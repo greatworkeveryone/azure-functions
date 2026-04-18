@@ -1,0 +1,21 @@
+{
+  "name": "rpcc-functions",
+  "version": "1.0.0",
+  "description": "RPCC Azure Functions - myBuildings sync and data API",
+  "main": "dist/functions/*.js",
+  "scripts": {
+    "prestart": "npm run build",
+    "start": "func start",
+    "build": "tsc && cp src/openapi.json dist/openapi.json",
+    "watch": "tsc -w"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "tedious": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "azure-functions-core-tools": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,11 @@
+.git*
+.vscode
+local.settings.json
+.env
+src/
+*.ts
+tsconfig.json
+dist/**/*.map
+dist/**/*.d.ts
+dist/**/*.d.ts.map
+node_modules/.package-lock.json

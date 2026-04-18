@@ -1,0 +1,239 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "RPCC Functions API",
+    "description": "Azure Functions API for myBuildings sync and data access",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:7071/api",
+      "description": "Local development"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/getBuildings": {
+      "get": {
+        "operationId": "getBuildings",
+        "summary": "Get buildings from the database",
+        "description": "Query buildings with optional filters for building ID and region",
+        "parameters": [
+          {
+            "name": "buildingId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Filter by building ID"
+          },
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by region"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of buildings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "buildings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Building"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/syncBuildings": {
+      "post": {
+        "operationId": "syncBuildings",
+        "summary": "Sync buildings from myBuildings API",
+        "description": "Fetches all buildings from the myBuildings API and upserts them into Azure SQL",
+        "responses": {
+          "200": {
+            "description": "Sync completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "inserted": {
+                      "type": "integer"
+                    },
+                    "updated": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Azure Entra ID access token scoped to https://database.windows.net/user_impersonation"
+      }
+    },
+    "schemas": {
+      "Building": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer"
+          },
+          "BuildingID": {
+            "type": "integer"
+          },
+          "BuildingName": {
+            "type": "string"
+          },
+          "BuildingCode": {
+            "type": "string"
+          },
+          "BuildingAddress": {
+            "type": "string"
+          },
+          "ThirdPartySystem_BuildingID": {
+            "type": "string"
+          },
+          "RegionID": {
+            "type": "integer"
+          },
+          "Region": {
+            "type": "string"
+          },
+          "NLA": {
+            "type": "string"
+          },
+          "InvoicingAddress": {
+            "type": "string"
+          },
+          "ContactPhoneNumber": {
+            "type": "string"
+          },
+          "Levels": {
+            "type": "string",
+            "description": "JSON array of level/floor names"
+          },
+          "Active": {
+            "type": "boolean"
+          },
+          "LastModifiedDate": {
+            "type": "string",
+            "description": "Last modified date from myBuildings source system"
+          },
+          "PrimaryContactUserID": {
+            "type": "integer"
+          },
+          "PrimaryContactName": {
+            "type": "string"
+          },
+          "PrimaryContactEmail": {
+            "type": "string"
+          },
+          "PrimaryContactPhone": {
+            "type": "string"
+          },
+          "PrimaryContactMobile": {
+            "type": "string"
+          },
+          "LastSyncedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "CreatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "UpdatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid authorization token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Internal server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "details": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
