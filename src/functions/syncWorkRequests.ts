@@ -1,7 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, closeConnection } from "../db";
+import { createConnection, closeConnection, executeQuery } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
 import { upsertWorkRequest } from "./workRequests";
 
 async function syncWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -25,7 +26,26 @@ async function syncWorkRequests(request: HttpRequest, context: InvocationContext
     context.log(`Fetched ${workRequests.length} work requests`);
 
     connection = await createConnection(token);
-    for (const wr of workRequests) {
+
+    // Resolve the BuildingID myBuildings omits — using the query param when
+    // it's a per-building sync, otherwise a name→id lookup from Buildings.
+    const fallbackId = buildingId ? parseInt(buildingId) : undefined;
+    let nameToId: Map<string, number> | undefined;
+    if (!fallbackId) {
+      const buildingRows = await executeQuery(
+        connection,
+        "SELECT BuildingID, BuildingName FROM Buildings WHERE BuildingName IS NOT NULL"
+      );
+      nameToId = new Map(buildingRows.map((b: any) => [b.BuildingName, b.BuildingID]));
+    }
+
+    const { resolved, unresolvedCount } = resolveAll(workRequests, { fallbackId, nameToId });
+    if (unresolvedCount > 0) {
+      context.log(`syncWorkRequests: ${unresolvedCount}/${workRequests.length} WRs could not be resolved to a BuildingID`);
+    }
+    assertResolvedWithinThreshold(unresolvedCount, workRequests.length);
+
+    for (const wr of resolved) {
       await upsertWorkRequest(connection, wr);
     }
 

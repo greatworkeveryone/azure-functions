@@ -1,8 +1,15 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createConnection, executeQuery, closeConnection } from "../db";
-import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest } from "../mybuildings-client";
+import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
+import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
+import {
+  buildOverlayUpsertSql,
+  pickOverlayFields,
+  WR_OVERLAY_JOIN,
+  workRequestSelectColumns,
+} from "../wr-overlay";
 import { TYPES } from "tedious";
 
 // Tweak this to control how long cached work requests are considered fresh
@@ -51,7 +58,9 @@ export async function upsertWorkRequest(connection: any, wr: MyWorkRequest): Pro
        ON target.WorkRequestID = source.WorkRequestID
      WHEN MATCHED THEN
        UPDATE SET
-         JobCode=@JobCode, BuildingID=@BuildingID, BuildingName=@BuildingName,
+         JobCode=@JobCode,
+         BuildingID=COALESCE(@BuildingID, target.BuildingID),
+         BuildingName=COALESCE(@BuildingName, target.BuildingName),
          LevelName=@LevelName, TenantName=@TenantName, Category=@Category,
          Type=@Type, SubType=@SubType, StatusID=@StatusID, Status=@Status,
          Priority=@Priority, Details=@Details, ExactLocation=@ExactLocation,
@@ -109,13 +118,38 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
         context.log(`Force-syncing all WRs from myBuildings since ${dateStr}`);
         const workRequests = await fetchWorkRequests(`lastmodifieddate=${dateStr}`);
         context.log(`Fetched ${workRequests.length} work requests from myBuildings`);
-        for (const wr of workRequests) {
+
+        // myBuildings' list endpoint does not include BuildingID on each WR
+        // (only BuildingName). Build a name→id lookup so we can backfill it.
+        const buildingRows = await executeQuery(
+          connection,
+          "SELECT BuildingID, BuildingName FROM Buildings WHERE BuildingName IS NOT NULL"
+        );
+        const nameToId = new Map<string, number>(
+          buildingRows.map((b: any) => [b.BuildingName, b.BuildingID])
+        );
+
+        const { resolved, unresolvedCount } = resolveAll(workRequests, { nameToId });
+        if (unresolvedCount > 0) {
+          context.log(`Warning: ${unresolvedCount}/${workRequests.length} WRs could not be resolved to a BuildingID by name`);
+        }
+        assertResolvedWithinThreshold(unresolvedCount, workRequests.length);
+
+        for (const wr of resolved) {
           await upsertWorkRequest(connection, wr);
         }
-        await executeQuery(connection, "UPDATE Buildings SET WRsLastSyncedAt=GETUTCDATE()");
+        // Only stamp buildings that were already stamped. Never-synced buildings
+        // (WRsLastSyncedAt IS NULL) must remain NULL so their first per-building
+        // visit triggers a full 2-year pull — the bulk sync uses an incremental
+        // lastmodifieddate window that would miss their older WRs.
+        await executeQuery(
+          connection,
+          "UPDATE Buildings SET WRsLastSyncedAt=GETUTCDATE() WHERE WRsLastSyncedAt IS NOT NULL"
+        );
       }
 
-      let sql = "SELECT * FROM WorkRequests WHERE 1=1";
+      let sql = `SELECT ${workRequestSelectColumns()}
+        FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE 1=1`;
       const params: any[] = [];
       if (statusId) {
         sql += " AND StatusID = @StatusID";
@@ -152,7 +186,10 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
       const workRequests = await fetchWorkRequests(syncParams);
       context.log(`Fetched ${workRequests.length} work requests from myBuildings`);
 
-      for (const wr of workRequests) {
+      // myBuildings' list endpoint omits BuildingID on WR records. Since we
+      // know the building for this sync, backfill it so the DB row is queryable.
+      const { resolved } = resolveAll(workRequests, { fallbackId: parseInt(buildingId) });
+      for (const wr of resolved) {
         await upsertWorkRequest(connection, wr);
       }
 
@@ -167,7 +204,8 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     }
 
     // Return from DB with optional filters
-    let sql = "SELECT * FROM WorkRequests WHERE BuildingID = @BuildingID";
+    let sql = `SELECT ${workRequestSelectColumns()}
+      FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.BuildingID = @BuildingID`;
     const params: any[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
 
     if (statusId) {
@@ -214,7 +252,7 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
     // Get the DB snapshot for comparison
     const existing = await executeQuery(
       connection,
-      "SELECT * FROM WorkRequests WHERE WorkRequestID = @WorkRequestID",
+      `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
       [{ name: "WorkRequestID", type: TYPES.Int, value: parseInt(workRequestId) }]
     );
 
@@ -270,7 +308,7 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
     // Read current DB state for conflict check
     const existing = await executeQuery(
       connection,
-      "SELECT * FROM WorkRequests WHERE WorkRequestID = @WorkRequestID",
+      `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
       [{ name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID }]
     );
 
@@ -280,9 +318,18 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
 
     const dbLastModified = existing[0].LastModifiedDate;
 
-    // 409 Conflict — another user has saved since this client loaded
-    if (dbLastModified && clientLastModified && dbLastModified !== clientLastModified) {
-      context.log(`WR ${WorkRequestID} conflict: client=${clientLastModified}, db=${dbLastModified}`);
+    // 409 Conflict — another user has saved since this client loaded.
+    // Normalise both sides to ISO strings before comparing: tedious returns
+    // DATETIME2 as a JS Date, but the client sends the same value back as the
+    // string it received from a previous response (JSON.stringify serialises
+    // Date → ISO string). Without this coercion every first call would 409
+    // because Date !== string.
+    const dbIso =
+      dbLastModified instanceof Date
+        ? dbLastModified.toISOString()
+        : dbLastModified ?? null;
+    if (dbIso && clientLastModified && dbIso !== clientLastModified) {
+      context.log(`WR ${WorkRequestID} conflict: client=${clientLastModified}, db=${dbIso}`);
       return {
         status: 409,
         jsonBody: {
@@ -292,16 +339,22 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
       };
     }
 
-    // Write to myBuildings via bulkStatusUpdate (the only supported write endpoint)
-    const bulkPayload = [{
+    // Write to myBuildings via bulkStatusUpdate (the only supported write endpoint).
+    // Only include fields that are actually being changed. myBuildings rejects
+    // the payload with "unable to deserialise" if we send TotalCost: null for a
+    // WR that has no cost set, so omit it entirely when absent.
+    const bulkItem: BulkStatusUpdatePayload2Item = {
       WorkRequestID,
       NewStatusID: body.StatusID ?? existing[0].StatusID,
       Comment: body.WorkNotes ?? "",
-      TotalCost: body.TotalCost ?? existing[0].TotalCost,
-    }];
+    };
+    const resolvedCost = body.TotalCost ?? existing[0].TotalCost;
+    if (resolvedCost !== null && resolvedCost !== undefined) {
+      bulkItem.TotalCost = Number(resolvedCost);
+    }
 
     context.log(`Updating WR ${WorkRequestID} via myBuildings bulkStatusUpdate`);
-    await bulkStatusUpdate(bulkPayload);
+    await bulkStatusUpdate([bulkItem]);
 
     // Re-fetch from myBuildings so our DB and response have the new LastModifiedDate
     const updated = await fetchWorkRequestById(WorkRequestID);
@@ -322,19 +375,169 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
 }
 
 // ── POST /api/createWorkRequest ───────────────────────────────────────────────
+// Creates the WR in myBuildings, fetches the fresh record back (so we have
+// the authoritative WorkRequestID and LastModifiedDate), upserts it into SQL,
+// and returns the AzureSqlWorkRequest row the frontend expects.
 
 async function handleCreateWorkRequest(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  let connection;
   try {
     const body = await request.json() as any;
     context.log("Creating work request via myBuildings API...");
     const result = await createWorkRequest(body);
-    return { status: 200, jsonBody: { message: "Work request created", result } };
+
+    const newId = extractCreatedWorkRequestId(result);
+    if (!newId) {
+      context.error("createWorkRequest: no WorkRequestID in response", JSON.stringify(result));
+      return errorResponse("Create failed", "myBuildings did not return a WorkRequestID");
+    }
+
+    // Fetch the authoritative record back
+    const fresh = await fetchWorkRequestById(newId);
+    if (!fresh) {
+      return errorResponse("Create failed", `myBuildings returned id ${newId} but fetchById yielded nothing`);
+    }
+
+    // Resolve BuildingID (myBuildings list omits it; payload may have it)
+    connection = await createConnection(token);
+    let buildingId: number | undefined = fresh.BuildingID ?? (typeof body.BuildingID === "number" ? body.BuildingID : undefined);
+    if (!buildingId && fresh.BuildingName) {
+      const rows = await executeQuery(
+        connection,
+        "SELECT BuildingID FROM Buildings WHERE BuildingName = @BuildingName",
+        [{ name: "BuildingName", type: TYPES.NVarChar, value: fresh.BuildingName }]
+      );
+      if (rows[0]) buildingId = rows[0].BuildingID;
+    }
+
+    const toUpsert = { ...fresh, BuildingID: buildingId ?? fresh.BuildingID };
+    await upsertWorkRequest(connection, toUpsert);
+
+    // Read back the full SQL row so the frontend gets CreatedAt/LastSyncedAt
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
+      [{ name: "WorkRequestID", type: TYPES.Int, value: newId }]
+    );
+
+    return {
+      status: 200,
+      jsonBody: { message: "Work request created", workRequest: stored[0] ?? toUpsert },
+    };
   } catch (error: any) {
     context.error("Create failed:", error.message);
     return errorResponse("Create failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/updateWorkRequestLocal ──────────────────────────────────────────
+// Writes to WorkRequestOverrides only. Never calls myBuildings. Any subset of
+// overlay columns can be sent; nulls explicitly clear an override; absent keys
+// keep whatever the existing override had.
+
+async function updateWorkRequestLocal(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { WorkRequestID, UpdatedBy, ...fields } = body ?? {};
+    if (!WorkRequestID || typeof WorkRequestID !== "number") {
+      return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
+    }
+
+    // Only accept known overlay columns; ignore anything else the client sent.
+    const accepted = pickOverlayFields(fields);
+
+    // Guard: refuse empty-body calls. Otherwise an empty MERGE would still
+    // insert a ghost override row and bump LastModifiedDate without any real
+    // change — breaks stalled-detection in weird ways.
+    if (Object.keys(accepted).length === 0) {
+      return {
+        status: 400,
+        jsonBody: { error: "No overlay columns provided — nothing to update" },
+      };
+    }
+
+    connection = await createConnection(token);
+
+    const presentColumns = Object.keys(accepted);
+    const sql = buildOverlayUpsertSql(presentColumns);
+
+    const params: any[] = [
+      { name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID },
+      { name: "UpdatedBy", type: TYPES.NVarChar, value: UpdatedBy ?? null },
+    ];
+    for (const [k, v] of Object.entries(accepted)) {
+      const isNumeric = k === "TotalCost" || k === "CostNotToExceed";
+      params.push({
+        name: k,
+        type: isNumeric ? TYPES.Decimal : TYPES.NVarChar,
+        value: v ?? null,
+      });
+    }
+
+    await executeQuery(connection, sql, params);
+
+    // Read back the merged WR so the frontend can update its cache in place
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
+      [{ name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID }],
+    );
+
+    if (stored.length === 0) {
+      return { status: 404, jsonBody: { error: "Work request not found" } };
+    }
+    return { status: 200, jsonBody: { workRequest: stored[0] } };
+  } catch (error: any) {
+    context.error("updateWorkRequestLocal failed:", error.message);
+    return errorResponse("Update failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/resetWorkRequestLocal ───────────────────────────────────────────
+// Deletes the overlay row so the WR reverts to pure myBuildings values.
+
+async function resetWorkRequestLocal(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { WorkRequestID } = body ?? {};
+    if (!WorkRequestID || typeof WorkRequestID !== "number") {
+      return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
+    }
+    connection = await createConnection(token);
+    await executeQuery(
+      connection,
+      "DELETE FROM WorkRequestOverrides WHERE WorkRequestID = @WorkRequestID",
+      [{ name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID }],
+    );
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
+      [{ name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID }],
+    );
+    if (stored.length === 0) {
+      return { status: 404, jsonBody: { error: "Work request not found" } };
+    }
+    return { status: 200, jsonBody: { workRequest: stored[0] } };
+  } catch (error: any) {
+    context.error("resetWorkRequestLocal failed:", error.message);
+    return errorResponse("Reset failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
   }
 }
 
@@ -342,3 +545,5 @@ app.http("getWorkRequests", { methods: ["GET"], authLevel: "anonymous", handler:
 app.http("getWorkRequest", { methods: ["GET"], authLevel: "anonymous", handler: getWorkRequest });
 app.http("updateWorkRequest", { methods: ["POST"], authLevel: "anonymous", handler: updateWorkRequest });
 app.http("createWorkRequest", { methods: ["POST"], authLevel: "anonymous", handler: handleCreateWorkRequest });
+app.http("updateWorkRequestLocal", { methods: ["POST"], authLevel: "anonymous", handler: updateWorkRequestLocal });
+app.http("resetWorkRequestLocal", { methods: ["POST"], authLevel: "anonymous", handler: resetWorkRequestLocal });

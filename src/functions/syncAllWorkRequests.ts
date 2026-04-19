@@ -16,7 +16,7 @@ import { fetchWorkRequests } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { upsertWorkRequest } from "./workRequests";
-import { TYPES } from "tedious";
+import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
@@ -43,12 +43,33 @@ async function runSync(token: string, force: boolean, context: InvocationContext
     const workRequests = await fetchWorkRequests(`lastmodifieddate=${dateStr}`);
     context.log(`syncAllWorkRequests: fetched ${workRequests.length} work requests`);
 
-    for (const wr of workRequests) {
+    // myBuildings' list endpoint does not include BuildingID on each WR (only
+    // BuildingName). Build a name→id lookup so we can backfill it on upsert.
+    const buildingRows = await executeQuery(
+      connection,
+      "SELECT BuildingID, BuildingName FROM Buildings WHERE BuildingName IS NOT NULL"
+    );
+    const nameToId = new Map<string, number>(
+      buildingRows.map((b: any) => [b.BuildingName, b.BuildingID])
+    );
+
+    const { resolved, unresolvedCount } = resolveAll(workRequests, { nameToId });
+    if (unresolvedCount > 0) {
+      context.log(`syncAllWorkRequests: ${unresolvedCount}/${workRequests.length} WRs could not be resolved to a BuildingID`);
+    }
+    assertResolvedWithinThreshold(unresolvedCount, workRequests.length);
+
+    for (const wr of resolved) {
       await upsertWorkRequest(connection, wr);
     }
 
-    // Stamp every building so per-building cache considers data fresh
-    await executeQuery(connection, "UPDATE Buildings SET WRsLastSyncedAt=GETUTCDATE()");
+    // Only stamp buildings that were already stamped. Never-synced buildings
+    // (WRsLastSyncedAt IS NULL) must remain NULL so their first per-building
+    // visit triggers a full 2-year pull.
+    await executeQuery(
+      connection,
+      "UPDATE Buildings SET WRsLastSyncedAt=GETUTCDATE() WHERE WRsLastSyncedAt IS NOT NULL"
+    );
 
     return { total: workRequests.length, syncFrom: dateStr };
   } finally {

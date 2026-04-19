@@ -49,6 +49,10 @@ async function fetchAllPaged<T>(
 
     // Response envelope: { Success, Data: { [arrayKey]: [...] }, RecordsReturned }
     const items: T[] = data.Data?.[arrayKey] ?? data[arrayKey] ?? [];
+    if (skip === 0 && items.length > 0) {
+      console.log(`[myBuildings] ${arrayKey} first-record keys:`, Object.keys(items[0] as any));
+      console.log(`[myBuildings] ${arrayKey} first record:`, JSON.stringify(items[0]));
+    }
     if (Array.isArray(items) && items.length > 0) {
       allItems.push(...items);
       hasMore = items.length >= PAGE_SIZE;
