@@ -60,11 +60,11 @@ export async function uploadBlob(
   buffer: Buffer,
   originalName: string,
   contentType: string,
-  workRequestId: number,
+  keyPrefix: string,
 ): Promise<UploadBlobResult> {
   const container = await getContainerClient();
   const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
-  const blobName = `${workRequestId}/${randomUUID()}${ext ? "." + ext : ""}`;
+  const blobName = `${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`;
   const blockBlob = container.getBlockBlobClient(blobName);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
@@ -101,4 +101,25 @@ export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS)
 export async function deleteBlob(blobName: string): Promise<void> {
   const container = await getContainerClient();
   await container.getBlockBlobClient(blobName).deleteIfExists();
+}
+
+/**
+ * Uploads a rendered Purchase Order PDF under a deterministic key
+ * (`po/{poId}.pdf`), so re-previewing overwrites the same blob rather than
+ * leaving orphaned drafts. Returns the blob name for storage on the PO row.
+ */
+export async function uploadPurchaseOrderPdf(
+  purchaseOrderId: number,
+  buffer: Buffer,
+): Promise<UploadBlobResult> {
+  const container = await getContainerClient();
+  const blobName = `po/${purchaseOrderId}.pdf`;
+  const blockBlob = container.getBlockBlobClient(blobName);
+  await blockBlob.uploadData(buffer, {
+    blobHTTPHeaders: {
+      blobContentType: "application/pdf",
+      blobContentDisposition: `inline; filename="${blobName.replace(/^po\//, "")}"`,
+    },
+  });
+  return { blobName, url: blockBlob.url };
 }

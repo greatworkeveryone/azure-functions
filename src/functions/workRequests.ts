@@ -87,7 +87,11 @@ export async function upsertWorkRequest(connection: any, wr: MyWorkRequest): Pro
   );
 }
 
-// ── GET /api/getWorkRequests?buildingId=xxx[&statusId=x][&category=x][&force=true] ──
+// ── GET /api/getWorkRequests?buildingId=xxx[&statusId=x][&category=x][&force=true][&unlinkedOnly=true] ──
+// `unlinkedOnly=true` excludes any WR that already has a Job pointing at it —
+// used by the Incoming screen so triaged WRs disappear from the inbox once
+// they've been promoted. The filter is a NOT EXISTS against Jobs.WorkRequestID
+// so the result stays correct the instant a Job is created.
 
 async function getWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -97,6 +101,11 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
   const statusId = request.query.get("statusId");
   const category = request.query.get("category");
   const force = request.query.get("force") === "true";
+  const unlinkedOnly = request.query.get("unlinkedOnly") === "true";
+
+  const unlinkedClause = unlinkedOnly
+    ? " AND NOT EXISTS (SELECT 1 FROM Jobs j WHERE j.WorkRequestID = wr.WorkRequestID)"
+    : "";
 
   let connection;
   try {
@@ -149,7 +158,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
       }
 
       let sql = `SELECT ${workRequestSelectColumns()}
-        FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE 1=1`;
+        FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE 1=1${unlinkedClause}`;
       const params: any[] = [];
       if (statusId) {
         sql += " AND StatusID = @StatusID";
@@ -205,7 +214,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
 
     // Return from DB with optional filters
     let sql = `SELECT ${workRequestSelectColumns()}
-      FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.BuildingID = @BuildingID`;
+      FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.BuildingID = @BuildingID${unlinkedClause}`;
     const params: any[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
 
     if (statusId) {

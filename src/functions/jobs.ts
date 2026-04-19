@@ -8,16 +8,23 @@ import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 
 const JOB_COLUMNS = `
   JobID, BuildingID, WorkRequestID, Title, Description, AssignedTo,
-  Status, IsStalled, ExpectedProgressUpdate, CompletionDate,
+  Status, IsStalled, IsInternal, CreationMethod, SourceEmailID,
+  ExpectedProgressUpdate, CompletionDate,
+  ApprovedQuoteID, ApprovedBy, ApprovedAt,
+  JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
+  ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
   CreatedAt, CreatedBy, LastModifiedDate
 `;
 
 const JOB_EVENT_COLUMNS = `
-  JobEventID, JobID, CreatedAt, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled
+  JobEventID, JobID, CreatedAt, CreatedBy, [Text], NewStatus,
+  ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID,
+  NewAssignee, CreationSource
 `;
 
 // Editable job columns — the set an upsert payload may write. Anything else is
-// ignored (CreatedAt, LastModifiedDate are managed server-side).
+// ignored (CreatedAt, LastModifiedDate are managed server-side; Approved*
+// columns flow through a dedicated approve-quote endpoint when that ships).
 const JOB_WRITE_COLUMNS = [
   "BuildingID",
   "WorkRequestID",
@@ -26,9 +33,24 @@ const JOB_WRITE_COLUMNS = [
   "AssignedTo",
   "Status",
   "IsStalled",
+  "IsInternal",
+  "CreationMethod",
+  "SourceEmailID",
   "ExpectedProgressUpdate",
   "CompletionDate",
   "CreatedBy",
+  "JobCode",
+  "LevelName",
+  "TenantName",
+  "Category",
+  "Type",
+  "SubType",
+  "Priority",
+  "ExactLocation",
+  "ContactName",
+  "ContactPhone",
+  "ContactEmail",
+  "PersonAffected",
 ] as const;
 
 type JobColumn = (typeof JOB_WRITE_COLUMNS)[number];
@@ -41,9 +63,24 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   AssignedTo: TYPES.NVarChar,
   Status: TYPES.NVarChar,
   IsStalled: TYPES.Bit,
+  IsInternal: TYPES.Bit,
+  CreationMethod: TYPES.NVarChar,
+  SourceEmailID: TYPES.Int,
   ExpectedProgressUpdate: TYPES.DateTime2,
   CompletionDate: TYPES.DateTime2,
   CreatedBy: TYPES.NVarChar,
+  JobCode: TYPES.NVarChar,
+  LevelName: TYPES.NVarChar,
+  TenantName: TYPES.NVarChar,
+  Category: TYPES.NVarChar,
+  Type: TYPES.NVarChar,
+  SubType: TYPES.NVarChar,
+  Priority: TYPES.NVarChar,
+  ExactLocation: TYPES.NVarChar,
+  ContactName: TYPES.NVarChar,
+  ContactPhone: TYPES.NVarChar,
+  ContactEmail: TYPES.NVarChar,
+  PersonAffected: TYPES.NVarChar,
 };
 
 function pickJobFields(body: any): Partial<Record<JobColumn, any>> {
@@ -73,36 +110,50 @@ async function fetchEventsForJobs(connection: any, jobIds: number[]): Promise<Re
   return byJob;
 }
 
-// ── GET /api/getJobs[?buildingId=x] ──────────────────────────────────────────
+// ── GET /api/getJobs[?buildingId=x][&status=Done] ────────────────────────────
+// Default response excludes Done jobs (they crowd active-workflow views).
+// Pass `status=Done` to get the Done list instead — used by the "Done"
+// filter in the frontend, which renders a dedicated panel.
 
 async function getJobs(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
   const buildingId = request.query.get("buildingId");
+  const statusParam = request.query.get("status");
+  const isDoneFilter = statusParam?.toLowerCase() === "done";
+
+  const whereParts: string[] = [
+    isDoneFilter ? "Status = 'Done'" : "Status <> 'Done'",
+  ];
+  const params: { name: string; type: any; value: any }[] = [];
+  if (buildingId) {
+    whereParts.push("BuildingID = @BuildingID");
+    params.push({ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) });
+  }
 
   let connection;
   try {
     connection = await createConnection(token);
 
-    const jobs = buildingId
-      ? await executeQuery(
-          connection,
-          `SELECT ${JOB_COLUMNS} FROM Jobs WHERE BuildingID = @BuildingID ORDER BY LastModifiedDate DESC`,
-          [{ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) }],
-        )
-      : await executeQuery(
-          connection,
-          `SELECT ${JOB_COLUMNS} FROM Jobs ORDER BY LastModifiedDate DESC`,
-        );
+    const jobs = await executeQuery(
+      connection,
+      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE ${whereParts.join(" AND ")} ORDER BY LastModifiedDate DESC`,
+      params,
+    );
 
     const eventsByJob = await fetchEventsForJobs(connection, jobs.map((j) => j.JobID as number));
     const payload = jobs.map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
 
     return { status: 200, jsonBody: { count: payload.length, jobs: payload } };
   } catch (error: any) {
-    context.error("getJobs failed:", error.message);
-    return errorResponse("Failed to fetch jobs", error.message);
+    // Tedious SQL errors don't always populate `.message`; the useful detail
+    // lives on `.message || .number / .code / .originalError`. Stringify the
+    // whole thing so the response body is diagnostic.
+    const detail =
+      error?.message || error?.originalError?.message || String(error);
+    context.error("getJobs failed:", detail, error);
+    return errorResponse("Failed to fetch jobs", detail);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -194,6 +245,24 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         params,
       );
       newJobId = inserted[0].JobID as number;
+
+      // If the job was created from a Work Request, claim any attachments
+      // that arrived with the WR. They were inserted earlier with JobID NULL
+      // (WR existed, no Job yet); now that the Job exists they live on it
+      // and the WR is finished with — see migration 010.
+      if (typeof fields.WorkRequestID === "number") {
+        await executeQuery(
+          connection,
+          `UPDATE Attachments
+              SET JobID = @JobID
+            WHERE WorkRequestID = @WorkRequestID
+              AND JobID IS NULL`,
+          [
+            { name: "JobID", type: TYPES.Int, value: newJobId },
+            { name: "WorkRequestID", type: TYPES.Int, value: fields.WorkRequestID },
+          ],
+        );
+      }
     } else {
       // UPDATE
       const setClause = Object.keys(fields).map((c) => `${c}=@${c}`).join(", ");
@@ -260,11 +329,17 @@ async function deleteJob(request: HttpRequest, context: InvocationContext): Prom
 }
 
 // ── POST /api/addJobEvent ────────────────────────────────────────────────────
-// Body: { JobID, CreatedBy?, Text?, NewStatus?, ExpectedProgressDate?, IsStalled? }
-// Appends one event; if NewStatus is set, also updates Jobs.Status. If
-// ExpectedProgressDate is set, also updates Jobs.ExpectedProgressUpdate. If
-// IsStalled is a boolean, also updates Jobs.IsStalled. Always bumps
-// Jobs.LastModifiedDate.
+// Body: {
+//   JobID, CreatedBy?, Text?, NewStatus?, ExpectedProgressDate?, IsStalled?,
+//   EventType?, PurchaseOrderID?, QuoteID?, NewAssignee?, CreationSource?
+// }
+// Appends one event and mirrors relevant fields onto the parent Jobs row so
+// list views stay current:
+//   NewStatus             → Jobs.Status
+//   ExpectedProgressDate  → Jobs.ExpectedProgressUpdate
+//   IsStalled (bool)      → Jobs.IsStalled
+//   NewAssignee           → Jobs.AssignedTo
+// Always bumps Jobs.LastModifiedDate.
 
 async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -273,7 +348,19 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { JobID, CreatedBy, Text, NewStatus, ExpectedProgressDate, IsStalled } = body ?? {};
+    const {
+      JobID,
+      CreatedBy,
+      Text,
+      NewStatus,
+      ExpectedProgressDate,
+      IsStalled,
+      EventType,
+      PurchaseOrderID,
+      QuoteID,
+      NewAssignee,
+      CreationSource,
+    } = body ?? {};
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
@@ -281,12 +368,18 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       Text == null &&
       NewStatus == null &&
       ExpectedProgressDate == null &&
-      IsStalled == null
+      IsStalled == null &&
+      EventType == null &&
+      PurchaseOrderID == null &&
+      QuoteID == null &&
+      NewAssignee == null &&
+      CreationSource == null
     ) {
       return {
         status: 400,
         jsonBody: {
-          error: "Event must set at least one of: Text, NewStatus, ExpectedProgressDate, IsStalled",
+          error:
+            "Event must set at least one of: Text, NewStatus, ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID, NewAssignee, CreationSource",
         },
       };
     }
@@ -297,9 +390,15 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
 
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled)
+      `INSERT INTO JobEvents (
+         JobID, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled,
+         EventType, PurchaseOrderID, QuoteID, NewAssignee, CreationSource
+       )
        OUTPUT INSERTED.JobEventID
-       VALUES (@JobID, @CreatedBy, @Text, @NewStatus, @ExpectedProgressDate, @IsStalled);`,
+       VALUES (
+         @JobID, @CreatedBy, @Text, @NewStatus, @ExpectedProgressDate, @IsStalled,
+         @EventType, @PurchaseOrderID, @QuoteID, @NewAssignee, @CreationSource
+       );`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
@@ -307,6 +406,11 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         { name: "NewStatus", type: TYPES.NVarChar, value: NewStatus ?? null },
         { name: "ExpectedProgressDate", type: TYPES.DateTime2, value: ExpectedProgressDate ?? null },
         { name: "IsStalled", type: TYPES.Bit, value: isStalledBit },
+        { name: "EventType", type: TYPES.NVarChar, value: EventType ?? null },
+        { name: "PurchaseOrderID", type: TYPES.Int, value: PurchaseOrderID ?? null },
+        { name: "QuoteID", type: TYPES.Int, value: QuoteID ?? null },
+        { name: "NewAssignee", type: TYPES.NVarChar, value: NewAssignee ?? null },
+        { name: "CreationSource", type: TYPES.NVarChar, value: CreationSource ?? null },
       ],
     );
     if (inserted.length === 0) {
@@ -334,6 +438,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         name: "IsStalledMirror",
         type: TYPES.Bit,
         value: isStalledBit,
+      });
+    }
+    if (NewAssignee != null) {
+      updates.push("AssignedTo=@AssignedToMirror");
+      updateParams.push({
+        name: "AssignedToMirror",
+        type: TYPES.NVarChar,
+        value: NewAssignee,
       });
     }
     await executeQuery(

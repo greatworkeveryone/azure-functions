@@ -1,12 +1,14 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createConnection, executeQuery, closeConnection } from "../db";
 import { fetchAllBuildings, MyBuilding } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
 
 async function syncBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const forbidden = requireRole(token, ["Admin"]);
+  if (forbidden) return forbidden;
 
   let connection;
   try {
