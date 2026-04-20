@@ -54,6 +54,8 @@ BEGIN
       FROM picked_jobs j
       INNER JOIN picked_contractors c ON c.rn = j.rn
   )
+  -- EmailSubject / EmailBody left NULL so the preview modal generates the
+  -- proper PO-tone default via defaultPOEmail() when opened.
   INSERT INTO dbo.PurchaseOrders
     (JobID, PONumber, Seq, ContractorID, ContractorName, Scope,
      EstimatedCost, CostNotToExceed, EmailSubject, EmailBody,
@@ -64,11 +66,11 @@ BEGIN
     1,
     ContractorID,
     ContractorName,
-    'Scope — see attached purchase order for the described works.',
+    'Rectify faults identified in the attached site report. Provide all labour, materials, and access equipment. Confirm a proposed start date before commencing.',
     1200.00,
     1500.00,
-    CONCAT('Purchase Order for Job #', JobID),
-    'Please quote against the attached purchase order at your earliest convenience.',
+    NULL,
+    NULL,
     DATEADD(DAY, -7, SYSUTCDATETIME()),
     'seed:012',
     'seed:012'

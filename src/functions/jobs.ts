@@ -9,8 +9,11 @@ import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 const JOB_COLUMNS = `
   JobID, BuildingID, WorkRequestID, Title, Description, AssignedTo,
   Status, IsStalled, IsInternal, CreationMethod, SourceEmailID,
+  AwaitingRole,
   ExpectedProgressUpdate, CompletionDate,
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
+  IsOnchargeable, OnchargeAmount, OnchargeNotes,
+  TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
   CreatedAt, CreatedBy, LastModifiedDate
@@ -19,7 +22,7 @@ const JOB_COLUMNS = `
 const JOB_EVENT_COLUMNS = `
   JobEventID, JobID, CreatedAt, CreatedBy, [Text], NewStatus,
   ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID,
-  NewAssignee, CreationSource
+  NewAssignee, NewAwaitingRole, CreationSource
 `;
 
 // Editable job columns — the set an upsert payload may write. Anything else is
@@ -34,8 +37,13 @@ const JOB_WRITE_COLUMNS = [
   "Status",
   "IsStalled",
   "IsInternal",
+  "IsOnchargeable",
+  "OnchargeAmount",
+  "OnchargeNotes",
+  "TenantID",
   "CreationMethod",
   "SourceEmailID",
+  "AwaitingRole",
   "ExpectedProgressUpdate",
   "CompletionDate",
   "CreatedBy",
@@ -64,8 +72,13 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   Status: TYPES.NVarChar,
   IsStalled: TYPES.Bit,
   IsInternal: TYPES.Bit,
+  IsOnchargeable: TYPES.Bit,
+  OnchargeAmount: TYPES.Decimal,
+  OnchargeNotes: TYPES.NVarChar,
+  TenantID: TYPES.Int,
   CreationMethod: TYPES.NVarChar,
   SourceEmailID: TYPES.Int,
+  AwaitingRole: TYPES.NVarChar,
   ExpectedProgressUpdate: TYPES.DateTime2,
   CompletionDate: TYPES.DateTime2,
   CreatedBy: TYPES.NVarChar,
@@ -359,6 +372,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       PurchaseOrderID,
       QuoteID,
       NewAssignee,
+      NewAwaitingRole,
       CreationSource,
     } = body ?? {};
     if (!JobID || typeof JobID !== "number") {
@@ -373,13 +387,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       PurchaseOrderID == null &&
       QuoteID == null &&
       NewAssignee == null &&
+      NewAwaitingRole == null &&
       CreationSource == null
     ) {
       return {
         status: 400,
         jsonBody: {
           error:
-            "Event must set at least one of: Text, NewStatus, ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID, NewAssignee, CreationSource",
+            "Event must set at least one of: Text, NewStatus, ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID, NewAssignee, NewAwaitingRole, CreationSource",
         },
       };
     }
@@ -392,12 +407,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       connection,
       `INSERT INTO JobEvents (
          JobID, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled,
-         EventType, PurchaseOrderID, QuoteID, NewAssignee, CreationSource
+         EventType, PurchaseOrderID, QuoteID, NewAssignee, NewAwaitingRole,
+         CreationSource
        )
        OUTPUT INSERTED.JobEventID
        VALUES (
          @JobID, @CreatedBy, @Text, @NewStatus, @ExpectedProgressDate, @IsStalled,
-         @EventType, @PurchaseOrderID, @QuoteID, @NewAssignee, @CreationSource
+         @EventType, @PurchaseOrderID, @QuoteID, @NewAssignee, @NewAwaitingRole,
+         @CreationSource
        );`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
@@ -410,6 +427,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         { name: "PurchaseOrderID", type: TYPES.Int, value: PurchaseOrderID ?? null },
         { name: "QuoteID", type: TYPES.Int, value: QuoteID ?? null },
         { name: "NewAssignee", type: TYPES.NVarChar, value: NewAssignee ?? null },
+        { name: "NewAwaitingRole", type: TYPES.NVarChar, value: NewAwaitingRole ?? null },
         { name: "CreationSource", type: TYPES.NVarChar, value: CreationSource ?? null },
       ],
     );
@@ -446,6 +464,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         name: "AssignedToMirror",
         type: TYPES.NVarChar,
         value: NewAssignee,
+      });
+    }
+    if (NewAwaitingRole != null) {
+      updates.push("AwaitingRole=@AwaitingRoleMirror");
+      updateParams.push({
+        name: "AwaitingRoleMirror",
+        type: TYPES.NVarChar,
+        value: NewAwaitingRole,
       });
     }
     await executeQuery(
