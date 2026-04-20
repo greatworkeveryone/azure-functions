@@ -41,7 +41,9 @@ function hydrateAttachments(
 
 const EMAIL_COLUMNS = `
   EmailID, MessageID, FromAddress, Subject, Body, ReceivedAt,
-  AttachmentBlobs, MatchedJobID, Status, ProcessedAt, CreatedAt
+  AttachmentBlobs, MatchedJobID, Status, ProcessedAt, CreatedAt,
+  AIParsedAt, AIClassification, AIConfidence, AIParsedData,
+  AIFlaggedForReview
 `;
 
 // ── GET /api/getEmails[?status=unread|matched|promoted|ignored] ─────────────
@@ -54,10 +56,15 @@ async function getEmails(
   if (!token) return unauthorizedResponse();
 
   const status = request.query.get("status");
-  const where = status ? "WHERE Status = @Status" : "";
-  const params = status
-    ? [{ name: "Status", type: TYPES.NVarChar, value: status }]
-    : [];
+  // Flagged rows live on the admin-only Flagged Incoming page. Normal users
+  // never see them in the standard Incoming list.
+  const whereParts: string[] = ["AIFlaggedForReview = 0"];
+  const params: { name: string; type: any; value: any }[] = [];
+  if (status) {
+    whereParts.push("Status = @Status");
+    params.push({ name: "Status", type: TYPES.NVarChar, value: status });
+  }
+  const where = `WHERE ${whereParts.join(" AND ")}`;
 
   let connection;
   try {
@@ -273,6 +280,184 @@ async function promoteEmailToQuote(
   }
 }
 
+// ── POST /api/archiveEmail ──────────────────────────────────────────────────
+// Body: { EmailID: number }
+// Sets Status = 'archived' and stamps ProcessedAt so the email leaves the
+// active inbox without being tied to a job/quote/invoice.
+
+async function archiveEmail(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { EmailID } = body ?? {};
+    if (typeof EmailID !== "number") {
+      return { status: 400, jsonBody: { error: "EmailID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+    await executeQuery(
+      connection,
+      `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
+       WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+
+    return { status: 200, jsonBody: { ok: true } };
+  } catch (error: any) {
+    context.error("archiveEmail failed:", error.message);
+    return errorResponse("Archive email failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/promoteEmailToJob ─────────────────────────────────────────────
+// Body: { EmailID: number, CreatedBy?: string }
+// Creates a Job row sourced from the email (title from subject), marks the
+// email as 'promoted', and returns the new job id.
+
+async function promoteEmailToJob(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { EmailID, CreatedBy } = body ?? {};
+    if (typeof EmailID !== "number") {
+      return { status: 400, jsonBody: { error: "EmailID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const emailRows = await executeQuery(
+      connection,
+      `SELECT EmailID, Subject FROM Emails WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+    if (!emailRows[0]) {
+      return { status: 404, jsonBody: { error: "Email not found" } };
+    }
+
+    const subject = (emailRows[0].Subject as string | null) ?? "Email job";
+    const title = subject.length > 200 ? subject.slice(0, 200) : subject;
+
+    const inserted = await executeQuery(
+      connection,
+      `INSERT INTO Jobs (Title, Status, CreatedBy, CreationMethod, SourceEmailID)
+       OUTPUT INSERTED.JobID
+       VALUES (@Title, 'New', @CreatedBy, 'email', @EmailID)`,
+      [
+        { name: "Title", type: TYPES.NVarChar, value: title },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        { name: "EmailID", type: TYPES.Int, value: EmailID },
+      ],
+    );
+    const jobId = inserted[0].JobID as number;
+
+    await executeQuery(
+      connection,
+      `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
+       WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+
+    return { status: 200, jsonBody: { jobId } };
+  } catch (error: any) {
+    context.error("promoteEmailToJob failed:", error.message);
+    return errorResponse("Promote email to job failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/promoteEmailToInvoice ─────────────────────────────────────────
+// Body: { EmailID, JobID, Amount?, Description?, CreatedBy? }
+// Creates an Invoice row linked to the job, marks the email as 'promoted'.
+
+async function promoteEmailToInvoice(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { EmailID, JobID, Amount, Description, CreatedBy } = body ?? {};
+    if (typeof EmailID !== "number" || typeof JobID !== "number") {
+      return {
+        status: 400,
+        jsonBody: { error: "EmailID and JobID (numbers) are required" },
+      };
+    }
+
+    connection = await createConnection(token);
+
+    const inserted = await executeQuery(
+      connection,
+      `INSERT INTO Invoices
+         (JobID, Amount, Description, SourceEmailID, CreatedBy, Status)
+       OUTPUT INSERTED.InvoiceID
+       VALUES (@JobID, @Amount, @Description, @EmailID, @CreatedBy, 'pending')`,
+      [
+        { name: "JobID", type: TYPES.Int, value: JobID },
+        { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+        { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
+        { name: "EmailID", type: TYPES.Int, value: EmailID },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+      ],
+    );
+    const invoiceId = inserted[0].InvoiceID as number;
+
+    await executeQuery(
+      connection,
+      `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
+       WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+
+    return { status: 200, jsonBody: { invoiceId } };
+  } catch (error: any) {
+    context.error("promoteEmailToInvoice failed:", error.message);
+    return errorResponse("Promote email to invoice failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── Timer: syncEmailsWorkHours ──────────────────────────────────────────────
+// Every hour Mon–Fri during Darwin work hours (21:30–08:30 UTC = 07:00–18:00 ACST).
+// MOCKED — logs intent only until Graph credentials are wired up.
+
+async function syncEmailsWorkHours(
+  _myTimer: unknown,
+  context: InvocationContext,
+): Promise<void> {
+  context.log("Graph sync mocked — work-hours schedule fired");
+}
+
+// ── Timer: syncEmailsOffHours ───────────────────────────────────────────────
+// Every 4 hours outside the work-hours window (overnight and weekends).
+// MOCKED — logs intent only until Graph credentials are wired up.
+
+async function syncEmailsOffHours(
+  _myTimer: unknown,
+  context: InvocationContext,
+): Promise<void> {
+  context.log("Graph sync mocked — off-hours schedule fired");
+}
+
 app.http("getEmails", { methods: ["GET"], authLevel: "anonymous", handler: getEmails });
 app.http("getEmail", { methods: ["GET"], authLevel: "anonymous", handler: getEmail });
 app.http("ingestEmail", { methods: ["POST"], authLevel: "anonymous", handler: ingestEmail });
@@ -280,4 +465,31 @@ app.http("promoteEmailToQuote", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: promoteEmailToQuote,
+});
+app.http("archiveEmail", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: archiveEmail,
+});
+app.http("promoteEmailToJob", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: promoteEmailToJob,
+});
+app.http("promoteEmailToInvoice", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: promoteEmailToInvoice,
+});
+
+// Work hours: hourly Mon–Fri 21:30–08:30 UTC (07:00–18:00 ACST Darwin)
+app.timer("syncEmailsWorkHours", {
+  schedule: "0 30 21-23,0-8 * * 1-5",
+  handler: syncEmailsWorkHours,
+});
+
+// Off hours: every 4 hours (covers overnight Mon–Fri + all day Sat/Sun)
+app.timer("syncEmailsOffHours", {
+  schedule: "0 0 */4 * * *",
+  handler: syncEmailsOffHours,
 });

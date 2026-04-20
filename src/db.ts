@@ -4,6 +4,55 @@ export interface SqlRow {
   [key: string]: any;
 }
 
+export interface SqlParam {
+  name: string;
+  type: any;
+  value: any;
+}
+
+/**
+ * Build a parameterized SET clause + params for an UPDATE.
+ *
+ * Security property: the loop iterates `Object.keys(allowlist)`, NOT
+ * `Object.keys(fields)`. Any `fields` key that is not a compile-time
+ * allowlist entry is silently dropped. That means a handler can pass
+ * `body` straight through without risk of an attacker writing
+ * `{ "Amount; DROP TABLE Jobs --": 1 }` into a SQL column name.
+ *
+ * - `undefined` field values are skipped entirely (column untouched).
+ * - `null` field values are written as SQL NULL.
+ * - Returns `null` when no allowlisted field was provided, so callers
+ *   can short-circuit with a 400 "no fields to update".
+ *
+ * @example
+ *   const update = buildUpdateSet(
+ *     { Amount: TYPES.Decimal, Notes: TYPES.NVarChar },
+ *     { Amount, Notes },
+ *   );
+ *   if (!update) return { status: 400, ... };
+ *   await executeQuery(
+ *     conn,
+ *     `UPDATE Payments SET ${update.setClause} WHERE PaymentID = @Id`,
+ *     [{ name: "Id", type: TYPES.Int, value: PaymentID }, ...update.params],
+ *   );
+ */
+export function buildUpdateSet<K extends string>(
+  allowlist: Record<K, any>,
+  fields: Partial<Record<K, unknown>>,
+): { params: SqlParam[]; setClause: string } | null {
+  const parts: string[] = [];
+  const params: SqlParam[] = [];
+  for (const col of Object.keys(allowlist) as K[]) {
+    if (!Object.prototype.hasOwnProperty.call(fields, col)) continue;
+    const value = fields[col];
+    if (value === undefined) continue;
+    parts.push(`${col} = @${col}`);
+    params.push({ name: col, type: allowlist[col], value: value ?? null });
+  }
+  if (parts.length === 0) return null;
+  return { params, setClause: parts.join(", ") };
+}
+
 export function createConnection(token: string): Promise<Connection> {
   return new Promise((resolve, reject) => {
     const config = {

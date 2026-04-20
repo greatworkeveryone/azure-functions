@@ -6,6 +6,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   beginTransaction,
+  buildUpdateSet,
   closeConnection,
   commitTransaction,
   createConnection,
@@ -204,29 +205,25 @@ async function upsertQuote(
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID must be a number" } };
     }
-    const fields: string[] = [];
-    const params: { name: string; type: any; value: any }[] = [
-      { name: "Id", type: TYPES.Int, value: QuoteID },
-    ];
-    const push = (col: string, type: any, val: unknown) => {
-      fields.push(`${col} = @${col}`);
-      params.push({ name: col, type, value: val ?? null });
-    };
-    if (ContractorID !== undefined) push("ContractorID", TYPES.Int, ContractorID);
-    if (ContractorName !== undefined) push("ContractorName", TYPES.NVarChar, ContractorName);
-    if (Amount !== undefined) push("Amount", TYPES.Decimal, Amount);
-    if (Currency !== undefined) push("Currency", TYPES.NVarChar, Currency);
-    if (Notes !== undefined) push("Notes", TYPES.NVarChar, Notes);
-    if (QuotePDFBlobName !== undefined) push("QuotePDFBlobName", TYPES.NVarChar, QuotePDFBlobName);
-
-    if (fields.length === 0) {
+    const update = buildUpdateSet(
+      {
+        Amount: TYPES.Decimal,
+        ContractorID: TYPES.Int,
+        ContractorName: TYPES.NVarChar,
+        Currency: TYPES.NVarChar,
+        Notes: TYPES.NVarChar,
+        QuotePDFBlobName: TYPES.NVarChar,
+      },
+      { Amount, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
+    );
+    if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
     await executeQuery(
       connection,
-      `UPDATE Quotes SET ${fields.join(", ")} WHERE QuoteID = @Id`,
-      params,
+      `UPDATE Quotes SET ${update.setClause} WHERE QuoteID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }, ...update.params],
     );
     const stored = await executeQuery(
       connection,

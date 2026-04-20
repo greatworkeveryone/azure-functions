@@ -5,7 +5,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { buildUpdateSet, createConnection, executeQuery, closeConnection } from "../db";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 
 const TENANT_COLUMNS = `
@@ -119,24 +119,33 @@ async function upsertTenant(
     if (typeof TenantID !== "number") {
       return { status: 400, jsonBody: { error: "TenantID must be a number" } };
     }
-    const fields: string[] = ["UpdatedAt = SYSUTCDATETIME()"];
-    const updateParams: { name: string; type: any; value: any }[] = [
-      { name: "Id", type: TYPES.Int, value: TenantID },
-    ];
-    const push = (col: string, type: any, val: unknown) => {
-      fields.push(`${col} = @${col}`);
-      updateParams.push({ name: col, type, value: val ?? null });
-    };
-    if (ThirdPartyTenantID !== undefined)
-      push("ThirdPartyTenantID", TYPES.NVarChar, ThirdPartyTenantID);
-    if (TenantName !== undefined) push("TenantName", TYPES.NVarChar, TenantName);
-    if (BuildingID !== undefined) push("BuildingID", TYPES.Int, BuildingID);
-    if (Levels !== undefined) push("Levels", TYPES.NVarChar, levelsJson);
+    const update = buildUpdateSet(
+      {
+        BuildingID: TYPES.Int,
+        Levels: TYPES.NVarChar,
+        TenantName: TYPES.NVarChar,
+        ThirdPartyTenantID: TYPES.NVarChar,
+      },
+      {
+        BuildingID,
+        // Levels is stored as JSON — pass the serialized string, not the array.
+        Levels: Levels === undefined ? undefined : levelsJson,
+        TenantName,
+        ThirdPartyTenantID,
+      },
+    );
+    // UpdatedAt is always bumped — SQL expression, outside the allowlist.
+    const setClause = update
+      ? `${update.setClause}, UpdatedAt = SYSUTCDATETIME()`
+      : "UpdatedAt = SYSUTCDATETIME()";
 
     await executeQuery(
       connection,
-      `UPDATE Tenants SET ${fields.join(", ")} WHERE TenantID = @Id`,
-      updateParams,
+      `UPDATE Tenants SET ${setClause} WHERE TenantID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: TenantID },
+        ...(update?.params ?? []),
+      ],
     );
     const stored = await executeQuery(
       connection,

@@ -7,6 +7,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   beginTransaction,
+  buildUpdateSet,
   closeConnection,
   commitTransaction,
   createConnection,
@@ -206,28 +207,41 @@ async function upsertPurchaseOrder(
     if (typeof PurchaseOrderID !== "number") {
       return { status: 400, jsonBody: { error: "PurchaseOrderID must be a number" } };
     }
-    const fields: string[] = ["UpdatedAt = SYSUTCDATETIME()"];
-    const params: { name: string; type: any; value: any }[] = [
-      { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-    ];
-    const push = (col: string, type: any, val: unknown) => {
-      fields.push(`${col} = @${col}`);
-      params.push({ name: col, type, value: val ?? null });
-    };
-    if (ContractorID !== undefined) push("ContractorID", TYPES.Int, ContractorID);
-    if (ContractorName !== undefined) push("ContractorName", TYPES.NVarChar, ContractorName);
-    if (Scope !== undefined) push("Scope", TYPES.NVarChar, Scope);
-    if (EstimatedCost !== undefined) push("EstimatedCost", TYPES.Decimal, EstimatedCost);
-    if (CostNotToExceed !== undefined) push("CostNotToExceed", TYPES.Decimal, CostNotToExceed);
-    if (CostJustification !== undefined)
-      push("CostJustification", TYPES.NVarChar, CostJustification);
-    if (EmailSubject !== undefined) push("EmailSubject", TYPES.NVarChar, EmailSubject);
-    if (EmailBody !== undefined) push("EmailBody", TYPES.NVarChar, EmailBody);
+    const update = buildUpdateSet(
+      {
+        ContractorID: TYPES.Int,
+        ContractorName: TYPES.NVarChar,
+        CostJustification: TYPES.NVarChar,
+        CostNotToExceed: TYPES.Decimal,
+        EmailBody: TYPES.NVarChar,
+        EmailSubject: TYPES.NVarChar,
+        EstimatedCost: TYPES.Decimal,
+        Scope: TYPES.NVarChar,
+      },
+      {
+        ContractorID,
+        ContractorName,
+        CostJustification,
+        CostNotToExceed,
+        EmailBody,
+        EmailSubject,
+        EstimatedCost,
+        Scope,
+      },
+    );
+    // UpdatedAt is always bumped on an update — it's a SQL expression, not a
+    // user value, so it lives outside the allowlist.
+    const setClause = update
+      ? `${update.setClause}, UpdatedAt = SYSUTCDATETIME()`
+      : "UpdatedAt = SYSUTCDATETIME()";
 
     await executeQuery(
       connection,
-      `UPDATE PurchaseOrders SET ${fields.join(", ")} WHERE PurchaseOrderID = @Id`,
-      params,
+      `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+        ...(update?.params ?? []),
+      ],
     );
     const stored = await executeQuery(
       connection,

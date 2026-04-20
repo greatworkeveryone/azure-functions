@@ -231,6 +231,7 @@ async function attachToParent(
     }
 
     connection = await createConnection(token);
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
       `IF NOT EXISTS (
@@ -245,6 +246,7 @@ async function attachToParent(
         { name: "AttachedBy", type: TYPES.NVarChar, value: attachedBy },
       ],
     );
+    /* eslint-enable local/no-sql-interpolation */
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error(`attach (${spec.table}) failed:`, error.message);
@@ -275,6 +277,7 @@ async function detachFromParent(
     }
 
     connection = await createConnection(token);
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
       `DELETE FROM ${spec.table}
@@ -284,6 +287,7 @@ async function detachFromParent(
         { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
       ],
     );
+    /* eslint-enable local/no-sql-interpolation */
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error(`detach (${spec.table}) failed:`, error.message);
@@ -314,6 +318,7 @@ async function listParentAttachments(
   let connection;
   try {
     connection = await createConnection(token);
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     const rows = await executeQuery(
       connection,
       `SELECT a.*
@@ -323,6 +328,7 @@ async function listParentAttachments(
         ORDER BY j.AttachedAt DESC`,
       [{ name: "ParentID", type: TYPES.Int, value: parentId }],
     );
+    /* eslint-enable local/no-sql-interpolation */
     const attachments = rows.map((r: any) => ({
       ...r,
       sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
@@ -392,6 +398,60 @@ async function handleDeleteAttachment(
   }
 }
 
+// ── POST /api/claimEmailAttachment ───────────────────────────────────────────
+// Body: { BlobName, FileName, JobID, ClaimedBy? }
+// The blob is already in Azure Storage (it arrived with the email). This
+// endpoint simply registers it in the Attachments table so it appears in the
+// job's attachment list without uploading anything.
+
+async function handleClaimEmailAttachment(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { BlobName, FileName, JobID, ClaimedBy } = body ?? {};
+    if (!BlobName || typeof BlobName !== "string") {
+      return { status: 400, jsonBody: { error: "BlobName (string) required" } };
+    }
+    if (!JobID || typeof JobID !== "number") {
+      return { status: 400, jsonBody: { error: "JobID (number) required" } };
+    }
+
+    const extension = typeof FileName === "string" && FileName.includes(".")
+      ? FileName.split(".").pop() ?? null
+      : null;
+    const sasUrl = generateReadSasUrl(BlobName);
+
+    connection = await createConnection(token);
+    const inserted = await executeQuery(
+      connection,
+      `INSERT INTO Attachments (JobID, BlobName, OriginalName, Extension, UploadedBy)
+       OUTPUT INSERTED.*
+       VALUES (@JobID, @BlobName, @OriginalName, @Extension, @UploadedBy)`,
+      [
+        { name: "JobID", type: TYPES.Int, value: JobID },
+        { name: "BlobName", type: TYPES.NVarChar, value: BlobName },
+        { name: "OriginalName", type: TYPES.NVarChar, value: FileName ?? BlobName },
+        { name: "Extension", type: TYPES.NVarChar, value: extension },
+        { name: "UploadedBy", type: TYPES.NVarChar, value: ClaimedBy ?? null },
+      ],
+    );
+
+    return { status: 200, jsonBody: { attachment: { ...inserted[0], sasUrl } } };
+  } catch (error: any) {
+    context.error("claimEmailAttachment failed:", error.message);
+    return errorResponse("Claim failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+app.http("claimEmailAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleClaimEmailAttachment });
 app.http("uploadAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleUploadAttachment });
 app.http("getAttachments", { methods: ["GET"], authLevel: "anonymous", handler: handleGetAttachments });
 app.http("deleteAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleDeleteAttachment });
