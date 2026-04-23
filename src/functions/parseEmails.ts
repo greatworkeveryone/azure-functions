@@ -21,7 +21,7 @@ import { generateReadSasUrl } from "../blob-storage";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-const TODDLER_URL = process.env.TODDLER_URL ?? "http://localhost:8000";
+const TODDLER_URL = process.env.TODDLER_URL ?? "";
 const TODDLER_TIMEOUT_MS = Number(process.env.TODDLER_TIMEOUT_MS ?? "180000");
 const BATCH_SIZE = Number(process.env.AI_PARSE_BATCH_SIZE ?? "5");
 const MAX_ATTEMPTS = 3;
@@ -97,6 +97,37 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
     return (await response.json()) as ToddlerResponse;
   } finally {
     clearTimeout(t);
+  }
+}
+
+// ── Reset failed emails back into the queue ────────────────────────────────
+// Clears parse state on emails that errored or hit max retries so they can
+// be picked up again on the next claimBatch call. Only resets rows that
+// failed — successfully classified emails (AIClassification IS NOT NULL,
+// AIParseError IS NULL) are left untouched.
+
+async function resetFailedEmails(token: string): Promise<number> {
+  const connection = await createConnection(token);
+  try {
+    const rows = (await executeQuery(
+      connection,
+      `UPDATE Emails
+          SET AIParsedAt        = NULL,
+              AIParseAttempts   = 0,
+              AIFlaggedForReview = 0,
+              AIParseError      = NULL,
+              AIClassification  = NULL,
+              AIConfidence      = NULL,
+              AIParsedData      = NULL,
+              AIRawResponse     = NULL,
+              AIModelVersion    = NULL
+        WHERE AIParsedAt IS NOT NULL
+          AND (AIParseError IS NOT NULL
+               OR AIClassification IS NULL)`,
+    )) as unknown as { rowsAffected?: number }[];
+    return (rows as any)?.rowsAffected ?? 0;
+  } finally {
+    closeConnection(connection);
   }
 }
 
@@ -236,36 +267,50 @@ function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[] {
     }));
 }
 
-// ── Timer: parseEmailsTimer ────────────────────────────────────────────────
+// ── Darwin timezone helpers ────────────────────────────────────────────────
+// Darwin = UTC+9:30, no daylight saving.
 
-async function parseEmailsTimer(
-  timer: Timer,
+function darwinHourNow(): number {
+  const now = new Date();
+  return Math.floor(((now.getUTCHours() * 60 + now.getUTCMinutes() + 570) % 1440) / 60);
+}
+
+function isDarwinWorkHours(): boolean {
+  const h = darwinHourNow();
+  return h >= 7 && h < 18;
+}
+
+// ── Shared batch runner ────────────────────────────────────────────────────
+
+export interface ParseBatchResult {
+  claimed: number;
+  errored: number;
+  flagged: number;
+  succeeded: number;
+}
+
+export async function runParseBatch(
+  token: string,
   context: InvocationContext,
-): Promise<void> {
-  if (timer.isPastDue) {
-    context.warn("parseEmailsTimer past due — running now");
-  }
-
-  const token = process.env.MYBUILDINGS_BEARER_TOKEN;
-  if (!token) {
-    context.error("parseEmailsTimer: MYBUILDINGS_BEARER_TOKEN not set");
-    return;
+): Promise<ParseBatchResult> {
+  if (!TODDLER_URL) {
+    context.log("runParseBatch: TODDLER_URL not configured — skipping (AI service not yet deployed)");
+    return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
   }
 
   let claimed: ClaimedEmail[];
   try {
     claimed = await claimBatch(token, BATCH_SIZE);
   } catch (err: any) {
-    context.error("parseEmailsTimer claim failed:", err.message);
-    return;
+    context.error("runParseBatch claim failed:", err.message);
+    throw err;
   }
 
   if (claimed.length === 0) {
-    context.log("parseEmailsTimer: no unparsed emails");
-    return;
+    return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
   }
 
-  context.log(`parseEmailsTimer: claimed ${claimed.length} email(s)`);
+  context.log(`runParseBatch: claimed ${claimed.length} email(s)`);
 
   let succeeded = 0;
   let flagged = 0;
@@ -281,10 +326,17 @@ async function parseEmailsTimer(
         html: email.Body ?? "",
         subject: email.Subject,
       });
-      await writeSuccess(token, email.EmailID, hints, result);
-      succeeded++;
-      if (result.confidence === "low" || result.classification === "unknown") {
-        flagged++;
+      if (result.error && !result.data) {
+        // Toddler returned 200 but the LLM itself errored — treat as transient
+        // so the email stays in the queue and gets retried.
+        await recordTransientError(token, email.EmailID, new Error(result.error));
+        errored++;
+      } else {
+        await writeSuccess(token, email.EmailID, hints, result);
+        succeeded++;
+        if (result.confidence === "low" || result.classification === "unknown") {
+          flagged++;
+        }
       }
     } catch (err: any) {
       await recordTransientError(token, email.EmailID, err).catch((e) =>
@@ -295,9 +347,84 @@ async function parseEmailsTimer(
     }
   }
 
-  context.log(
-    `parseEmailsTimer done: succeeded=${succeeded}, flagged=${flagged}, errored=${errored}`,
-  );
+  return { claimed: claimed.length, errored, flagged, succeeded };
+}
+
+// ── Timer: parseEmailsTimer ────────────────────────────────────────────────
+// Runs every hour. Outside Darwin work hours (7am–6pm ACST) only fires at
+// 4-hour intervals (midnight, 4am, 8am Darwin time) — skips all other ticks.
+
+async function parseEmailsTimer(
+  timer: Timer,
+  context: InvocationContext,
+): Promise<void> {
+  if (timer.isPastDue) {
+    context.warn("parseEmailsTimer past due — running now");
+  }
+
+  if (!isDarwinWorkHours() && darwinHourNow() % 4 !== 0) {
+    context.log("parseEmailsTimer: off-hours non-4h slot, skipping");
+    return;
+  }
+
+  const token = process.env.MYBUILDINGS_BEARER_TOKEN;
+  if (!token) {
+    context.error("parseEmailsTimer: MYBUILDINGS_BEARER_TOKEN not set");
+    return;
+  }
+
+  try {
+    const result = await runParseBatch(token, context);
+    context.log(
+      `parseEmailsTimer done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
+    );
+  } catch (err: any) {
+    context.error("parseEmailsTimer batch failed:", err.message);
+  }
+}
+
+// ── POST /api/adminTriggerEmailParse ──────────────────────────────────────
+// Admin-only manual trigger — runs the same batch logic immediately without
+// waiting for the next scheduled tick. Returns the batch summary as JSON.
+
+async function adminTriggerEmailParse(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const isDev = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Development";
+
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  if (!isDev) {
+    const roleCheck = requireRole(token, ["Admin"]);
+    if (roleCheck) return roleCheck;
+  }
+
+  // ?reset=true clears all failed/errored emails back into the queue first,
+  // so a manual trigger can recover from bugs that burned through retries.
+  const reset = request.query.get("reset") === "true";
+  const MAX_EMAILS = 200;
+  const totals: ParseBatchResult & { reset?: number } = { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
+
+  try {
+    if (reset) {
+      totals.reset = await resetFailedEmails(token);
+      context.log(`resetEmailParseQueue: reset ${totals.reset} failed email(s)`);
+    }
+
+    while (totals.claimed < MAX_EMAILS) {
+      const result = await runParseBatch(token, context);
+      totals.claimed += result.claimed;
+      totals.errored += result.errored;
+      totals.flagged += result.flagged;
+      totals.succeeded += result.succeeded;
+      if (result.claimed === 0) break;
+    }
+    return { jsonBody: totals, status: 200 };
+  } catch (error: any) {
+    context.error("adminTriggerEmailParse failed:", error.message);
+    return errorResponse("Email parse batch failed", error.message);
+  }
 }
 
 // ── GET /api/getFlaggedEmails ──────────────────────────────────────────────
@@ -316,10 +443,14 @@ async function getFlaggedEmails(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const isDev = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Development";
+
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(token, ["Admin"]);
-  if (roleCheck) return roleCheck;
+  if (!isDev) {
+    const roleCheck = requireRole(token, ["Admin"]);
+    if (roleCheck) return roleCheck;
+  }
 
   let connection;
   try {
@@ -347,7 +478,13 @@ async function getFlaggedEmails(
 
 app.timer("parseEmailsTimer", {
   handler: parseEmailsTimer,
-  schedule: "0 */5 * * * *", // every 5 minutes
+  schedule: "0 0 * * * *", // every hour; Darwin work-hours / off-hours logic inside
+});
+
+app.http("triggerEmailParse", {
+  authLevel: "anonymous",
+  handler: adminTriggerEmailParse,
+  methods: ["POST"],
 });
 
 app.http("getFlaggedEmails", {

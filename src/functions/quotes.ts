@@ -511,11 +511,154 @@ async function unapproveQuote(
   }
 }
 
+// ── POST /api/completeQuote ──────────────────────────────────────────────────
+// Body: { QuoteID, CompletedBy }
+// Marks an approved quote as 'completed' — work has been done and the job is
+// waiting on an invoice. Only allowed from 'approved'; logs a job event.
+
+async function completeQuote(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { QuoteID, CompletedBy } = body ?? {};
+    if (typeof QuoteID !== "number") {
+      return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      "SELECT JobID, QuoteNumber, Status FROM Quotes WHERE QuoteID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Quote not found" } };
+    }
+    if (rows[0].Status !== "approved") {
+      return { status: 400, jsonBody: { error: "Only approved quotes can be marked completed." } };
+    }
+    const jobId = rows[0].JobID as number;
+    const quoteNumber = (rows[0].QuoteNumber as string | null) ?? `#${QuoteID}`;
+
+    await executeQuery(
+      connection,
+      "UPDATE Quotes SET Status = 'completed' WHERE QuoteID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
+       VALUES (@JobID, @CreatedBy, @Text, 'quote_completed', @QuoteID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: CompletedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked work completed on ${quoteNumber}` },
+        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    return { status: 200, jsonBody: { quote: stored[0] } };
+  } catch (error: any) {
+    context.error("completeQuote failed:", error.message);
+    return errorResponse("Complete quote failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/uncompleteQuote ────────────────────────────────────────────────
+// Body: { QuoteID, UncompletedBy }
+// Reverts a completed quote back to 'approved' — "Work remaining".
+
+async function uncompleteQuote(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { QuoteID, UncompletedBy } = body ?? {};
+    if (typeof QuoteID !== "number") {
+      return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      "SELECT JobID, QuoteNumber, Status FROM Quotes WHERE QuoteID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Quote not found" } };
+    }
+    if (rows[0].Status !== "completed") {
+      return { status: 400, jsonBody: { error: "Only completed quotes can be marked as work remaining." } };
+    }
+    const jobId = rows[0].JobID as number;
+    const quoteNumber = (rows[0].QuoteNumber as string | null) ?? `#${QuoteID}`;
+
+    await executeQuery(
+      connection,
+      "UPDATE Quotes SET Status = 'approved' WHERE QuoteID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
+       VALUES (@JobID, @CreatedBy, @Text, 'comment', @QuoteID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: UncompletedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Work remaining on ${quoteNumber} — marked back in progress` },
+        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    return { status: 200, jsonBody: { quote: stored[0] } };
+  } catch (error: any) {
+    context.error("uncompleteQuote failed:", error.message);
+    return errorResponse("Uncomplete quote failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/deleteQuote ────────────────────────────────────────────────────
 // Body: { QuoteID }
-// Refuses to delete approved quotes — Jobs.ApprovedQuoteID still references
-// them and a payment may have been recorded against the approval. User
-// should reject first, then delete if needed.
+// Refuses to delete approved or completed quotes — Jobs.ApprovedQuoteID still
+// references them and a payment may have been recorded. User should reject
+// (or uncomplete then unapprove) first.
 
 async function deleteQuote(
   request: HttpRequest,
@@ -541,7 +684,7 @@ async function deleteQuote(
     if (rows.length === 0) {
       return { status: 404, jsonBody: { error: "Quote not found" } };
     }
-    if (rows[0].Status === "approved") {
+    if (rows[0].Status === "approved" || rows[0].Status === "completed") {
       return {
         status: 400,
         jsonBody: {

@@ -9,6 +9,8 @@ import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection } from "../db";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { graphSendReply, graphFetchEmails, GraphEmail } from "../graph";
+import { runParseBatch } from "./parseEmails";
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
 // render click-to-open chips without a second round-trip for each file.
@@ -46,7 +48,13 @@ const EMAIL_COLUMNS = `
   AIFlaggedForReview
 `;
 
-// ── GET /api/getEmails[?status=unread|matched|promoted|ignored] ─────────────
+// ── GET /api/getEmails ───────────────────────────────────────────────────────
+// Query params:
+//   statuses  — comma-separated list, e.g. "unread,matched" (default: unread,matched)
+//   page      — 1-based page number (default: 1)
+//   pageSize  — rows per page (default: 50, max: 100)
+//   search    — optional free-text; filters by FromAddress or Subject (LIKE)
+// Flagged rows are always excluded — those live on the admin Flagged page.
 
 async function getEmails(
   request: HttpRequest,
@@ -55,26 +63,62 @@ async function getEmails(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const status = request.query.get("status");
-  // Flagged rows live on the admin-only Flagged Incoming page. Normal users
-  // never see them in the standard Incoming list.
+  const rawStatuses = request.query.get("statuses") ?? "unread,matched";
+  const statusList = rawStatuses
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const page = Math.max(1, Number(request.query.get("page") ?? "1"));
+  const pageSize = Math.min(100, Math.max(1, Number(request.query.get("pageSize") ?? "50")));
+  const offset = (page - 1) * pageSize;
+  const search = request.query.get("search")?.trim() || undefined;
+
+  // Flagged rows live on the admin-only Flagged Incoming page.
   const whereParts: string[] = ["AIFlaggedForReview = 0"];
   const params: { name: string; type: any; value: any }[] = [];
-  if (status) {
-    whereParts.push("Status = @Status");
-    params.push({ name: "Status", type: TYPES.NVarChar, value: status });
+
+  if (search) {
+    whereParts.push("(FromAddress LIKE @Search OR Subject LIKE @Search)");
+    params.push({ name: "Search", type: TYPES.NVarChar, value: `%${search}%` });
   }
+
+  if (statusList.length === 1) {
+    whereParts.push("Status = @Status");
+    params.push({ name: "Status", type: TYPES.NVarChar, value: statusList[0] });
+  } else if (statusList.length > 1) {
+    // Build Status IN (@S0, @S1, ...) from the validated list
+    const placeholders = statusList.map((_, i) => `@S${i}`).join(", ");
+    whereParts.push(`Status IN (${placeholders})`);
+    statusList.forEach((s, i) =>
+      params.push({ name: `S${i}`, type: TYPES.NVarChar, value: s }),
+    );
+  }
+
   const where = `WHERE ${whereParts.join(" AND ")}`;
 
   let connection;
   try {
     connection = await createConnection(token);
-    const rows = await executeQuery(
+
+    const countRows = await executeQuery(
       connection,
-      `SELECT ${EMAIL_COLUMNS} FROM Emails ${where} ORDER BY ReceivedAt DESC`,
+      `SELECT COUNT(*) AS Total FROM Emails ${where}`,
       params,
     );
-    return { status: 200, jsonBody: { count: rows.length, emails: rows } };
+    const total = (countRows[0]?.Total as number) ?? 0;
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT ${EMAIL_COLUMNS} FROM Emails ${where}
+       ORDER BY ReceivedAt DESC
+       OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY`,
+      [...params,
+        { name: "Offset",   type: TYPES.Int, value: offset },
+        { name: "PageSize", type: TYPES.Int, value: pageSize },
+      ],
+    );
+    return { status: 200, jsonBody: { count: rows.length, emails: rows, page, pageSize, total } };
   } catch (error: any) {
     context.error("getEmails failed:", error.message);
     return errorResponse("Failed to fetch emails", error.message);
@@ -208,7 +252,7 @@ async function promoteEmailToQuote(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, Amount, ContractorID, ContractorName, Notes, CreatedBy } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes, CreatedBy } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
@@ -224,11 +268,12 @@ async function promoteEmailToQuote(
     if (!email) {
       return { status: 404, jsonBody: { error: "Email not found" } };
     }
-    const jobId = email.MatchedJobID as number | null;
+    // JobID from the request body takes precedence; fall back to MatchedJobID on the email row.
+    const jobId = (typeof JobID === "number" ? JobID : null) ?? (email.MatchedJobID as number | null);
     if (!jobId) {
       return {
         status: 400,
-        jsonBody: { error: "Email is not matched to a job; set MatchedJobID first." },
+        jsonBody: { error: "JobID required (or email must be matched to a job)." },
       };
     }
 
@@ -317,6 +362,42 @@ async function archiveEmail(
   }
 }
 
+// ── POST /api/flagEmailForReview ────────────────────────────────────────────
+// Body: { EmailID: number }
+// Sets AIFlaggedForReview = 1, removing the email from the active inbox and
+// surfacing it on the admin Flagged Incoming page for model review.
+
+async function flagEmailForReview(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { EmailID } = body ?? {};
+    if (typeof EmailID !== "number") {
+      return { status: 400, jsonBody: { error: "EmailID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+    await executeQuery(
+      connection,
+      `UPDATE Emails SET AIFlaggedForReview = 1 WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+
+    return { status: 200, jsonBody: { ok: true } };
+  } catch (error: any) {
+    context.error("flagEmailForReview failed:", error.message);
+    return errorResponse("Flag email for review failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/promoteEmailToJob ─────────────────────────────────────────────
 // Body: { EmailID: number, CreatedBy?: string }
 // Creates a Job row sourced from the email (title from subject), marks the
@@ -394,7 +475,7 @@ async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, Description, CreatedBy } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, CreatedBy } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -406,19 +487,21 @@ async function promoteEmailToInvoice(
 
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO Invoices
-         (JobID, Amount, Description, SourceEmailID, CreatedBy, Status)
-       OUTPUT INSERTED.InvoiceID
-       VALUES (@JobID, @Amount, @Description, @EmailID, @CreatedBy, 'pending')`,
+      `INSERT INTO JobInvoices
+         (JobID, Amount, ContractorName, InvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+       OUTPUT INSERTED.JobInvoiceID
+       VALUES (@JobID, @Amount, @ContractorName, @InvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+        { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+        { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
         { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
         { name: "EmailID", type: TYPES.Int, value: EmailID },
         { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
       ],
     );
-    const invoiceId = inserted[0].InvoiceID as number;
+    const invoiceId = inserted[0].JobInvoiceID as number;
 
     await executeQuery(
       connection,
@@ -436,26 +519,205 @@ async function promoteEmailToInvoice(
   }
 }
 
-// ── Timer: syncEmailsWorkHours ──────────────────────────────────────────────
-// Every hour Mon–Fri during Darwin work hours (21:30–08:30 UTC = 07:00–18:00 ACST).
-// MOCKED — logs intent only until Graph credentials are wired up.
+// ── GET /api/getEmailThread?emailId=N ───────────────────────────────────────
+// Returns all outbound replies stored in EmailReplies for the given email.
 
-async function syncEmailsWorkHours(
-  _myTimer: unknown,
+async function getEmailThread(
+  request: HttpRequest,
   context: InvocationContext,
-): Promise<void> {
-  context.log("Graph sync mocked — work-hours schedule fired");
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const emailId = Number(request.query.get("emailId"));
+  if (!emailId) {
+    return { status: 400, jsonBody: { error: "emailId (number) is required" } };
+  }
+
+  let connection;
+  try {
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT ReplyID, EmailID, Body, ToAddress, SentBy, SentAt,
+              GraphMessageID, GraphSent, GraphError, AttachmentNames
+       FROM EmailReplies WHERE EmailID = @Id ORDER BY SentAt ASC`,
+      [{ name: "Id", type: TYPES.Int, value: emailId }],
+    );
+    return { status: 200, jsonBody: { replies: rows } };
+  } catch (error: any) {
+    context.error("getEmailThread failed:", error.message);
+    return errorResponse("Failed to fetch email thread", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
 }
 
-// ── Timer: syncEmailsOffHours ───────────────────────────────────────────────
-// Every 4 hours outside the work-hours window (overnight and weekends).
-// MOCKED — logs intent only until Graph credentials are wired up.
+// ── POST /api/sendEmailReply ─────────────────────────────────────────────────
+// Body: { EmailID, Body, SentBy?, ToAddress? }
+// Stores the reply in EmailReplies, then attempts a Graph API send. Graph
+// failure is recorded in GraphError but does not cause a non-200 response —
+// the reply is always persisted so users can see what was recorded.
 
-async function syncEmailsOffHours(
-  _myTimer: unknown,
+async function sendEmailReply(
+  request: HttpRequest,
   context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { EmailID, Body: replyBody, SentBy, ToAddress, Attachments } = body ?? {};
+    if (typeof EmailID !== "number" || typeof replyBody !== "string" || !replyBody.trim()) {
+      return { status: 400, jsonBody: { error: "EmailID (number) and Body (string) required" } };
+    }
+    const attachments: Array<{ fileName: string; contentType: string; contentBase64: string }> =
+      Array.isArray(Attachments) ? Attachments : [];
+
+    connection = await createConnection(token);
+
+    // Fetch email metadata for Graph send (subject + messageId for threading)
+    const emailRows = await executeQuery(
+      connection,
+      `SELECT Subject, MessageID, FromAddress FROM Emails WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+    if (!emailRows[0]) {
+      return { status: 404, jsonBody: { error: "Email not found" } };
+    }
+    const email = emailRows[0] as { Subject: string | null; MessageID: string | null; FromAddress: string | null };
+
+    const toAddr = ToAddress ?? email.FromAddress ?? null;
+
+    const attachmentNames = attachments.map((a) => a.fileName);
+    const attachmentNamesJson = attachmentNames.length ? JSON.stringify(attachmentNames) : null;
+
+    // Store reply first — Graph send is best-effort.
+    const inserted = await executeQuery(
+      connection,
+      `INSERT INTO EmailReplies (EmailID, Body, ToAddress, SentBy, AttachmentNames)
+       OUTPUT INSERTED.ReplyID
+       VALUES (@EmailID, @Body, @ToAddress, @SentBy, @AttachmentNames)`,
+      [
+        { name: "EmailID", type: TYPES.Int, value: EmailID },
+        { name: "Body", type: TYPES.NVarChar, value: replyBody },
+        { name: "ToAddress", type: TYPES.NVarChar, value: toAddr },
+        { name: "SentBy", type: TYPES.NVarChar, value: SentBy ?? null },
+        { name: "AttachmentNames", type: TYPES.NVarChar, value: attachmentNamesJson },
+      ],
+    );
+    const replyId = inserted[0].ReplyID as number;
+
+    // Attempt Graph send — fail gracefully.
+    let graphSent = false;
+    let graphMessageId: string | null = null;
+    let graphError: string | null = null;
+    if (toAddr) {
+      try {
+        graphMessageId = await graphSendReply(
+          toAddr,
+          email.Subject ?? "(no subject)",
+          replyBody,
+          email.MessageID,
+          attachments.length ? attachments : undefined,
+          SentBy ? [SentBy] : undefined,
+        );
+        graphSent = true;
+      } catch (err: any) {
+        graphError = err?.message ?? "Unknown Graph error";
+        context.warn("Graph sendMail failed (reply still stored):", graphError);
+      }
+    }
+
+    // Update Graph outcome on the stored reply row.
+    await executeQuery(
+      connection,
+      `UPDATE EmailReplies
+       SET GraphSent = @GraphSent, GraphMessageID = @GraphMessageID, GraphError = @GraphError
+       WHERE ReplyID = @ReplyID`,
+      [
+        { name: "GraphSent", type: TYPES.Bit, value: graphSent ? 1 : 0 },
+        { name: "GraphMessageID", type: TYPES.NVarChar, value: graphMessageId },
+        { name: "GraphError", type: TYPES.NVarChar, value: graphError },
+        { name: "ReplyID", type: TYPES.Int, value: replyId },
+      ],
+    );
+
+    return {
+      status: 200,
+      jsonBody: { replyId, graphSent, graphError: graphError ?? undefined },
+    };
+  } catch (error: any) {
+    context.error("sendEmailReply failed:", error.message);
+    return errorResponse("Failed to send email reply", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── Shared: upsert a batch of Graph emails into the DB ───────────────────────
+
+export async function upsertGraphEmails(
+  connection: import("tedious").Connection,
+  emails: GraphEmail[],
 ): Promise<void> {
-  context.log("Graph sync mocked — off-hours schedule fired");
+  for (const email of emails) {
+    const jobMatch = email.subject?.match(/job\s*#?\s*(\d+)/i) ?? null;
+    const matchedJobId = jobMatch ? Number(jobMatch[1]) : null;
+
+    await executeQuery(
+      connection,
+      `IF NOT EXISTS (SELECT 1 FROM Emails WHERE MessageID = @MessageID)
+         INSERT INTO Emails (MessageID, FromAddress, Subject, Body, ReceivedAt, MatchedJobID, Status)
+         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread')`,
+      [
+        { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
+        { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
+        { name: "Subject", type: TYPES.NVarChar, value: email.subject },
+        { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
+        { name: "ReceivedAt", type: TYPES.NVarChar, value: email.receivedAt },
+        { name: "MatchedJobID", type: TYPES.Int, value: matchedJobId },
+      ],
+    );
+  }
+}
+
+// ── POST /api/syncEmailsNow ─────────────────────────────────────────────────
+// Manually pulls unread emails from the configured mailbox and upserts them.
+// Superseded by the Graph webhook once deployed.
+
+async function syncEmailsNow(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const mailbox = process.env.GRAPH_MAILBOX_DEV;
+  if (!mailbox) {
+    return { status: 500, jsonBody: { error: "GRAPH_MAILBOX_DEV not configured" } };
+  }
+
+  let connection;
+  try {
+    const emails = await graphFetchEmails(mailbox);
+    connection = await createConnection(token);
+    await upsertGraphEmails(connection, emails);
+    closeConnection(connection);
+    connection = undefined;
+
+    await runParseBatch(token, context);
+
+    context.log(`syncEmailsNow: fetched ${emails.length} emails from ${mailbox}`);
+    return { status: 200, jsonBody: { mailbox, fetched: emails.length } };
+  } catch (error: any) {
+    context.error("syncEmailsNow failed:", error.message);
+    return errorResponse("Sync failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
 }
 
 app.http("getEmails", { methods: ["GET"], authLevel: "anonymous", handler: getEmails });
@@ -465,6 +727,11 @@ app.http("promoteEmailToQuote", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: promoteEmailToQuote,
+});
+app.http("flagEmailForReview", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: flagEmailForReview,
 });
 app.http("archiveEmail", {
   methods: ["POST"],
@@ -481,15 +748,15 @@ app.http("promoteEmailToInvoice", {
   authLevel: "anonymous",
   handler: promoteEmailToInvoice,
 });
-
-// Work hours: hourly Mon–Fri 21:30–08:30 UTC (07:00–18:00 ACST Darwin)
-app.timer("syncEmailsWorkHours", {
-  schedule: "0 30 21-23,0-8 * * 1-5",
-  handler: syncEmailsWorkHours,
+app.http("getEmailThread", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getEmailThread,
+});
+app.http("sendEmailReply", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: sendEmailReply,
 });
 
-// Off hours: every 4 hours (covers overnight Mon–Fri + all day Sat/Sun)
-app.timer("syncEmailsOffHours", {
-  schedule: "0 0 */4 * * *",
-  handler: syncEmailsOffHours,
-});
+app.http("syncEmailsNow", { methods: ["POST"], authLevel: "anonymous", handler: syncEmailsNow });

@@ -53,6 +53,35 @@ export function buildUpdateSet<K extends string>(
   return { params, setClause: parts.join(", ") };
 }
 
+export async function createServiceConnection(): Promise<Connection> {
+  const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
+  if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
+    throw new Error("Graph credentials not configured for service DB connection");
+  }
+
+  const resp = await fetch(
+    `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: GRAPH_CLIENT_ID,
+        client_secret: GRAPH_CLIENT_SECRET,
+        scope: "https://database.windows.net/.default",
+      }).toString(),
+    },
+  );
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Service DB token request failed: ${resp.status} — ${text}`);
+  }
+
+  const { access_token } = (await resp.json()) as { access_token: string };
+  return createConnection(access_token);
+}
+
 export function createConnection(token: string): Promise<Connection> {
   return new Promise((resolve, reject) => {
     const config = {
