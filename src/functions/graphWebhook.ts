@@ -50,7 +50,8 @@ async function graphNotification(
   try {
     connection = await createServiceConnection();
     const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
-    const sinceDateTime = (latestRows[0]?.LatestReceivedAt as string | null) ?? undefined;
+    const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null;
+    const sinceDateTime = rawDate ? new Date(rawDate).toISOString() : undefined;
 
     const emails = await graphFetchEmails(mailbox, sinceDateTime);
     await upsertGraphEmails(connection, emails);

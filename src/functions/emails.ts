@@ -34,12 +34,14 @@ function hydrateAttachments(
   if (!Array.isArray(names)) return [];
   const hour = 60 * 60 * 1000;
   return names
-    .filter((n): n is string => typeof n === "string" && n.length > 0)
-    .map((blobName) => ({
-      blobName,
-      fileName: blobName.split("/").pop() ?? blobName,
-      url: generateReadSasUrl(blobName, hour),
-    }));
+    .filter((n) => (typeof n === "string" && n.length > 0) || (typeof n === "object" && n !== null && "blobName" in n))
+    .map((n) => {
+      const blobName = typeof n === "string" ? n : (n as { blobName: string }).blobName;
+      const fileName = typeof n === "string"
+        ? (blobName.split("/").pop() ?? blobName)
+        : (n as { blobName: string; fileName: string }).fileName;
+      return { blobName, fileName, url: generateReadSasUrl(blobName, hour) };
+    });
 }
 
 const EMAIL_COLUMNS = `
@@ -119,7 +121,11 @@ async function getEmails(
         { name: "PageSize", type: TYPES.Int, value: pageSize },
       ],
     );
-    return { status: 200, jsonBody: { count: rows.length, emails: rows, page, pageSize, total } };
+    const emails = rows.map((row) => ({
+      ...row,
+      attachments: hydrateAttachments(row.AttachmentBlobs as string | null),
+    }));
+    return { status: 200, jsonBody: { count: emails.length, emails, page, pageSize, total } };
   } catch (error: any) {
     context.error("getEmails failed:", error.message);
     return errorResponse("Failed to fetch emails", error.message);
@@ -701,7 +707,10 @@ export async function upsertGraphEmails(
       connection,
       `IF NOT EXISTS (SELECT 1 FROM Emails WHERE MessageID = @MessageID)
          INSERT INTO Emails (MessageID, FromAddress, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs)
-         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs)`,
+         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs)
+       ELSE IF @AttachmentBlobs IS NOT NULL
+         UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
+         WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL`,
       [
         { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
         { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },

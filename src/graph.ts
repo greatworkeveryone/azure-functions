@@ -229,7 +229,7 @@ export interface GraphEmail {
   fromAddress: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
-  attachmentBlobNames: string[];
+  attachmentBlobNames: { blobName: string; fileName: string }[];
 }
 
 async function fetchAttachmentBytes(
@@ -250,7 +250,7 @@ async function fetchAndUploadAttachments(
   mailbox: string,
   graphMessageId: string,
   token: string,
-): Promise<string[]> {
+): Promise<{ blobName: string; fileName: string }[]> {
   const { uploadBlob } = await import("./blob-storage");
 
   const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments?$select=id,name,contentType,isInline,size`;
@@ -272,7 +272,7 @@ async function fetchAndUploadAttachments(
   );
   console.log(`[attachments] msg=${graphMessageId} fileAttachments=${fileAttachments.map((a) => `${a.name}(inline=${a.isInline},size=${a.size})`).join("|")}`);
 
-  const blobNames: string[] = [];
+  const results: { blobName: string; fileName: string }[] = [];
   for (const att of fileAttachments) {
     try {
       const buffer = await fetchAttachmentBytes(mailbox, graphMessageId, att.id, token);
@@ -282,13 +282,13 @@ async function fetchAndUploadAttachments(
         att.contentType ?? "application/octet-stream",
         `email-attachments/${graphMessageId}`,
       );
-      blobNames.push(blobName);
+      results.push({ blobName, fileName: att.name });
       console.log(`[attachments] uploaded ${att.name} → ${blobName}`);
     } catch (err: any) {
       console.error(`[attachments] failed to upload ${att.name} for msg=${graphMessageId}: ${err?.message}`);
     }
   }
-  return blobNames;
+  return results;
 }
 
 export async function graphFetchEmails(mailbox: string, sinceDateTime?: string): Promise<GraphEmail[]> {
