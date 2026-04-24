@@ -3,7 +3,7 @@ import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginT
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
-import { formatYYMMDD } from "../doc-number";
+import { formatDocNumber, nameToAcronym } from "../doc-number";
 
 // POST /api/syncInvoices - fetch from myBuildings and upsert into SQL
 async function syncInvoices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -221,7 +221,12 @@ async function upsertJobInvoice(
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
-        const invoiceNumber = `${formatYYMMDD()}-INV-${JobID}-${nextSeq}`;
+        const invoiceNumber = formatDocNumber({
+          prefix: "IV",
+          jobId: JobID,
+          acronym: nameToAcronym(ContractorName ?? ""),
+          seq: nextSeq,
+        });
 
         const inserted = await executeQuery(
           connection,

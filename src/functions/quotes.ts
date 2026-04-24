@@ -125,7 +125,7 @@ async function upsertQuote(
         const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
 
         const quoteNumber = formatDocNumber({
-          prefix: "Q",
+          prefix: "QT",
           jobId: JobID,
           acronym,
           seq: nextSeq,
@@ -795,3 +795,5 @@ app.http("rejectQuote", { methods: ["POST"], authLevel: "anonymous", handler: re
 app.http("deleteQuote", { methods: ["POST"], authLevel: "anonymous", handler: deleteQuote });
 app.http("unapproveQuote", { methods: ["POST"], authLevel: "anonymous", handler: unapproveQuote });
 app.http("validateQuote", { methods: ["POST"], authLevel: "anonymous", handler: validateQuote });
+app.http("completeQuote", { methods: ["POST"], authLevel: "anonymous", handler: completeQuote });
+app.http("uncompleteQuote", { methods: ["POST"], authLevel: "anonymous", handler: uncompleteQuote });

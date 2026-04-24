@@ -97,7 +97,7 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
 async function syncAllWorkRequestsHttp(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = requireRole(token, ["Admin"]);
+  const forbidden = await requireRole(request, ["Admin"]);
   if (forbidden) return forbidden;
 
   const force = request.query.get("force") === "true";

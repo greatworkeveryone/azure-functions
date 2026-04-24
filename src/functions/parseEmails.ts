@@ -396,7 +396,7 @@ async function adminTriggerEmailParse(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isDev) {
-    const roleCheck = requireRole(token, ["Admin"]);
+    const roleCheck = await requireRole(request, ["Admin"]);
     if (roleCheck) return roleCheck;
   }
 
@@ -448,7 +448,7 @@ async function getFlaggedEmails(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isDev) {
-    const roleCheck = requireRole(token, ["Admin"]);
+    const roleCheck = await requireRole(request, ["Admin"]);
     if (roleCheck) return roleCheck;
   }
 

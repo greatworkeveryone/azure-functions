@@ -10,6 +10,7 @@ import { createConnection, executeQuery, closeConnection } from "../db";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { graphSendReply, graphFetchEmails, GraphEmail } from "../graph";
+import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { runParseBatch } from "./parseEmails";
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
@@ -261,7 +262,7 @@ async function promoteEmailToQuote(
 
     const emailRows = await executeQuery(
       connection,
-      `SELECT EmailID, MatchedJobID, ReceivedAt FROM Emails WHERE EmailID = @Id`,
+      `SELECT EmailID, MatchedJobID, ReceivedAt, AIClassification FROM Emails WHERE EmailID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     const email = emailRows[0];
@@ -283,17 +284,34 @@ async function promoteEmailToQuote(
       [{ name: "JobID", type: TYPES.Int, value: jobId }],
     );
     const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
-    const quoteNumber = `QT-${jobId}-${nextSeq}`;
+    const quoteNumber = formatDocNumber({
+      prefix: "QT",
+      jobId,
+      acronym: nameToAcronym(ContractorName ?? ""),
+      seq: nextSeq,
+    });
 
+    // Only mark as needing AI validation when the email was actually AI-classified as
+    // a quote. If the user promoted it manually (email classified as something else),
+    // stamp AIValidatedAt immediately so the banner never appears.
+    const needsAIValidation = (email.AIClassification as string | null) === "quote";
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO Quotes
-         (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-          Notes, SourceEmailID, ReceivedAt, CreatedBy)
-       OUTPUT INSERTED.QuoteID
-       VALUES
-         (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-          @Notes, @EmailID, @ReceivedAt, @CreatedBy);`,
+      needsAIValidation
+        ? `INSERT INTO Quotes
+             (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
+              Notes, SourceEmailID, ReceivedAt, CreatedBy)
+           OUTPUT INSERTED.QuoteID
+           VALUES
+             (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
+              @Notes, @EmailID, @ReceivedAt, @CreatedBy);`
+        : `INSERT INTO Quotes
+             (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
+              Notes, SourceEmailID, ReceivedAt, CreatedBy, AIValidatedAt, AIValidatedBy)
+           OUTPUT INSERTED.QuoteID
+           VALUES
+             (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
+              @Notes, @EmailID, @ReceivedAt, @CreatedBy, SYSUTCDATETIME(), @AIValidatedBy);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
@@ -305,6 +323,7 @@ async function promoteEmailToQuote(
         { name: "EmailID", type: TYPES.Int, value: EmailID },
         { name: "ReceivedAt", type: TYPES.DateTime2, value: email.ReceivedAt ?? null },
         { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        ...(needsAIValidation ? [] : [{ name: "AIValidatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null }]),
       ],
     );
     const newQuoteId = inserted[0].QuoteID as number;
@@ -413,37 +432,44 @@ async function promoteEmailToJob(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, CreatedBy } = body ?? {};
+    const { EmailID, CreatedBy, ExistingJobID } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
 
     connection = await createConnection(token);
 
-    const emailRows = await executeQuery(
-      connection,
-      `SELECT EmailID, Subject FROM Emails WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
-    if (!emailRows[0]) {
-      return { status: 404, jsonBody: { error: "Email not found" } };
+    let jobId: number;
+
+    if (typeof ExistingJobID === "number") {
+      // Job was already created by the caller (e.g. EmailJobForm) — just mark the email.
+      jobId = ExistingJobID;
+    } else {
+      const emailRows = await executeQuery(
+        connection,
+        `SELECT EmailID, Subject FROM Emails WHERE EmailID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: EmailID }],
+      );
+      if (!emailRows[0]) {
+        return { status: 404, jsonBody: { error: "Email not found" } };
+      }
+
+      const subject = (emailRows[0].Subject as string | null) ?? "Email job";
+      const title = subject.length > 200 ? subject.slice(0, 200) : subject;
+
+      const inserted = await executeQuery(
+        connection,
+        `INSERT INTO Jobs (Title, Status, CreatedBy, CreationMethod, SourceEmailID)
+         OUTPUT INSERTED.JobID
+         VALUES (@Title, 'New', @CreatedBy, 'email', @EmailID)`,
+        [
+          { name: "Title", type: TYPES.NVarChar, value: title },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "EmailID", type: TYPES.Int, value: EmailID },
+        ],
+      );
+      jobId = inserted[0].JobID as number;
     }
-
-    const subject = (emailRows[0].Subject as string | null) ?? "Email job";
-    const title = subject.length > 200 ? subject.slice(0, 200) : subject;
-
-    const inserted = await executeQuery(
-      connection,
-      `INSERT INTO Jobs (Title, Status, CreatedBy, CreationMethod, SourceEmailID)
-       OUTPUT INSERTED.JobID
-       VALUES (@Title, 'New', @CreatedBy, 'email', @EmailID)`,
-      [
-        { name: "Title", type: TYPES.NVarChar, value: title },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
-        { name: "EmailID", type: TYPES.Int, value: EmailID },
-      ],
-    );
-    const jobId = inserted[0].JobID as number;
 
     await executeQuery(
       connection,
@@ -666,12 +692,16 @@ export async function upsertGraphEmails(
   for (const email of emails) {
     const jobMatch = email.subject?.match(/job\s*#?\s*(\d+)/i) ?? null;
     const matchedJobId = jobMatch ? Number(jobMatch[1]) : null;
+    const attachmentBlobsJson =
+      email.attachmentBlobNames.length > 0
+        ? JSON.stringify(email.attachmentBlobNames)
+        : null;
 
     await executeQuery(
       connection,
       `IF NOT EXISTS (SELECT 1 FROM Emails WHERE MessageID = @MessageID)
-         INSERT INTO Emails (MessageID, FromAddress, Subject, Body, ReceivedAt, MatchedJobID, Status)
-         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread')`,
+         INSERT INTO Emails (MessageID, FromAddress, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs)
+         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs)`,
       [
         { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
         { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
@@ -679,6 +709,7 @@ export async function upsertGraphEmails(
         { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
         { name: "ReceivedAt", type: TYPES.NVarChar, value: email.receivedAt },
         { name: "MatchedJobID", type: TYPES.Int, value: matchedJobId },
+        { name: "AttachmentBlobs", type: TYPES.NVarChar, value: attachmentBlobsJson },
       ],
     );
   }

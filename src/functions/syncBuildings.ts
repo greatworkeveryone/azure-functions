@@ -7,7 +7,7 @@ import { TYPES } from "tedious";
 async function syncBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = requireRole(token, ["Admin"]);
+  const forbidden = await requireRole(request, ["Admin"]);
   if (forbidden) return forbidden;
 
   let connection;

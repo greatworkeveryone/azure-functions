@@ -1,4 +1,5 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
+import { lookupUserRoles } from "./user-roles";
 
 export function extractToken(request: HttpRequest): string | null {
   const authHeader = request.headers.get("authorization");
@@ -32,13 +33,12 @@ export function errorResponse(message: string, details: string): HttpResponseIni
   };
 }
 
-// ── Role extraction ──────────────────────────────────────────────────────────
-// Decodes the JWT payload to read the Entra `roles` claim (populated from
-// app-role assignments on the app registration). We deliberately don't
-// signature-verify here: the same token is later used to authenticate to
-// Azure SQL, which Entra verifies end-to-end, so a forged token can't reach
-// the actual resources. If the security boundary grows (e.g. endpoints that
-// don't hit SQL), swap this for proper JWKS verification via `jose`.
+// ── Identity extraction ──────────────────────────────────────────────────────
+// Decodes the JWT payload without signature verification. This is safe here
+// because the same token is passed to Azure SQL, which performs full Entra
+// signature verification end-to-end — a forged token is rejected by SQL before
+// it can do anything. We only use the decoded payload for the `oid` claim (user
+// identity), never for authorization decisions directly.
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
@@ -56,24 +56,39 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-export function rolesFromToken(token: string): string[] {
+export function oidFromToken(token: string): string | null {
   const payload = decodeJwtPayload(token);
-  const raw = payload?.roles;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((r): r is string => typeof r === "string");
+  const oid = payload?.oid;
+  return typeof oid === "string" ? oid : null;
 }
 
 /**
- * Returns null if the token carries at least one of the required roles,
- * or a 403 response otherwise. Callers should early-return on the non-null
- * result. `Admin` is implicitly allowed for every call — it's the superset
- * role, not a distinct permission.
+ * Resolves the caller's app roles via the Microsoft Graph API.
+ *
+ * The bearer token is a SQL delegation token — Entra does not include custom
+ * app-role claims in it. Instead we extract the user's OID (trustworthy because
+ * Azure SQL auth verifies the full token chain) and ask Graph for the user's
+ * actual role assignments on this app registration. The client never touches
+ * the role data, so it cannot be spoofed.
  */
-export function requireRole(
-  token: string,
+export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
+  const token = extractToken(request);
+  if (!token) return [];
+  const oid = oidFromToken(token);
+  if (!oid) return [];
+  return lookupUserRoles(oid);
+}
+
+/**
+ * Returns null if the caller has at least one of the required roles,
+ * or a 403 HttpResponseInit otherwise. Callers should early-return on the
+ * non-null result. `Admin` implicitly satisfies every role check.
+ */
+export async function requireRole(
+  request: HttpRequest,
   allowed: readonly string[],
-): HttpResponseInit | null {
-  const roles = rolesFromToken(token);
+): Promise<HttpResponseInit | null> {
+  const roles = await rolesForRequest(request);
   if (roles.includes("Admin")) return null;
   if (roles.some((r) => allowed.includes(r))) return null;
   return forbiddenResponse(

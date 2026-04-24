@@ -178,6 +178,37 @@ export interface GraphEmail {
   fromAddress: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
+  attachmentBlobNames: string[];
+}
+
+async function fetchAndUploadAttachments(
+  mailbox: string,
+  graphMessageId: string,
+  token: string,
+): Promise<string[]> {
+  const { uploadBlob } = await import("./blob-storage");
+
+  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments?$select=id,name,contentType,contentBytes,isInline,size`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) return [];
+
+  const data = (await resp.json()) as { value: any[] };
+  const fileAttachments = (data.value ?? []).filter(
+    (a) => !a.isInline && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment",
+  );
+
+  const blobNames: string[] = [];
+  for (const att of fileAttachments) {
+    const buffer = Buffer.from(att.contentBytes, "base64");
+    const { blobName } = await uploadBlob(
+      buffer,
+      att.name ?? "attachment",
+      att.contentType ?? "application/octet-stream",
+      `email-attachments/${graphMessageId}`,
+    );
+    blobNames.push(blobName);
+  }
+  return blobNames;
 }
 
 export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
@@ -186,7 +217,7 @@ export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
   const url = new URL(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`,
   );
-  url.searchParams.set("$select", "internetMessageId,subject,from,body,receivedDateTime");
+  url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments");
   url.searchParams.set("$filter", "isRead eq false");
   url.searchParams.set("$orderby", "receivedDateTime desc");
   url.searchParams.set("$top", "50");
@@ -204,11 +235,23 @@ export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
   }
 
   const data = (await resp.json()) as { value: any[] };
-  return (data.value ?? []).map((m) => ({
-    internetMessageId: m.internetMessageId ?? m.id,
-    subject: m.subject ?? null,
-    fromAddress: m.from?.emailAddress?.address ?? null,
-    bodyContent: m.body?.content ?? null,
-    receivedAt: m.receivedDateTime ?? null,
-  }));
+
+  const emails = await Promise.all(
+    (data.value ?? []).map(async (m) => {
+      const attachmentBlobNames =
+        m.hasAttachments && m.id
+          ? await fetchAndUploadAttachments(mailbox, m.id, token).catch(() => [])
+          : [];
+      return {
+        internetMessageId: m.internetMessageId ?? m.id,
+        subject: m.subject ?? null,
+        fromAddress: m.from?.emailAddress?.address ?? null,
+        bodyContent: m.body?.content ?? null,
+        receivedAt: m.receivedDateTime ?? null,
+        attachmentBlobNames,
+      };
+    }),
+  );
+
+  return emails;
 }

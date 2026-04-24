@@ -9,7 +9,7 @@ import {
   errorResponse,
   extractToken,
   forbiddenResponse,
-  rolesFromToken,
+  rolesForRequest,
   unauthorizedResponse,
 } from "../auth";
 
@@ -88,7 +88,7 @@ async function getTimesheet(
   const callerOid = oidFromToken(token);
   if (!callerOid) return unauthorizedResponse();
 
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
   const weekStart = request.query.get("weekStart");
   const targetUserId = request.query.get("userId") ?? callerOid;
 
@@ -155,7 +155,7 @@ async function upsertTimesheet(
   if (!callerOid) return unauthorizedResponse();
 
   const callerName = nameFromToken(token) ?? "";
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
 
   let connection;
   try {
@@ -279,7 +279,7 @@ async function submitTimesheetForApproval(
   const callerOid = oidFromToken(token);
   if (!callerOid) return unauthorizedResponse();
 
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
 
   let connection;
   try {
@@ -356,7 +356,7 @@ async function approveTimesheet(
   if (!callerOid) return unauthorizedResponse();
 
   const callerName = nameFromToken(token) ?? "";
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
 
   if (!isApprovalManager(roles)) {
     return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
@@ -441,7 +441,7 @@ async function getTimesheets(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
     return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
   }
@@ -533,7 +533,7 @@ async function getTimesheetUsers(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
     return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
   }
@@ -624,7 +624,7 @@ async function syncTimesheetsToMyob(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roles = rolesFromToken(token);
+  const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
     return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
   }

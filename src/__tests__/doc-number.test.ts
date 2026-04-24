@@ -1,10 +1,9 @@
 import { describe, test } from "node:test";
 import assert from "node:assert";
-import { formatDocNumber, formatYYMMDD } from "../doc-number";
+import { formatDocNumber, formatYYMMDD, nameToAcronym } from "../doc-number";
 
 describe("formatYYMMDD", () => {
   test("pads month and day to two digits", () => {
-    // 2026-01-05 UTC
     const d = new Date(Date.UTC(2026, 0, 5));
     assert.strictEqual(formatYYMMDD(d), "260105");
   });
@@ -15,8 +14,6 @@ describe("formatYYMMDD", () => {
   });
 
   test("uses UTC (not local) to stay deterministic across servers", () => {
-    // 2026-04-19 23:59 UTC → should be 260419, not 260420 even if local is
-    // ahead of UTC (Sydney +10/+11).
     const d = new Date(Date.UTC(2026, 3, 19, 23, 59, 59));
     assert.strictEqual(formatYYMMDD(d), "260419");
   });
@@ -32,10 +29,17 @@ describe("formatDocNumber", () => {
     );
   });
 
-  test("Quote with contractor acronym", () => {
+  test("Quote (QT) with contractor acronym", () => {
     assert.strictEqual(
-      formatDocNumber({ prefix: "Q", jobId: 42, acronym: "ACM", seq: 3, now }),
-      "260419-Q-42-ACM-3",
+      formatDocNumber({ prefix: "QT", jobId: 42, acronym: "CR", seq: 3, now }),
+      "260419-QT-42-CR-3",
+    );
+  });
+
+  test("Invoice (IV) with contractor acronym", () => {
+    assert.strictEqual(
+      formatDocNumber({ prefix: "IV", jobId: 42, acronym: "CR", seq: 1, now }),
+      "260419-IV-42-CR-1",
     );
   });
 
@@ -44,5 +48,27 @@ describe("formatDocNumber", () => {
       formatDocNumber({ prefix: "PO", jobId: 9, acronym: "INT", seq: 1, now }),
       "260419-PO-9-INT-1",
     );
+  });
+});
+
+describe("nameToAcronym", () => {
+  test("two-word name → initials", () => {
+    assert.strictEqual(nameToAcronym("Connor Randazzo"), "CR");
+  });
+
+  test("three-word name → first 3 initials", () => {
+    assert.strictEqual(nameToAcronym("Acme Corp Materials"), "ACM");
+  });
+
+  test("single word → first letter only", () => {
+    assert.strictEqual(nameToAcronym("Microsoft"), "M");
+  });
+
+  test("more than three words → capped at 3", () => {
+    assert.strictEqual(nameToAcronym("Alpha Beta Gamma Delta"), "ABG");
+  });
+
+  test("empty string → UNK", () => {
+    assert.strictEqual(nameToAcronym(""), "UNK");
   });
 });
