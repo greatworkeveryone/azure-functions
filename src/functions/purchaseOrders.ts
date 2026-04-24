@@ -16,10 +16,12 @@ import {
 } from "../db";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { resolveRecipient } from "../email-recipient";
+import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
 import { defaultPOEmail } from "../pdf/default-po-email";
 import {
   deleteBlob,
+  downloadBlob,
   generateReadSasUrl,
   uploadPurchaseOrderPdf,
 } from "../blob-storage";
@@ -427,7 +429,7 @@ async function sendPurchaseOrder(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { PurchaseOrderID, SentBy } = body ?? {};
+    const { PurchaseOrderID, SentBy, SentByEmail } = body ?? {};
     if (typeof PurchaseOrderID !== "number") {
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
@@ -436,7 +438,8 @@ async function sendPurchaseOrder(
 
     const contractorRows = await executeQuery(
       connection,
-      `SELECT c.EmailAddress, po.PDFBlobName, j.ApprovedQuoteID
+      `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
+              po.EmailSubject, po.EmailBody, j.ApprovedQuoteID
          FROM PurchaseOrders po
          INNER JOIN Jobs j ON j.JobID = po.JobID
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -462,14 +465,35 @@ async function sendPurchaseOrder(
       };
     }
     const recipient = resolveRecipient(contractorRows[0]?.EmailAddress);
+    if (!recipient.address) {
+      return { status: 400, jsonBody: { error: "Contractor has no email address." } };
+    }
     const pdfBlobName = contractorRows[0].PDFBlobName as string;
+    const poNumber = contractorRows[0].PONumber as string | null;
+    const emailSubject = (contractorRows[0].EmailSubject as string | null) ?? poNumber ?? "Purchase Order";
+    const emailBody = (contractorRows[0].EmailBody as string | null) ?? "";
+
     context.log(
-      `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address ?? "(no recipient)"}${
+      `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
         recipient.overridden ? ` (overridden from ${recipient.original ?? "(none)"})` : ""
       } · pdf=${pdfBlobName}`,
     );
-    // TODO: Microsoft Graph sendMail — fetch blob `pdfBlobName`, attach, send
-    // to `recipient.address` with subject/body from the PO row.
+
+    const pdfBuffer = await downloadBlob(pdfBlobName);
+    const ccAddresses = typeof SentByEmail === "string" && SentByEmail ? [SentByEmail] : undefined;
+    await graphSendMail(
+      recipient.address,
+      emailSubject,
+      emailBody,
+      [
+        {
+          fileName: `${poNumber ?? `PO-${PurchaseOrderID}`}.pdf`,
+          contentType: "application/pdf",
+          contentBase64: pdfBuffer.toString("base64"),
+        },
+      ],
+      ccAddresses,
+    );
 
     await executeQuery(
       connection,

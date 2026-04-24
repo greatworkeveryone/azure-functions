@@ -108,6 +108,13 @@ export async function deleteBlob(blobName: string): Promise<void> {
  * (`po/{poId}.pdf`), so re-previewing overwrites the same blob rather than
  * leaving orphaned drafts. Returns the blob name for storage on the PO row.
  */
+export async function downloadBlob(blobName: string): Promise<Buffer> {
+  const container = await getContainerClient();
+  const blockBlob = container.getBlockBlobClient(blobName);
+  const response = await blockBlob.downloadToBuffer();
+  return response;
+}
+
 export async function uploadPurchaseOrderPdf(
   purchaseOrderId: number,
   buffer: Buffer,

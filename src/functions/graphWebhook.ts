@@ -48,14 +48,17 @@ async function graphNotification(
 
   let connection;
   try {
-    const emails = await graphFetchEmails(mailbox);
     connection = await createServiceConnection();
+    const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
+    const sinceDateTime = (latestRows[0]?.LatestReceivedAt as string | null) ?? undefined;
+
+    const emails = await graphFetchEmails(mailbox, sinceDateTime);
     await upsertGraphEmails(connection, emails);
     closeConnection(connection);
     connection = undefined;
 
     await runParseBatch(parseToken, context);
-    context.log(`graphNotification: synced ${emails.length} emails from ${mailbox}`);
+    context.log(`graphNotification: synced ${emails.length} emails from ${mailbox} (since=${sinceDateTime ?? "beginning"})`);
   } catch (err: any) {
     context.error("graphNotification sync failed:", err.message);
   } finally {

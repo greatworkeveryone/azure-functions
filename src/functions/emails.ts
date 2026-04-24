@@ -707,7 +707,7 @@ export async function upsertGraphEmails(
         { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
         { name: "Subject", type: TYPES.NVarChar, value: email.subject },
         { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
-        { name: "ReceivedAt", type: TYPES.NVarChar, value: email.receivedAt },
+        { name: "ReceivedAt", type: TYPES.DateTime2, value: email.receivedAt ? new Date(email.receivedAt) : null },
         { name: "MatchedJobID", type: TYPES.Int, value: matchedJobId },
         { name: "AttachmentBlobs", type: TYPES.NVarChar, value: attachmentBlobsJson },
       ],
@@ -733,8 +733,12 @@ async function syncEmailsNow(
 
   let connection;
   try {
-    const emails = await graphFetchEmails(mailbox);
     connection = await createConnection(token);
+    const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
+    const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null;
+    const sinceDateTime = rawDate ? new Date(rawDate).toISOString() : undefined;
+
+    const emails = await graphFetchEmails(mailbox, sinceDateTime);
     await upsertGraphEmails(connection, emails);
     closeConnection(connection);
     connection = undefined;

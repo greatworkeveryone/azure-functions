@@ -120,6 +120,56 @@ export async function graphSendReply(
   return `graph-sent-${Date.now()}`;
 }
 
+export async function graphSendMail(
+  toAddress: string,
+  subject: string,
+  body: string,
+  attachments?: GraphAttachment[],
+  ccAddresses?: string[],
+): Promise<void> {
+  const token = await getGraphToken();
+  const senderEmail = process.env.GRAPH_SENDER_EMAIL;
+  if (!senderEmail) {
+    throw new Error("GRAPH_SENDER_EMAIL not configured");
+  }
+
+  const message: Record<string, unknown> = {
+    subject,
+    body: { contentType: "Text", content: body },
+    toRecipients: [{ emailAddress: { address: toAddress } }],
+  };
+
+  if (ccAddresses?.length) {
+    message.ccRecipients = ccAddresses.map((a) => ({ emailAddress: { address: a } }));
+  }
+
+  if (attachments?.length) {
+    message.attachments = attachments.map((a) => ({
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name: a.fileName,
+      contentType: a.contentType,
+      contentBytes: a.contentBase64,
+    }));
+  }
+
+  const resp = await fetch(
+    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message }),
+    },
+  );
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
+  }
+}
+
 export async function graphCreateSubscription(
   mailbox: string,
   notificationUrl: string,
@@ -173,12 +223,27 @@ export async function graphRenewSubscription(subscriptionId: string): Promise<st
 }
 
 export interface GraphEmail {
+  graphMessageId: string;
   internetMessageId: string;
   subject: string | null;
   fromAddress: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
   attachmentBlobNames: string[];
+}
+
+async function fetchAttachmentBytes(
+  mailbox: string,
+  graphMessageId: string,
+  attachmentId: string,
+  token: string,
+): Promise<Buffer> {
+  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments/${attachmentId}/$value`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) {
+    throw new Error(`Graph attachment download failed: ${resp.status}`);
+  }
+  return Buffer.from(await resp.arrayBuffer());
 }
 
 async function fetchAndUploadAttachments(
@@ -188,37 +253,54 @@ async function fetchAndUploadAttachments(
 ): Promise<string[]> {
   const { uploadBlob } = await import("./blob-storage");
 
-  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments?$select=id,name,contentType,contentBytes,isInline,size`;
+  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments?$select=id,name,contentType,isInline,size`;
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!resp.ok) return [];
+  if (!resp.ok) {
+    console.error(`[attachments] Graph list failed for msg=${graphMessageId}: ${resp.status} ${await resp.text().catch(() => "")}`);
+    return [];
+  }
 
   const data = (await resp.json()) as { value: any[] };
-  const fileAttachments = (data.value ?? []).filter(
-    (a) => !a.isInline && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment",
+  const all = data.value ?? [];
+  console.log(`[attachments] msg=${graphMessageId} raw count=${all.length} types=${all.map((a) => a["@odata.type"]).join(",")}`);
+
+  // Accept all file attachments that have a name — isInline is unreliable
+  // (Outlook often marks image attachments as inline) and contentBytes is
+  // absent for attachments >3 MB, so we fall back to a per-attachment fetch.
+  const fileAttachments = all.filter(
+    (a) => a["@odata.type"] === "#microsoft.graph.fileAttachment" && a.name,
   );
+  console.log(`[attachments] msg=${graphMessageId} fileAttachments=${fileAttachments.map((a) => `${a.name}(inline=${a.isInline},size=${a.size})`).join("|")}`);
 
   const blobNames: string[] = [];
   for (const att of fileAttachments) {
-    const buffer = Buffer.from(att.contentBytes, "base64");
-    const { blobName } = await uploadBlob(
-      buffer,
-      att.name ?? "attachment",
-      att.contentType ?? "application/octet-stream",
-      `email-attachments/${graphMessageId}`,
-    );
-    blobNames.push(blobName);
+    try {
+      const buffer = await fetchAttachmentBytes(mailbox, graphMessageId, att.id, token);
+      const { blobName } = await uploadBlob(
+        buffer,
+        att.name,
+        att.contentType ?? "application/octet-stream",
+        `email-attachments/${graphMessageId}`,
+      );
+      blobNames.push(blobName);
+      console.log(`[attachments] uploaded ${att.name} → ${blobName}`);
+    } catch (err: any) {
+      console.error(`[attachments] failed to upload ${att.name} for msg=${graphMessageId}: ${err?.message}`);
+    }
   }
   return blobNames;
 }
 
-export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
+export async function graphFetchEmails(mailbox: string, sinceDateTime?: string): Promise<GraphEmail[]> {
   const token = await getGraphToken();
 
   const url = new URL(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`,
   );
   url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments");
-  url.searchParams.set("$filter", "isRead eq false");
+  if (sinceDateTime) {
+    url.searchParams.set("$filter", `receivedDateTime ge ${sinceDateTime}`);
+  }
   url.searchParams.set("$orderby", "receivedDateTime desc");
   url.searchParams.set("$top", "50");
 
@@ -240,9 +322,16 @@ export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
     (data.value ?? []).map(async (m) => {
       const attachmentBlobNames =
         m.hasAttachments && m.id
-          ? await fetchAndUploadAttachments(mailbox, m.id, token).catch(() => [])
+          ? await fetchAndUploadAttachments(mailbox, m.id, token).catch((err: any) => {
+              console.error(`[attachments] fetchAndUpload threw for msg=${m.id}: ${err?.message}`);
+              return [];
+            })
           : [];
+      if (!m.hasAttachments) {
+        console.log(`[attachments] skipped msg=${m.id} subject="${m.subject}" — hasAttachments=false`);
+      }
       return {
+        graphMessageId: m.id,
         internetMessageId: m.internetMessageId ?? m.id,
         subject: m.subject ?? null,
         fromAddress: m.from?.emailAddress?.address ?? null,
@@ -255,3 +344,4 @@ export async function graphFetchEmails(mailbox: string): Promise<GraphEmail[]> {
 
   return emails;
 }
+
