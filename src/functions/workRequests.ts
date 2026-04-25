@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, executeQuery, closeConnection } from "../db";
-import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item } from "../mybuildings-client";
+import { Connection, TYPES } from "tedious";
+import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
+import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
@@ -10,7 +11,20 @@ import {
   WR_OVERLAY_JOIN,
   workRequestSelectColumns,
 } from "../wr-overlay";
-import { TYPES } from "tedious";
+
+interface UpdateWorkRequestBody {
+  WorkRequestID: number;
+  LastModifiedDate?: string;
+  StatusID?: number;
+  WorkNotes?: string;
+  TotalCost?: number;
+}
+interface UpdateWorkRequestLocalBody {
+  WorkRequestID: number;
+  UpdatedBy?: string;
+  [key: string]: unknown;
+}
+interface ResetWorkRequestLocalBody { WorkRequestID: number }
 
 // Tweak this to control how long cached work requests are considered fresh
 export const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -51,7 +65,7 @@ function wrToParams(wr: MyWorkRequest) {
 // ── DB upsert helper ──────────────────────────────────────────────────────────
 // Uses MERGE so each WR is one round-trip instead of SELECT + UPDATE/INSERT.
 
-export async function upsertWorkRequest(connection: any, wr: MyWorkRequest): Promise<void> {
+export async function upsertWorkRequest(connection: Connection, wr: MyWorkRequest): Promise<void> {
   await executeQuery(connection,
     `MERGE INTO WorkRequests WITH (HOLDLOCK) AS target
      USING (SELECT @WorkRequestID AS WorkRequestID) AS source
@@ -135,7 +149,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
           "SELECT BuildingID, BuildingName FROM Buildings WHERE BuildingName IS NOT NULL"
         );
         const nameToId = new Map<string, number>(
-          buildingRows.map((b: any) => [b.BuildingName, b.BuildingID])
+          buildingRows.map((b) => [b.BuildingName as string, b.BuildingID as number])
         );
 
         const { resolved, unresolvedCount } = resolveAll(workRequests, { nameToId });
@@ -159,7 +173,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
 
       let sql = `SELECT ${workRequestSelectColumns()}
         FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE 1=1${unlinkedClause}`;
-      const params: any[] = [];
+      const params: SqlParam[] = [];
       if (statusId) {
         sql += " AND StatusID = @StatusID";
         params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
@@ -215,7 +229,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     // Return from DB with optional filters
     let sql = `SELECT ${workRequestSelectColumns()}
       FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.BuildingID = @BuildingID${unlinkedClause}`;
-    const params: any[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
+    const params: SqlParam[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
 
     if (statusId) {
       sql += " AND StatusID = @StatusID";
@@ -305,7 +319,7 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
 
   let connection;
   try {
-    const body = await request.json() as any;
+    const body = await request.json() as UpdateWorkRequestBody;
     const { WorkRequestID, LastModifiedDate: clientLastModified } = body;
 
     if (!WorkRequestID) {
@@ -394,7 +408,7 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
 
   let connection;
   try {
-    const body = await request.json() as any;
+    const body = await request.json() as CreateWorkRequestPayload;
     context.log("Creating work request via myBuildings API...");
     const result = await createWorkRequest(body);
 
@@ -455,7 +469,7 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpdateWorkRequestLocalBody;
     const { WorkRequestID, UpdatedBy, ...fields } = body ?? {};
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
@@ -479,7 +493,7 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
     const presentColumns = Object.keys(accepted);
     const sql = buildOverlayUpsertSql(presentColumns);
 
-    const params: any[] = [
+    const params: SqlParam[] = [
       { name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID },
       { name: "UpdatedBy", type: TYPES.NVarChar, value: UpdatedBy ?? null },
     ];
@@ -522,7 +536,7 @@ async function resetWorkRequestLocal(request: HttpRequest, context: InvocationCo
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as ResetWorkRequestLocalBody;
     const { WorkRequestID } = body ?? {};
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };

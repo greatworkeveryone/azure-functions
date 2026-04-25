@@ -4,6 +4,7 @@ import {
   closeConnection,
   createConnection,
   executeQuery,
+  SqlParam,
 } from "../db";
 import {
   errorResponse,
@@ -12,6 +13,10 @@ import {
   rolesForRequest,
   unauthorizedResponse,
 } from "../auth";
+
+interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string }
+interface SubmitTimesheetBody { timesheetId: number; submit: boolean }
+interface ApproveTimesheetBody { timesheetId: number; approve: boolean }
 
 // ── Role helpers ─────────────────────────────────────────────────────────────
 
@@ -118,7 +123,7 @@ async function getTimesheet(
       FROM dbo.Timesheets
       WHERE UserID = @UserID AND WeekStartDate = @WeekStartDate
     `;
-    const params: any[] = [
+    const params: SqlParam[] = [
       { name: "UserID",        type: TYPES.NVarChar, value: targetUserId },
       { name: "WeekStartDate", type: TYPES.Date,     value: new Date(weekStart) },
     ];
@@ -159,7 +164,7 @@ async function upsertTimesheet(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpsertTimesheetBody;
     const { weekStart, data, userId, userDisplayName } = body ?? {};
 
     if (!weekStart || !data) {
@@ -283,7 +288,7 @@ async function submitTimesheetForApproval(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as SubmitTimesheetBody;
     const { timesheetId, submit } = body ?? {};
 
     if (typeof timesheetId !== "number") {
@@ -364,7 +369,7 @@ async function approveTimesheet(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as ApproveTimesheetBody;
     const { timesheetId, approve } = body ?? {};
 
     if (typeof timesheetId !== "number") {
@@ -461,7 +466,7 @@ async function getTimesheets(
     const pageSize          = Math.min(100, parseInt(request.query.get("pageSize") ?? "50"));
     const offset            = (page - 1) * pageSize;
 
-    const params: any[] = [];
+    const params: SqlParam[] = [];
     let WHERE_SQL = "";
 
     // Enforce role scope — managers can only see their groups
@@ -544,7 +549,7 @@ async function getTimesheetUsers(
   try {
     connection = await createConnection(token);
 
-    const params: any[] = [];
+    const params: SqlParam[] = [];
     const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
     managed.forEach((r, i) => params.push({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
 
@@ -582,7 +587,7 @@ export async function runMyobSync(
   const connection = await createConnection(token);
   try {
     const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
-    const params: any[] = managed.map((r, i) => ({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
+    const params: SqlParam[] = managed.map((r, i) => ({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
 
     const pending = await executeQuery(
       connection,

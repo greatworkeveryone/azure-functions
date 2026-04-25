@@ -451,10 +451,66 @@ async function handleClaimEmailAttachment(
   }
 }
 
+// ── POST /api/updateAttachmentComment ────────────────────────────────────────
+// Body: { AttachmentID, Comment }. Saves (or clears) the free-text comment on
+// an attachment row. Returns the updated attachment with a fresh SAS URL.
+
+async function handleUpdateAttachmentComment(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { AttachmentID, Comment } = body ?? {};
+    if (typeof AttachmentID !== "number") {
+      return { status: 400, jsonBody: { error: "AttachmentID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+    await executeQuery(
+      connection,
+      "UPDATE Attachments SET Comment = @Comment WHERE Id = @Id",
+      [
+        { name: "Id", type: TYPES.Int, value: AttachmentID },
+        { name: "Comment", type: TYPES.NVarChar, value: typeof Comment === "string" ? Comment : null },
+      ],
+    );
+
+    const rows = await executeQuery(
+      connection,
+      "SELECT * FROM Attachments WHERE Id = @Id",
+      [{ name: "Id", type: TYPES.Int, value: AttachmentID }],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Attachment not found" } };
+    }
+    const r = rows[0] as any;
+    return {
+      status: 200,
+      jsonBody: {
+        attachment: {
+          ...r,
+          sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+        },
+      },
+    };
+  } catch (error: any) {
+    context.error("updateAttachmentComment failed:", error.message);
+    return errorResponse("Failed to update comment", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 app.http("claimEmailAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleClaimEmailAttachment });
 app.http("uploadAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleUploadAttachment });
 app.http("getAttachments", { methods: ["GET"], authLevel: "anonymous", handler: handleGetAttachments });
 app.http("deleteAttachment", { methods: ["POST"], authLevel: "anonymous", handler: handleDeleteAttachment });
+app.http("updateAttachmentComment", { methods: ["POST"], authLevel: "anonymous", handler: handleUpdateAttachmentComment });
 
 app.http("attachToPurchaseOrder", {
   authLevel: "anonymous",

@@ -21,8 +21,9 @@ async function graphNotification(
     return { status: 200, headers: { "Content-Type": "text/plain" }, body: validationToken };
   }
 
-  const body = (await request.json().catch(() => null)) as any;
-  const notifications: any[] = body?.value ?? [];
+  interface GraphChangeNotification { clientState?: string; subscriptionId?: string; changeType?: string; resource?: string }
+  const body = (await request.json().catch(() => null)) as { value?: GraphChangeNotification[] } | null;
+  const notifications: GraphChangeNotification[] = body?.value ?? [];
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
 
   const valid = notifications.filter(

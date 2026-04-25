@@ -1,9 +1,58 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction } from "../db";
-import { fetchInvoices, MyInvoice } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
+import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
+import { fetchInvoices, MyInvoice } from "../mybuildings-client";
+import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
+
+// ── Approval limit helpers ────────────────────────────────────────────────────
+
+export interface ApprovalLimit {
+  RoleName: string;
+  /** null means unlimited authority */
+  MaxInvoiceAmount: number | null;
+}
+
+/**
+ * Pure function — determines whether a user with the given roles can approve an
+ * invoice of the given amount, given a set of per-role limits.
+ *
+ * Rules:
+ * - A user's effective limit is the maximum of all their matching role limits.
+ * - A null limit for any matching role means unlimited authority (always true).
+ * - If no matching role is found, approval is denied.
+ */
+export function canApproveAmount(
+  userRoles: string[],
+  limits: ApprovalLimit[],
+  amount: number,
+): boolean {
+  const matching = limits.filter((l) => userRoles.includes(l.RoleName));
+  if (matching.length === 0) return false;
+  // If any matching role has unlimited authority, allow immediately
+  if (matching.some((l) => l.MaxInvoiceAmount === null)) return true;
+  const effectiveLimit = Math.max(...matching.map((l) => l.MaxInvoiceAmount as number));
+  return amount <= effectiveLimit;
+}
+
+// ── Body interfaces ───────────────────────────────────────────────────────────
+
+interface SyncInvoicesBody { queryParams: string }
+interface UpsertJobInvoiceBody {
+  JobInvoiceID?: number;
+  JobID?: number;
+  ContractorName?: string;
+  Amount?: number;
+  Currency?: string;
+  Notes?: string;
+  InvoicePDFBlobName?: string;
+  SourceEmailID?: number;
+  ReceivedAt?: string;
+  CreatedBy?: string;
+}
+interface ApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
+interface RejectJobInvoiceBody { JobInvoiceID: number; RejectedBy?: string }
+interface DeleteJobInvoiceBody { JobInvoiceID: number }
 
 // POST /api/syncInvoices - fetch from myBuildings and upsert into SQL
 async function syncInvoices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -12,7 +61,7 @@ async function syncInvoices(request: HttpRequest, context: InvocationContext): P
 
   let connection;
   try {
-    const body = await request.json() as any;
+    const body = await request.json() as SyncInvoicesBody;
     const params = body.queryParams || "";
 
     if (!params) {
@@ -87,7 +136,7 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
     const jobCode = request.query.get("jobCode");
 
     let sql = "SELECT * FROM Invoices WHERE 1=1";
-    const params: any[] = [];
+    const params: SqlParam[] = [];
 
     if (buildingId) {
       sql += " AND BuildingID = @BuildingID";
@@ -192,7 +241,7 @@ async function upsertJobInvoice(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpsertJobInvoiceBody;
     const {
       JobInvoiceID,
       JobID,
@@ -326,6 +375,8 @@ async function upsertJobInvoice(
 
 // ── POST /api/approveJobInvoice ───────────────────────────────────────────────
 // Body: { JobInvoiceID, ApprovedBy? }
+// Checks approval limits against the caller's roles before approving.
+// On success, transitions the job to status='Done', awaitingRole='accounts'.
 
 async function approveJobInvoice(
   request: HttpRequest,
@@ -336,22 +387,56 @@ async function approveJobInvoice(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as ApproveJobInvoiceBody;
     const { JobInvoiceID, ApprovedBy } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
     connection = await createConnection(token);
+
+    // Fetch invoice — need Amount for limit check
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Amount FROM JobInvoices WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
 
     const jobId = rows[0].JobID as number;
     const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+    const amount = (rows[0].Amount as number | null) ?? 0;
+
+    // Approval limit check — resolve caller's roles from X-App-Token
+    const userRoles = rolesForRequest(request);
+    const escapedRoles = userRoles.map((r) => `'${r.replace(/'/g, "''")}'`).join(", ");
+    const limitRows: ApprovalLimit[] = escapedRoles
+      ? (await executeQuery(
+          connection,
+          `SELECT RoleName, MaxInvoiceAmount FROM ApprovalLimits WHERE RoleName IN (${escapedRoles})`,
+        ) as ApprovalLimit[])
+      : [];
+
+    if (!canApproveAmount(userRoles, limitRows, amount)) {
+      const matching = limitRows.filter((l) => userRoles.includes(l.RoleName));
+      const effectiveLimit =
+        matching.length === 0
+          ? 0
+          : matching.some((l) => l.MaxInvoiceAmount === null)
+            ? null
+            : Math.max(...matching.map((l) => l.MaxInvoiceAmount as number));
+
+      return {
+        status: 403,
+        jsonBody: {
+          error: "Insufficient approval authority",
+          requiredAmount: amount,
+          userLimit: effectiveLimit,
+          message:
+            "This invoice requires approval from a user with a higher approval limit.",
+        },
+      };
+    }
 
     await executeQuery(
       connection,
@@ -374,9 +459,22 @@ async function approveJobInvoice(
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
     );
+
+    // Transition job to Done
     await executeQuery(
       connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
+       VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Done', 'accounts');`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: "Invoice approved — job complete" },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `UPDATE Jobs SET Status = 'Done', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
+       WHERE JobID = @JobID`,
       [{ name: "JobID", type: TYPES.Int, value: jobId }],
     );
 
@@ -394,6 +492,37 @@ async function approveJobInvoice(
   }
 }
 
+// ── GET /api/getApprovalLimits ────────────────────────────────────────────────
+// Returns all rows from the ApprovalLimits table.
+// Used by the frontend to display per-role approval authority to users.
+
+async function getApprovalLimits(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      "SELECT RoleName, MaxInvoiceAmount FROM ApprovalLimits ORDER BY RoleName ASC",
+    ) as { RoleName: string; MaxInvoiceAmount: number | null }[];
+    const approvalLimits = rows.map((r) => ({
+      roleName: r.RoleName,
+      maxInvoiceAmount: r.MaxInvoiceAmount,
+    }));
+    return { status: 200, jsonBody: { approvalLimits } };
+  } catch (error: any) {
+    context.error("getApprovalLimits failed:", error.message);
+    return errorResponse("Failed to fetch approval limits", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/rejectJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID, RejectedBy? }
 
@@ -406,7 +535,7 @@ async function rejectJobInvoice(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as RejectJobInvoiceBody;
     const { JobInvoiceID, RejectedBy } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
@@ -472,7 +601,7 @@ async function deleteJobInvoice(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as DeleteJobInvoiceBody;
     const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
@@ -508,3 +637,4 @@ app.http("upsertJobInvoice", { methods: ["POST"], authLevel: "anonymous", handle
 app.http("approveJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: approveJobInvoice });
 app.http("rejectJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: rejectJobInvoice });
 app.http("deleteJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: deleteJobInvoice });
+app.http("getApprovalLimits", { methods: ["GET"], authLevel: "anonymous", handler: getApprovalLimits });

@@ -10,7 +10,7 @@ const PAGE_SIZE = 300;
 async function apiFetch(
   path: string,
   method: "GET" | "POST" | "PUT" = "GET",
-  body?: any,
+  body?: unknown,
 ): Promise<any> {
   const url = `${API_URL}${path}`;
   const options: RequestInit = {
@@ -49,10 +49,6 @@ async function fetchAllPaged<T>(
 
     // Response envelope: { Success, Data: { [arrayKey]: [...] }, RecordsReturned }
     const items: T[] = data.Data?.[arrayKey] ?? data[arrayKey] ?? [];
-    if (skip === 0 && items.length > 0) {
-      console.log(`[myBuildings] ${arrayKey} first-record keys:`, Object.keys(items[0] as any));
-      console.log(`[myBuildings] ${arrayKey} first record:`, JSON.stringify(items[0]));
-    }
     if (Array.isArray(items) && items.length > 0) {
       allItems.push(...items);
       hasMore = items.length >= PAGE_SIZE;
@@ -173,7 +169,7 @@ export interface CreateWorkRequestPayload {
 
 export async function createWorkRequest(
   payload: CreateWorkRequestPayload,
-): Promise<any> {
+): Promise<unknown> {
   return apiFetch("/core/api/workrequest/v1/create", "POST", payload);
 }
 
@@ -195,8 +191,8 @@ export interface BulkStatusUpdatePayload2Item {
 
 export async function bulkStatusUpdate(
   payload: BulkStatusUpdatePayload1 | BulkStatusUpdatePayload2Item[],
-): Promise<any> {
-  return apiFetch("/core/api/workrequest/v1/bulkstatusupdate", "POST", payload);
+): Promise<void> {
+  await apiFetch("/core/api/workrequest/v1/bulkstatusupdate", "POST", payload);
 }
 
 // ── Work Request Attachments ──────────────────────────────────────────────────
@@ -211,8 +207,8 @@ export interface AttachmentPayload {
 
 export async function uploadAttachment(
   payload: AttachmentPayload,
-): Promise<any> {
-  return apiFetch("/core/api/workrequest/v1/attachment", "POST", payload);
+): Promise<void> {
+  await apiFetch("/core/api/workrequest/v1/attachment", "POST", payload);
 }
 
 // ── Invoices ──────────────────────────────────────────────────────────────────
@@ -285,7 +281,7 @@ export async function fetchContractorById(
 
 export async function createOrUpdateContractors(
   contractors: MyContractor[],
-): Promise<any> {
+): Promise<unknown> {
   return apiFetch("/core/api/contractors/v1", "PUT", {
     Contractors: contractors,
   });

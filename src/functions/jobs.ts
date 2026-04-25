@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection, SqlRow } from "../db";
+import { Connection, TYPES } from "tedious";
+import { createConnection, executeQuery, closeConnection, SqlParam, SqlRow } from "../db";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
 
 // ── Column lists ─────────────────────────────────────────────────────────────
@@ -63,6 +63,23 @@ const JOB_WRITE_COLUMNS = [
 
 type JobColumn = (typeof JOB_WRITE_COLUMNS)[number];
 
+type UpsertJobBody = { JobID?: number } & Partial<Record<JobColumn, unknown>>;
+interface DeleteJobBody { JobID: number }
+interface AddJobEventBody {
+  JobID: number;
+  CreatedBy?: string;
+  Text?: string;
+  NewStatus?: string;
+  ExpectedProgressDate?: string;
+  IsStalled?: boolean | null;
+  EventType?: string;
+  PurchaseOrderID?: number;
+  QuoteID?: number;
+  NewAssignee?: string;
+  NewAwaitingRole?: string;
+  CreationSource?: string;
+}
+
 const COLUMN_TYPES: Record<JobColumn, any> = {
   BuildingID: TYPES.Int,
   WorkRequestID: TYPES.Int,
@@ -96,8 +113,8 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   PersonAffected: TYPES.NVarChar,
 };
 
-function pickJobFields(body: any): Partial<Record<JobColumn, any>> {
-  const out: Partial<Record<JobColumn, any>> = {};
+function pickJobFields(body: UpsertJobBody): Partial<Record<JobColumn, unknown>> {
+  const out: Partial<Record<JobColumn, unknown>> = {};
   for (const col of JOB_WRITE_COLUMNS) {
     if (body[col] !== undefined) out[col] = body[col];
   }
@@ -106,7 +123,7 @@ function pickJobFields(body: any): Partial<Record<JobColumn, any>> {
 
 // ── Event-log fetch helper ───────────────────────────────────────────────────
 
-async function fetchEventsForJobs(connection: any, jobIds: number[]): Promise<Record<number, SqlRow[]>> {
+async function fetchEventsForJobs(connection: Connection, jobIds: number[]): Promise<Record<number, SqlRow[]>> {
   if (jobIds.length === 0) return {};
   // Inline the ids — they are integers we just pulled from the Jobs table,
   // so there is no injection risk. Parameterising an IN-clause in Tedious
@@ -139,7 +156,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   const whereParts: string[] = [
     isDoneFilter ? "Status = 'Done'" : "Status <> 'Done'",
   ];
-  const params: { name: string; type: any; value: any }[] = [];
+  const params: SqlParam[] = [];
   if (buildingId) {
     whereParts.push("BuildingID = @BuildingID");
     params.push({ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) });
@@ -218,7 +235,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpsertJobBody;
     const { JobID } = body ?? {};
     const fields = pickJobFields(body ?? {});
 
@@ -238,7 +255,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
 
     connection = await createConnection(token);
 
-    const params: any[] = [];
+    const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
       params.push({ name: k, type: COLUMN_TYPES[k as JobColumn], value: v ?? null });
     }
@@ -321,7 +338,7 @@ async function deleteJob(request: HttpRequest, context: InvocationContext): Prom
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as DeleteJobBody;
     const { JobID } = body ?? {};
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
@@ -360,7 +377,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
 
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as AddJobEventBody;
     const {
       JobID,
       CreatedBy,
@@ -437,7 +454,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
 
     // Mirror the event's fields onto the parent Jobs row so list views stay current.
     const updates: string[] = ["LastModifiedDate=SYSUTCDATETIME()"];
-    const updateParams: any[] = [{ name: "JobID", type: TYPES.Int, value: JobID }];
+    const updateParams: SqlParam[] = [{ name: "JobID", type: TYPES.Int, value: JobID }];
     if (NewStatus != null) {
       updates.push("Status=@Status");
       updateParams.push({ name: "Status", type: TYPES.NVarChar, value: NewStatus });

@@ -13,7 +13,7 @@ import {
 import { randomUUID } from "crypto";
 
 const CONTAINER_NAME = process.env.ATTACHMENTS_CONTAINER_NAME ?? "wr-attachments";
-const SAS_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 let cachedServiceClient: BlobServiceClient | undefined;
 let cachedAccountKey: StorageSharedKeyCredential | undefined;
@@ -76,7 +76,7 @@ export async function uploadBlob(
 }
 
 /**
- * Generates a time-limited read SAS URL for a blob. TTL is 7 days by default;
+ * Generates a time-limited read SAS URL for a blob. TTL is 4 hours by default;
  * the URL is handed to myBuildings so their server can ingest the file.
  */
 export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS): string {

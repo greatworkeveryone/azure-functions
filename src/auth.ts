@@ -1,5 +1,4 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
-import { lookupUserRoles } from "./user-roles";
 
 export function extractToken(request: HttpRequest): string | null {
   const authHeader = request.headers.get("authorization");
@@ -26,10 +25,10 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
-export function errorResponse(message: string, details: string): HttpResponseInit {
+export function errorResponse(message: string, _details: string): HttpResponseInit {
   return {
     status: 500,
-    jsonBody: { error: message, details },
+    jsonBody: { error: message },
   };
 }
 
@@ -63,20 +62,31 @@ export function oidFromToken(token: string): string | null {
 }
 
 /**
- * Resolves the caller's app roles via the Microsoft Graph API.
+ * Reads the caller's app roles from the X-App-Token header.
  *
- * The bearer token is a SQL delegation token — Entra does not include custom
- * app-role claims in it. Instead we extract the user's OID (trustworthy because
- * Azure SQL auth verifies the full token chain) and ask Graph for the user's
- * actual role assignments on this app registration. The client never touches
- * the role data, so it cannot be spoofed.
+ * The app token is an Entra ID token whose audience is this app's clientId
+ * (acquired with scope `${clientId}/.default`), so it carries the `roles`
+ * claim directly — no Graph call needed.
+ *
+ * We cross-check the OID in both tokens to ensure the app token belongs to
+ * the same user as the SQL token. Both are signed by Entra and acquired in
+ * the same browser session, so a mismatch indicates tampering.
  */
-export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
-  const token = extractToken(request);
-  if (!token) return [];
-  const oid = oidFromToken(token);
-  if (!oid) return [];
-  return lookupUserRoles(oid);
+export function rolesFromAppToken(sqlToken: string, appToken: string): string[] {
+  const sqlPayload = decodeJwtPayload(sqlToken);
+  const appPayload = decodeJwtPayload(appToken);
+  if (!sqlPayload || !appPayload) return [];
+  if (sqlPayload.oid !== appPayload.oid) return [];
+  const roles = appPayload.roles;
+  if (!Array.isArray(roles)) return [];
+  return roles.filter((r): r is string => typeof r === "string");
+}
+
+export function rolesForRequest(request: HttpRequest): string[] {
+  const sqlToken = extractToken(request);
+  const appToken = request.headers.get("x-app-token");
+  if (!sqlToken || !appToken) return [];
+  return rolesFromAppToken(sqlToken, appToken);
 }
 
 /**
@@ -84,11 +94,11 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
  * or a 403 HttpResponseInit otherwise. Callers should early-return on the
  * non-null result. `Admin` implicitly satisfies every role check.
  */
-export async function requireRole(
+export function requireRole(
   request: HttpRequest,
   allowed: readonly string[],
-): Promise<HttpResponseInit | null> {
-  const roles = await rolesForRequest(request);
+): HttpResponseInit | null {
+  const roles = rolesForRequest(request);
   if (roles.includes("Admin")) return null;
   if (roles.some((r) => allowed.includes(r))) return null;
   return forbiddenResponse(

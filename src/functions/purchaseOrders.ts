@@ -35,6 +35,7 @@ const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
   Scope, EstimatedCost, CostNotToExceed, CostJustification,
   EmailSubject, EmailBody, PDFBlobName, SentAt, SentBy,
+  MyobCreatedAt, MyobCreatedBy, CompletedAt, CompletedBy,
   CreatedAt, CreatedBy, UpdatedAt
 `;
 
@@ -549,7 +550,7 @@ async function deletePurchaseOrder(
     connection = await createConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT SentAt, PDFBlobName FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      `SELECT SentAt, CompletedAt, PDFBlobName FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
     if (rows.length === 0) {
@@ -559,6 +560,12 @@ async function deletePurchaseOrder(
       return {
         status: 400,
         jsonBody: { error: "Cannot delete a purchase order that has been sent." },
+      };
+    }
+    if (rows[0].CompletedAt) {
+      return {
+        status: 400,
+        jsonBody: { error: "Cannot delete a purchase order that has been marked complete." },
       };
     }
 
@@ -580,6 +587,358 @@ async function deletePurchaseOrder(
   } catch (error: any) {
     context.error("deletePurchaseOrder failed:", error.message);
     return errorResponse("Delete purchase order failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/markPurchaseOrderMyobCreated ───────────────────────────────────
+// Body: { id, jobId, createdBy }
+// Records that this PO has been entered into MYOB. Cannot be undone once
+// CompletedAt is set.
+
+async function markPurchaseOrderMyobCreated(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { id, jobId, createdBy } = body ?? {};
+    if (typeof id !== "number") {
+      return { status: 400, jsonBody: { error: "id (number) required" } };
+    }
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE PurchaseOrders
+         SET MyobCreatedAt = SYSUTCDATETIME(), MyobCreatedBy = @CreatedBy, UpdatedAt = SYSUTCDATETIME()
+       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+       VALUES (@JobID, @CreatedBy, @Text, 'po_myob_created', @PurchaseOrderID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} as created in MYOB` },
+        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: id }],
+    );
+    return { status: 200, jsonBody: { purchaseOrder: stored[0] } };
+  } catch (error: any) {
+    context.error("markPurchaseOrderMyobCreated failed:", error.message);
+    return errorResponse("Mark MYOB created failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/unmarkPurchaseOrderMyobCreated ─────────────────────────────────
+// Body: { id, jobId }
+// Clears the MyobCreatedAt/By fields. Refused if CompletedAt is already set —
+// cannot undo MYOB entry after the PO has been completed.
+
+async function unmarkPurchaseOrderMyobCreated(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { id, jobId } = body ?? {};
+    if (typeof id !== "number") {
+      return { status: 400, jsonBody: { error: "id (number) required" } };
+    }
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+    if (rows[0].CompletedAt) {
+      return {
+        status: 400,
+        jsonBody: { error: "Cannot undo MYOB entry — this purchase order has already been marked complete." },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE PurchaseOrders
+         SET MyobCreatedAt = NULL, MyobCreatedBy = NULL, UpdatedAt = SYSUTCDATETIME()
+       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+       VALUES (@JobID, NULL, @Text, 'po_myob_uncreated', @PurchaseOrderID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} from MYOB created` },
+        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: id }],
+    );
+    return { status: 200, jsonBody: { purchaseOrder: stored[0] } };
+  } catch (error: any) {
+    context.error("unmarkPurchaseOrderMyobCreated failed:", error.message);
+    return errorResponse("Unmark MYOB created failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/markPurchaseOrderComplete ──────────────────────────────────────
+// Body: { id, jobId, completedBy }
+// Requires MyobCreatedAt to be set first. Transitions the job to
+// status='Awaiting Approval', awaitingRole='accounts'.
+
+async function markPurchaseOrderComplete(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { id, jobId, completedBy } = body ?? {};
+    if (typeof id !== "number") {
+      return { status: 400, jsonBody: { error: "id (number) required" } };
+    }
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT MyobCreatedAt, CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+    if (!rows[0].MyobCreatedAt) {
+      return {
+        status: 400,
+        jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE PurchaseOrders
+         SET CompletedAt = SYSUTCDATETIME(), CompletedBy = @CompletedBy, UpdatedAt = SYSUTCDATETIME()
+       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CompletedBy", type: TYPES.NVarChar, value: completedBy ?? null },
+      ],
+    );
+
+    // Fire PO event
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+       VALUES (@JobID, @CreatedBy, @Text, 'po_completed', @PurchaseOrderID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} complete` },
+        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+      ],
+    );
+
+    // Transition the job: Awaiting Approval, accounts team
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
+       VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Awaiting Approval', 'accounts');`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: "Work complete — awaiting accounts approval" },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `UPDATE Jobs SET Status = 'Awaiting Approval', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
+       WHERE JobID = @JobID`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: id }],
+    );
+    return { status: 200, jsonBody: { purchaseOrder: stored[0] } };
+  } catch (error: any) {
+    context.error("markPurchaseOrderComplete failed:", error.message);
+    return errorResponse("Mark complete failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/unmarkPurchaseOrderComplete ────────────────────────────────────
+// Body: { id, jobId }
+// Clears CompletedAt/By and rolls the job back to status='Work', awaitingRole='facilities'.
+
+async function unmarkPurchaseOrderComplete(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { id, jobId } = body ?? {};
+    if (typeof id !== "number") {
+      return { status: 400, jsonBody: { error: "id (number) required" } };
+    }
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE PurchaseOrders
+         SET CompletedAt = NULL, CompletedBy = NULL, UpdatedAt = SYSUTCDATETIME()
+       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      [
+        { name: "Id", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+      ],
+    );
+
+    // Fire PO event
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+       VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} as complete` },
+        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+      ],
+    );
+
+    // Roll back job status
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
+       VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
+       WHERE JobID = @JobID`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: id }],
+    );
+    return { status: 200, jsonBody: { purchaseOrder: stored[0] } };
+  } catch (error: any) {
+    context.error("unmarkPurchaseOrderComplete failed:", error.message);
+    return errorResponse("Unmark complete failed", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -609,4 +968,24 @@ app.http("deletePurchaseOrder", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deletePurchaseOrder,
+});
+app.http("markPurchaseOrderMyobCreated", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: markPurchaseOrderMyobCreated,
+});
+app.http("unmarkPurchaseOrderMyobCreated", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: unmarkPurchaseOrderMyobCreated,
+});
+app.http("markPurchaseOrderComplete", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: markPurchaseOrderComplete,
+});
+app.http("unmarkPurchaseOrderComplete", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: unmarkPurchaseOrderComplete,
 });

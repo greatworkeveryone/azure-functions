@@ -315,7 +315,11 @@ async function myobWebhook(
     const rawBody = await request.text();
     const signature = request.headers.get("x-myob-hmac-sha256") ?? "";
 
-    if (MYOB_WEBHOOK_KEY && !validateMyobWebhookSignature(rawBody, signature)) {
+    if (!MYOB_WEBHOOK_KEY) {
+      context.error("myobWebhook: MYOB_WEBHOOK_KEY is not configured");
+      return { status: 500, jsonBody: { error: "Webhook not configured" } };
+    }
+    if (!validateMyobWebhookSignature(rawBody, signature)) {
       context.warn("myobWebhook: invalid HMAC signature — rejected");
       return { status: 401, jsonBody: { error: "Invalid signature" } };
     }

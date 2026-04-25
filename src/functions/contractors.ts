@@ -1,8 +1,14 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { TYPES } from "tedious";
+import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchAllContractors, createOrUpdateContractors, MyContractor } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
-import { TYPES } from "tedious";
+
+interface UpdateContractorsBody {
+  Contractors?: MyContractor[];
+  contractors?: MyContractor[];
+  ContractorID?: number;
+}
 
 // POST /api/syncContractors - fetch from myBuildings and upsert into SQL
 async function syncContractors(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -77,7 +83,7 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
     const active = request.query.get("active");
 
     let sql = "SELECT * FROM Contractors WHERE 1=1";
-    const params: any[] = [];
+    const params: SqlParam[] = [];
 
     if (contractorId) {
       sql += " AND ContractorID = @ContractorID";
@@ -106,8 +112,8 @@ async function handleUpdateContractors(request: HttpRequest, context: Invocation
   if (!token) return unauthorizedResponse();
 
   try {
-    const body = await request.json() as any;
-    const contractors = body.Contractors || body.contractors || [body];
+    const body = await request.json() as UpdateContractorsBody;
+    const contractors = body.Contractors ?? body.contractors ?? [body as MyContractor];
     context.log(`Updating ${contractors.length} contractors via myBuildings API...`);
     const result = await createOrUpdateContractors(contractors);
     return { status: 200, jsonBody: { message: "Contractors updated", result } };
