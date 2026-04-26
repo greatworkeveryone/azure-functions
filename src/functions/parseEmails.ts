@@ -1,19 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Email AI parsing — batch worker + admin-only flagged read.
 //
-// Every 5 minutes, `parseEmailsTimer`:
-//   1. Flags permanently-failed rows (attempts ≥ 3) and stops retrying them.
-//   2. Atomically claims a batch of unparsed rows (incrementing attempts).
-//   3. Pre-extracts PO#/Quote# hints via regex (cheap, deterministic).
-//   4. Calls codename-toddler's /parse-incoming for each one.
-//   5. Writes the classification/data/confidence back to Emails.
+// `runParseBatch` is the shared batch worker:
+//   1. Atomically claims a batch of unparsed rows (incrementing attempts).
+//   2. Pre-extracts PO#/Quote# hints via regex (cheap, deterministic).
+//   3. Calls codename-toddler's /parse-incoming for each one.
+//   4. Writes the classification/data/confidence back to Emails.
+//
+// It is invoked from `graphNotification` on inbound mail (real-time) and from
+// the admin-only `triggerEmailParse` HTTP endpoint (manual recovery).
 //
 // `getFlaggedEmails` is the read-side for the dev-only Flagged Incoming page.
 // It returns rows where the AI flagged low confidence, errored, or never
 // responded. The page is read-only — no mutations here, just a diagnosis view.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { app, HttpRequest, HttpResponseInit, InvocationContext, Timer } from "@azure/functions";
+import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
@@ -267,19 +269,6 @@ function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[] {
     }));
 }
 
-// ── Darwin timezone helpers ────────────────────────────────────────────────
-// Darwin = UTC+9:30, no daylight saving.
-
-function darwinHourNow(): number {
-  const now = new Date();
-  return Math.floor(((now.getUTCHours() * 60 + now.getUTCMinutes() + 570) % 1440) / 60);
-}
-
-function isDarwinWorkHours(): boolean {
-  const h = darwinHourNow();
-  return h >= 7 && h < 18;
-}
-
 // ── Shared batch runner ────────────────────────────────────────────────────
 
 export interface ParseBatchResult {
@@ -350,36 +339,30 @@ export async function runParseBatch(
   return { claimed: claimed.length, errored, flagged, succeeded };
 }
 
-// ── Timer: parseEmailsTimer ────────────────────────────────────────────────
-// Runs every hour. Outside Darwin work hours (7am–6pm ACST) only fires at
-// 4-hour intervals (midnight, 4am, 8am Darwin time) — skips all other ticks.
+// ── Timer: parseEmailsDailyRetry ───────────────────────────────────────────
+// Once-a-day safety net for emails left un-parsed because Toddler was down
+// when the Graph webhook fired. Real-time parsing happens in graphNotification;
+// this only catches the failure-mode backlog. Scheduled at 02:00 UTC to share
+// a DB wakeup with the other daily timers (auto-pause-friendly).
 
-async function parseEmailsTimer(
-  timer: Timer,
+async function parseEmailsDailyRetry(
+  _timer: unknown,
   context: InvocationContext,
 ): Promise<void> {
-  if (timer.isPastDue) {
-    context.warn("parseEmailsTimer past due — running now");
-  }
-
-  if (!isDarwinWorkHours() && darwinHourNow() % 4 !== 0) {
-    context.log("parseEmailsTimer: off-hours non-4h slot, skipping");
-    return;
-  }
-
   const token = process.env.MYBUILDINGS_BEARER_TOKEN;
   if (!token) {
-    context.error("parseEmailsTimer: MYBUILDINGS_BEARER_TOKEN not set");
+    context.error("parseEmailsDailyRetry: MYBUILDINGS_BEARER_TOKEN not set");
     return;
   }
 
   try {
     const result = await runParseBatch(token, context);
     context.log(
-      `parseEmailsTimer done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
+      `parseEmailsDailyRetry done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
     );
-  } catch (err: any) {
-    context.error("parseEmailsTimer batch failed:", err.message);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    context.error("parseEmailsDailyRetry batch failed:", message);
   }
 }
 
@@ -476,9 +459,11 @@ async function getFlaggedEmails(
 
 // ── Registrations ──────────────────────────────────────────────────────────
 
-app.timer("parseEmailsTimer", {
-  handler: parseEmailsTimer,
-  schedule: "0 0 * * * *", // every hour; Darwin work-hours / off-hours logic inside
+// Daily at 02:00 UTC — coincides with other daily timers so the DB only
+// wakes once for the batch.
+app.timer("parseEmailsDailyRetry", {
+  handler: parseEmailsDailyRetry,
+  schedule: "0 0 2 * * *",
 });
 
 app.http("triggerEmailParse", {
@@ -492,9 +477,6 @@ app.http("getFlaggedEmails", {
   handler: getFlaggedEmails,
   methods: ["GET"],
 });
-
-// Re-export helper — consumed by the unit tests.
-export { parseEmailsTimer };
 
 // Unused-import silencer: SqlRow is re-exported so tests can import it via
 // this module without reaching into db.ts directly.

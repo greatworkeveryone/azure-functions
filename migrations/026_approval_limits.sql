@@ -13,9 +13,11 @@ BEGIN
     CONSTRAINT PK_ApprovalLimits PRIMARY KEY (RoleName)
   );
 
-  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('facilities_staff',    1000.00);
-  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('facilities_manager', 10000.00);
-  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('accounts',               NULL);
-  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('Admin',                  NULL);
+  -- RoleNames must match the Entra ID app role values defined in APP_ROLES (src/constants/roles.ts)
+  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('facilities',                       1000.00);
+  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('timesheet_approval_facilities',   10000.00);
+  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('timesheet_approval_accounts',     10000.00);
+  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('accounts',                         1000.00);
+  INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('Admin',                              NULL);
 END
 GO

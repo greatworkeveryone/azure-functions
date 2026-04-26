@@ -25,10 +25,10 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
-export function errorResponse(message: string, _details: string): HttpResponseInit {
+export function errorResponse(message: string, details?: string): HttpResponseInit {
   return {
     status: 500,
-    jsonBody: { error: message },
+    jsonBody: { details, error: message },
   };
 }
 

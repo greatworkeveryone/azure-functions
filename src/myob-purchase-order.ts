@@ -1,9 +1,7 @@
-// MYOB Purchase Order (Service Order) API client — STUB.
+// MYOB Purchase Order (Service Order) API client.
 //
-// These functions wrap the MYOB AccountRight v2 Service Order endpoints.
-// All functions are stubbed: they log the call for observability but do NOT
-// make real API calls yet. Activate by removing the stub guards and wiring up
-// the real MYOB OAuth credentials.
+// Wraps the MYOB AccountRight v2 Service Order endpoints.
+// Follows the same auth + fetch pattern as myob-client.ts.
 //
 // API reference: https://developer.myob.com/api/myob-business-api/v2/purchase/order/order_service/
 //
@@ -11,6 +9,48 @@
 //   MYOB_API_BASE          — e.g. https://api.myob.com/accountright
 //   MYOB_COMPANY_FILE_ID   — GUID of the company file
 //   MYOB_ACCESS_TOKEN      — OAuth 2.0 bearer token
+//   MYOB_CLIENT_ID         — sent as x-myobapi-key header
+//   MYOB_WEB_APP_URL       — base URL for "View on MYOB" links
+
+const MYOB_API_BASE        = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
+const MYOB_COMPANY_FILE_ID = process.env.MYOB_COMPANY_FILE_ID ?? "";
+const MYOB_ACCESS_TOKEN    = process.env.MYOB_ACCESS_TOKEN ?? "";
+const MYOB_WEB_APP_URL     = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
+
+const base = () => `${MYOB_API_BASE}/${MYOB_COMPANY_FILE_ID}`;
+
+function myobHeaders(): Record<string, string> {
+  return {
+    Authorization: `Bearer ${MYOB_ACCESS_TOKEN}`,
+    "Content-Type": "application/json",
+    "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
+    "x-myobapi-version": "v2",
+  };
+}
+
+async function myobFetch(
+  path: string,
+  method: "GET" | "PUT" | "DELETE" = "GET",
+  body?: unknown,
+): Promise<unknown> {
+  const url = `${base()}${path}`;
+  const response = await fetch(url, {
+    method,
+    headers: myobHeaders(),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`MYOB API ${response.status} ${response.statusText}: ${text}`);
+  }
+
+  if (response.status === 204 || response.headers.get("content-length") === "0") {
+    return null;
+  }
+
+  return response.json() as Promise<unknown>;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,194 +76,120 @@ export interface MyobServiceOrderLine {
   /** Line type — "Account" for a charge line, "Header" for a heading. */
   Type: MyobServiceOrderLineType;
   Description: string;
-  /** Unit price per unit. */
   UnitPrice?: number;
-  /** Number of units. */
   Units?: number;
-  /** Total for this line (UnitPrice * Units). */
   Total?: number;
   TaxCode?: MyobTaxCodeRef;
   Account?: MyobAccountRef;
 }
 
 export interface CreateMyobServiceOrderParams {
-  /** MYOB supplier (vendor) UID. */
-  Supplier?: MyobSupplierRef;
+  /** MYOB supplier (vendor) UID — required by the MYOB API. */
+  Supplier: MyobSupplierRef;
   /** Purchase order number / reference. */
   Number?: string;
-  /** ISO date string, e.g. "2026-04-24". */
+  /** ISO date string, e.g. "2026-04-25". */
   Date?: string;
   /** ISO date string for expected delivery. */
   PromisedDate?: string;
   Memo?: string;
   Lines: MyobServiceOrderLine[];
-  /** Whether tax is inclusive in the line totals. */
   IsTaxInclusive?: boolean;
   ShipToAddress?: string;
 }
 
 export interface MyobServiceOrder extends CreateMyobServiceOrderParams {
-  /** MYOB-assigned GUID for this order. */
   UID: string;
-  /** ISO datetime string. */
+  RowVersion?: string;
   LastModified?: string;
-  /** Order status in MYOB. */
+  /** "Open" or "ConvertedToBill" */
   Status?: string;
-  /** Total amount before tax. */
   Subtotal?: number;
-  /** Total tax amount. */
   TotalTax?: number;
-  /** Total amount including tax. */
   TotalAmount?: number;
-  /** Direct URL to this resource in the MYOB API. */
+  BalanceDueAmount?: number;
   URI?: string;
 }
 
 export interface MyobServiceOrderResponse {
-  /** MYOB-assigned GUID for the created order. */
   uid: string;
-  /** Direct URL to this resource in the MYOB API (from Location header). */
+  /** Direct link to this order in the MYOB web app. */
   url: string;
 }
 
-// ── Environment helpers ───────────────────────────────────────────────────────
+// ── URL builder ───────────────────────────────────────────────────────────────
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `MYOB Purchase Order client: missing required environment variable "${name}". ` +
-        `Set it in your Azure Function App configuration.`,
-    );
-  }
-  return value;
+export function buildMyobOrderUrl(uid: string): string {
+  return `${MYOB_WEB_APP_URL}/app/#/In/Purchase/Orders/Order/${uid}`;
 }
 
-function companyFileBase(): string {
-  const apiBase = requireEnv("MYOB_API_BASE");
-  const fileId = requireEnv("MYOB_COMPANY_FILE_ID");
-  return `${apiBase}/${fileId}`;
-}
-
-// ── STUB: MYOB API not yet active ─────────────────────────────────────────────
-
-class NotImplementedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NotImplementedError";
-  }
-}
+// ── API calls ─────────────────────────────────────────────────────────────────
 
 /**
  * Creates a Service Order (Purchase Order) in MYOB.
- *
  * POST /{companyFileId}/Purchase/Order/Service
- *
- * // STUB: MYOB API not yet active
+ * Returns 204 with the new UID in the Location header.
  */
 export async function myobCreateServiceOrder(
   params: CreateMyobServiceOrderParams,
 ): Promise<MyobServiceOrderResponse> {
-  const base = companyFileBase();
-  const accessToken = requireEnv("MYOB_ACCESS_TOKEN");
-  console.log(
-    `[myobCreateServiceOrder] STUB — would POST ${base}/Purchase/Order/Service`,
-    JSON.stringify({ params, accessToken: accessToken ? "[redacted]" : "(missing)" }),
-  );
-  // STUB: MYOB API not yet active
-  // When activating: make the real POST, read the Location header for the UID,
-  // return { uid, url }.
-  throw new NotImplementedError(
-    "myobCreateServiceOrder is not yet active. Remove the stub guard and wire up MYOB OAuth credentials to enable it.",
-  );
+  const response = await fetch(`${base()}/Purchase/Order/Service`, {
+    method: "POST",
+    headers: myobHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`MYOB createServiceOrder ${response.status}: ${text}`);
+  }
+
+  // Location: https://api.myob.com/accountright/{cfId}/Purchase/Order/Service/{uid}
+  const location = response.headers.get("Location") ?? "";
+  const uid = location.split("/").pop() ?? "";
+  return { uid, url: buildMyobOrderUrl(uid) };
 }
 
 /**
  * Fetches a single Service Order by MYOB UID.
- *
  * GET /{companyFileId}/Purchase/Order/Service/{uid}
- *
- * // STUB: MYOB API not yet active
  */
 export async function myobGetServiceOrder(uid: string): Promise<MyobServiceOrder> {
-  const base = companyFileBase();
-  const accessToken = requireEnv("MYOB_ACCESS_TOKEN");
-  console.log(
-    `[myobGetServiceOrder] STUB — would GET ${base}/Purchase/Order/Service/${uid}`,
-    JSON.stringify({ uid, accessToken: accessToken ? "[redacted]" : "(missing)" }),
-  );
-  // STUB: MYOB API not yet active
-  throw new NotImplementedError(
-    "myobGetServiceOrder is not yet active. Remove the stub guard and wire up MYOB OAuth credentials to enable it.",
-  );
+  return myobFetch(`/Purchase/Order/Service/${uid}`) as Promise<MyobServiceOrder>;
 }
 
 /**
  * Updates an existing Service Order in MYOB.
- *
  * PUT /{companyFileId}/Purchase/Order/Service/{uid}
- *
- * // STUB: MYOB API not yet active
+ * RowVersion must be included (fetch the order first to get the current value).
  */
 export async function myobUpdateServiceOrder(
   uid: string,
-  params: Partial<CreateMyobServiceOrderParams>,
+  params: Partial<MyobServiceOrder>,
 ): Promise<void> {
-  const base = companyFileBase();
-  const accessToken = requireEnv("MYOB_ACCESS_TOKEN");
-  console.log(
-    `[myobUpdateServiceOrder] STUB — would PUT ${base}/Purchase/Order/Service/${uid}`,
-    JSON.stringify({ uid, params, accessToken: accessToken ? "[redacted]" : "(missing)" }),
-  );
-  // STUB: MYOB API not yet active
-  throw new NotImplementedError(
-    "myobUpdateServiceOrder is not yet active. Remove the stub guard and wire up MYOB OAuth credentials to enable it.",
-  );
+  await myobFetch(`/Purchase/Order/Service/${uid}`, "PUT", params);
 }
 
 /**
  * Deletes a Service Order in MYOB.
- *
  * DELETE /{companyFileId}/Purchase/Order/Service/{uid}
- *
- * // STUB: MYOB API not yet active
  */
 export async function myobDeleteServiceOrder(uid: string): Promise<void> {
-  const base = companyFileBase();
-  const accessToken = requireEnv("MYOB_ACCESS_TOKEN");
-  console.log(
-    `[myobDeleteServiceOrder] STUB — would DELETE ${base}/Purchase/Order/Service/${uid}`,
-    JSON.stringify({ uid, accessToken: accessToken ? "[redacted]" : "(missing)" }),
-  );
-  // STUB: MYOB API not yet active
-  throw new NotImplementedError(
-    "myobDeleteServiceOrder is not yet active. Remove the stub guard and wire up MYOB OAuth credentials to enable it.",
-  );
+  await myobFetch(`/Purchase/Order/Service/${uid}`, "DELETE");
 }
 
 /**
- * Converts a Service Order to a Purchase Bill in MYOB.
+ * Converts a Service Order to a Purchase Bill.
  *
- * The MYOB AccountRight API does not currently expose a direct "convert order
- * to bill" endpoint. The standard workflow is to open the order in the MYOB
- * web UI and convert it there. This stub is a placeholder for when MYOB adds
- * API support for this operation, or if a workaround is identified (e.g.
- * creating a Bill with reference to the Order UID).
- *
- * // STUB: MYOB API not yet active
+ * The MYOB AccountRight API does not expose a direct "convert order to bill"
+ * endpoint. Convert the order to a bill manually in the MYOB web app. Track
+ * https://developer.myob.com for future API support.
  */
 export async function myobConvertOrderToBill(
-  uid: string,
+  _uid: string,
 ): Promise<{ billUid: string; billUrl: string }> {
-  console.log(
-    `[myobConvertOrderToBill] STUB — MYOB API does not yet support converting a Service Order to a Bill programmatically. UID: ${uid}`,
-  );
-  // STUB: MYOB API not yet active
-  // Future: MYOB may add a POST /{cfId}/Purchase/Bill/Service endpoint that
-  // accepts an OrderUID to create a bill from an existing order. Track the
-  // MYOB developer changelog at https://developer.myob.com for updates.
-  throw new NotImplementedError(
-    "myobConvertOrderToBill is not yet supported by the MYOB AccountRight API. " +
+  throw new Error(
+    "myobConvertOrderToBill is not supported by the MYOB AccountRight API. " +
       "Convert the order to a bill manually in the MYOB web app.",
   );
 }

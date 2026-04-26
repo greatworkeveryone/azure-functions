@@ -26,8 +26,14 @@ interface RemoveJobRequestedContractorBody {
   jobId: number;
 }
 
+interface ToggleRequestedContractorSentBody {
+  id: number;
+  jobId: number;
+  requestSent: boolean;
+}
+
 const REQUESTED_CONTRACTOR_COLUMNS = `
-  ID, JobID, ContractorID, ContractorName, AddedAt, AddedBy
+  ID, JobID, ContractorID, ContractorName, AddedAt, AddedBy, RequestSent
 `;
 
 // ── GET /api/getJobRequestedContractors?jobId=N ──────────────────────────────
@@ -247,6 +253,61 @@ async function removeJobRequestedContractor(
   }
 }
 
+// ── POST /api/toggleRequestedContractorSent ──────────────────────────────────
+// Body: { id, jobId, requestSent }
+
+async function toggleRequestedContractorSent(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as ToggleRequestedContractorSentBody;
+    const { id, jobId, requestSent } = body ?? {};
+
+    if (typeof id !== "number") {
+      return { status: 400, jsonBody: { error: "id (number) required" } };
+    }
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+    if (typeof requestSent !== "boolean") {
+      return { status: 400, jsonBody: { error: "requestSent (boolean) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const updated = await executeQuery(
+      connection,
+      `UPDATE dbo.JobRequestedContractors
+          SET RequestSent = @RequestSent
+        WHERE ID = @ID AND JobID = @JobID;
+       SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
+         FROM dbo.JobRequestedContractors
+        WHERE ID = @ID AND JobID = @JobID;`,
+      [
+        { name: "ID", type: TYPES.Int, value: id },
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "RequestSent", type: TYPES.Bit, value: requestSent },
+      ],
+    );
+
+    if (updated.length === 0) {
+      return { status: 404, jsonBody: { error: "Requested contractor not found" } };
+    }
+
+    return { status: 200, jsonBody: { requestedContractor: updated[0] } };
+  } catch (error: any) {
+    context.error("toggleRequestedContractorSent failed:", error.message);
+    return errorResponse("Failed to update request status", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 app.http("getJobRequestedContractors", {
   methods: ["GET"],
   authLevel: "anonymous",
@@ -261,4 +322,9 @@ app.http("removeJobRequestedContractor", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: removeJobRequestedContractor,
+});
+app.http("toggleRequestedContractorSent", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: toggleRequestedContractorSent,
 });

@@ -117,22 +117,6 @@ async function upsertPurchaseOrder(
         return { status: 400, jsonBody: { error: "JobID (number) required to create a PO" } };
       }
 
-      // Once the business has approved a quote for this job, no new POs.
-      const approvedRows = await executeQuery(
-        connection,
-        "SELECT ApprovedQuoteID FROM Jobs WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: JobID }],
-      );
-      if (approvedRows[0]?.ApprovedQuoteID != null) {
-        return {
-          status: 400,
-          jsonBody: {
-            error:
-              "A quote has already been approved for this job — unapprove it first to add more POs.",
-          },
-        };
-      }
-
       await beginTransaction(connection);
       try {
         const acronym =
@@ -440,24 +424,14 @@ async function sendPurchaseOrder(
     const contractorRows = await executeQuery(
       connection,
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
-              po.EmailSubject, po.EmailBody, j.ApprovedQuoteID
+              po.EmailSubject, po.EmailBody
          FROM PurchaseOrders po
-         INNER JOIN Jobs j ON j.JobID = po.JobID
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
         WHERE po.PurchaseOrderID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
     if (contractorRows.length === 0) {
       return { status: 404, jsonBody: { error: "Purchase order not found" } };
-    }
-    if (contractorRows[0].ApprovedQuoteID != null) {
-      return {
-        status: 400,
-        jsonBody: {
-          error:
-            "A quote has already been approved for this job — unapprove it first to send more POs.",
-        },
-      };
     }
     if (!contractorRows[0]?.PDFBlobName) {
       return {
