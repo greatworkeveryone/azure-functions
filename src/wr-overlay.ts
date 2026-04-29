@@ -51,11 +51,11 @@ export type OverlayColumn = (typeof OVERLAY_COLUMNS)[number];
 
 /**
  * Builds the SELECT column list for a WR fetch: authoritative columns direct
- * from `wr`, overlaid columns via COALESCE, plus AttachmentCount subquery and
- * a HasLocalOverride flag. Use inside:
+ * from `wr`, overlaid columns via COALESCE, AttachmentCount from a grouped
+ * join (see WR_OVERLAY_JOIN), and a HasLocalOverride flag. Use inside:
  *
  *   SELECT ${workRequestSelectColumns()} FROM WorkRequests wr
- *   LEFT JOIN WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID
+ *   ${WR_OVERLAY_JOIN}
  *   WHERE ...
  */
 export function workRequestSelectColumns(): string {
@@ -70,8 +70,7 @@ export function workRequestSelectColumns(): string {
   const lastModified =
     `CASE WHEN o.UpdatedAt IS NULL OR wr.LastModifiedDate > o.UpdatedAt
           THEN wr.LastModifiedDate ELSE o.UpdatedAt END AS LastModifiedDate`;
-  const attachmentCount =
-    `(SELECT COUNT(*) FROM Attachments a WHERE a.WorkRequestID = wr.WorkRequestID) AS AttachmentCount`;
+  const attachmentCount = `COALESCE(ac.AttachmentCount, 0) AS AttachmentCount`;
   const overrideFlag =
     `CASE WHEN o.WorkRequestID IS NOT NULL THEN 1 ELSE 0 END AS HasLocalOverride`;
   return [...authoritative, ...overlaid, lastModified, attachmentCount, overrideFlag].join(", ");
@@ -82,9 +81,16 @@ function quote(col: string): string {
   return col === "Type" ? "[Type]" : col;
 }
 
-/** SQL fragment for the LEFT JOIN that backs the overlay. */
+/**
+ * SQL fragment for the joins that back the overlay + attachment count. Using a
+ * grouped derived table for AttachmentCount instead of a per-row correlated
+ * subquery — on list queries that's the difference between O(N) lookups and
+ * one indexed scan.
+ */
 export const WR_OVERLAY_JOIN =
-  "LEFT JOIN WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID";
+  "LEFT JOIN WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID " +
+  "LEFT JOIN (SELECT WorkRequestID, COUNT(*) AS AttachmentCount FROM Attachments GROUP BY WorkRequestID) ac " +
+  "ON ac.WorkRequestID = wr.WorkRequestID";
 
 // ── Pure-logic helpers, used in tests and from the endpoint handler ──────────
 

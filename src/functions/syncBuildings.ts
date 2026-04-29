@@ -3,6 +3,7 @@ import { createConnection, executeQuery, closeConnection } from "../db";
 import { fetchAllBuildings, MyBuilding } from "../mybuildings-client";
 import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
+import { clearBuildingsCache } from "./getBuildings";
 
 async function syncBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -60,6 +61,7 @@ async function syncBuildings(request: HttpRequest, context: InvocationContext): 
       }
     }
 
+    clearBuildingsCache();
     context.log(`Sync complete: ${inserted} inserted, ${updated} updated`);
     return { status: 200, jsonBody: { message: "Sync complete", total: buildings.length, inserted, updated } };
   } catch (error: any) {

@@ -53,7 +53,17 @@ export function buildUpdateSet<K extends string>(
   return { params, setClause: parts.join(", ") };
 }
 
-export async function createServiceConnection(): Promise<Connection> {
+// Cache the AAD token across warm invocations. AAD tokens are valid ~1 hour;
+// reusing them avoids a network round-trip + handshake on every request and
+// keeps the SQL DB from being woken purely by token refreshes.
+let cachedServiceToken: { value: string; expiresAt: number } | null = null;
+const TOKEN_REFRESH_SKEW_MS = 60_000;
+
+async function getServiceToken(): Promise<string> {
+  if (cachedServiceToken && cachedServiceToken.expiresAt > Date.now() + TOKEN_REFRESH_SKEW_MS) {
+    return cachedServiceToken.value;
+  }
+
   const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
   if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
     throw new Error("Graph credentials not configured for service DB connection");
@@ -78,8 +88,20 @@ export async function createServiceConnection(): Promise<Connection> {
     throw new Error(`Service DB token request failed: ${resp.status} — ${text}`);
   }
 
-  const { access_token } = (await resp.json()) as { access_token: string };
-  return createConnection(access_token);
+  const { access_token, expires_in } = (await resp.json()) as {
+    access_token: string;
+    expires_in: number;
+  };
+  cachedServiceToken = {
+    value: access_token,
+    expiresAt: Date.now() + expires_in * 1000,
+  };
+  return access_token;
+}
+
+export async function createServiceConnection(): Promise<Connection> {
+  const token = await getServiceToken();
+  return createConnection(token);
 }
 
 export function createConnection(token: string): Promise<Connection> {

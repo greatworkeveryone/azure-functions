@@ -97,7 +97,7 @@ async function getKeys(
          ) > 0 AND kb.ExpectedReturnAt < SYSUTCDATETIME()
          THEN 1 ELSE 0 END AS IsOverdue
        FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.Id = k.BuildingId
+       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
        LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
        LEFT JOIN dbo.KeyCheckouts kco
          ON kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
@@ -180,7 +180,7 @@ async function getKeyDetail(
       connection,
       `SELECT ${KEY_COLUMNS}
        FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.Id = k.BuildingId
+       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
        LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
        WHERE k.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: id }],
@@ -305,7 +305,7 @@ async function createKey(
       connection,
       `SELECT ${KEY_COLUMNS}
        FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.Id = k.BuildingId
+       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
        LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
        WHERE k.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: newId }],
@@ -364,7 +364,7 @@ async function updateKey(
       connection,
       `SELECT ${KEY_COLUMNS}
        FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.Id = k.BuildingId
+       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
        LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
        WHERE k.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: Id }],
@@ -438,9 +438,15 @@ async function checkoutKeys(
     if (!Array.isArray(KeyIds) || KeyIds.length === 0) {
       return { status: 400, jsonBody: { error: "KeyIds (non-empty array) required" } };
     }
-    if (!CheckedOutTo || !ExpectedReturnAt || !CheckOutPhotoBlobUrl) {
-      return { status: 400, jsonBody: { error: "CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl required" } };
+    if (!CheckedOutTo || !ExpectedReturnAt) {
+      return { status: 400, jsonBody: { error: "CheckedOutTo, ExpectedReturnAt required" } };
     }
+    // Photo is required when at least one item is a physical key. For codes
+    // there's no handover, so it's optional.
+    const photoBlob: string | null =
+      typeof CheckOutPhotoBlobUrl === "string" && CheckOutPhotoBlobUrl.length > 0
+        ? CheckOutPhotoBlobUrl
+        : null;
 
     // Decode name from the JWT
     const payload = token.split(".")[1];
@@ -465,6 +471,22 @@ async function checkoutKeys(
       return { status: 409, jsonBody: { error: `Already checked out: ${nums}` } };
     }
 
+    // Photo is mandatory when at least one item being checked out is a
+    // physical key. Codes alone are exempt — there's nothing to hand over.
+    if (photoBlob === null) {
+      const physicalRows = await executeQuery(
+        connection,
+        `SELECT 1 FROM dbo.Keys WHERE Id IN (${placeholders}) AND ItemType = 'key'`,
+        params,
+      );
+      if (physicalRows.length > 0) {
+        return {
+          status: 400,
+          jsonBody: { error: "CheckOutPhotoBlobUrl required when checking out a physical key" },
+        };
+      }
+    }
+
     // Create batch
     const batchInserted = await executeQuery(
       connection,
@@ -477,7 +499,7 @@ async function checkoutKeys(
         { name: "CheckedOutBy",  type: TYPES.NVarChar, value: checkedOutBy },
         { name: "CheckedOutTo",  type: TYPES.NVarChar, value: CheckedOutTo },
         { name: "ExpectedReturnAt", type: TYPES.NVarChar, value: ExpectedReturnAt },
-        { name: "Photo",         type: TYPES.NVarChar, value: CheckOutPhotoBlobUrl },
+        { name: "Photo",         type: TYPES.NVarChar, value: photoBlob },
         { name: "Notes",         type: TYPES.NVarChar, value: Notes ?? null },
       ],
     );

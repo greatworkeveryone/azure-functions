@@ -57,9 +57,8 @@ describe("workRequestSelectColumns", () => {
     );
   });
 
-  test("includes AttachmentCount subquery", () => {
-    assert.match(sql, /SELECT COUNT\(\*\) FROM Attachments/);
-    assert.match(sql, /AS AttachmentCount/);
+  test("includes AttachmentCount via grouped join", () => {
+    assert.match(sql, /COALESCE\(ac\.AttachmentCount, 0\) AS AttachmentCount/);
   });
 
   test("emits HasLocalOverride flag", () => {
@@ -68,6 +67,13 @@ describe("workRequestSelectColumns", () => {
 
   test("WR_OVERLAY_JOIN uses LEFT JOIN keyed by WorkRequestID", () => {
     assert.match(WR_OVERLAY_JOIN, /LEFT JOIN WorkRequestOverrides o ON o\.WorkRequestID = wr\.WorkRequestID/);
+  });
+
+  test("WR_OVERLAY_JOIN includes grouped AttachmentCount join (replaces O(N) correlated subquery)", () => {
+    assert.match(
+      WR_OVERLAY_JOIN,
+      /LEFT JOIN \(SELECT WorkRequestID, COUNT\(\*\) AS AttachmentCount FROM Attachments GROUP BY WorkRequestID\) ac/,
+    );
   });
 });
 
