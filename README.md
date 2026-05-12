@@ -15,9 +15,17 @@ Returns buildings from the database. Supports optional query parameters:
 ## Setup
 
 ### 1. Prerequisites
-- Node.js 22
-- Azure Functions Core Tools v4: `npm install -g azure-functions-core-tools@4 --unsafe-perm true`
-- VS Code with Azure Functions extension (optional but recommended)
+- **Node.js 22** — check with `node --version`.
+- **Azure Functions Core Tools v4** — already pinned as a devDependency, so `npm install` provides the local `func` binary at `node_modules/.bin/func`. The npm scripts in this repo (`npm start` etc.) resolve that local copy, so you do **not** need a global install. If you want `func` on your `PATH` for ad-hoc commands, install globally with `npm install -g azure-functions-core-tools@4 --unsafe-perm true`.
+- **Azurite** (local Azure Storage emulator) — required because `local.settings.json` sets `AzureWebJobsStorage: "UseDevelopmentStorage=true"`. Without it the func host refuses to start. Install once and leave running in a separate terminal:
+  ```bash
+  npm install -g azurite
+  azurite --silent --location ~/.azurite --debug ~/.azurite/debug.log
+  ```
+  (Alternatively run via VS Code's Azurite extension, or via Docker: `docker run -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite`.)
+- **Azure CLI** — needed to acquire SQL tokens for local curl-testing (`az login`).
+- **Extension bundles** — listed in `host.json` (`Microsoft.Azure.Functions.ExtensionBundle`, v4.x). These are downloaded automatically by the func host on the first run; **no manual install required**.
+- **VS Code with Azure Functions extension** — optional but recommended for the in-IDE deploy flow.
 
 ### 2. Install dependencies
 ```bash
@@ -31,31 +39,14 @@ Update the values in `local.settings.json`:
 - `SQL_SERVER` — your Azure SQL server (e.g. `rpcc-server.database.windows.net`)
 - `SQL_DATABASE` — your database name
 
-### 4. Create the database table
-Run this SQL in the Azure portal Query editor:
+Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
+- `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
+- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect.
 
-```sql
-CREATE TABLE Buildings (
-    Id INT IDENTITY(1,1) PRIMARY KEY,
-    BuildingID INT NULL,
-    BuildingName NVARCHAR(255) NULL,
-    BuildingCode NVARCHAR(100) NULL,
-    BuildingAddress NVARCHAR(500) NULL,
-    ThirdPartySystem_BuildingID NVARCHAR(100) NULL,
-    Region NVARCHAR(100) NULL,
-    NLA NVARCHAR(50) NULL,
-    InvoicingAddress NVARCHAR(1000) NULL,
-    ContactPhoneNumber NVARCHAR(50) NULL,
-    Active BIT DEFAULT 1,
-    LastSyncedAt DATETIME2 DEFAULT GETUTCDATE(),
-    CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
-    UpdatedAt DATETIME2 DEFAULT GETUTCDATE()
-);
+### 4. Apply database migrations
+The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. Apply them in order against your dev SQL database — Azure Portal Query editor, `sqlcmd`, or your SQL IDE of choice. Each migration is re-runnable, so re-applying is a no-op if the schema already matches.
 
-CREATE UNIQUE INDEX IX_Buildings_BuildingID 
-ON Buildings(BuildingID) 
-WHERE BuildingID IS NOT NULL;
-```
+If you just want a clean dev DB, run every file in `migrations/` from `001_*.sql` through the latest (e.g. `045_jobinvoices_director_approval.sql`). When new migrations land on `main`, apply the new files only.
 
 ### 5. Grant your Entra ID user SQL access
 In the Azure Portal Query editor for your database, run:
@@ -119,7 +110,8 @@ This protects all endpoints at the platform level — unauthenticated requests a
 ## Notes
 - **myBuildings staging** uses a self-signed SSL cert. For local dev, `NODE_TLS_REJECT_UNAUTHORIZED=0` is set in `local.settings.json`. Do NOT set this in production — only needed if the staging cert is still self-signed.
 - **Tokens expire** after ~1 hour. If you get connection timeouts locally, get a fresh token with `az account get-access-token`.
-- **Azure Functions Core Tools** is a devDependency — use `npx func start` rather than installing globally.
+- **Azure Functions Core Tools** is a devDependency — `npm start` resolves the local `func` binary from `node_modules/.bin/`. Use `npx func <cmd>` for ad-hoc commands rather than installing globally.
+- **Azurite must be running** before `npm start`, otherwise the func host fails on `AzureWebJobsStorage` initialisation. See the Prerequisites for install + run commands.
 - The Function App is on the **Consumption plan** (Linux). To upgrade to Flex Consumption (VNet, warm instances), you need a paid subscription and must create a new Function App and redeploy.
 
 ## How it works
