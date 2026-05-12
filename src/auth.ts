@@ -83,6 +83,28 @@ export function rolesFromAppToken(sqlToken: string, appToken: string): string[] 
 }
 
 export function rolesForRequest(request: HttpRequest): string[] {
+  // Dev-only role override — when DEV_ROLE_OVERRIDE_ENABLED is literally
+  // "true" (set in local.settings.json, never in prod app settings) and the
+  // caller sends X-Dev-Roles, those roles REPLACE whatever's on the JWT.
+  // Lets devs exercise role-gated handlers (e.g. director approval) without
+  // re-assigning Entra app roles. Logged so it's obvious in the func terminal
+  // that a request was impersonated.
+  if (process.env.DEV_ROLE_OVERRIDE_ENABLED === "true") {
+    const header = request.headers.get("x-dev-roles");
+    if (header) {
+      const roles = header
+        .split(",")
+        .map((r) => r.trim())
+        .filter(Boolean);
+      if (roles.length > 0) {
+        console.warn(
+          `[auth] DEV ROLE OVERRIDE active — using roles [${roles.join(", ")}] from X-Dev-Roles header (ignoring JWT roles)`,
+        );
+        return roles;
+      }
+    }
+  }
+
   const sqlToken = extractToken(request);
   const appToken = request.headers.get("x-app-token");
   if (!sqlToken || !appToken) return [];

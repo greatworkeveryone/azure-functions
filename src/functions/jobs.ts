@@ -1,14 +1,53 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection, SqlParam, SqlRow } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import {
+  errorResponse,
+  extractToken,
+  oidFromToken,
+  rolesForRequest,
+  unauthorizedResponse,
+} from "../auth";
+
+// ── Caller identity ──────────────────────────────────────────────────────────
+
+interface UserRef { id: string; name: string }
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function callerFromToken(token: string): UserRef {
+  const claims = decodeJwtPayload(token);
+  const id = oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
+  const name =
+    (claims?.name as string) ?? (claims?.preferred_username as string) ?? "Unknown user";
+  return { id, name };
+}
+
+// Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
+// `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
+// users get the OR with Job.CreatedBy === caller.name (handled inline).
+const ARCHIVE_ANY_JOB_ROLES = [
+  "Admin",
+  "timesheet_approval_facilities",
+  "timesheet_approval_accounts",
+];
 
 // ── Column lists ─────────────────────────────────────────────────────────────
 // Keep one source of truth so SELECT shapes match what the frontend expects.
 
 const JOB_COLUMNS = `
   JobID, BuildingID, WorkRequestID, Title, Description, AssignedTo,
-  Status, IsStalled, IsInternal, CreationMethod, SourceEmailID,
+  Status, IsStalled, StalledReason, IsInternal, CreationMethod, SourceEmailID,
   SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
   AwaitingRole,
   ExpectedProgressUpdate, CompletionDate,
@@ -17,7 +56,12 @@ const JOB_COLUMNS = `
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
-  CreatedAt, CreatedBy, LastModifiedDate
+  IsArchived, ArchivedAt, ArchivedBy,
+  CreatedAt, CreatedBy, LastModifiedDate,
+  -- Count of invoices on this job currently waiting on a director (stage-2)
+  -- approval. Drives the "Director needed" filter on the Jobs screen.
+  (SELECT COUNT(*) FROM JobInvoices ji
+     WHERE ji.JobID = Jobs.JobID AND ji.Status = 'approved') AS DirectorNeededCount
 `;
 
 const JOB_EVENT_COLUMNS = `
@@ -37,6 +81,7 @@ const JOB_WRITE_COLUMNS = [
   "AssignedTo",
   "Status",
   "IsStalled",
+  "StalledReason",
   "IsInternal",
   "IsOnchargeable",
   "OnchargeAmount",
@@ -68,7 +113,8 @@ const JOB_WRITE_COLUMNS = [
 type JobColumn = (typeof JOB_WRITE_COLUMNS)[number];
 
 type UpsertJobBody = { JobID?: number } & Partial<Record<JobColumn, unknown>>;
-interface DeleteJobBody { JobID: number }
+interface ArchiveJobBody { JobID: number }
+interface UnarchiveJobBody { JobID: number }
 interface AddJobEventBody {
   JobID: number;
   CreatedBy?: string;
@@ -92,6 +138,7 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   AssignedTo: TYPES.NVarChar,
   Status: TYPES.NVarChar,
   IsStalled: TYPES.Bit,
+  StalledReason: TYPES.NVarChar,
   IsInternal: TYPES.Bit,
   IsOnchargeable: TYPES.Bit,
   OnchargeAmount: TYPES.Decimal,
@@ -147,10 +194,14 @@ async function fetchEventsForJobs(connection: Connection, jobIds: number[]): Pro
   return byJob;
 }
 
-// ── GET /api/getJobs[?buildingId=x][&status=Done] ────────────────────────────
-// Default response excludes Done jobs (they crowd active-workflow views).
-// Pass `status=Done` to get the Done list instead — used by the "Done"
-// filter in the frontend, which renders a dedicated panel.
+// ── GET /api/getJobs[?buildingId=x][&status=Done][&archived=true] ────────────
+// Three slices, mutually exclusive in practice:
+//   default          → active jobs (IsArchived=0 AND Status <> 'Done')
+//   ?status=Done     → completed work       (IsArchived=0 AND Status =  'Done')
+//   ?archived=true   → soft-deleted jobs    (IsArchived=1, any status)
+// Each frontend view (active panels / Done panel / Archived panel) hits the
+// matching slice — keeps active payloads small and lets the archive panel
+// surface restored-from candidates without polluting the default lists.
 
 async function getJobs(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -159,10 +210,15 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   const buildingId = request.query.get("buildingId");
   const statusParam = request.query.get("status");
   const isDoneFilter = statusParam?.toLowerCase() === "done";
+  const isArchivedFilter = request.query.get("archived")?.toLowerCase() === "true";
 
-  const whereParts: string[] = [
-    isDoneFilter ? "Status = 'Done'" : "Status <> 'Done'",
-  ];
+  const whereParts: string[] = [];
+  if (isArchivedFilter) {
+    whereParts.push("IsArchived = 1");
+  } else {
+    whereParts.push("IsArchived = 0");
+    whereParts.push(isDoneFilter ? "Status = 'Done'" : "Status <> 'Done'");
+  }
   const params: SqlParam[] = [];
   if (buildingId) {
     whereParts.push("BuildingID = @BuildingID");
@@ -336,30 +392,150 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
   }
 }
 
-// ── POST /api/deleteJob ──────────────────────────────────────────────────────
-// Body: { JobID }. JobEvents cascade via FK.
+// ── POST /api/archiveJob ─────────────────────────────────────────────────────
+// Body: { JobID }. Soft-archives a job: sets IsArchived=1, ArchivedAt=now,
+// ArchivedBy=caller. Records a JobEvents 'archived' row so the audit trail
+// shows who and when. Authorisation:
+//   • Admin / approval-tier roles can archive any job.
+//   • Plain `facilities` users can only archive jobs they CreatedBy.
+//   • Anyone else → 403.
 
-async function deleteJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+async function archiveJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const caller = callerFromToken(token);
+  const userRoles = rolesForRequest(request);
+  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r));
+  const isFacilities = userRoles.includes("facilities");
 
   let connection;
   try {
-    const body = (await request.json()) as DeleteJobBody;
+    const body = (await request.json()) as ArchiveJobBody;
     const { JobID } = body ?? {};
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
     connection = await createConnection(token);
-    await executeQuery(
+
+    // Authorisation: load CreatedBy first so we can scope facilities users.
+    const existing = await executeQuery(
       connection,
-      "DELETE FROM Jobs WHERE JobID = @JobID",
+      "SELECT CreatedBy, IsArchived FROM Jobs WHERE JobID = @JobID",
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
-    return { status: 200, jsonBody: { deleted: JobID } };
+    if (existing.length === 0) {
+      return { status: 404, jsonBody: { error: "Job not found" } };
+    }
+    const createdBy = existing[0].CreatedBy as string | null;
+    const alreadyArchived = Boolean(existing[0].IsArchived);
+    if (alreadyArchived) {
+      return { status: 200, jsonBody: { archived: JobID, alreadyArchived: true } };
+    }
+    if (!canArchiveAny) {
+      const isOwner = isFacilities && createdBy && createdBy === caller.name;
+      if (!isOwner) {
+        return {
+          status: 403,
+          jsonBody: { error: "Not authorised to archive this job" },
+        };
+      }
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE Jobs SET IsArchived = 1, ArchivedAt = SYSUTCDATETIME(),
+                       ArchivedBy = @ArchivedBy,
+                       LastModifiedDate = SYSUTCDATETIME()
+       WHERE JobID = @JobID`,
+      [
+        { name: "JobID", type: TYPES.Int, value: JobID },
+        { name: "ArchivedBy", type: TYPES.NVarChar, value: caller.name },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+       VALUES (@JobID, @CreatedBy, @Text, 'archived')`,
+      [
+        { name: "JobID", type: TYPES.Int, value: JobID },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+        { name: "Text", type: TYPES.NVarChar, value: "Job archived" },
+      ],
+    );
+    return { status: 200, jsonBody: { archived: JobID } };
   } catch (error: any) {
-    context.error("deleteJob failed:", error.message);
-    return errorResponse("Delete failed", error.message);
+    context.error("archiveJob failed:", error.message);
+    return errorResponse("Archive failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/unarchiveJob ───────────────────────────────────────────────────
+// Body: { JobID }. Same auth model as archiveJob — facilities can only
+// restore jobs they originally created.
+
+async function unarchiveJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const caller = callerFromToken(token);
+  const userRoles = rolesForRequest(request);
+  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r));
+  const isFacilities = userRoles.includes("facilities");
+
+  let connection;
+  try {
+    const body = (await request.json()) as UnarchiveJobBody;
+    const { JobID } = body ?? {};
+    if (!JobID || typeof JobID !== "number") {
+      return { status: 400, jsonBody: { error: "JobID (number) is required" } };
+    }
+    connection = await createConnection(token);
+
+    const existing = await executeQuery(
+      connection,
+      "SELECT CreatedBy, IsArchived FROM Jobs WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: JobID }],
+    );
+    if (existing.length === 0) {
+      return { status: 404, jsonBody: { error: "Job not found" } };
+    }
+    const createdBy = existing[0].CreatedBy as string | null;
+    const isArchived = Boolean(existing[0].IsArchived);
+    if (!isArchived) {
+      return { status: 200, jsonBody: { unarchived: JobID, alreadyActive: true } };
+    }
+    if (!canArchiveAny) {
+      const isOwner = isFacilities && createdBy && createdBy === caller.name;
+      if (!isOwner) {
+        return {
+          status: 403,
+          jsonBody: { error: "Not authorised to restore this job" },
+        };
+      }
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE Jobs SET IsArchived = 0, ArchivedAt = NULL, ArchivedBy = NULL,
+                       LastModifiedDate = SYSUTCDATETIME()
+       WHERE JobID = @JobID`,
+      [{ name: "JobID", type: TYPES.Int, value: JobID }],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+       VALUES (@JobID, @CreatedBy, @Text, 'unarchived')`,
+      [
+        { name: "JobID", type: TYPES.Int, value: JobID },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+        { name: "Text", type: TYPES.NVarChar, value: "Job restored from archive" },
+      ],
+    );
+    return { status: 200, jsonBody: { unarchived: JobID } };
+  } catch (error: any) {
+    context.error("unarchiveJob failed:", error.message);
+    return errorResponse("Restore failed", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -526,5 +702,6 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
 app.http("getJobs", { methods: ["GET"], authLevel: "anonymous", handler: getJobs });
 app.http("getJob", { methods: ["GET"], authLevel: "anonymous", handler: getJob });
 app.http("upsertJob", { methods: ["POST"], authLevel: "anonymous", handler: upsertJob });
-app.http("deleteJob", { methods: ["POST"], authLevel: "anonymous", handler: deleteJob });
+app.http("archiveJob", { methods: ["POST"], authLevel: "anonymous", handler: archiveJob });
+app.http("unarchiveJob", { methods: ["POST"], authLevel: "anonymous", handler: unarchiveJob });
 app.http("addJobEvent", { methods: ["POST"], authLevel: "anonymous", handler: addJobEvent });

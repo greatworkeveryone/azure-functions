@@ -35,6 +35,16 @@ export function canApproveAmount(
   return amount <= effectiveLimit;
 }
 
+/**
+ * Pure function — returns true when an invoice is stage-1 approved but still
+ * waiting on stage-2 (director) approval. Used by the UI banner today; future
+ * "bands" rules (e.g. outgoing invoices skip stage 2, or amount < X skips
+ * stage 2) live here so call sites stay one-liners.
+ */
+export function requiresDirectorApproval(invoice: { status: string }): boolean {
+  return invoice.status === "approved";
+}
+
 // ── Body interfaces ───────────────────────────────────────────────────────────
 
 interface SyncInvoicesBody { queryParams: string }
@@ -44,6 +54,9 @@ interface UpsertJobInvoiceBody {
   ContractorName?: string;
   Amount?: number;
   Currency?: string;
+  /** Per m043 — 'incoming' (contractor → us) or 'outgoing' (us → tenant
+   *  for an on-charge recoup). Defaults to 'incoming' for back-compat. */
+  Direction?: "incoming" | "outgoing";
   Notes?: string;
   InvoicePDFBlobName?: string;
   SourceEmailID?: number;
@@ -51,8 +64,12 @@ interface UpsertJobInvoiceBody {
   CreatedBy?: string;
 }
 interface ApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
+interface DirectorApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
+interface UndoDirectorApproveJobInvoiceBody { JobInvoiceID: number }
 interface RejectJobInvoiceBody { JobInvoiceID: number; RejectedBy?: string }
 interface DeleteJobInvoiceBody { JobInvoiceID: number }
+interface MarkJobInvoiceMyobCreatedBody { JobInvoiceID: number; CreatedBy?: string }
+interface UnmarkJobInvoiceMyobCreatedBody { JobInvoiceID: number }
 
 // POST /api/syncInvoices - fetch from myBuildings and upsert into SQL
 async function syncInvoices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -195,8 +212,9 @@ app.http("getInvoices", { methods: ["GET"], authLevel: "anonymous", handler: get
 
 const JOB_INVOICE_COLUMNS = `
   JobInvoiceID, JobID, InvoiceNumber, Seq, ContractorName,
-  Amount, Currency, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
-  Status, ApprovedAt, ApprovedBy, CreatedAt, CreatedBy
+  Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
+  Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
+  MyobCreatedAt, MyobCreatedBy, CreatedAt, CreatedBy
 `;
 
 // ── GET /api/getJobInvoices?jobId=N ──────────────────────────────────────────
@@ -248,6 +266,7 @@ async function upsertJobInvoice(
       ContractorName,
       Amount,
       Currency,
+      Direction,
       Notes,
       InvoicePDFBlobName,
       SourceEmailID,
@@ -277,14 +296,16 @@ async function upsertJobInvoice(
           seq: nextSeq,
         });
 
+        const direction: "incoming" | "outgoing" =
+          Direction === "outgoing" ? "outgoing" : "incoming";
         const inserted = await executeQuery(
           connection,
           `INSERT INTO JobInvoices
-             (JobID, InvoiceNumber, Seq, ContractorName, Amount, Currency,
+             (JobID, InvoiceNumber, Seq, ContractorName, Amount, Currency, Direction,
               Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy)
            OUTPUT INSERTED.JobInvoiceID
            VALUES
-             (@JobID, @InvoiceNumber, @Seq, @ContractorName, @Amount, @Currency,
+             (@JobID, @InvoiceNumber, @Seq, @ContractorName, @Amount, @Currency, @Direction,
               @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
@@ -293,6 +314,7 @@ async function upsertJobInvoice(
             { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
             { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
+            { name: "Direction", type: TYPES.NVarChar, value: direction },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "InvoicePDFBlobName", type: TYPES.NVarChar, value: InvoicePDFBlobName ?? null },
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
@@ -344,11 +366,12 @@ async function upsertJobInvoice(
         Amount: TYPES.Decimal,
         ContractorName: TYPES.NVarChar,
         Currency: TYPES.NVarChar,
+        Direction: TYPES.NVarChar,
         InvoicePDFBlobName: TYPES.NVarChar,
         Notes: TYPES.NVarChar,
         ReceivedAt: TYPES.DateTime2,
       },
-      { Amount, ContractorName, Currency, InvoicePDFBlobName, Notes, ReceivedAt },
+      { Amount, ContractorName, Currency, Direction, InvoicePDFBlobName, Notes, ReceivedAt },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
@@ -395,10 +418,11 @@ async function approveJobInvoice(
 
     connection = await createConnection(token);
 
-    // Fetch invoice — need Amount for limit check
+    // Fetch invoice — need Amount for limit check, Direction to decide whether
+    // to roll the job to Done (only incoming/contractor invoices do that).
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber, Amount FROM JobInvoices WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Amount, Direction FROM JobInvoices WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
@@ -406,6 +430,7 @@ async function approveJobInvoice(
     const jobId = rows[0].JobID as number;
     const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
     const amount = (rows[0].Amount as number | null) ?? 0;
+    const direction = ((rows[0].Direction as string | null) ?? "incoming") as "incoming" | "outgoing";
 
     // Approval limit check — resolve caller's roles from X-App-Token
     const userRoles = rolesForRequest(request);
@@ -460,23 +485,33 @@ async function approveJobInvoice(
       ],
     );
 
-    // Transition job to Done
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-       VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Done', 'accounts');`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: "Invoice approved — job complete" },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `UPDATE Jobs SET Status = 'Done', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
-       WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
+    // Auto-transition job → Done only fires for incoming (contractor)
+    // approvals. Outgoing oncharge invoices are sent to tenants and don't
+    // imply the job is finished — they only mark the on-charge as approved.
+    if (direction === "incoming") {
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
+         VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Done', 'accounts');`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+          { name: "Text", type: TYPES.NVarChar, value: "Invoice approved — job complete" },
+        ],
+      );
+      await executeQuery(
+        connection,
+        `UPDATE Jobs SET Status = 'Done', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
+         WHERE JobID = @JobID`,
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+    } else {
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+    }
 
     const stored = await executeQuery(
       connection,
@@ -487,6 +522,192 @@ async function approveJobInvoice(
   } catch (error: any) {
     context.error("approveJobInvoice failed:", error.message);
     return errorResponse("Approve invoice failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/directorApproveJobInvoice ──────────────────────────────────────
+// Body: { JobInvoiceID, ApprovedBy }
+// Stage-2 (Director) approval. Caller MUST hold the 'director' role — Admin
+// does not double for this on purpose (separation of duties). The invoice must
+// be at Status='approved'; this flips it to 'director_approved' and stamps the
+// audit columns.
+
+async function directorApproveJobInvoice(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const userRoles = rolesForRequest(request);
+  if (!userRoles.includes("director")) {
+    return { status: 403, jsonBody: { error: "Director role required" } };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as DirectorApproveJobInvoiceBody;
+    const { JobInvoiceID, ApprovedBy } = body ?? {};
+    if (typeof JobInvoiceID !== "number") {
+      return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT JobID, InvoiceNumber, Status FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+
+    const jobId = rows[0].JobID as number;
+    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+    const status = (rows[0].Status as string) ?? "pending";
+
+    if (status === "director_approved") {
+      return { status: 400, jsonBody: { error: "Invoice is already director-approved" } };
+    }
+    if (status !== "approved") {
+      return {
+        status: 400,
+        jsonBody: { error: "Invoice must be stage-1 approved before director approval" },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE JobInvoices
+         SET Status = 'director_approved',
+             DirectorApprovedAt = SYSUTCDATETIME(),
+             DirectorApprovedBy = @ApprovedBy
+       WHERE JobInvoiceID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: JobInvoiceID },
+        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+       VALUES (@JobID, @CreatedBy, @Text, 'invoice_director_approved', @InvoiceID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Director-approved invoice ${invoiceNumber}` },
+        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    return { status: 200, jsonBody: { invoice: stored[0] } };
+  } catch (error: any) {
+    context.error("directorApproveJobInvoice failed:", error.message);
+    return errorResponse("Director approve invoice failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/undoDirectorApproveJobInvoice ──────────────────────────────────
+// Body: { JobInvoiceID }
+// Reverses stage 2: Status flips from 'director_approved' back to 'approved'
+// and the audit columns clear. Refuses if the invoice has been marked as
+// created in MYOB. Caller MUST hold the 'director' role.
+
+async function undoDirectorApproveJobInvoice(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const userRoles = rolesForRequest(request);
+  if (!userRoles.includes("director")) {
+    return { status: 403, jsonBody: { error: "Director role required" } };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as UndoDirectorApproveJobInvoiceBody;
+    const { JobInvoiceID } = body ?? {};
+    if (typeof JobInvoiceID !== "number") {
+      return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT JobID, InvoiceNumber, Status, MyobCreatedAt
+         FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+
+    const jobId = rows[0].JobID as number;
+    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+    const status = (rows[0].Status as string) ?? "pending";
+    const myobCreatedAt = rows[0].MyobCreatedAt as Date | null;
+
+    if (status !== "director_approved") {
+      return {
+        status: 400,
+        jsonBody: { error: "Invoice is not director-approved" },
+      };
+    }
+    if (myobCreatedAt != null) {
+      return {
+        status: 400,
+        jsonBody: { error: "Invoice has been created in MYOB — unmark MYOB first" },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE JobInvoices
+         SET Status = 'approved',
+             DirectorApprovedAt = NULL,
+             DirectorApprovedBy = NULL
+       WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+       VALUES (@JobID, NULL, @Text, 'invoice_director_unapproved', @InvoiceID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "Text", type: TYPES.NVarChar, value: `Director-unapproved invoice ${invoiceNumber}` },
+        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    return { status: 200, jsonBody: { invoice: stored[0] } };
+  } catch (error: any) {
+    context.error("undoDirectorApproveJobInvoice failed:", error.message);
+    return errorResponse("Undo director approve invoice failed", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -588,6 +809,157 @@ async function rejectJobInvoice(
   }
 }
 
+// ── POST /api/markJobInvoiceMyobCreated ──────────────────────────────────────
+// Body: { JobInvoiceID, CreatedBy? }
+// Records that this invoice has been entered into MYOB. Currently only used
+// by outgoing (oncharge) invoices via the InvoicesStep — incoming contractor
+// invoices may opt in later when the direct integration lands.
+
+async function markJobInvoiceMyobCreated(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as MarkJobInvoiceMyobCreatedBody;
+    const { JobInvoiceID, CreatedBy } = body ?? {};
+    if (typeof JobInvoiceID !== "number") {
+      return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      "SELECT JobID, InvoiceNumber, Status FROM JobInvoices WHERE JobInvoiceID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+
+    const jobId = rows[0].JobID as number;
+    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+    const status = (rows[0].Status as string) ?? "pending";
+
+    if (status !== "director_approved") {
+      return {
+        status: 400,
+        jsonBody: { error: "Invoice must be director-approved before MYOB creation" },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE JobInvoices
+         SET MyobCreatedAt = SYSUTCDATETIME(), MyobCreatedBy = @CreatedBy
+       WHERE JobInvoiceID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: JobInvoiceID },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+      ],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+       VALUES (@JobID, @CreatedBy, @Text, 'invoice_myob_created', @InvoiceID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked invoice ${invoiceNumber} as created in MYOB` },
+        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    return { status: 200, jsonBody: { invoice: stored[0] } };
+  } catch (error: any) {
+    context.error("markJobInvoiceMyobCreated failed:", error.message);
+    return errorResponse("Mark invoice MYOB created failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/unmarkJobInvoiceMyobCreated ────────────────────────────────────
+// Body: { JobInvoiceID }
+// Clears the MyobCreatedAt/By fields. No completion gate — invoices don't
+// have a downstream "completed" state distinct from approval.
+
+async function unmarkJobInvoiceMyobCreated(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as UnmarkJobInvoiceMyobCreatedBody;
+    const { JobInvoiceID } = body ?? {};
+    if (typeof JobInvoiceID !== "number") {
+      return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      "SELECT JobID, InvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+
+    const jobId = rows[0].JobID as number;
+    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+
+    await executeQuery(
+      connection,
+      `UPDATE JobInvoices
+         SET MyobCreatedAt = NULL, MyobCreatedBy = NULL
+       WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    await executeQuery(
+      connection,
+      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+       VALUES (@JobID, NULL, @Text, 'invoice_myob_uncreated', @InvoiceID);`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked invoice ${invoiceNumber} from MYOB created` },
+        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+      ],
+    );
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    return { status: 200, jsonBody: { invoice: stored[0] } };
+  } catch (error: any) {
+    context.error("unmarkJobInvoiceMyobCreated failed:", error.message);
+    return errorResponse("Unmark invoice MYOB created failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/deleteJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID }
 // Refuses to delete approved invoices.
@@ -635,6 +1007,10 @@ async function deleteJobInvoice(
 app.http("getJobInvoices", { methods: ["GET"], authLevel: "anonymous", handler: getJobInvoices });
 app.http("upsertJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: upsertJobInvoice });
 app.http("approveJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: approveJobInvoice });
+app.http("directorApproveJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: directorApproveJobInvoice });
+app.http("undoDirectorApproveJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: undoDirectorApproveJobInvoice });
 app.http("rejectJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: rejectJobInvoice });
 app.http("deleteJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: deleteJobInvoice });
+app.http("markJobInvoiceMyobCreated", { methods: ["POST"], authLevel: "anonymous", handler: markJobInvoiceMyobCreated });
+app.http("unmarkJobInvoiceMyobCreated", { methods: ["POST"], authLevel: "anonymous", handler: unmarkJobInvoiceMyobCreated });
 app.http("getApprovalLimits", { methods: ["GET"], authLevel: "anonymous", handler: getApprovalLimits });
