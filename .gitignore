@@ -64,3 +64,4 @@ local.settings.json
 .yarn/unplugged
 .yarn/install-state.gz
 .pnp.*
+__blobstorage__

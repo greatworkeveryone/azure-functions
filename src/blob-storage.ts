@@ -8,6 +8,7 @@ import {
   BlobSASPermissions,
   BlobServiceClient,
   generateBlobSASQueryParameters,
+  SASProtocol,
   StorageSharedKeyCredential,
 } from "@azure/storage-blob";
 import { randomUUID } from "crypto";
@@ -18,19 +19,6 @@ const SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 let cachedServiceClient: BlobServiceClient | undefined;
 let cachedAccountKey: StorageSharedKeyCredential | undefined;
 
-function parseConnectionString(connStr: string): { accountName: string; accountKey: string } {
-  const parts = Object.fromEntries(
-    connStr.split(";").filter(Boolean).map((pair) => {
-      const idx = pair.indexOf("=");
-      return [pair.slice(0, idx), pair.slice(idx + 1)];
-    }),
-  );
-  return {
-    accountName: parts.AccountName,
-    accountKey: parts.AccountKey,
-  };
-}
-
 function getServiceClient(): BlobServiceClient {
   if (cachedServiceClient) return cachedServiceClient;
   const connStr = process.env.AzureWebJobsStorage;
@@ -38,9 +26,11 @@ function getServiceClient(): BlobServiceClient {
     throw new Error("AzureWebJobsStorage connection string is not configured");
   }
   cachedServiceClient = BlobServiceClient.fromConnectionString(connStr);
-  const { accountName, accountKey } = parseConnectionString(connStr);
-  if (accountName && accountKey) {
-    cachedAccountKey = new StorageSharedKeyCredential(accountName, accountKey);
+  // Reuse the credential the SDK constructed from the connection string —
+  // hand-rolling our own risks key drift (e.g. wrong well-known Azurite key).
+  const cred = (cachedServiceClient as unknown as { credential?: unknown }).credential;
+  if (cred instanceof StorageSharedKeyCredential) {
+    cachedAccountKey = cred;
   }
   return cachedServiceClient;
 }
@@ -85,17 +75,22 @@ export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS)
     throw new Error("Blob account key unavailable — SAS signing requires a shared-key connection string");
   }
   const expiresOn = new Date(Date.now() + ttlMs);
+  const isDevStorage = service.url.startsWith("http://");
   const sas = generateBlobSASQueryParameters(
     {
       blobName,
       containerName: CONTAINER_NAME,
       expiresOn,
       permissions: BlobSASPermissions.parse("r"),
-      protocol: "https" as any,
+      protocol: isDevStorage ? SASProtocol.HttpsAndHttp : SASProtocol.Https,
+      // Azurite only knows how to validate signatures for older API versions.
+      // Pin SAS version on dev storage; let SDK default apply in prod.
+      ...(isDevStorage ? { version: "2024-08-04" } : {}),
     },
     cachedAccountKey,
   ).toString();
-  return `${service.url}${CONTAINER_NAME}/${blobName}?${sas}`;
+  const base = service.url.endsWith("/") ? service.url : `${service.url}/`;
+  return `${base}${CONTAINER_NAME}/${blobName}?${sas}`;
 }
 
 export async function deleteBlob(blobName: string): Promise<void> {

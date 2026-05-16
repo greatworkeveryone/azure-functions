@@ -11,11 +11,38 @@ import {
   unauthorizedResponse,
   errorResponse,
   requireRole,
-  rolesForRequest,
+  oidFromToken,
 } from "../auth";
 import { uploadBlob, generateReadSasUrl } from "../blob-storage";
 
 const BULK_CREATE_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
+const EDIT_KEYS_ROLES   = ["Admin", "facilities", "timesheet_approval_facilities"] as const;
+
+// ── Caller identity ─────────────────────────────────────────────────────────
+// Mirrors the pattern in inspections.ts. We store both the stable Entra OID
+// and the display name so audit rows remain readable if a user is renamed.
+
+interface UserRef { id: string; name: string }
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function callerFromToken(token: string): UserRef {
+  const claims = decodeJwtPayload(token);
+  const id = oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
+  const name =
+    (claims?.name as string) ?? (claims?.preferred_username as string) ?? "Unknown user";
+  return { id, name };
+}
 
 const KEY_STORAGE_LOCATIONS = [
   "Randazzo Properties Office",
@@ -24,6 +51,18 @@ const KEY_STORAGE_LOCATIONS = [
   "66 Smith (Plant Room)",
   "Bov Plaza (Site Office)",
 ] as const;
+
+const KEY_SUB_TYPES = [
+  "Normal", "BiLock", "Dimpled", "Safe", "Laser Tracked", "Cylinder",
+  "Tubular", "Window", "Fob (RFID)", "Keycard", "Padlock", "ABLOY", "Lockwood",
+] as const;
+
+const CODE_SUB_TYPES = [
+  "Door Code", "Mechanical Code Lock", "Electronic Keypad", "Smart Lock", "Padlock/Chain",
+] as const;
+
+const ITEM_TYPES = ["key", "code"] as const;
+const REGISTRATIONS = ["standard", "registered"] as const;
 
 // ── Notification stub ────────────────────────────────────────────────────────
 // TODO: send Graph API email to key manager when key is overdue
@@ -35,11 +74,19 @@ async function notifyOverdueKey(_keyId: number): Promise<void> {
 
 const KEY_COLUMNS = `
   k.Id, k.BuildingId, b.BuildingName,
-  k.TenancyId, t.TenantName AS TenancyName,
+  k.TenancyId, t.LegalName AS TenancyName,
   k.Level, k.KeyNumber, k.ItemType, k.SubType, k.Registration,
   k.Description, k.PhotoBlobUrl, k.StorageLocation,
-  k.DateAdded, k.Status
+  k.DateAdded, k.Status,
+  k.CreatedById, k.CreatedByName, k.CreatedAt,
+  k.IsDeleted, k.DeletedAt, k.DeletedById, k.DeletedByName,
+  k.LostAt, k.LostById, k.LostByName, k.LostComment
 `;
+
+// Photo SAS URLs are baked into list/detail responses. 4h was tight — a user
+// who opened the page in the morning would see broken images by mid-afternoon.
+// 24h lasts a working day comfortably without raising the surface area much.
+const PHOTO_SAS_TTL_MS = 24 * 60 * 60 * 1000;
 
 const BATCH_COLUMNS = `
   kb.Id AS BatchId, kb.CheckedOutBy, kb.CheckedOutTo,
@@ -62,11 +109,25 @@ function formatKey(row: Record<string, unknown>) {
     registration: row.Registration,
     description: row.Description,
     photoUrl: row.PhotoBlobUrl
-      ? generateReadSasUrl(row.PhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+      ? generateReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
       : null,
     storageLocation: row.StorageLocation ?? null,
     dateAdded: row.DateAdded,
     status: row.Status,
+    createdBy: row.CreatedById
+      ? { id: row.CreatedById as string, name: (row.CreatedByName as string) ?? "Unknown user" }
+      : null,
+    createdAt: row.CreatedAt ?? null,
+    isDeleted: row.IsDeleted === 1 || row.IsDeleted === true,
+    deletedAt: row.DeletedAt ?? null,
+    deletedBy: row.DeletedById
+      ? { id: row.DeletedById as string, name: (row.DeletedByName as string) ?? "Unknown user" }
+      : null,
+    lostAt: row.LostAt ?? null,
+    lostBy: row.LostById
+      ? { id: row.LostById as string, name: (row.LostByName as string) ?? "Unknown user" }
+      : null,
+    lostComment: (row.LostComment as string | null) ?? null,
   };
 }
 
@@ -83,25 +144,34 @@ async function getKeys(
   try {
     connection = await createConnection(token);
 
+    // OUTER APPLY pulls the single most-recent open batch per key so the row
+    // count stays 1:1 with dbo.Keys. Codes can have several concurrent open
+    // shares; a plain LEFT JOIN would fan them out into duplicate rows.
     const rows = await executeQuery(
       connection,
       `SELECT
          ${KEY_COLUMNS},
-         kb.Id      AS BatchId,
-         kb.CheckedOutBy, kb.CheckedOutTo,
-         kb.CheckedOutAt, kb.ExpectedReturnAt,
-         kb.CheckOutPhotoBlobUrl, kb.Notes,
-         CASE WHEN (
-           SELECT COUNT(*) FROM dbo.KeyCheckouts kc2
-           WHERE kc2.BatchId = kb.Id AND kc2.KeyId = k.Id AND kc2.CheckedInAt IS NULL
-         ) > 0 AND kb.ExpectedReturnAt < SYSUTCDATETIME()
-         THEN 1 ELSE 0 END AS IsOverdue
+         cb.BatchId,
+         cb.CheckedOutBy, cb.CheckedOutTo,
+         cb.CheckedOutAt, cb.ExpectedReturnAt,
+         cb.CheckOutPhotoBlobUrl, cb.Notes,
+         CASE WHEN cb.BatchId IS NOT NULL AND cb.ExpectedReturnAt < SYSUTCDATETIME()
+           THEN 1 ELSE 0 END AS IsOverdue
        FROM dbo.Keys k
        JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
        LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
-       LEFT JOIN dbo.KeyCheckouts kco
-         ON kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
-       LEFT JOIN dbo.KeyCheckoutBatches kb ON kb.Id = kco.BatchId
+       OUTER APPLY (
+         SELECT TOP 1
+           kb.Id AS BatchId,
+           kb.CheckedOutBy, kb.CheckedOutTo,
+           kb.CheckedOutAt, kb.ExpectedReturnAt,
+           kb.CheckOutPhotoBlobUrl, kb.Notes
+         FROM dbo.KeyCheckouts kco
+         JOIN dbo.KeyCheckoutBatches kb ON kb.Id = kco.BatchId
+         WHERE kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
+         ORDER BY kb.CheckedOutAt DESC
+       ) cb
+       WHERE k.IsDeleted = 0
        ORDER BY b.BuildingName, k.KeyNumber`,
       [],
     );
@@ -265,6 +335,9 @@ async function createKey(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -275,17 +348,20 @@ async function createKey(
       return { status: 400, jsonBody: { error: "BuildingId, Level, KeyNumber, Description required" } };
     }
 
+    const caller = callerFromToken(token);
     connection = await createConnection(token);
 
     const inserted = await executeQuery(
       connection,
       `INSERT INTO dbo.Keys
          (BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
-          Registration, Description, PhotoBlobUrl, StorageLocation)
+          Registration, Description, PhotoBlobUrl, StorageLocation,
+          CreatedById, CreatedByName)
        OUTPUT INSERTED.Id
        VALUES
          (@BuildingId, @TenancyId, @Level, @KeyNumber, @ItemType, @SubType,
-          @Registration, @Description, @PhotoBlobUrl, @StorageLocation)`,
+          @Registration, @Description, @PhotoBlobUrl, @StorageLocation,
+          @CreatedById, @CreatedByName)`,
       [
         { name: "BuildingId",      type: TYPES.Int,      value: BuildingId },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
@@ -297,6 +373,8 @@ async function createKey(
         { name: "Description",     type: TYPES.NVarChar,  value: Description },
         { name: "PhotoBlobUrl",    type: TYPES.NVarChar,  value: PhotoBlobUrl ?? null },
         { name: "StorageLocation", type: TYPES.NVarChar,  value: StorageLocation ?? null },
+        { name: "CreatedById",     type: TYPES.NVarChar,  value: caller.id },
+        { name: "CreatedByName",   type: TYPES.NVarChar,  value: caller.name },
       ],
     );
 
@@ -314,7 +392,13 @@ async function createKey(
     return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
   } catch (error: any) {
     if (error.message?.includes("UQ_Keys_Building_KeyNumber")) {
-      return { status: 409, jsonBody: { error: "A key with that number already exists for this building." } };
+      return {
+        status: 409,
+        jsonBody: {
+          error: "A key with that number already exists for this building.",
+          code: "DUPLICATE_KEY_NUMBER",
+        },
+      };
     }
     context.error("createKey failed:", error.message);
     return errorResponse("Failed to create key", error.message);
@@ -331,6 +415,9 @@ async function updateKey(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -387,11 +474,17 @@ async function reportKeyLost(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
-    const { Id } = ((await request.json()) as any) ?? {};
+    const { Id, Comment } = ((await request.json()) as any) ?? {};
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
+    const trimmedComment = typeof Comment === "string" ? Comment.trim() : "";
+    const lostComment = trimmedComment === "" ? null : trimmedComment;
 
+    const caller = callerFromToken(token);
     connection = await createConnection(token);
 
     // Close any open checkout rows for this key
@@ -405,14 +498,156 @@ async function reportKeyLost(
 
     await executeQuery(
       connection,
-      `UPDATE dbo.Keys SET Status = 'lost' WHERE Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
+      `UPDATE dbo.Keys
+       SET Status = 'lost',
+           LostAt = SYSUTCDATETIME(),
+           LostById = @LostById,
+           LostByName = @LostByName,
+           LostComment = @LostComment
+       WHERE Id = @Id`,
+      [
+        { name: "Id",          type: TYPES.Int,      value: Id },
+        { name: "LostById",    type: TYPES.NVarChar, value: caller.id },
+        { name: "LostByName",  type: TYPES.NVarChar, value: caller.name },
+        { name: "LostComment", type: TYPES.NVarChar, value: lostComment },
+      ],
     );
 
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error("reportKeyLost failed:", error.message);
     return errorResponse("Failed to report key lost", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteKey ───────────────────────────────────────────────────────
+// Soft delete. The row stays — it's hidden from /getKeys and rejected by
+// /checkoutKeys, but /getKeyDetail still returns it so the UI can offer
+// "Restore". Any open checkouts are force-closed so the audit trail closes
+// cleanly. Mirrors the Jobs archive pattern from migration 041.
+
+async function deleteKey(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
+
+  let connection;
+  try {
+    const { Id } = ((await request.json()) as any) ?? {};
+    if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
+
+    const caller = callerFromToken(token);
+    connection = await createConnection(token);
+
+    const existing = await executeQuery(
+      connection,
+      `SELECT IsDeleted FROM dbo.Keys WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: Id }],
+    );
+    if (existing.length === 0) {
+      return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
+    }
+    if (existing[0].IsDeleted === true || existing[0].IsDeleted === 1) {
+      return {
+        status: 409,
+        jsonBody: { error: "Key is already deleted.", code: "ALREADY_DELETED" },
+      };
+    }
+
+    // Close any open checkout rows so the audit trail doesn't leave dangling
+    // batches against a deleted key.
+    await executeQuery(
+      connection,
+      `UPDATE dbo.KeyCheckouts
+       SET CheckedInAt = SYSUTCDATETIME()
+       WHERE KeyId = @Id AND CheckedInAt IS NULL`,
+      [{ name: "Id", type: TYPES.Int, value: Id }],
+    );
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Keys
+       SET IsDeleted = 1,
+           DeletedAt = SYSUTCDATETIME(),
+           DeletedById = @DeletedById,
+           DeletedByName = @DeletedByName
+       WHERE Id = @Id`,
+      [
+        { name: "Id",            type: TYPES.Int,      value: Id },
+        { name: "DeletedById",   type: TYPES.NVarChar, value: caller.id },
+        { name: "DeletedByName", type: TYPES.NVarChar, value: caller.name },
+      ],
+    );
+
+    return { status: 200, jsonBody: { ok: true } };
+  } catch (error: any) {
+    context.error("deleteKey failed:", error.message);
+    return errorResponse("Failed to delete key", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/restoreKey ──────────────────────────────────────────────────────
+// Reverses both "report lost" and "delete". Brings the key back to
+// Status='active', IsDeleted=0. Used when a lost key turns up or a delete
+// was made in error. Audit (CreatedBy) is preserved; we don't clear
+// DeletedBy/At so the history of the deletion is still visible if anything
+// wants to surface it later.
+
+async function restoreKey(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
+
+  let connection;
+  try {
+    const { Id } = ((await request.json()) as any) ?? {};
+    if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
+
+    connection = await createConnection(token);
+
+    const existing = await executeQuery(
+      connection,
+      `SELECT Status, IsDeleted FROM dbo.Keys WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: Id }],
+    );
+    if (existing.length === 0) {
+      return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
+    }
+    const wasDeleted = existing[0].IsDeleted === true || existing[0].IsDeleted === 1;
+    const wasLost = existing[0].Status === "lost";
+    if (!wasDeleted && !wasLost) {
+      return {
+        status: 409,
+        jsonBody: { error: "Key is already active — nothing to restore.", code: "ALREADY_ACTIVE" },
+      };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Keys
+       SET IsDeleted = 0, DeletedAt = NULL, Status = 'active'
+       WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: Id }],
+    );
+
+    return { status: 200, jsonBody: { ok: true } };
+  } catch (error: any) {
+    context.error("restoreKey failed:", error.message);
+    return errorResponse("Failed to restore key", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -448,27 +683,62 @@ async function checkoutKeys(
         ? CheckOutPhotoBlobUrl
         : null;
 
-    // Decode name from the JWT
-    const payload = token.split(".")[1];
-    const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(payload.length + ((4 - payload.length % 4) % 4), "="), "base64").toString("utf8")) as any;
-    const checkedOutBy: string = decoded?.name ?? decoded?.preferred_username ?? "Unknown";
+    const checkedOutBy = callerFromToken(token).name;
 
     connection = await createConnection(token);
 
-    // Validate no key is already checked out
     const placeholders = KeyIds.map((_: number, i: number) => `@K${i}`).join(",");
     const params = KeyIds.map((id: number, i: number) => ({ name: `K${i}`, type: TYPES.Int, value: id }));
 
+    // Validate every key exists, isn't soft-deleted, and is in `active` status.
+    // Lost/retired/deleted keys can't be checked out — bail with a granular
+    // error that names the offending keys so the UI can show a useful toast.
+    const keyStateRows = await executeQuery(
+      connection,
+      `SELECT Id, KeyNumber, Status, IsDeleted FROM dbo.Keys WHERE Id IN (${placeholders})`,
+      params,
+    );
+    if (keyStateRows.length !== KeyIds.length) {
+      return {
+        status: 404,
+        jsonBody: { error: "One or more keys could not be found", code: "KEY_NOT_FOUND" },
+      };
+    }
+    const deletedRows = keyStateRows.filter((r: any) => r.IsDeleted === true || r.IsDeleted === 1);
+    if (deletedRows.length > 0) {
+      const nums = deletedRows.map((r: any) => r.KeyNumber).join(", ");
+      return {
+        status: 409,
+        jsonBody: { error: `Deleted — cannot check out: ${nums}`, code: "KEY_DELETED" },
+      };
+    }
+    const inactiveRows = keyStateRows.filter((r: any) => r.Status !== "active");
+    if (inactiveRows.length > 0) {
+      const detail = inactiveRows
+        .map((r: any) => `${r.KeyNumber} (${r.Status})`)
+        .join(", ");
+      return {
+        status: 409,
+        jsonBody: { error: `Not active — cannot check out: ${detail}`, code: "KEY_NOT_ACTIVE" },
+      };
+    }
+
+    // Validate no physical key is already checked out. Codes are exempt — a
+    // PIN/access code can be shared with multiple parties at the same time,
+    // so re-sharing is always allowed.
     const alreadyOut = await executeQuery(
       connection,
       `SELECT k.Id, k.KeyNumber FROM dbo.Keys k
        JOIN dbo.KeyCheckouts kco ON kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
-       WHERE k.Id IN (${placeholders})`,
+       WHERE k.Id IN (${placeholders}) AND k.ItemType = 'key'`,
       params,
     );
     if (alreadyOut.length > 0) {
       const nums = alreadyOut.map((r: any) => r.KeyNumber).join(", ");
-      return { status: 409, jsonBody: { error: `Already checked out: ${nums}` } };
+      return {
+        status: 409,
+        jsonBody: { error: `Already checked out: ${nums}`, code: "ALREADY_CHECKED_OUT" },
+      };
     }
 
     // Photo is mandatory when at least one item being checked out is a
@@ -482,7 +752,10 @@ async function checkoutKeys(
       if (physicalRows.length > 0) {
         return {
           status: 400,
-          jsonBody: { error: "CheckOutPhotoBlobUrl required when checking out a physical key" },
+          jsonBody: {
+            error: "A handover photo is required when checking out a physical key.",
+            code: "PHOTO_REQUIRED",
+          },
         };
       }
     }
@@ -660,12 +933,15 @@ async function uploadKeyPhoto(
 // Downloads a pre-built XLSX template with building dropdown validation.
 
 async function keyImportTemplate(
-  _request: HttpRequest,
+  request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
   let connection;
   try {
-    connection = await createServiceConnection();
+    connection = await createConnection(token);
     const buildings = await executeQuery(
       connection,
       `SELECT BuildingName FROM dbo.Buildings WHERE Active = 1 ORDER BY BuildingName`,
@@ -675,19 +951,8 @@ async function keyImportTemplate(
 
     // All subtypes combined — Item Type determines which apply, but XLSX
     // can't do conditional validation without VBA, so we show the full set.
-    const allSubTypes = [
-      "Normal", "BiLock", "Dimpled", "Safe", "Laser Tracked", "Cylinder",
-      "Tubular", "Window", "Fob (RFID)", "Keycard", "Padlock", "ABLOY", "Lockwood",
-      "Door Code", "Mechanical Code Lock", "Electronic Keypad", "Smart Lock", "Padlock/Chain",
-    ];
-
-    const storageLocations = [
-      "Randazzo Properties Office",
-      "Randazzo Center (Harry Potter Room)",
-      "9 Cavanagh (Plant Room)",
-      "66 Smith (Plant Room)",
-      "Bov Plaza (Site Office)",
-    ];
+    const allSubTypes = [...KEY_SUB_TYPES, ...CODE_SUB_TYPES];
+    const storageLocations = [...KEY_STORAGE_LOCATIONS];
 
     const wb = XLSX.utils.book_new();
     const headers = [
@@ -707,10 +972,10 @@ async function keyImportTemplate(
     // Visible reference sheet showing valid values for every enum field
     const infoData: (string | null)[][] = [
       ["Field", "Valid Values"],
-      ["Item Type", "key, code"],
-      ["Registration", "standard, registered"],
-      ["Sub Type (keys)", "Normal, BiLock, Dimpled, Safe, Laser Tracked, Cylinder, Tubular, Window, Fob (RFID), Keycard, Padlock, ABLOY, Lockwood"],
-      ["Sub Type (codes)", "Door Code, Mechanical Code Lock, Electronic Keypad, Smart Lock, Padlock/Chain"],
+      ["Item Type", ITEM_TYPES.join(", ")],
+      ["Registration", REGISTRATIONS.join(", ")],
+      ["Sub Type (keys)", KEY_SUB_TYPES.join(", ")],
+      ["Sub Type (codes)", CODE_SUB_TYPES.join(", ")],
       [null, null],
       ["Storage Location", null],
       ...storageLocations.map((loc) => [null, loc]),
@@ -801,6 +1066,8 @@ async function bulkImportKeys(
   const roleCheck = requireRole(request, BULK_CREATE_ROLES);
   if (roleCheck) return roleCheck;
 
+  const caller = callerFromToken(token);
+
   let connection;
   try {
     const formData = await request.formData();
@@ -817,14 +1084,19 @@ async function bulkImportKeys(
 
     connection = await createConnection(token);
 
-    // Load buildings for name→id lookup
-    const buildings = await executeQuery(connection, `SELECT Id, BuildingName FROM dbo.Buildings`, []);
+    // Load buildings for name→id lookup. The Keys FK references Buildings.BuildingID
+    // (not Id), so we must read that column or every insert violates FK_Keys_Buildings_BuildingID.
+    const buildings = await executeQuery(
+      connection,
+      `SELECT BuildingID, BuildingName FROM dbo.Buildings`,
+      [],
+    );
     const buildingMap = new Map<string, number>(
-      buildings.map((b: any) => [String(b.BuildingName).toLowerCase().trim(), b.Id as number]),
+      buildings.map((b: any) => [String(b.BuildingName).toLowerCase().trim(), b.BuildingID as number]),
     );
 
     // Load tenancies for name→id lookup
-    const tenancies = await executeQuery(connection, `SELECT TenantID AS Id, TenantName AS Name FROM dbo.Tenants`, []);
+    const tenancies = await executeQuery(connection, `SELECT TenantId AS Id, LegalName AS Name FROM dbo.Tenants`, []);
     const tenancyMap = new Map<string, number>(
       tenancies.map((t: any) => [String(t.Name).toLowerCase().trim(), t.Id as number]),
     );
@@ -847,6 +1119,11 @@ async function bulkImportKeys(
         continue;
       }
 
+      if (!(ITEM_TYPES as readonly string[]).includes(itemType)) {
+        errors.push({ row: rowNum, reason: `Item Type "${itemType}" must be one of: ${ITEM_TYPES.join(", ")}` });
+        continue;
+      }
+
       const buildingId = buildingMap.get(buildingName.toLowerCase().trim());
       if (!buildingId) {
         errors.push({ row: rowNum, reason: `Building "${buildingName}" not found` });
@@ -860,6 +1137,19 @@ async function bulkImportKeys(
       const registration = (r["Registration"] ?? "standard").trim().toLowerCase() || "standard";
       const storageLocation = (r["Storage Location"] ?? "").trim() || null;
 
+      if (!(REGISTRATIONS as readonly string[]).includes(registration)) {
+        errors.push({ row: rowNum, reason: `Registration "${registration}" must be one of: ${REGISTRATIONS.join(", ")}` });
+        continue;
+      }
+
+      if (subType) {
+        const allowedSubTypes = itemType === "code" ? CODE_SUB_TYPES : KEY_SUB_TYPES;
+        if (!(allowedSubTypes as readonly string[]).includes(subType)) {
+          errors.push({ row: rowNum, reason: `Sub Type "${subType}" is not valid for item type "${itemType}"` });
+          continue;
+        }
+      }
+
       // Validate storage location if provided
       if (storageLocation && !(KEY_STORAGE_LOCATIONS as readonly string[]).includes(storageLocation)) {
         errors.push({ row: rowNum, reason: `Storage location "${storageLocation}" is not a known location` });
@@ -871,10 +1161,12 @@ async function bulkImportKeys(
           connection,
           `INSERT INTO dbo.Keys
              (BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
-              Registration, Description, StorageLocation)
+              Registration, Description, StorageLocation,
+              CreatedById, CreatedByName)
            VALUES
              (@BuildingId, @TenancyId, @Level, @KeyNumber, @ItemType, @SubType,
-              @Registration, @Description, @StorageLocation)`,
+              @Registration, @Description, @StorageLocation,
+              @CreatedById, @CreatedByName)`,
           [
             { name: "BuildingId",      type: TYPES.Int,      value: buildingId },
             { name: "TenancyId",       type: TYPES.Int,      value: tenancyId },
@@ -885,6 +1177,8 @@ async function bulkImportKeys(
             { name: "Registration",    type: TYPES.NVarChar,  value: registration },
             { name: "Description",     type: TYPES.NVarChar,  value: description },
             { name: "StorageLocation", type: TYPES.NVarChar,  value: storageLocation },
+            { name: "CreatedById",     type: TYPES.NVarChar,  value: caller.id },
+            { name: "CreatedByName",   type: TYPES.NVarChar,  value: caller.name },
           ],
         );
         created.push(rowNum);
@@ -916,6 +1210,8 @@ app.http("getKeyDetail",       { methods: ["GET"],  authLevel: "anonymous", hand
 app.http("createKey",          { methods: ["POST"], authLevel: "anonymous", handler: createKey });
 app.http("updateKey",          { methods: ["PUT"],  authLevel: "anonymous", handler: updateKey });
 app.http("reportKeyLost",      { methods: ["POST"], authLevel: "anonymous", handler: reportKeyLost });
+app.http("deleteKey",          { methods: ["POST"], authLevel: "anonymous", handler: deleteKey });
+app.http("restoreKey",         { methods: ["POST"], authLevel: "anonymous", handler: restoreKey });
 app.http("checkoutKeys",       { methods: ["POST"], authLevel: "anonymous", handler: checkoutKeys });
 app.http("checkinKeys",        { methods: ["POST"], authLevel: "anonymous", handler: checkinKeys });
 app.http("uploadKeyPhoto",     { methods: ["POST"], authLevel: "anonymous", handler: uploadKeyPhoto });

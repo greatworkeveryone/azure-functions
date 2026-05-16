@@ -15,6 +15,7 @@
     "@azure/functions": "^4.5.0",
     "@azure/storage-blob": "^12.31.0",
     "@types/pdfkit": "^0.17.6",
+    "pdf-lib": "^1.17.1",
     "pdfkit": "^0.18.0",
     "tedious": "^18.0.0",
     "xlsx": "^0.18.5"

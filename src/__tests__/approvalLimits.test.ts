@@ -1,13 +1,14 @@
 import { describe, test } from "node:test";
 import assert from "node:assert";
-import { canApproveAmount, ApprovalLimit } from "../functions/invoices";
+import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "../functions/invoices";
 
 const LIMITS: ApprovalLimit[] = [
-  { RoleName: "facilities",                    MaxInvoiceAmount: 1000.00 },
-  { RoleName: "timesheet_approval_facilities", MaxInvoiceAmount: 10000.00 },
-  { RoleName: "timesheet_approval_accounts",   MaxInvoiceAmount: 10000.00 },
-  { RoleName: "accounts",                      MaxInvoiceAmount: 1000.00 },
-  { RoleName: "Admin",                         MaxInvoiceAmount: null },
+  { RoleName: "facilities",                    MaxApprovalAmount: 1000.00 },
+  { RoleName: "timesheet_approval_facilities", MaxApprovalAmount: 10000.00 },
+  { RoleName: "timesheet_approval_accounts",   MaxApprovalAmount: 10000.00 },
+  { RoleName: "accounts",                      MaxApprovalAmount: 1000.00 },
+  { RoleName: "Admin",                         MaxApprovalAmount: null },
+  { RoleName: "director",                      MaxApprovalAmount: null },
 ];
 
 describe("canApproveAmount", () => {
@@ -94,5 +95,38 @@ describe("canApproveAmount", () => {
       canApproveAmount(["facilities"], [], 999),
       false,
     );
+  });
+});
+
+describe("requiresDirectorApproval", () => {
+  test("amount within non-director limits → no director needed", () => {
+    assert.strictEqual(requiresDirectorApproval(5000, LIMITS), false);
+    assert.strictEqual(requiresDirectorApproval(10000, LIMITS), false);
+  });
+
+  test("amount above max non-director limit → director needed", () => {
+    assert.strictEqual(requiresDirectorApproval(10001, LIMITS), true);
+    assert.strictEqual(requiresDirectorApproval(50000, LIMITS), true);
+  });
+
+  test("'director' and 'Admin' limits are ignored when computing the threshold", () => {
+    // If we accidentally included them, the threshold would be infinite (NULL) and
+    // requiresDirectorApproval would always return false for any finite amount.
+    assert.strictEqual(requiresDirectorApproval(99999999, LIMITS), true);
+  });
+
+  test("empty limits list → director not required (no rule to apply)", () => {
+    assert.strictEqual(requiresDirectorApproval(99999999, []), false);
+  });
+
+  test("only the 'director' row defined → no enforceable threshold → false", () => {
+    assert.strictEqual(
+      requiresDirectorApproval(99999999, [{ RoleName: "director", MaxApprovalAmount: null }]),
+      false,
+    );
+  });
+
+  test("zero / null amount → false (no amount, no enforcement)", () => {
+    assert.strictEqual(requiresDirectorApproval(0, LIMITS), false);
   });
 });

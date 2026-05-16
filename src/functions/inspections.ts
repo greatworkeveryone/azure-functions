@@ -19,9 +19,13 @@ import {
   errorResponse,
   extractToken,
   oidFromToken,
+  requireRole,
   unauthorizedResponse,
 } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+
+const EDIT_INSPECTIONS_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
@@ -416,6 +420,9 @@ async function createInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -466,6 +473,9 @@ async function applyInspectionOps(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -653,7 +663,9 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "updatePoint": {
-      if (op.patch?.description === undefined) return;
+      if (op.patch?.description === undefined) {
+        throw new Error("updatePoint requires patch.description");
+      }
       await executeQuery(
         connection,
         `UPDATE dbo.InspectionPoints
@@ -729,6 +741,9 @@ async function completeInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -772,6 +787,9 @@ async function revertInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -812,10 +830,22 @@ async function uploadInspectionAttachment(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'file' field required" } };
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return {
+        status: 413,
+        jsonBody: {
+          error: `Attachment exceeds ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB limit`,
+          code: "ATTACHMENT_TOO_LARGE",
+        },
+      };
+    }
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const result = await uploadBlob(buffer, file.name, file.type || "image/jpeg", "inspections");
@@ -841,6 +871,9 @@ async function mergeInspections(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -1058,6 +1091,9 @@ async function raiseJobsFromInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
   let connection;
   try {
     const body = (await request.json()) as RaiseJobsBody;
@@ -1095,19 +1131,31 @@ async function raiseJobsFromInspection(
       };
     }
 
-    // Group selected points into one batch per Job-to-create.
+    // Group selected points into one batch per Job-to-create. The `missing`
+    // check above already rejected any id not in pointIndex, so a fresh lookup
+    // here can only miss if the inspection was mutated concurrently — in that
+    // case bail with a 409 rather than crashing on a non-null assertion.
     const groups: PointContext[][] = [];
     if (mode === "per-room") {
       const byRoom = new Map<string, PointContext[]>();
       for (const id of pointIds) {
-        const ctx = pointIndex.get(id)!;
+        const ctx = pointIndex.get(id);
+        if (!ctx) {
+          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
+        }
         const list = byRoom.get(ctx.roomId);
         if (list) list.push(ctx);
         else byRoom.set(ctx.roomId, [ctx]);
       }
       for (const list of byRoom.values()) groups.push(list);
     } else {
-      for (const id of pointIds) groups.push([pointIndex.get(id)!]);
+      for (const id of pointIds) {
+        const ctx = pointIndex.get(id);
+        if (!ctx) {
+          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
+        }
+        groups.push([ctx]);
+      }
     }
 
     const raised: RaisedJobOutput[] = [];

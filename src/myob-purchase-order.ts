@@ -1,27 +1,29 @@
 // MYOB Purchase Order (Service Order) API client.
 //
 // Wraps the MYOB AccountRight v2 Service Order endpoints.
-// Follows the same auth + fetch pattern as myob-client.ts.
+// Follows the same auth + fetch pattern as myob-client.ts: tokens come from
+// dbo.MyobAuth via getValidMyobAccessToken(), refreshed as needed.
 //
 // API reference: https://developer.myob.com/api/myob-business-api/v2/purchase/order/order_service/
 //
 // Required environment variables (same as myob-client.ts):
 //   MYOB_API_BASE          — e.g. https://api.myob.com/accountright
 //   MYOB_COMPANY_FILE_ID   — GUID of the company file
-//   MYOB_ACCESS_TOKEN      — OAuth 2.0 bearer token
 //   MYOB_CLIENT_ID         — sent as x-myobapi-key header
+//   MYOB_CLIENT_SECRET     — used by the token-refresh flow
 //   MYOB_WEB_APP_URL       — base URL for "View on MYOB" links
+
+import { getValidMyobAccessToken } from "./myob-auth";
 
 const MYOB_API_BASE        = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
 const MYOB_COMPANY_FILE_ID = process.env.MYOB_COMPANY_FILE_ID ?? "";
-const MYOB_ACCESS_TOKEN    = process.env.MYOB_ACCESS_TOKEN ?? "";
 const MYOB_WEB_APP_URL     = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
 
 const base = () => `${MYOB_API_BASE}/${MYOB_COMPANY_FILE_ID}`;
 
-function myobHeaders(): Record<string, string> {
+async function myobHeaders(sqlToken: string | null): Promise<Record<string, string>> {
   return {
-    Authorization: `Bearer ${MYOB_ACCESS_TOKEN}`,
+    Authorization: `Bearer ${await getValidMyobAccessToken(sqlToken)}`,
     "Content-Type": "application/json",
     "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
     "x-myobapi-version": "v2",
@@ -32,11 +34,12 @@ async function myobFetch(
   path: string,
   method: "GET" | "PUT" | "DELETE" = "GET",
   body?: unknown,
+  sqlToken: string | null = null,
 ): Promise<unknown> {
   const url = `${base()}${path}`;
   const response = await fetch(url, {
     method,
-    headers: myobHeaders(),
+    headers: await myobHeaders(sqlToken),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
@@ -132,10 +135,11 @@ export function buildMyobOrderUrl(uid: string): string {
  */
 export async function myobCreateServiceOrder(
   params: CreateMyobServiceOrderParams,
+  sqlToken: string | null,
 ): Promise<MyobServiceOrderResponse> {
   const response = await fetch(`${base()}/Purchase/Order/Service`, {
     method: "POST",
-    headers: myobHeaders(),
+    headers: await myobHeaders(sqlToken),
     body: JSON.stringify(params),
   });
 
@@ -154,8 +158,16 @@ export async function myobCreateServiceOrder(
  * Fetches a single Service Order by MYOB UID.
  * GET /{companyFileId}/Purchase/Order/Service/{uid}
  */
-export async function myobGetServiceOrder(uid: string): Promise<MyobServiceOrder> {
-  return myobFetch(`/Purchase/Order/Service/${uid}`) as Promise<MyobServiceOrder>;
+export async function myobGetServiceOrder(
+  uid: string,
+  sqlToken: string | null,
+): Promise<MyobServiceOrder> {
+  return myobFetch(
+    `/Purchase/Order/Service/${uid}`,
+    "GET",
+    undefined,
+    sqlToken,
+  ) as Promise<MyobServiceOrder>;
 }
 
 /**
@@ -166,16 +178,25 @@ export async function myobGetServiceOrder(uid: string): Promise<MyobServiceOrder
 export async function myobUpdateServiceOrder(
   uid: string,
   params: Partial<MyobServiceOrder>,
+  sqlToken: string | null,
 ): Promise<void> {
-  await myobFetch(`/Purchase/Order/Service/${uid}`, "PUT", params);
+  await myobFetch(`/Purchase/Order/Service/${uid}`, "PUT", params, sqlToken);
 }
 
 /**
  * Deletes a Service Order in MYOB.
  * DELETE /{companyFileId}/Purchase/Order/Service/{uid}
  */
-export async function myobDeleteServiceOrder(uid: string): Promise<void> {
-  await myobFetch(`/Purchase/Order/Service/${uid}`, "DELETE");
+export async function myobDeleteServiceOrder(
+  uid: string,
+  sqlToken: string | null,
+): Promise<void> {
+  await myobFetch(
+    `/Purchase/Order/Service/${uid}`,
+    "DELETE",
+    undefined,
+    sqlToken,
+  );
 }
 
 /**

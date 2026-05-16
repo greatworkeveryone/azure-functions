@@ -152,6 +152,7 @@ async function upsertPayment(
           jobTitle,
           notes: Notes ?? undefined,
           referenceNumber: `PAY-${JobID}-${newId}`,
+          sqlToken: token,
         });
         await executeQuery(
           connection,
@@ -259,6 +260,7 @@ async function markPaymentPaid(
         await applyMyobPayment({
           amount: payment.Amount as number,
           billUid: myobId,
+          sqlToken: token,
         });
         context.log(`MYOB payment applied: bill ${myobId}, payment ${PaymentID}`);
       } catch (myobErr: any) {

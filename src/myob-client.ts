@@ -1,11 +1,15 @@
 // MYOB AccountRight Live API client.
 //
 // All calls go through Azure Functions — the frontend never touches MYOB.
+// The access token is fetched from dbo.MyobAuth on every call (refreshed
+// automatically when within 60s of expiry). Authorize via the admin page.
 //
 // Required environment variables:
 //   MYOB_API_BASE          — e.g. https://api.myob.com/accountright
 //   MYOB_COMPANY_FILE_ID   — GUID of the company file (find it via GET /accountright)
-//   MYOB_ACCESS_TOKEN      — OAuth 2.0 bearer token (rotate via MYOB developer portal)
+//   MYOB_CLIENT_ID         — "Key" from the MYOB developer portal (x-myobapi-key header)
+//   MYOB_CLIENT_SECRET     — "Secret" from the MYOB developer portal
+//   MYOB_REDIRECT_URI      — OAuth callback URL, must match the registered Redirect Uri
 //   MYOB_EXPENSE_ACCOUNT_UID — UID of the GL expense account to post purchases to
 //   MYOB_BANK_ACCOUNT_UID  — UID of the bank/payment account used for outgoing payments
 //   MYOB_WEB_APP_URL       — base URL of MYOB web app for "View on MYOB" links
@@ -13,10 +17,10 @@
 //   MYOB_WEBHOOK_KEY       — secret used to validate incoming webhook HMAC signatures
 
 import { createHmac } from "crypto";
+import { getValidMyobAccessToken } from "./myob-auth";
 
 const MYOB_API_BASE        = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
 const MYOB_COMPANY_FILE_ID = process.env.MYOB_COMPANY_FILE_ID ?? "";
-const MYOB_ACCESS_TOKEN    = process.env.MYOB_ACCESS_TOKEN ?? "";
 const MYOB_EXPENSE_ACCOUNT_UID = process.env.MYOB_EXPENSE_ACCOUNT_UID ?? "";
 const MYOB_BANK_ACCOUNT_UID    = process.env.MYOB_BANK_ACCOUNT_UID ?? "";
 const MYOB_WEB_APP_URL     = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
@@ -24,22 +28,27 @@ export const MYOB_WEBHOOK_KEY  = process.env.MYOB_WEBHOOK_KEY ?? "";
 
 const base = () => `${MYOB_API_BASE}/${MYOB_COMPANY_FILE_ID}`;
 
+async function myobHeaders(sqlToken: string | null): Promise<Record<string, string>> {
+  return {
+    Authorization: `Bearer ${await getValidMyobAccessToken(sqlToken)}`,
+    "Content-Type": "application/json",
+    "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
+    "x-myobapi-version": "v2",
+  };
+}
+
 // ── Shared fetch ─────────────────────────────────────────────────────────────
 
 async function myobFetch(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   body?: unknown,
+  sqlToken: string | null = null,
 ): Promise<any> {
   const url = `${base()}${path}`;
   const response = await fetch(url, {
     method,
-    headers: {
-      Authorization: `Bearer ${MYOB_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-      "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
-      "x-myobapi-version": "v2",
-    },
+    headers: await myobHeaders(sqlToken),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
@@ -81,6 +90,7 @@ export async function createMyobBill(opts: {
   jobTitle: string;
   notes?: string;
   referenceNumber: string;
+  sqlToken: string | null;
 }): Promise<MyobBillResult> {
   const description = [
     `Job #${opts.jobId} — ${opts.jobTitle}`,
@@ -93,12 +103,7 @@ export async function createMyobBill(opts: {
   // POST returns 204 with Location header containing the new UID
   const response = await fetch(`${base()}/Purchase/Bill/Service`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${MYOB_ACCESS_TOKEN}`,
-      "Content-Type": "application/json",
-      "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
-      "x-myobapi-version": "v2",
-    },
+    headers: await myobHeaders(opts.sqlToken),
     body: JSON.stringify({
       Date: new Date().toISOString().slice(0, 10),
       Lines: [
@@ -137,14 +142,20 @@ export async function applyMyobPayment(opts: {
   billUid: string;
   amount: number;
   paidDate?: Date;
+  sqlToken: string | null;
 }): Promise<void> {
-  await myobFetch("/Purchase/PaymentPurchase", "POST", {
-    Bills: [{ AmountApplied: opts.amount, UID: opts.billUid }],
-    PaymentDate: (opts.paidDate ?? new Date()).toISOString().slice(0, 10),
-    SupplierPaymentDetails: MYOB_BANK_ACCOUNT_UID
-      ? { Account: { UID: MYOB_BANK_ACCOUNT_UID } }
-      : undefined,
-  });
+  await myobFetch(
+    "/Purchase/PaymentPurchase",
+    "POST",
+    {
+      Bills: [{ AmountApplied: opts.amount, UID: opts.billUid }],
+      PaymentDate: (opts.paidDate ?? new Date()).toISOString().slice(0, 10),
+      SupplierPaymentDetails: MYOB_BANK_ACCOUNT_UID
+        ? { Account: { UID: MYOB_BANK_ACCOUNT_UID } }
+        : undefined,
+    },
+    opts.sqlToken,
+  );
 }
 
 /**

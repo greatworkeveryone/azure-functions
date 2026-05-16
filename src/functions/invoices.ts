@@ -9,8 +9,8 @@ import { formatDocNumber, nameToAcronym } from "../doc-number";
 
 export interface ApprovalLimit {
   RoleName: string;
-  /** null means unlimited authority */
-  MaxInvoiceAmount: number | null;
+  /** null means unlimited authority. Applies to BOTH quotes and invoices. */
+  MaxApprovalAmount: number | null;
 }
 
 /**
@@ -30,19 +30,31 @@ export function canApproveAmount(
   const matching = limits.filter((l) => userRoles.includes(l.RoleName));
   if (matching.length === 0) return false;
   // If any matching role has unlimited authority, allow immediately
-  if (matching.some((l) => l.MaxInvoiceAmount === null)) return true;
-  const effectiveLimit = Math.max(...matching.map((l) => l.MaxInvoiceAmount as number));
+  if (matching.some((l) => l.MaxApprovalAmount === null)) return true;
+  const effectiveLimit = Math.max(...matching.map((l) => l.MaxApprovalAmount as number));
   return amount <= effectiveLimit;
 }
 
 /**
- * Pure function — returns true when an invoice is stage-1 approved but still
- * waiting on stage-2 (director) approval. Used by the UI banner today; future
- * "bands" rules (e.g. outgoing invoices skip stage 2, or amount < X skips
- * stage 2) live here so call sites stay one-liners.
+ * Pure function — returns true when the amount exceeds the highest non-director,
+ * non-null approval limit, meaning only a director can fully approve it.
+ *
+ * Rules:
+ * - 'director' and unlimited (NULL) roles are excluded from the threshold calc.
+ * - With no enforceable non-director limits, returns false (no rule to enforce).
+ * - Amount <= 0 returns false.
  */
-export function requiresDirectorApproval(invoice: { status: string }): boolean {
-  return invoice.status === "approved";
+export function requiresDirectorApproval(
+  amount: number,
+  limits: ApprovalLimit[],
+): boolean {
+  if (!amount || amount <= 0) return false;
+  const nonDirector = limits.filter(
+    (l) => l.RoleName !== "director" && l.MaxApprovalAmount !== null,
+  );
+  if (nonDirector.length === 0) return false;
+  const threshold = Math.max(...nonDirector.map((l) => l.MaxApprovalAmount as number));
+  return amount > threshold;
 }
 
 // ── Body interfaces ───────────────────────────────────────────────────────────
@@ -214,6 +226,7 @@ const JOB_INVOICE_COLUMNS = `
   JobInvoiceID, JobID, InvoiceNumber, Seq, ContractorName,
   Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
+  DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy,
   MyobCreatedAt, MyobCreatedBy, CreatedAt, CreatedBy
 `;
 
@@ -399,7 +412,8 @@ async function upsertJobInvoice(
 // ── POST /api/approveJobInvoice ───────────────────────────────────────────────
 // Body: { JobInvoiceID, ApprovedBy? }
 // Checks approval limits against the caller's roles before approving.
-// On success, transitions the job to status='Done', awaitingRole='accounts'.
+// Does NOT auto-transition the job — the job stays in its current status so a
+// person decides when it's truly done (e.g. after marking it created in MYOB).
 
 async function approveJobInvoice(
   request: HttpRequest,
@@ -432,86 +446,110 @@ async function approveJobInvoice(
     const amount = (rows[0].Amount as number | null) ?? 0;
     const direction = ((rows[0].Direction as string | null) ?? "incoming") as "incoming" | "outgoing";
 
-    // Approval limit check — resolve caller's roles from X-App-Token
+    // Three-tier routing (matches approveQuote):
+    //   - user can approve, no director gate    → 'approved' + job→Done
+    //   - user can approve, director gate fires → 'approved' + director email (no job→Done)
+    //   - user can't approve, director gate fires → same as above (anyone may submit)
+    //   - user can't approve, no director gate → 'awaiting_approval' (senior manager picks up)
     const userRoles = rolesForRequest(request);
-    const escapedRoles = userRoles.map((r) => `'${r.replace(/'/g, "''")}'`).join(", ");
-    const limitRows: ApprovalLimit[] = escapedRoles
-      ? (await executeQuery(
-          connection,
-          `SELECT RoleName, MaxInvoiceAmount FROM ApprovalLimits WHERE RoleName IN (${escapedRoles})`,
-        ) as ApprovalLimit[])
-      : [];
+    const allLimits = (await executeQuery(
+      connection,
+      `SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits`,
+    )) as ApprovalLimit[];
+    const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
-    if (!canApproveAmount(userRoles, limitRows, amount)) {
-      const matching = limitRows.filter((l) => userRoles.includes(l.RoleName));
-      const effectiveLimit =
-        matching.length === 0
-          ? 0
-          : matching.some((l) => l.MaxInvoiceAmount === null)
-            ? null
-            : Math.max(...matching.map((l) => l.MaxInvoiceAmount as number));
-
-      return {
-        status: 403,
-        jsonBody: {
-          error: "Insufficient approval authority",
-          requiredAmount: amount,
-          userLimit: effectiveLimit,
-          message:
-            "This invoice requires approval from a user with a higher approval limit.",
-        },
-      };
-    }
+    const userCanApprove = canApproveAmount(userRoles, limitRows, amount);
+    const directorGateEngaged = requiresDirectorApproval(amount, allLimits);
+    const routesToAwaitingApproval = !userCanApprove && !directorGateEngaged;
+    const newStatus = routesToAwaitingApproval ? "awaiting_approval" : "approved";
 
     await executeQuery(
       connection,
       `UPDATE JobInvoices
-       SET Status = 'approved', ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
+       SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
        WHERE JobInvoiceID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: JobInvoiceID },
+        { name: "Status", type: TYPES.NVarChar, value: newStatus },
         { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
       ],
     );
     await executeQuery(
       connection,
       `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
-       VALUES (@JobID, @CreatedBy, @Text, 'invoice_approved', @InvoiceID);`,
+       VALUES (@JobID, @CreatedBy, @Text, @EventType, @InvoiceID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Approved invoice ${invoiceNumber}` },
+        {
+          name: "Text",
+          type: TYPES.NVarChar,
+          value: routesToAwaitingApproval
+            ? `Submitted invoice ${invoiceNumber} — awaiting approval`
+            : `Approved invoice ${invoiceNumber}`,
+        },
+        {
+          name: "EventType",
+          type: TYPES.NVarChar,
+          value: routesToAwaitingApproval ? "invoice_awaiting_approval" : "invoice_approved",
+        },
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
     );
-
-    // Auto-transition job → Done only fires for incoming (contractor)
-    // approvals. Outgoing oncharge invoices are sent to tenants and don't
-    // imply the job is finished — they only mark the on-charge as approved.
-    if (direction === "incoming") {
-      await executeQuery(
-        connection,
-        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-         VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Done', 'accounts');`,
-        [
-          { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-          { name: "Text", type: TYPES.NVarChar, value: "Invoice approved — job complete" },
-        ],
-      );
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET Status = 'Done', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
-         WHERE JobID = @JobID`,
-        [{ name: "JobID", type: TYPES.Int, value: jobId }],
-      );
-    } else {
-      await executeQuery(
-        connection,
-        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: jobId }],
-      );
+    // Director email + job→Done transition both gated on a successful approve
+    // landing at status='approved'. If we routed to awaiting_approval, nothing
+    // else fires until a senior manager re-approves.
+    //
+    // Fire-and-forget: spawn the email on a FRESH connection so the request
+    // connection closes in `finally` once the response returns. Packet build
+    // + Graph sendMail can take 5–20s with attachments — we don't want the
+    // user's Approve click to block on it. If the background send fails, the
+    // Resend button on the banner is the recovery path.
+    if (directorGateEngaged && !routesToAwaitingApproval) {
+      void (async () => {
+        let bgConnection;
+        try {
+          bgConnection = await createConnection(token);
+          const { sendDirectorApprovalEmail } = await import("../email/director-emails");
+          const result = await sendDirectorApprovalEmail({
+            connection: bgConnection,
+            jobId,
+            stage: "invoice",
+            amount,
+            currency: "AUD",
+            triggeredBy: ApprovedBy ?? undefined,
+          });
+          await executeQuery(
+            bgConnection,
+            `UPDATE JobInvoices
+               SET DirectorEmailSentAt = @SentAt,
+                   DirectorEmailSentTo = @SentTo,
+                   DirectorEmailSentBy = @SentBy
+             WHERE JobInvoiceID = @Id`,
+            [
+              { name: "Id", type: TYPES.Int, value: JobInvoiceID },
+              { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
+              { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
+              { name: "SentBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+            ],
+          );
+        } catch (emailErr: any) {
+          context.warn(`Director email failed for invoice ${JobInvoiceID}: ${emailErr?.message}`);
+        } finally {
+          if (bgConnection) closeConnection(bgConnection);
+        }
+      })();
     }
+
+    // No auto-status-transition on invoice approval — the job stays where it
+    // is. Users mark the job Done themselves once they've actually closed it
+    // out (typically after the invoice is created in MYOB). Touch
+    // LastModifiedDate so the activity feed reflects the approval.
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
 
     const stored = await executeQuery(
       connection,
@@ -600,6 +638,10 @@ async function directorApproveJobInvoice(
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
     );
+    // No auto-status-transition on director approval — the job stays where it
+    // is. A person decides when the job is actually done (typically after
+    // marking the invoice created in MYOB). Touch LastModifiedDate so the
+    // activity feed reflects the approval.
     await executeQuery(
       connection,
       "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
@@ -729,11 +771,11 @@ async function getApprovalLimits(
     connection = await createConnection(token);
     const rows = await executeQuery(
       connection,
-      "SELECT RoleName, MaxInvoiceAmount FROM ApprovalLimits ORDER BY RoleName ASC",
-    ) as { RoleName: string; MaxInvoiceAmount: number | null }[];
+      "SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits ORDER BY RoleName ASC",
+    ) as { RoleName: string; MaxApprovalAmount: number | null }[];
     const approvalLimits = rows.map((r) => ({
       roleName: r.RoleName,
-      maxInvoiceAmount: r.MaxInvoiceAmount,
+      maxApprovalAmount: r.MaxApprovalAmount,
     }));
     return { status: 200, jsonBody: { approvalLimits } };
   } catch (error: any) {
@@ -834,7 +876,7 @@ async function markJobInvoiceMyobCreated(
 
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber, Status FROM JobInvoices WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Status, Amount FROM JobInvoices WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
@@ -842,11 +884,25 @@ async function markJobInvoiceMyobCreated(
     const jobId = rows[0].JobID as number;
     const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
     const status = (rows[0].Status as string) ?? "pending";
+    const amount = (rows[0].Amount as number | null) ?? 0;
 
-    if (status !== "director_approved") {
+    // Director gate may not have been engaged (e.g. small-amount invoices). Allow
+    // MYOB creation when EITHER director_approved OR (approved AND no director was needed).
+    const allLimits = (await executeQuery(
+      connection,
+      `SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits`,
+    )) as ApprovalLimit[];
+    const directorWasRequired = requiresDirectorApproval(amount, allLimits);
+    const fullyApproved =
+      status === "director_approved" || (status === "approved" && !directorWasRequired);
+    if (!fullyApproved) {
       return {
         status: 400,
-        jsonBody: { error: "Invoice must be director-approved before MYOB creation" },
+        jsonBody: {
+          error: directorWasRequired
+            ? "Invoice must be director-approved before MYOB creation"
+            : "Invoice must be approved before MYOB creation",
+        },
       };
     }
 
@@ -1004,6 +1060,83 @@ async function deleteJobInvoice(
   }
 }
 
+// ── POST /api/resendDirectorInvoiceEmail ─────────────────────────────────────
+// Body: { JobInvoiceID, TriggeredBy? }
+// Re-fires the director packet email for an invoice already in the
+// awaiting-director state (Status='approved'). Updates the audit columns.
+
+interface ResendDirectorInvoiceEmailBody { JobInvoiceID: number; TriggeredBy?: string }
+
+async function resendDirectorInvoiceEmail(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as ResendDirectorInvoiceEmailBody;
+    const { JobInvoiceID, TriggeredBy } = body ?? {};
+    if (typeof JobInvoiceID !== "number") {
+      return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
+    }
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT JobID, Amount, Status FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+
+    const jobId = rows[0].JobID as number;
+    const amount = (rows[0].Amount as number | null) ?? 0;
+    const status = (rows[0].Status as string) ?? "";
+
+    if (status !== "approved") {
+      return { status: 400, jsonBody: { error: "Invoice is not in the awaiting-director state" } };
+    }
+
+    const { sendDirectorApprovalEmail } = await import("../email/director-emails");
+    const result = await sendDirectorApprovalEmail({
+      connection,
+      jobId,
+      stage: "invoice",
+      amount,
+      currency: "AUD",
+      triggeredBy: TriggeredBy ?? undefined,
+    });
+    await executeQuery(
+      connection,
+      `UPDATE JobInvoices
+         SET DirectorEmailSentAt = @SentAt,
+             DirectorEmailSentTo = @SentTo,
+             DirectorEmailSentBy = @SentBy
+       WHERE JobInvoiceID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: JobInvoiceID },
+        { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
+        { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
+        { name: "SentBy", type: TYPES.NVarChar, value: TriggeredBy ?? null },
+      ],
+    );
+
+    const stored = await executeQuery(
+      connection,
+      `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+    );
+    return { status: 200, jsonBody: { invoice: stored[0] } };
+  } catch (error: any) {
+    context.error("resendDirectorInvoiceEmail failed:", error.message);
+    return errorResponse("Resend director invoice email failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 app.http("getJobInvoices", { methods: ["GET"], authLevel: "anonymous", handler: getJobInvoices });
 app.http("upsertJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: upsertJobInvoice });
 app.http("approveJobInvoice", { methods: ["POST"], authLevel: "anonymous", handler: approveJobInvoice });
@@ -1014,3 +1147,4 @@ app.http("deleteJobInvoice", { methods: ["POST"], authLevel: "anonymous", handle
 app.http("markJobInvoiceMyobCreated", { methods: ["POST"], authLevel: "anonymous", handler: markJobInvoiceMyobCreated });
 app.http("unmarkJobInvoiceMyobCreated", { methods: ["POST"], authLevel: "anonymous", handler: unmarkJobInvoiceMyobCreated });
 app.http("getApprovalLimits", { methods: ["GET"], authLevel: "anonymous", handler: getApprovalLimits });
+app.http("resendDirectorInvoiceEmail", { methods: ["POST"], authLevel: "anonymous", handler: resendDirectorInvoiceEmail });

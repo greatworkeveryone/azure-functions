@@ -121,7 +121,7 @@ export async function graphSendReply(
 }
 
 export async function graphSendMail(
-  toAddress: string,
+  toAddress: string | string[],
   subject: string,
   body: string,
   attachments?: GraphAttachment[],
@@ -133,10 +133,11 @@ export async function graphSendMail(
     throw new Error("GRAPH_SENDER_EMAIL not configured");
   }
 
+  const recipients = Array.isArray(toAddress) ? toAddress : [toAddress];
   const message: Record<string, unknown> = {
     subject,
     body: { contentType: "Text", content: body },
-    toRecipients: [{ emailAddress: { address: toAddress } }],
+    toRecipients: recipients.map((a) => ({ emailAddress: { address: a } })),
   };
 
   if (ccAddresses?.length) {
