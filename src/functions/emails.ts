@@ -45,7 +45,7 @@ function hydrateAttachments(
 }
 
 const EMAIL_COLUMNS = `
-  EmailID, MessageID, FromAddress, Subject, Body, ReceivedAt,
+  EmailID, FromAddress, Subject, Body, ReceivedAt,
   AttachmentBlobs, MatchedJobID, Status, ProcessedAt, CreatedAt,
   AIParsedAt, AIClassification, AIConfidence, AIParsedData,
   AIFlaggedForReview
@@ -572,7 +572,7 @@ async function getEmailThread(
     const rows = await executeQuery(
       connection,
       `SELECT ReplyID, EmailID, Body, ToAddress, SentBy, SentAt,
-              GraphMessageID, GraphSent, GraphError, AttachmentNames
+              GraphSent, GraphError, AttachmentNames
        FROM EmailReplies WHERE EmailID = @Id ORDER BY SentAt ASC`,
       [{ name: "Id", type: TYPES.Int, value: emailId }],
     );

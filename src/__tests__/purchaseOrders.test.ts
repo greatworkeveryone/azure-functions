@@ -4,7 +4,6 @@
 // inline checks in the handler — keeping them testable without spinning up a
 // real DB connection.
 
-import { describe, test } from "node:test";
 import assert from "node:assert";
 
 // ── Guard logic mirrors ───────────────────────────────────────────────────────

@@ -7,8 +7,13 @@
 // for the frontend (no transform layer in the client lib), payloads are
 // PascalCase to match the parameterised-SQL pattern.
 
-import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { TYPES } from "tedious";
+import {
+  app,
+  HttpRequest,
+  HttpResponseInit,
+  InvocationContext,
+} from "@azure/functions";
+import { Connection, TYPES } from "tedious";
 import {
   beginTransaction,
   closeConnection,
@@ -16,25 +21,87 @@ import {
   createConnection,
   executeQuery,
   rollbackTransaction,
+  SqlParam,
   SqlRow,
 } from "../db";
 import {
   errorResponse,
   extractToken,
   oidFromToken,
+  requireRole,
   unauthorizedResponse,
 } from "../auth";
+import { checkRateLimit } from "../rateLimit";
+import {
+  deleteIncentive,
+  NOT_FOUND,
+  parseIncentives,
+  TenancyIncentive,
+  upsertIncentive,
+  validateDeleteEnvelope,
+  validateUpsertEnvelope,
+} from "../incentiveLogic";
+import {
+  CarparkScheduleGroup,
+  deleteGroup,
+  deleteMiscFee,
+  deleteStep,
+  MiscFee,
+  NOT_FOUND as STEP_NOT_FOUND,
+  parseGroups,
+  parseMiscFees,
+  parseSteps,
+  ScheduledRateStep,
+  upsertGroup,
+  upsertMiscFee,
+  upsertStep,
+  validateDeleteFeeEnvelope,
+  validateDeleteGroupEnvelope,
+  validateDeleteStepEnvelope,
+  validateUpsertFeeEnvelope,
+  validateUpsertGroupEnvelope,
+  validateUpsertStepEnvelope,
+} from "../scheduledRateStepLogic";
+
+// Decimal column precision/scale — tedious defaults Decimal to scale 0 and
+// silently truncates fractional values, so every Decimal param must pass
+// the column's precision/scale explicitly. Keys match SQL column names.
+const DECIMAL_OPTS = {
+  // DECIMAL(12,2) — money columns
+  RentPerAnnum: { precision: 12, scale: 2 },
+  SecurityDepositHeld: { precision: 12, scale: 2 },
+  OldRentPerAnnum: { precision: 12, scale: 2 },
+  NewRentPerAnnum: { precision: 12, scale: 2 },
+  // DECIMAL(5,2) — percent columns
+  CpiCapPercent: { precision: 5, scale: 2 },
+  CpiFloorPercent: { precision: 5, scale: 2 },
+  EscalationPercent: { precision: 5, scale: 2 },
+  FixedReviewPercent: { precision: 5, scale: 2 },
+  LastReviewIncreasePercent: { precision: 5, scale: 2 },
+  IncreasePercent: { precision: 5, scale: 2 },
+  // DECIMAL(10,3) — CPI index values
+  CpiBaseValue: { precision: 10, scale: 3 },
+  CpiCurrentValue: { precision: 10, scale: 3 },
+  // DECIMAL(10,2) — size
+  SizeSqm: { precision: 10, scale: 2 },
+} as const;
 
 // ── Caller identity (same shape as inspections.ts) ───────────────────────────
 
-interface UserRef { id: string; name: string }
+interface UserRef {
+  id: string;
+  name: string;
+}
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
     const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
+    const padded = payload.padEnd(
+      payload.length + ((4 - (payload.length % 4)) % 4),
+      "=",
+    );
     return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
   } catch {
     return null;
@@ -43,9 +110,12 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function callerFromToken(token: string): UserRef {
   const claims = decodeJwtPayload(token);
-  const id = oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
+  const id =
+    oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
   const name =
-    (claims?.name as string) ?? (claims?.preferred_username as string) ?? "Unknown user";
+    (claims?.name as string) ??
+    (claims?.preferred_username as string) ??
+    "Unknown user";
   return { id, name };
 }
 
@@ -65,7 +135,9 @@ function formatSqlError(err: any): string {
 
 // Strip undefined keys + truncate long values so logged payloads stay readable
 // in the func host stream without leaking giant blobs.
-function summariseBody(body: Record<string, any> | null | undefined): Record<string, any> {
+function summariseBody(
+  body: Record<string, any> | null | undefined,
+): Record<string, any> {
   if (!body) return {};
   const out: Record<string, any> = {};
   for (const [k, v] of Object.entries(body)) {
@@ -104,6 +176,12 @@ interface RegisterTenantApi {
   expiry?: string;
   fixedReviewPercent?: number;
   idNo?: string;
+  /** m052 — lease incentives (rent-free months / monthly reductions). */
+  incentives: TenancyIncentive[];
+  scheduledRateSteps: ScheduledRateStep[];
+  carparkScheduleGroups: CarparkScheduleGroup[];
+  /** m059 — miscellaneous fees (air con, cleaning, etc.). */
+  miscFees: MiscFee[];
   /** Per m040 — text date like "5/1/19". */
   informationSheetAsAt?: string;
   /** Per m040 — file path/reference for the info-sheet doc. */
@@ -124,10 +202,9 @@ interface RegisterTenantApi {
   primaryContactEmail?: string;
   primaryContactName?: string;
   primaryContactPhone?: string;
+  holdoverTerms?: string;
   renewalLetterIssueBy?: string;
-  rentBasis: "custom" | "fixedAnnual" | "perSqm";
   rentPerAnnum?: number;
-  rentPerSqm?: number;
   reviewIntervalMonths?: number;
   reviewState: "amber" | "green" | "grey" | "red";
   // Free-form per m038: e.g. "CPI Darwin (June)", "Fixed 3%", "Market".
@@ -194,7 +271,6 @@ interface TenantOccupancyHistoryApi {
   historyId: string;
   occupancyId: string;
   rentPerAnnum?: number;
-  rentPerSqm?: number;
   sizeSqm: number;
   snapshot: string;
   tenantId: number;
@@ -211,7 +287,9 @@ function toIso(d: any): string {
 function toIsoDate(d: any): string | undefined {
   if (!d) return undefined;
   const date = d instanceof Date ? d : new Date(d);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
+  return Number.isNaN(date.getTime())
+    ? undefined
+    : date.toISOString().slice(0, 10);
 }
 
 function asNum(v: any): number | undefined {
@@ -240,7 +318,8 @@ function computeReviewState(
 ): "amber" | "green" | "grey" | "red" {
   if (status === "vacated") return "grey";
   if (!nextReviewDate) return "grey";
-  const reviewDate = nextReviewDate instanceof Date ? nextReviewDate : new Date(nextReviewDate);
+  const reviewDate =
+    nextReviewDate instanceof Date ? nextReviewDate : new Date(nextReviewDate);
   if (Number.isNaN(reviewDate.getTime())) return "grey";
   const now = Date.now();
   const reviewMs = reviewDate.getTime();
@@ -250,11 +329,13 @@ function computeReviewState(
   return "green";
 }
 
-/** Months between two dates, partial month rounded down. */
-function monthsBetween(from: Date, to: Date): number {
-  let months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
-  if (to.getDate() < from.getDate()) months -= 1;
-  return Math.max(0, months);
+/** Day-pro-rated rent remaining until expiry. Uses 365-day year. */
+export function calcDollarsToExpiry(
+  daysToExpiry: number,
+  effectiveRentPerAnnum: number,
+): number {
+  if (daysToExpiry <= 0) return 0;
+  return (daysToExpiry / 365) * effectiveRentPerAnnum;
 }
 
 function tenantRowToApi(
@@ -262,19 +343,18 @@ function tenantRowToApi(
   occupancies: TenantOccupancyApi[],
   noteCountByAnchor: Record<string, number>,
 ): RegisterTenantApi {
-  const totalSizeSqm = occupancies.reduce((sum, o) => sum + (o.sizeSqm || 0), 0);
-  const rentBasis = (row.RentBasis as RegisterTenantApi["rentBasis"]) ?? "fixedAnnual";
+  const totalSizeSqm = occupancies.reduce(
+    (sum, o) => sum + (o.sizeSqm || 0),
+    0,
+  );
   const rentPerAnnum = asNum(row.RentPerAnnum);
-  const rentPerSqm = asNum(row.RentPerSqm);
 
-  let effectiveRentPerAnnum = 0;
-  if (rentBasis === "perSqm" && rentPerSqm !== undefined) {
-    effectiveRentPerAnnum = rentPerSqm * totalSizeSqm;
-  } else if (rentPerAnnum !== undefined) {
-    effectiveRentPerAnnum = rentPerAnnum;
-  }
+  // rentPerAnnum is the source of truth. costPerSqm and monthlyRental are
+  // derived from it for display only.
+  const effectiveRentPerAnnum = rentPerAnnum ?? 0;
   const monthlyRental = effectiveRentPerAnnum / 12;
-  const costPerSqm = totalSizeSqm > 0 ? effectiveRentPerAnnum / totalSizeSqm : 0;
+  const costPerSqm =
+    totalSizeSqm > 0 ? effectiveRentPerAnnum / totalSizeSqm : 0;
 
   const expiryIso = toIsoDate(row.Expiry);
   let daysToExpiry: number | undefined;
@@ -285,11 +365,7 @@ function tenantRowToApi(
     daysToExpiry = Math.ceil(
       (expiryDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
     );
-    if (daysToExpiry > 0) {
-      dollarsToExpiry = monthsBetween(now, expiryDate) * monthlyRental;
-    } else {
-      dollarsToExpiry = 0;
-    }
+    dollarsToExpiry = calcDollarsToExpiry(daysToExpiry, effectiveRentPerAnnum);
   }
 
   const status = (row.Status as RegisterTenantApi["status"]) ?? "current";
@@ -320,6 +396,14 @@ function tenantRowToApi(
     expiry: expiryIso,
     fixedReviewPercent: asNum(row.FixedReviewPercent),
     idNo: asStr(row.IdNo),
+    incentives: parseIncentives(row.Incentives as string | null | undefined),
+    scheduledRateSteps: parseSteps(
+      row.ScheduledRateSteps as string | null | undefined,
+    ),
+    carparkScheduleGroups: parseGroups(
+      row.CarparkScheduleGroups as string | null | undefined,
+    ),
+    miscFees: parseMiscFees(row.MiscFees as string | null | undefined),
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
     lastReviewDate: toIsoDate(row.LastReviewDate),
@@ -337,10 +421,9 @@ function tenantRowToApi(
     primaryContactEmail: asStr(row.PrimaryContactEmail),
     primaryContactName: asStr(row.PrimaryContactName),
     primaryContactPhone: asStr(row.PrimaryContactPhone),
+    holdoverTerms: asStr(row.HoldoverTerms),
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
-    rentBasis,
     rentPerAnnum,
-    rentPerSqm,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
     reviewState: computeReviewState(row.NextReviewDate, status),
     reviewType: asStr(row.ReviewType) ?? "none",
@@ -422,7 +505,6 @@ function historyRowToApi(row: SqlRow): TenantOccupancyHistoryApi {
     historyId: row.HistoryId as string,
     occupancyId: row.OccupancyId as string,
     rentPerAnnum: asNum(row.RentPerAnnum),
-    rentPerSqm: asNum(row.RentPerSqm),
     sizeSqm: Number(row.SizeSqm),
     snapshot: (row.Snapshot as string) ?? "{}",
     tenantId: row.TenantId as number,
@@ -435,14 +517,18 @@ const TENANT_COLUMNS = `
   PrimaryContactName, PrimaryContactEmail, PrimaryContactPhone,
   Lot, InformationSheetAsAt, InformationSheetReference,
   Commencement, Expiry, TermMonths, OptionPeriods, OptionNoticeMonths,
-  RenewalLetterIssueBy,
-  RentBasis, RentPerAnnum, RentPerSqm,
+  RenewalLetterIssueBy, HoldoverTerms,
+  RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
   CpiRegion, CpiCapPercent, CpiFloorPercent,
   SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
+  Incentives,
+  ScheduledRateSteps,
+  CarparkScheduleGroups,
+  MiscFees,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName
 `;
 
@@ -599,7 +685,9 @@ async function getRegisterTenant(
     const row = tenantRows[0];
 
     // tedious Connections handle one request at a time — run sequentially.
-    const tenantIdParam = [{ name: "TenantId", type: TYPES.Int, value: tenantId }];
+    const tenantIdParam = [
+      { name: "TenantId", type: TYPES.Int, value: tenantId },
+    ];
     const occupancyRows = await executeQuery(
       connection,
       `SELECT ${OCCUPANCY_COLUMNS}
@@ -631,7 +719,7 @@ async function getRegisterTenant(
     const historyRows = await executeQuery(
       connection,
       `SELECT HistoryId, OccupancyId, TenantId, EffectiveFrom, EffectiveTo,
-              SizeSqm, RentPerAnnum, RentPerSqm, Snapshot
+              SizeSqm, RentPerAnnum, Snapshot
        FROM dbo.TenantOccupancyHistory
        WHERE TenantId = @TenantId
        ORDER BY EffectiveFrom DESC`,
@@ -645,7 +733,11 @@ async function getRegisterTenant(
 
     const noteCountByAnchor: Record<string, number> = {};
     for (const n of notes) {
-      const key = noteAnchorKey(n.anchorKind, n.occupancyId ?? "", n.fieldKey ?? "");
+      const key = noteAnchorKey(
+        n.anchorKind,
+        n.occupancyId ?? "",
+        n.fieldKey ?? "",
+      );
       noteCountByAnchor[key] = (noteCountByAnchor[key] ?? 0) + 1;
     }
 
@@ -681,10 +773,16 @@ async function upsertRegisterTenant(
     // Required on create
     if (tenantId === undefined) {
       if (typeof body.LegalName !== "string" || !body.LegalName.trim()) {
-        return { status: 400, jsonBody: { error: "LegalName (string) required" } };
+        return {
+          status: 400,
+          jsonBody: { error: "LegalName (string) required" },
+        };
       }
       if (typeof body.BuildingId !== "number") {
-        return { status: 400, jsonBody: { error: "BuildingId (number) required" } };
+        return {
+          status: 400,
+          jsonBody: { error: "BuildingId (number) required" },
+        };
       }
     } else if (
       Object.prototype.hasOwnProperty.call(body, "LegalName") &&
@@ -708,8 +806,8 @@ async function upsertRegisterTenant(
             PrimaryContactName, PrimaryContactEmail, PrimaryContactPhone,
             Lot, InformationSheetAsAt, InformationSheetReference,
             Commencement, Expiry, TermMonths, OptionPeriods, OptionNoticeMonths,
-            RenewalLetterIssueBy,
-            RentBasis, RentPerAnnum, RentPerSqm,
+            RenewalLetterIssueBy, HoldoverTerms,
+            RentPerAnnum,
             ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
             LastReviewIncreasePercent, FixedReviewPercent,
             CpiRegion, CpiCapPercent, CpiFloorPercent,
@@ -725,8 +823,8 @@ async function upsertRegisterTenant(
             @PrimaryContactName, @PrimaryContactEmail, @PrimaryContactPhone,
             @Lot, @InformationSheetAsAt, @InformationSheetReference,
             @Commencement, @Expiry, @TermMonths, @OptionPeriods, @OptionNoticeMonths,
-            @RenewalLetterIssueBy,
-            @RentBasis, @RentPerAnnum, @RentPerSqm,
+            @RenewalLetterIssueBy, @HoldoverTerms,
+            @RentPerAnnum,
             @ReviewType, @ReviewIntervalMonths, @NextReviewDate, @LastReviewDate,
             @LastReviewIncreasePercent, @FixedReviewPercent,
             @CpiRegion, @CpiCapPercent, @CpiFloorPercent,
@@ -743,50 +841,83 @@ async function upsertRegisterTenant(
       // always update. Use the full param set; UPDATE references only the
       // params we name in the SET clause, so passing extras is harmless.
       const setParts: string[] = [];
-      const updateParams: { name: string; type: any; value: any }[] = [];
+      const updateParams: SqlParam[] = [];
       // Whitelist of column → tedious type. Keys are SQL column names (used to
       // build SET clauses), so an attacker controlling the request body can't
       // inject a column name they didn't add to this list — the loop ignores
       // unknown keys.
       const allowlist: Record<string, any> = {
-        Abn: TYPES.NVarChar, AccountsEmail: TYPES.NVarChar,
-        AccountsPhone: TYPES.NVarChar, Acn: TYPES.NVarChar,
+        Abn: TYPES.NVarChar,
+        AccountsEmail: TYPES.NVarChar,
+        AccountsPhone: TYPES.NVarChar,
+        Acn: TYPES.NVarChar,
         BuildingId: TYPES.Int,
         BusinessTenanciesAct: TYPES.NVarChar,
-        Commencement: TYPES.Date, Comments: TYPES.NVarChar,
-        CpiCapPercent: TYPES.Decimal, CpiFloorPercent: TYPES.Decimal,
-        CpiRegion: TYPES.NVarChar, EscalationPercent: TYPES.Decimal,
-        EscalationSchedule: TYPES.NVarChar, Expiry: TYPES.Date,
-        FixedReviewPercent: TYPES.Decimal, IdNo: TYPES.NVarChar,
+        Commencement: TYPES.Date,
+        Comments: TYPES.NVarChar,
+        HoldoverTerms: TYPES.NVarChar,
+        CpiCapPercent: TYPES.Decimal,
+        CpiFloorPercent: TYPES.Decimal,
+        CpiRegion: TYPES.NVarChar,
+        EscalationPercent: TYPES.Decimal,
+        EscalationSchedule: TYPES.NVarChar,
+        Expiry: TYPES.Date,
+        FixedReviewPercent: TYPES.Decimal,
+        IdNo: TYPES.NVarChar,
         InformationSheetAsAt: TYPES.NVarChar,
         InformationSheetReference: TYPES.NVarChar,
-        LastReviewDate: TYPES.Date, LastReviewIncreasePercent: TYPES.Decimal,
-        LegalName: TYPES.NVarChar, Lot: TYPES.NVarChar, MyobId: TYPES.NVarChar,
-        NextReviewDate: TYPES.Date, OptionNoticeMonths: TYPES.Int,
-        OptionPeriods: TYPES.NVarChar, PostalAddress: TYPES.NVarChar,
-        PrimaryContactEmail: TYPES.NVarChar, PrimaryContactName: TYPES.NVarChar,
-        PrimaryContactPhone: TYPES.NVarChar, RenewalLetterIssueBy: TYPES.NVarChar,
-        RentBasis: TYPES.NVarChar, RentPerAnnum: TYPES.Decimal,
-        RentPerSqm: TYPES.Decimal, ReviewIntervalMonths: TYPES.Int,
-        ReviewType: TYPES.NVarChar, SecurityDepositHeld: TYPES.Decimal,
+        LastReviewDate: TYPES.Date,
+        LastReviewIncreasePercent: TYPES.Decimal,
+        LegalName: TYPES.NVarChar,
+        Lot: TYPES.NVarChar,
+        MyobId: TYPES.NVarChar,
+        NextReviewDate: TYPES.Date,
+        OptionNoticeMonths: TYPES.Int,
+        OptionPeriods: TYPES.NVarChar,
+        PostalAddress: TYPES.NVarChar,
+        PrimaryContactEmail: TYPES.NVarChar,
+        PrimaryContactName: TYPES.NVarChar,
+        PrimaryContactPhone: TYPES.NVarChar,
+        RenewalLetterIssueBy: TYPES.NVarChar,
+        RentPerAnnum: TYPES.Decimal,
+        ReviewIntervalMonths: TYPES.Int,
+        ReviewType: TYPES.NVarChar,
+        SecurityDepositHeld: TYPES.Decimal,
         SecurityDepositMethod: TYPES.NVarChar,
-        SecurityDepositRequired: TYPES.NVarChar, Status: TYPES.NVarChar,
+        SecurityDepositRequired: TYPES.NVarChar,
+        Status: TYPES.NVarChar,
         StreetAddress: TYPES.NVarChar,
-        TermMonths: TYPES.Int, TradingName: TYPES.NVarChar,
+        TermMonths: TYPES.Int,
+        TradingName: TYPES.NVarChar,
       };
       for (const col of Object.keys(allowlist)) {
         if (!Object.prototype.hasOwnProperty.call(body, col)) continue;
         const value = (body as any)[col];
         if (value === undefined) continue;
         setParts.push(`${col} = @${col}`);
-        updateParams.push({ name: col, type: allowlist[col], value: normaliseValue(col, value) });
+        updateParams.push({
+          name: col,
+          type: allowlist[col],
+          value: normaliseValue(col, value),
+          options: (
+            DECIMAL_OPTS as Record<string, { precision: number; scale: number }>
+          )[col],
+        });
       }
       // Always bump audit fields on update.
       setParts.push("UpdatedAt = SYSUTCDATETIME()");
       setParts.push("UpdatedById = @UpdatedById");
       setParts.push("UpdatedByName = @UpdatedByName");
-      updateParams.push({ name: "UpdatedById", type: TYPES.NVarChar, value: caller.id });
-      updateParams.push({ name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name });
+      updateParams.push({
+        name: "UpdatedById",
+        type: TYPES.NVarChar,
+        value: caller.id,
+      });
+      updateParams.push({
+        name: "UpdatedByName",
+        type: TYPES.NVarChar,
+        value: caller.name,
+      });
       updateParams.push({ name: "TenantId", type: TYPES.Int, value: tenantId });
 
       await executeQuery(
@@ -803,7 +934,10 @@ async function upsertRegisterTenant(
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
-      return { status: 404, jsonBody: { error: "Tenant disappeared after upsert" } };
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant disappeared after upsert" },
+      };
     }
     return {
       status: 200,
@@ -826,7 +960,10 @@ function normaliseValue(col: string, value: any): any {
   if (value === null || value === "") return null;
   // Dates: trim a full ISO datetime down to YYYY-MM-DD for DATE columns.
   const dateCols = new Set([
-    "Commencement", "Expiry", "NextReviewDate", "LastReviewDate",
+    "Commencement",
+    "Expiry",
+    "NextReviewDate",
+    "LastReviewDate",
   ]);
   if (dateCols.has(col) && typeof value === "string" && value.length > 10) {
     return value.slice(0, 10);
@@ -837,8 +974,9 @@ function normaliseValue(col: string, value: any): any {
 function buildTenantParams(
   body: Record<string, any>,
   caller: UserRef,
-): { name: string; type: any; value: any }[] {
-  const v = (k: string) => (body[k] === undefined ? null : normaliseValue(k, body[k]));
+): SqlParam[] {
+  const v = (k: string) =>
+    body[k] === undefined ? null : normaliseValue(k, body[k]);
   return [
     { name: "BuildingId", type: TYPES.Int, value: body.BuildingId },
     { name: "IdNo", type: TYPES.NVarChar, value: v("IdNo") },
@@ -851,38 +989,124 @@ function buildTenantParams(
     { name: "StreetAddress", type: TYPES.NVarChar, value: v("StreetAddress") },
     { name: "AccountsPhone", type: TYPES.NVarChar, value: v("AccountsPhone") },
     { name: "AccountsEmail", type: TYPES.NVarChar, value: v("AccountsEmail") },
-    { name: "PrimaryContactName", type: TYPES.NVarChar, value: v("PrimaryContactName") },
-    { name: "PrimaryContactEmail", type: TYPES.NVarChar, value: v("PrimaryContactEmail") },
-    { name: "PrimaryContactPhone", type: TYPES.NVarChar, value: v("PrimaryContactPhone") },
+    {
+      name: "PrimaryContactName",
+      type: TYPES.NVarChar,
+      value: v("PrimaryContactName"),
+    },
+    {
+      name: "PrimaryContactEmail",
+      type: TYPES.NVarChar,
+      value: v("PrimaryContactEmail"),
+    },
+    {
+      name: "PrimaryContactPhone",
+      type: TYPES.NVarChar,
+      value: v("PrimaryContactPhone"),
+    },
     { name: "Lot", type: TYPES.NVarChar, value: v("Lot") },
-    { name: "InformationSheetAsAt", type: TYPES.NVarChar, value: v("InformationSheetAsAt") },
-    { name: "InformationSheetReference", type: TYPES.NVarChar, value: v("InformationSheetReference") },
+    {
+      name: "InformationSheetAsAt",
+      type: TYPES.NVarChar,
+      value: v("InformationSheetAsAt"),
+    },
+    {
+      name: "InformationSheetReference",
+      type: TYPES.NVarChar,
+      value: v("InformationSheetReference"),
+    },
     { name: "Commencement", type: TYPES.Date, value: v("Commencement") },
     { name: "Expiry", type: TYPES.Date, value: v("Expiry") },
     { name: "TermMonths", type: TYPES.Int, value: v("TermMonths") },
     { name: "OptionPeriods", type: TYPES.NVarChar, value: v("OptionPeriods") },
-    { name: "OptionNoticeMonths", type: TYPES.Int, value: v("OptionNoticeMonths") },
-    { name: "RenewalLetterIssueBy", type: TYPES.NVarChar, value: v("RenewalLetterIssueBy") },
-    { name: "RentBasis", type: TYPES.NVarChar, value: body.RentBasis ?? "fixedAnnual" },
-    { name: "RentPerAnnum", type: TYPES.Decimal, value: v("RentPerAnnum") },
-    { name: "RentPerSqm", type: TYPES.Decimal, value: v("RentPerSqm") },
-    { name: "ReviewType", type: TYPES.NVarChar, value: body.ReviewType ?? "none" },
-    { name: "ReviewIntervalMonths", type: TYPES.Int, value: v("ReviewIntervalMonths") },
+    {
+      name: "OptionNoticeMonths",
+      type: TYPES.Int,
+      value: v("OptionNoticeMonths"),
+    },
+    {
+      name: "RenewalLetterIssueBy",
+      type: TYPES.NVarChar,
+      value: v("RenewalLetterIssueBy"),
+    },
+    { name: "HoldoverTerms", type: TYPES.NVarChar, value: v("HoldoverTerms") },
+    {
+      name: "RentPerAnnum",
+      type: TYPES.Decimal,
+      value: v("RentPerAnnum"),
+      options: DECIMAL_OPTS.RentPerAnnum,
+    },
+    {
+      name: "ReviewType",
+      type: TYPES.NVarChar,
+      value: body.ReviewType ?? "none",
+    },
+    {
+      name: "ReviewIntervalMonths",
+      type: TYPES.Int,
+      value: v("ReviewIntervalMonths"),
+    },
     { name: "NextReviewDate", type: TYPES.Date, value: v("NextReviewDate") },
     { name: "LastReviewDate", type: TYPES.Date, value: v("LastReviewDate") },
-    { name: "LastReviewIncreasePercent", type: TYPES.Decimal, value: v("LastReviewIncreasePercent") },
-    { name: "FixedReviewPercent", type: TYPES.Decimal, value: v("FixedReviewPercent") },
+    {
+      name: "LastReviewIncreasePercent",
+      type: TYPES.Decimal,
+      value: v("LastReviewIncreasePercent"),
+      options: DECIMAL_OPTS.LastReviewIncreasePercent,
+    },
+    {
+      name: "FixedReviewPercent",
+      type: TYPES.Decimal,
+      value: v("FixedReviewPercent"),
+      options: DECIMAL_OPTS.FixedReviewPercent,
+    },
     { name: "CpiRegion", type: TYPES.NVarChar, value: v("CpiRegion") },
-    { name: "CpiCapPercent", type: TYPES.Decimal, value: v("CpiCapPercent") },
-    { name: "CpiFloorPercent", type: TYPES.Decimal, value: v("CpiFloorPercent") },
-    { name: "SecurityDepositRequired", type: TYPES.NVarChar, value: v("SecurityDepositRequired") },
-    { name: "SecurityDepositMethod", type: TYPES.NVarChar, value: v("SecurityDepositMethod") },
-    { name: "SecurityDepositHeld", type: TYPES.Decimal, value: v("SecurityDepositHeld") },
+    {
+      name: "CpiCapPercent",
+      type: TYPES.Decimal,
+      value: v("CpiCapPercent"),
+      options: DECIMAL_OPTS.CpiCapPercent,
+    },
+    {
+      name: "CpiFloorPercent",
+      type: TYPES.Decimal,
+      value: v("CpiFloorPercent"),
+      options: DECIMAL_OPTS.CpiFloorPercent,
+    },
+    {
+      name: "SecurityDepositRequired",
+      type: TYPES.NVarChar,
+      value: v("SecurityDepositRequired"),
+    },
+    {
+      name: "SecurityDepositMethod",
+      type: TYPES.NVarChar,
+      value: v("SecurityDepositMethod"),
+    },
+    {
+      name: "SecurityDepositHeld",
+      type: TYPES.Decimal,
+      value: v("SecurityDepositHeld"),
+      options: DECIMAL_OPTS.SecurityDepositHeld,
+    },
     { name: "Status", type: TYPES.NVarChar, value: body.Status ?? "current" },
     { name: "Comments", type: TYPES.NVarChar, value: v("Comments") },
-    { name: "EscalationPercent", type: TYPES.Decimal, value: v("EscalationPercent") },
-    { name: "EscalationSchedule", type: TYPES.NVarChar, value: v("EscalationSchedule") },
-    { name: "BusinessTenanciesAct", type: TYPES.NVarChar, value: v("BusinessTenanciesAct") },
+    {
+      name: "EscalationPercent",
+      type: TYPES.Decimal,
+      value: v("EscalationPercent"),
+      options: DECIMAL_OPTS.EscalationPercent,
+    },
+    {
+      name: "EscalationSchedule",
+      type: TYPES.NVarChar,
+      value: v("EscalationSchedule"),
+    },
+    {
+      name: "BusinessTenanciesAct",
+      type: TYPES.NVarChar,
+      value: v("BusinessTenanciesAct"),
+    },
     { name: "CreatedById", type: TYPES.NVarChar, value: caller.id },
     { name: "CreatedByName", type: TYPES.NVarChar, value: caller.name },
     { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
@@ -905,18 +1129,26 @@ async function upsertOccupancy(
   let body: Record<string, any> | null = null;
   try {
     body = (await request.json()) as Record<string, any>;
-    const {
-      OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm, Notes,
-    } = body;
+    const { OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm, Notes } =
+      body;
 
     if (typeof OccupancyId !== "string" || !OccupancyId) {
-      return { status: 400, jsonBody: { error: "OccupancyId (string UUID) required" } };
+      return {
+        status: 400,
+        jsonBody: { error: "OccupancyId (string UUID) required" },
+      };
     }
     if (typeof TenantId !== "number" || typeof BuildingId !== "number") {
-      return { status: 400, jsonBody: { error: "TenantId + BuildingId required" } };
+      return {
+        status: 400,
+        jsonBody: { error: "TenantId + BuildingId required" },
+      };
     }
     if (typeof Level !== "string" || typeof Area !== "string") {
-      return { status: 400, jsonBody: { error: "Level + Area (strings) required" } };
+      return {
+        status: 400,
+        jsonBody: { error: "Level + Area (strings) required" },
+      };
     }
     if (typeof SizeSqm !== "number" || !Number.isFinite(SizeSqm)) {
       return { status: 400, jsonBody: { error: "SizeSqm (number) required" } };
@@ -927,14 +1159,13 @@ async function upsertOccupancy(
     // Fetch tenant rent fields up-front so the history snapshot is consistent.
     const tenantRows = await executeQuery(
       connection,
-      `SELECT RentPerAnnum, RentPerSqm FROM dbo.Tenants WHERE TenantId = @TenantId`,
+      `SELECT RentPerAnnum FROM dbo.Tenants WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: TenantId }],
     );
     if (tenantRows.length === 0) {
       return { status: 404, jsonBody: { error: "Tenant not found" } };
     }
     const rentPerAnnum = tenantRows[0].RentPerAnnum as number | null;
-    const rentPerSqm = tenantRows[0].RentPerSqm as number | null;
 
     // Effective ID we'll write under. Updated inside the transaction once we
     // know whether a row already exists at this cell; defaults to the
@@ -979,7 +1210,12 @@ async function upsertOccupancy(
             { name: "BuildingId", type: TYPES.Int, value: BuildingId },
             { name: "Level", type: TYPES.NVarChar, value: Level },
             { name: "Area", type: TYPES.NVarChar, value: Area },
-            { name: "SizeSqm", type: TYPES.Decimal, value: SizeSqm },
+            {
+              name: "SizeSqm",
+              type: TYPES.Decimal,
+              value: SizeSqm,
+              options: DECIMAL_OPTS.SizeSqm,
+            },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
           ],
         );
@@ -999,7 +1235,12 @@ async function upsertOccupancy(
             { name: "TenantId", type: TYPES.Int, value: TenantId },
             { name: "Level", type: TYPES.NVarChar, value: Level },
             { name: "Area", type: TYPES.NVarChar, value: Area },
-            { name: "SizeSqm", type: TYPES.Decimal, value: SizeSqm },
+            {
+              name: "SizeSqm",
+              type: TYPES.Decimal,
+              value: SizeSqm,
+              options: DECIMAL_OPTS.SizeSqm,
+            },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
           ],
         );
@@ -1009,27 +1250,45 @@ async function upsertOccupancy(
       // job on top later if the table grows uncomfortably).
       const historyId = randomUuid();
       const snapshot = JSON.stringify({
-        OccupancyId: effectiveOccupancyId, TenantId, BuildingId, Level, Area, SizeSqm,
-        Notes, RentPerAnnum: rentPerAnnum,
-        RentPerSqm: rentPerSqm,
+        OccupancyId: effectiveOccupancyId,
+        TenantId,
+        BuildingId,
+        Level,
+        Area,
+        SizeSqm,
+        Notes,
+        RentPerAnnum: rentPerAnnum,
       });
       const today = new Date().toISOString().slice(0, 10);
       await executeQuery(
         connection,
         `INSERT INTO dbo.TenantOccupancyHistory (
             HistoryId, OccupancyId, TenantId, EffectiveFrom,
-            SizeSqm, RentPerAnnum, RentPerSqm, Snapshot
+            SizeSqm, RentPerAnnum, Snapshot
          )
          VALUES (@HistoryId, @OccupancyId, @TenantId, @EffectiveFrom,
-                 @SizeSqm, @RentPerAnnum, @RentPerSqm, @Snapshot)`,
+                 @SizeSqm, @RentPerAnnum, @Snapshot)`,
         [
           { name: "HistoryId", type: TYPES.NVarChar, value: historyId },
-          { name: "OccupancyId", type: TYPES.NVarChar, value: effectiveOccupancyId },
+          {
+            name: "OccupancyId",
+            type: TYPES.NVarChar,
+            value: effectiveOccupancyId,
+          },
           { name: "TenantId", type: TYPES.Int, value: TenantId },
           { name: "EffectiveFrom", type: TYPES.Date, value: today },
-          { name: "SizeSqm", type: TYPES.Decimal, value: SizeSqm },
-          { name: "RentPerAnnum", type: TYPES.Decimal, value: rentPerAnnum },
-          { name: "RentPerSqm", type: TYPES.Decimal, value: rentPerSqm },
+          {
+            name: "SizeSqm",
+            type: TYPES.Decimal,
+            value: SizeSqm,
+            options: DECIMAL_OPTS.SizeSqm,
+          },
+          {
+            name: "RentPerAnnum",
+            type: TYPES.Decimal,
+            value: rentPerAnnum,
+            options: DECIMAL_OPTS.RentPerAnnum,
+          },
           { name: "Snapshot", type: TYPES.NVarChar, value: snapshot },
         ],
       );
@@ -1046,7 +1305,10 @@ async function upsertOccupancy(
        FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: effectiveOccupancyId }],
     );
-    return { status: 200, jsonBody: { occupancy: occupancyRowToApi(stored[0]) } };
+    return {
+      status: 200,
+      jsonBody: { occupancy: occupancyRowToApi(stored[0]) },
+    };
   } catch (error: any) {
     const formatted = formatSqlError(error);
     context.error("upsertOccupancy failed", {
@@ -1081,7 +1343,10 @@ async function deleteOccupancy(
       `DELETE FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: body.OccupancyId }],
     );
-    return { status: 200, jsonBody: { deleted: true, occupancyId: body.OccupancyId } };
+    return {
+      status: 200,
+      jsonBody: { deleted: true, occupancyId: body.OccupancyId },
+    };
   } catch (error: any) {
     context.error("deleteOccupancy failed:", error.message);
     return errorResponse("Delete occupancy failed", error.message);
@@ -1112,13 +1377,22 @@ async function createTenantNote(
       return { status: 400, jsonBody: { error: "TenantId required" } };
     }
     if (!["tenant", "occupancy", "field"].includes(AnchorKind)) {
-      return { status: 400, jsonBody: { error: "AnchorKind must be tenant|occupancy|field" } };
+      return {
+        status: 400,
+        jsonBody: { error: "AnchorKind must be tenant|occupancy|field" },
+      };
     }
     if (AnchorKind === "occupancy" && typeof OccupancyId !== "string") {
-      return { status: 400, jsonBody: { error: "OccupancyId required for occupancy anchor" } };
+      return {
+        status: 400,
+        jsonBody: { error: "OccupancyId required for occupancy anchor" },
+      };
     }
     if (AnchorKind === "field" && typeof FieldKey !== "string") {
-      return { status: 400, jsonBody: { error: "FieldKey required for field anchor" } };
+      return {
+        status: 400,
+        jsonBody: { error: "FieldKey required for field anchor" },
+      };
     }
     if (typeof Body !== "string" || !Body.trim()) {
       return { status: 400, jsonBody: { error: "Body (string) required" } };
@@ -1136,7 +1410,11 @@ async function createTenantNote(
         { name: "NoteId", type: TYPES.NVarChar, value: NoteId },
         { name: "TenantId", type: TYPES.Int, value: TenantId },
         { name: "AnchorKind", type: TYPES.NVarChar, value: AnchorKind },
-        { name: "OccupancyId", type: TYPES.NVarChar, value: OccupancyId ?? null },
+        {
+          name: "OccupancyId",
+          type: TYPES.NVarChar,
+          value: OccupancyId ?? null,
+        },
         { name: "FieldKey", type: TYPES.NVarChar, value: FieldKey ?? null },
         { name: "Body", type: TYPES.NVarChar, value: Body },
         { name: "CreatedById", type: TYPES.NVarChar, value: caller.id },
@@ -1263,13 +1541,21 @@ async function applyRentReview(
   try {
     const body = (await request.json()) as Record<string, any>;
     const {
-      ReviewId, NewRentPerAnnum, IncreasePercent, Source,
-      CpiBaseValue, CpiCurrentValue, CpiIndexUsed,
+      ReviewId,
+      NewRentPerAnnum,
+      IncreasePercent,
+      Source,
+      CpiBaseValue,
+      CpiCurrentValue,
+      CpiIndexUsed,
     } = body;
     if (typeof ReviewId !== "string" || !ReviewId) {
       return { status: 400, jsonBody: { error: "ReviewId required" } };
     }
-    if (typeof NewRentPerAnnum !== "number" || !Number.isFinite(NewRentPerAnnum)) {
+    if (
+      typeof NewRentPerAnnum !== "number" ||
+      !Number.isFinite(NewRentPerAnnum)
+    ) {
       return { status: 400, jsonBody: { error: "NewRentPerAnnum required" } };
     }
 
@@ -1320,15 +1606,48 @@ async function applyRentReview(
          WHERE ReviewId = @Id`,
         [
           { name: "Id", type: TYPES.NVarChar, value: ReviewId },
-          { name: "OldRent", type: TYPES.Decimal, value: oldRent },
-          { name: "NewRent", type: TYPES.Decimal, value: NewRentPerAnnum },
-          { name: "IncreasePercent", type: TYPES.Decimal, value: computedIncrease },
-          { name: "CpiIndexUsed", type: TYPES.NVarChar, value: CpiIndexUsed ?? null },
-          { name: "CpiBaseValue", type: TYPES.Decimal, value: CpiBaseValue ?? null },
-          { name: "CpiCurrentValue", type: TYPES.Decimal, value: CpiCurrentValue ?? null },
+          {
+            name: "OldRent",
+            type: TYPES.Decimal,
+            value: oldRent,
+            options: DECIMAL_OPTS.OldRentPerAnnum,
+          },
+          {
+            name: "NewRent",
+            type: TYPES.Decimal,
+            value: NewRentPerAnnum,
+            options: DECIMAL_OPTS.NewRentPerAnnum,
+          },
+          {
+            name: "IncreasePercent",
+            type: TYPES.Decimal,
+            value: computedIncrease,
+            options: DECIMAL_OPTS.IncreasePercent,
+          },
+          {
+            name: "CpiIndexUsed",
+            type: TYPES.NVarChar,
+            value: CpiIndexUsed ?? null,
+          },
+          {
+            name: "CpiBaseValue",
+            type: TYPES.Decimal,
+            value: CpiBaseValue ?? null,
+            options: DECIMAL_OPTS.CpiBaseValue,
+          },
+          {
+            name: "CpiCurrentValue",
+            type: TYPES.Decimal,
+            value: CpiCurrentValue ?? null,
+            options: DECIMAL_OPTS.CpiCurrentValue,
+          },
           { name: "CompletedById", type: TYPES.NVarChar, value: caller.id },
           { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
-          { name: "Notes", type: TYPES.NVarChar, value: Source ? `Applied via ${Source}` : null },
+          {
+            name: "Notes",
+            type: TYPES.NVarChar,
+            value: Source ? `Applied via ${Source}` : null,
+          },
         ],
       );
 
@@ -1345,9 +1664,19 @@ async function applyRentReview(
          WHERE TenantId = @TenantId`,
         [
           { name: "TenantId", type: TYPES.Int, value: tenantId },
-          { name: "NewRent", type: TYPES.Decimal, value: NewRentPerAnnum },
+          {
+            name: "NewRent",
+            type: TYPES.Decimal,
+            value: NewRentPerAnnum,
+            options: DECIMAL_OPTS.NewRentPerAnnum,
+          },
           { name: "Today", type: TYPES.Date, value: todayIso },
-          { name: "IncreasePercent", type: TYPES.Decimal, value: computedIncrease },
+          {
+            name: "IncreasePercent",
+            type: TYPES.Decimal,
+            value: computedIncrease,
+            options: DECIMAL_OPTS.IncreasePercent,
+          },
           { name: "NextReview", type: TYPES.Date, value: nextReviewIso },
           { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
           { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
@@ -1395,7 +1724,13 @@ async function getReviewsDue(
     connection = await createConnection(token);
     const where = buildingIdParam ? "WHERE BuildingId = @BuildingId" : "";
     const params = buildingIdParam
-      ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }]
+      ? [
+          {
+            name: "BuildingId",
+            type: TYPES.Int,
+            value: Number(buildingIdParam),
+          },
+        ]
       : [];
     const rows = await executeQuery(
       connection,
@@ -1416,6 +1751,450 @@ async function getReviewsDue(
   }
 }
 
+// ── GET /api/getPortfolioOccupancy ───────────────────────────────────────────
+// One row per building with total SQM, active SQM and occupancy %. Active =
+// tenants in status 'current' or 'holdover' (mirrors TenancySummary on the
+// register page). Buildings with no tenant rows are omitted; the client falls
+// back to 0 / no value for those.
+
+async function getPortfolioOccupancy(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT t.BuildingId,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
+                       THEN o.SizeSqm ELSE 0 END) AS ActiveSqm,
+              SUM(o.SizeSqm) AS TotalSqm
+       FROM dbo.TenantOccupancies o
+       INNER JOIN dbo.Tenants t ON t.TenantId = o.TenantId
+       GROUP BY t.BuildingId`,
+      [],
+    );
+
+    const buildings = rows.map((r) => {
+      const totalSqm = Number(r.TotalSqm) || 0;
+      const activeSqm = Number(r.ActiveSqm) || 0;
+      return {
+        activeSqm,
+        buildingId: r.BuildingId as number,
+        occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
+        totalSqm,
+      };
+    });
+
+    return { status: 200, jsonBody: { buildings } };
+  } catch (error: any) {
+    context.error("getPortfolioOccupancy failed:", error.message);
+    return errorResponse("Failed to fetch portfolio occupancy", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertTenantIncentive ──────────────────────────────────────────
+// Adds a new incentive or replaces an existing one (by id) on the tenant's
+// Incentives JSON column. Role-gated (Admin, facilities), rate-limited per
+// caller OID, and validated before any SQL runs.
+
+const INCENTIVE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+async function loadTenantIncentives(
+  connection: Connection,
+  tenantId: number,
+  buildingId: number,
+): Promise<{ found: false } | { found: true; incentives: TenancyIncentive[] }> {
+  // BuildingId is part of the lookup so a caller can't drift a tenant onto
+  // the wrong building by mistake — the path key the frontend uses always
+  // pairs both, and a mismatch is a bug worth surfacing as 404 rather than
+  // silently writing to the unintended row.
+  const rows = await executeQuery(
+    connection,
+    `SELECT Incentives FROM dbo.Tenants
+     WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+    [
+      { name: "TenantId", type: TYPES.Int, value: tenantId },
+      { name: "BuildingId", type: TYPES.Int, value: buildingId },
+    ],
+  );
+  if (rows.length === 0) return { found: false };
+  return {
+    found: true,
+    incentives: parseIncentives(
+      rows[0].Incentives as string | null | undefined,
+    ),
+  };
+}
+
+async function reloadFullTenant(
+  connection: Connection,
+  tenantId: number,
+): Promise<RegisterTenantApi | null> {
+  // Mirror getRegisterTenant's joined load so callers get the full
+  // tenant payload back from a mutation. We do the cheaper subset (skip
+  // notes/reviews/history) because the frontend re-uses the cached
+  // detail-query response for those and only patches the tenant row.
+  const tenantRows = await executeQuery(
+    connection,
+    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
+    [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
+  );
+  if (tenantRows.length === 0) return null;
+  const occupancyRows = await executeQuery(
+    connection,
+    `SELECT ${OCCUPANCY_COLUMNS} FROM dbo.TenantOccupancies WHERE TenantId = @TenantId
+     ORDER BY Level, Area`,
+    [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
+  );
+  const occupancies = occupancyRows.map(occupancyRowToApi);
+  return tenantRowToApi(tenantRows[0], occupancies, {});
+}
+
+async function upsertTenantIncentive(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`incentive:${caller.id}`, INCENTIVE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  let body: Record<string, any> | null = null;
+  try {
+    body = (await request.json()) as Record<string, any>;
+    const parsed = validateUpsertEnvelope(body);
+    if (!parsed.ok) {
+      return { status: 400, jsonBody: { error: parsed.error } };
+    }
+    const { TenantId, BuildingId, incentive } = parsed;
+
+    connection = await createConnection(token);
+
+    const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
+    if (!loaded.found) {
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant not found for the given BuildingId" },
+      };
+    }
+    const next = upsertIncentive(loaded.incentives, incentive);
+    const nextJson = JSON.stringify(next);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         Incentives = @Incentives,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "Incentives", type: TYPES.NVarChar, value: nextJson },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    context.log("upsertTenantIncentive", {
+      action: "upsertTenantIncentive",
+      actor: caller,
+      incentiveId: incentive.id,
+      noteSummary: incentive.note
+        ? incentive.note.length > 80
+          ? `${incentive.note.slice(0, 77)}…`
+          : incentive.note
+        : undefined,
+      tenantId: TenantId,
+    });
+
+    const tenant = await reloadFullTenant(connection, TenantId);
+    if (!tenant) {
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant disappeared after upsert" },
+      };
+    }
+    return { status: 200, jsonBody: { tenant } };
+  } catch (error: any) {
+    const formatted = formatSqlError(error);
+    context.error("upsertTenantIncentive failed", {
+      error: formatted,
+      payload: summariseBody(body),
+      stack: error?.stack,
+    });
+    return errorResponse("Upsert tenant incentive failed", formatted);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteTenantIncentive ──────────────────────────────────────────
+
+async function deleteTenantIncentive(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`incentive:${caller.id}`, INCENTIVE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  let body: Record<string, any> | null = null;
+  try {
+    body = (await request.json()) as Record<string, any>;
+    const parsed = validateDeleteEnvelope(body);
+    if (!parsed.ok) {
+      return { status: 400, jsonBody: { error: parsed.error } };
+    }
+    const { TenantId, BuildingId, incentiveId } = parsed;
+
+    connection = await createConnection(token);
+
+    const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
+    if (!loaded.found) {
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant not found for the given BuildingId" },
+      };
+    }
+    const next = deleteIncentive(loaded.incentives, incentiveId);
+    if (next === NOT_FOUND) {
+      return { status: 404, jsonBody: { error: "Incentive not found" } };
+    }
+    const nextJson = JSON.stringify(next);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         Incentives = @Incentives,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "Incentives", type: TYPES.NVarChar, value: nextJson },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    context.log("deleteTenantIncentive", {
+      action: "deleteTenantIncentive",
+      actor: caller,
+      incentiveId,
+      tenantId: TenantId,
+    });
+
+    const tenant = await reloadFullTenant(connection, TenantId);
+    if (!tenant) {
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant disappeared after delete" },
+      };
+    }
+    return { status: 200, jsonBody: { tenant } };
+  } catch (error: any) {
+    const formatted = formatSqlError(error);
+    context.error("deleteTenantIncentive failed", {
+      error: formatted,
+      payload: summariseBody(body),
+      stack: error?.stack,
+    });
+    return errorResponse("Delete tenant incentive failed", formatted);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertScheduledRateStep ────────────────────────────────────────
+
+const STEP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+async function upsertScheduledRateStep(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`step:${caller.id}`, STEP_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateUpsertStepEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, step } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT ScheduledRateSteps FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) {
+      return {
+        status: 404,
+        jsonBody: { error: "Tenant not found for the given BuildingId" },
+      };
+    }
+    const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
+    const next = upsertStep(existing, step);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         ScheduledRateSteps = @ScheduledRateSteps,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        {
+          name: "ScheduledRateSteps",
+          type: TYPES.NVarChar,
+          value: JSON.stringify(next),
+        },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { steps: next } };
+  } catch (error: any) {
+    context.error("upsertScheduledRateStep failed:", error.message);
+    return errorResponse("Failed to upsert scheduled rate step", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteScheduledRateStep ────────────────────────────────────────
+
+async function deleteScheduledRateStep(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`step:${caller.id}`, STEP_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateDeleteStepEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, stepId } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT ScheduledRateSteps FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) {
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+    }
+    const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
+    const next = deleteStep(existing, stepId);
+    if (next === STEP_NOT_FOUND) {
+      return { status: 404, jsonBody: { error: "Step not found" } };
+    }
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         ScheduledRateSteps = @ScheduledRateSteps,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        {
+          name: "ScheduledRateSteps",
+          type: TYPES.NVarChar,
+          value: JSON.stringify(next),
+        },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { steps: next } };
+  } catch (error: any) {
+    context.error("deleteScheduledRateStep failed:", error.message);
+    return errorResponse("Failed to delete scheduled rate step", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── UUID helper (fallback when crypto.randomUUID isn't available) ────────────
 
 function randomUuid(): string {
@@ -1425,15 +2204,820 @@ function randomUuid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// ── Carparks (m053) ──────────────────────────────────────────────────────────
+// Building-level bays allocated to a register tenant OR to one of the
+// non-tenant sentinel kinds (vacant / notAvailable / randazzo). Rent is
+// canonicalised as RentPerAnnum; the UI derives monthly/weekly.
+
+type CarparkAllocationKind = "tenant" | "vacant" | "notAvailable" | "randazzo";
+
+interface CarparkApi {
+  allocationKind: CarparkAllocationKind;
+  buildingId: number;
+  carparkId: string;
+  comments?: string;
+  createdAt: string;
+  identifier: string;
+  rentPerAnnum?: number;
+  tenantId?: number;
+  type: string;
+  updatedAt: string;
+}
+
+const CARPARK_COLUMNS = `
+  CarparkId, BuildingId, Type, Identifier,
+  AllocationKind, TenantId, RentPerAnnum, Comments,
+  CreatedAt, UpdatedAt
+`;
+
+const ALLOCATION_KINDS: ReadonlySet<CarparkAllocationKind> = new Set([
+  "tenant",
+  "vacant",
+  "notAvailable",
+  "randazzo",
+]);
+
+function carparkRowToApi(row: SqlRow): CarparkApi {
+  return {
+    allocationKind: row.AllocationKind as CarparkAllocationKind,
+    buildingId: row.BuildingId as number,
+    carparkId: row.CarparkId as string,
+    comments: asStr(row.Comments),
+    createdAt: toIso(row.CreatedAt),
+    identifier: row.Identifier as string,
+    rentPerAnnum: asNum(row.RentPerAnnum),
+    tenantId: asNum(row.TenantId),
+    type: row.Type as string,
+    updatedAt: toIso(row.UpdatedAt),
+  };
+}
+
+interface CarparkUpsertRow {
+  CarparkId: string;
+  BuildingId: number;
+  Type: string;
+  Identifier: string;
+  AllocationKind: CarparkAllocationKind;
+  TenantId: number | null;
+  RentPerAnnum: number | null;
+  Comments: string | null;
+}
+
+// Pull a single carpark payload out of an arbitrary body. Used by both
+// upsertCarpark (one row) and upsertCarparksBulk (many rows) — keeps
+// validation consistent across the two routes.
+function parseCarparkPayload(
+  raw: Record<string, any>,
+): { error: string } | { value: CarparkUpsertRow } {
+  const {
+    CarparkId,
+    BuildingId,
+    Type,
+    Identifier,
+    AllocationKind,
+    TenantId,
+    RentPerAnnum,
+    Comments,
+  } = raw;
+
+  if (typeof CarparkId !== "string" || !CarparkId) {
+    return { error: "CarparkId (string UUID) required" };
+  }
+  if (typeof BuildingId !== "number") return { error: "BuildingId required" };
+  if (typeof Type !== "string" || !Type) return { error: "Type required" };
+  if (typeof Identifier !== "string" || !Identifier.trim()) {
+    return { error: "Identifier required" };
+  }
+  if (
+    typeof AllocationKind !== "string" ||
+    !ALLOCATION_KINDS.has(AllocationKind as CarparkAllocationKind)
+  ) {
+    return {
+      error:
+        "AllocationKind must be one of tenant/vacant/notAvailable/randazzo",
+    };
+  }
+  const kind = AllocationKind as CarparkAllocationKind;
+  if (kind === "tenant" && typeof TenantId !== "number") {
+    return { error: "TenantId required when AllocationKind = tenant" };
+  }
+  if (kind !== "tenant" && TenantId != null) {
+    return { error: "TenantId must be null when AllocationKind != tenant" };
+  }
+  if (
+    RentPerAnnum != null &&
+    (typeof RentPerAnnum !== "number" || !Number.isFinite(RentPerAnnum))
+  ) {
+    return { error: "RentPerAnnum must be a finite number or null" };
+  }
+
+  return {
+    value: {
+      CarparkId,
+      BuildingId,
+      Type,
+      Identifier: Identifier.trim(),
+      AllocationKind: kind,
+      TenantId: kind === "tenant" ? (TenantId as number) : null,
+      RentPerAnnum: RentPerAnnum != null ? (RentPerAnnum as number) : null,
+      Comments:
+        typeof Comments === "string" && Comments.length > 0 ? Comments : null,
+    },
+  };
+}
+
+async function upsertCarparkRow(
+  connection: Connection,
+  v: CarparkUpsertRow,
+): Promise<CarparkApi> {
+  // Look up by either the client CarparkId OR the unique (BuildingId,
+  // Identifier) — mirrors the upsertOccupancy pattern so re-imports with a
+  // fresh client UUID find the existing bay rather than collide on the index.
+  const existing = await executeQuery(
+    connection,
+    `SELECT TOP 1 CarparkId
+     FROM dbo.Carparks
+     WHERE CarparkId = @Id
+        OR (BuildingId = @BuildingId AND Identifier = @Identifier)
+     ORDER BY CASE WHEN CarparkId = @Id THEN 0 ELSE 1 END`,
+    [
+      { name: "Id", type: TYPES.NVarChar, value: v.CarparkId },
+      { name: "BuildingId", type: TYPES.Int, value: v.BuildingId },
+      { name: "Identifier", type: TYPES.NVarChar, value: v.Identifier },
+    ],
+  );
+  const effectiveId =
+    existing.length > 0 ? (existing[0].CarparkId as string) : v.CarparkId;
+
+  if (existing.length === 0) {
+    await executeQuery(
+      connection,
+      `INSERT INTO dbo.Carparks (
+          CarparkId, BuildingId, Type, Identifier,
+          AllocationKind, TenantId, RentPerAnnum, Comments
+       )
+       VALUES (@Id, @BuildingId, @Type, @Identifier,
+               @AllocationKind, @TenantId, @RentPerAnnum, @Comments)`,
+      [
+        { name: "Id", type: TYPES.NVarChar, value: effectiveId },
+        { name: "BuildingId", type: TYPES.Int, value: v.BuildingId },
+        { name: "Type", type: TYPES.NVarChar, value: v.Type },
+        { name: "Identifier", type: TYPES.NVarChar, value: v.Identifier },
+        {
+          name: "AllocationKind",
+          type: TYPES.NVarChar,
+          value: v.AllocationKind,
+        },
+        { name: "TenantId", type: TYPES.Int, value: v.TenantId },
+        {
+          name: "RentPerAnnum",
+          type: TYPES.Decimal,
+          value: v.RentPerAnnum,
+          options: DECIMAL_OPTS.RentPerAnnum,
+        },
+        { name: "Comments", type: TYPES.NVarChar, value: v.Comments },
+      ],
+    );
+  } else {
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Carparks SET
+          Type = @Type,
+          Identifier = @Identifier,
+          AllocationKind = @AllocationKind,
+          TenantId = @TenantId,
+          RentPerAnnum = @RentPerAnnum,
+          Comments = @Comments,
+          UpdatedAt = SYSUTCDATETIME()
+       WHERE CarparkId = @Id`,
+      [
+        { name: "Id", type: TYPES.NVarChar, value: effectiveId },
+        { name: "Type", type: TYPES.NVarChar, value: v.Type },
+        { name: "Identifier", type: TYPES.NVarChar, value: v.Identifier },
+        {
+          name: "AllocationKind",
+          type: TYPES.NVarChar,
+          value: v.AllocationKind,
+        },
+        { name: "TenantId", type: TYPES.Int, value: v.TenantId },
+        {
+          name: "RentPerAnnum",
+          type: TYPES.Decimal,
+          value: v.RentPerAnnum,
+          options: DECIMAL_OPTS.RentPerAnnum,
+        },
+        { name: "Comments", type: TYPES.NVarChar, value: v.Comments },
+      ],
+    );
+  }
+
+  const stored = await executeQuery(
+    connection,
+    `SELECT ${CARPARK_COLUMNS} FROM dbo.Carparks WHERE CarparkId = @Id`,
+    [{ name: "Id", type: TYPES.NVarChar, value: effectiveId }],
+  );
+  return carparkRowToApi(stored[0]);
+}
+
+// ── GET /api/getCarparks?buildingId=N ────────────────────────────────────────
+
+async function getCarparks(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const buildingIdRaw = request.query.get("buildingId");
+    const buildingId = buildingIdRaw ? Number(buildingIdRaw) : NaN;
+    if (!Number.isFinite(buildingId)) {
+      return { status: 400, jsonBody: { error: "buildingId required" } };
+    }
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT ${CARPARK_COLUMNS}
+       FROM dbo.Carparks
+       WHERE BuildingId = @BuildingId
+       ORDER BY Identifier`,
+      [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
+    );
+    return {
+      status: 200,
+      jsonBody: { carparks: rows.map(carparkRowToApi) },
+    };
+  } catch (error: any) {
+    context.error("getCarparks failed:", error.message);
+    return errorResponse("Fetch carparks failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertCarpark ──────────────────────────────────────────────────
+
+async function upsertCarpark(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  let body: Record<string, any> | null = null;
+  try {
+    body = (await request.json()) as Record<string, any>;
+    const parsed = parseCarparkPayload(body);
+    if ("error" in parsed) {
+      return { status: 400, jsonBody: { error: parsed.error } };
+    }
+
+    connection = await createConnection(token);
+    const carpark = await upsertCarparkRow(connection, parsed.value);
+    return { status: 200, jsonBody: { carpark } };
+  } catch (error: any) {
+    const formatted = formatSqlError(error);
+    context.error("upsertCarpark failed", {
+      error: formatted,
+      payload: summariseBody(body),
+      stack: error?.stack,
+    });
+    return errorResponse("Upsert carpark failed", formatted);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertCarparksBulk ─────────────────────────────────────────────
+// Bulk-add path for "add 12 bays in one go". Each row is upserted under a
+// single connection — partial failures return per-row results so the UI can
+// surface a "added 10 of 12 — 2 failed" message rather than rolling the
+// whole batch back.
+
+async function upsertCarparksBulk(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  let body: any = null;
+  try {
+    body = await request.json();
+    const rows: any[] = Array.isArray(body?.Carparks) ? body.Carparks : [];
+    if (rows.length === 0) {
+      return {
+        status: 400,
+        jsonBody: { error: "Carparks (non-empty array) required" },
+      };
+    }
+
+    connection = await createConnection(token);
+
+    const results: Array<
+      | { ok: true; carpark: CarparkApi }
+      | { ok: false; error: string; identifier?: string }
+    > = [];
+    for (const row of rows) {
+      const parsed = parseCarparkPayload(row);
+      if ("error" in parsed) {
+        results.push({
+          ok: false,
+          error: parsed.error,
+          identifier: row?.Identifier,
+        });
+        continue;
+      }
+      try {
+        const carpark = await upsertCarparkRow(connection, parsed.value);
+        results.push({ ok: true, carpark });
+      } catch (err: any) {
+        results.push({
+          ok: false,
+          error: formatSqlError(err),
+          identifier: parsed.value.Identifier,
+        });
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    return {
+      status: 200,
+      jsonBody: {
+        results,
+        successCount: okCount,
+        failureCount: results.length - okCount,
+      },
+    };
+  } catch (error: any) {
+    const formatted = formatSqlError(error);
+    context.error("upsertCarparksBulk failed", {
+      error: formatted,
+      stack: error?.stack,
+    });
+    return errorResponse("Bulk upsert carparks failed", formatted);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteCarpark ──────────────────────────────────────────────────
+
+async function deleteCarpark(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  let connection;
+  try {
+    const body = (await request.json()) as { CarparkId?: string };
+    if (typeof body.CarparkId !== "string" || !body.CarparkId) {
+      return { status: 400, jsonBody: { error: "CarparkId required" } };
+    }
+    connection = await createConnection(token);
+    await executeQuery(
+      connection,
+      `DELETE FROM dbo.Carparks WHERE CarparkId = @Id`,
+      [{ name: "Id", type: TYPES.NVarChar, value: body.CarparkId }],
+    );
+    return {
+      status: 200,
+      jsonBody: { deleted: true, carparkId: body.CarparkId },
+    };
+  } catch (error: any) {
+    context.error("deleteCarpark failed:", error.message);
+    return errorResponse("Delete carpark failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertCarparkScheduleGroup ─────────────────────────────────────
+
+const GROUP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+async function upsertCarparkScheduleGroup(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`group:${caller.id}`, GROUP_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateUpsertGroupEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, group } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT CarparkScheduleGroups FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0)
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseGroups(
+      rows[0].CarparkScheduleGroups as string | null,
+    );
+    const next = upsertGroup(existing, group);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         CarparkScheduleGroups = @CarparkScheduleGroups,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        {
+          name: "CarparkScheduleGroups",
+          type: TYPES.NVarChar,
+          value: JSON.stringify(next),
+        },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { groups: next } };
+  } catch (error: any) {
+    context.error("upsertCarparkScheduleGroup failed:", error.message);
+    return errorResponse(
+      "Failed to upsert carpark schedule group",
+      error.message,
+    );
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteCarparkScheduleGroup ─────────────────────────────────────
+
+async function deleteCarparkScheduleGroup(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`group:${caller.id}`, GROUP_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateDeleteGroupEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, groupId } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT CarparkScheduleGroups FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0)
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseGroups(
+      rows[0].CarparkScheduleGroups as string | null,
+    );
+    const next = deleteGroup(existing, groupId);
+    if (next === STEP_NOT_FOUND)
+      return { status: 404, jsonBody: { error: "Group not found" } };
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         CarparkScheduleGroups = @CarparkScheduleGroups,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        {
+          name: "CarparkScheduleGroups",
+          type: TYPES.NVarChar,
+          value: JSON.stringify(next),
+        },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { groups: next } };
+  } catch (error: any) {
+    context.error("deleteCarparkScheduleGroup failed:", error.message);
+    return errorResponse(
+      "Failed to delete carpark schedule group",
+      error.message,
+    );
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertMiscFee ───────────────────────────────────────────────────
+
+const MISC_FEE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+async function upsertMiscFeeHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`miscfee:${caller.id}`, MISC_FEE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateUpsertFeeEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, fee } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT MiscFees FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0)
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseMiscFees(rows[0].MiscFees as string | null);
+    const next = upsertMiscFee(existing, fee);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         MiscFees = @MiscFees,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "MiscFees", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { fees: next } };
+  } catch (error: any) {
+    context.error("upsertMiscFee failed:", error.message);
+    return errorResponse("Failed to upsert misc fee", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteMiscFee ───────────────────────────────────────────────────
+
+async function deleteMiscFeeHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`miscfee:${caller.id}`, MISC_FEE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = validateDeleteFeeEnvelope(body);
+    if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const { TenantId, BuildingId, feeId } = parsed;
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT MiscFees FROM dbo.Tenants
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0)
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseMiscFees(rows[0].MiscFees as string | null);
+    const next = deleteMiscFee(existing, feeId);
+    if (next === STEP_NOT_FOUND)
+      return { status: 404, jsonBody: { error: "Fee not found" } };
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         MiscFees = @MiscFees,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "MiscFees", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    return { status: 200, jsonBody: { fees: next } };
+  } catch (error: any) {
+    context.error("deleteMiscFee failed:", error.message);
+    return errorResponse("Failed to delete misc fee", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── Route registration ───────────────────────────────────────────────────────
 
-app.http("getRegisterTenants",   { methods: ["GET"],  authLevel: "anonymous", handler: getRegisterTenants });
-app.http("getRegisterTenant",    { methods: ["GET"],  authLevel: "anonymous", handler: getRegisterTenant });
-app.http("upsertRegisterTenant", { methods: ["POST"], authLevel: "anonymous", handler: upsertRegisterTenant });
-app.http("upsertOccupancy",      { methods: ["POST"], authLevel: "anonymous", handler: upsertOccupancy });
-app.http("deleteOccupancy",      { methods: ["POST"], authLevel: "anonymous", handler: deleteOccupancy });
-app.http("createTenantNote",     { methods: ["POST"], authLevel: "anonymous", handler: createTenantNote });
-app.http("deleteTenantNote",     { methods: ["POST"], authLevel: "anonymous", handler: deleteTenantNote });
-app.http("deleteRegisterTenant", { methods: ["POST"], authLevel: "anonymous", handler: deleteRegisterTenant });
-app.http("applyRentReview",      { methods: ["POST"], authLevel: "anonymous", handler: applyRentReview });
-app.http("getReviewsDue",        { methods: ["GET"],  authLevel: "anonymous", handler: getReviewsDue });
+app.http("getRegisterTenants", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getRegisterTenants,
+});
+app.http("getRegisterTenant", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getRegisterTenant,
+});
+app.http("upsertRegisterTenant", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertRegisterTenant,
+});
+app.http("upsertOccupancy", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertOccupancy,
+});
+app.http("deleteOccupancy", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteOccupancy,
+});
+app.http("createTenantNote", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: createTenantNote,
+});
+app.http("deleteTenantNote", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteTenantNote,
+});
+app.http("deleteRegisterTenant", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteRegisterTenant,
+});
+app.http("applyRentReview", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: applyRentReview,
+});
+app.http("getReviewsDue", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getReviewsDue,
+});
+app.http("getPortfolioOccupancy", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getPortfolioOccupancy,
+});
+app.http("upsertTenantIncentive", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertTenantIncentive,
+});
+app.http("deleteTenantIncentive", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteTenantIncentive,
+});
+app.http("getCarparks", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getCarparks,
+});
+app.http("upsertCarpark", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertCarpark,
+});
+app.http("upsertCarparksBulk", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertCarparksBulk,
+});
+app.http("deleteCarpark", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteCarpark,
+});
+app.http("upsertScheduledRateStep", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertScheduledRateStep,
+});
+app.http("deleteScheduledRateStep", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteScheduledRateStep,
+});
+app.http("upsertCarparkScheduleGroup", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertCarparkScheduleGroup,
+});
+app.http("deleteCarparkScheduleGroup", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteCarparkScheduleGroup,
+});
+app.http("upsertMiscFee", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertMiscFeeHandler,
+});
+app.http("deleteMiscFee", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteMiscFeeHandler,
+});

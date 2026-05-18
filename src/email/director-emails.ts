@@ -17,6 +17,14 @@ export function getDirectorEmails(): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Deep-link to the job modal in the web app. Returns null when APP_BASE_URL
+ *  isn't configured so the email still sends (link line is just omitted). */
+export function buildJobUrl(jobId: number): string | null {
+  const base = (process.env.APP_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  return `${base}/jobs?jobId=${jobId}`;
+}
+
 export interface SendDirectorApprovalArgs {
   connection: Connection;
   jobId: number;
@@ -51,6 +59,10 @@ export async function sendDirectorApprovalEmail(
   const extrasLine = extras.length
     ? `\n${extras.length} additional file${extras.length === 1 ? "" : "s"} attached separately: ${extras.map((e) => e.fileName).join(", ")}.`
     : "";
+  const jobUrl = buildJobUrl(args.jobId);
+  const linkLine = jobUrl
+    ? `Open in Command Centre: ${jobUrl}`
+    : "Open the job in Command Centre to approve or reject.";
   const body =
 `Hi,
 
@@ -63,7 +75,7 @@ ${args.triggeredBy ? `Approved by: ${args.triggeredBy}` : ""}
 
 The full packet (job summary, ${args.stage === "quote" ? "selected quote" : "selected quote, PO, invoice"}, and attachments) is attached as a PDF.${extrasLine}
 
-Open the job in Command Centre to approve or reject.
+${linkLine}
 `;
 
   await graphSendMail(

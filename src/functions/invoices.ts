@@ -164,7 +164,13 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
     const statusId = request.query.get("statusId");
     const jobCode = request.query.get("jobCode");
 
-    let sql = "SELECT * FROM Invoices WHERE 1=1";
+    let sql = `SELECT
+      Id, InvoiceID, InvoiceNumber, WorkRequestID, JobCode,
+      BuildingName, BuildingID, ContractorName, ContractorID,
+      InvoiceAmount, GSTAmount, TotalAmount, InvoiceDate, DateApproved,
+      StatusID, Status, InvoicePDFURL, GLAccountCode,
+      CreatedAt, UpdatedAt
+    FROM Invoices WHERE 1=1`;
     const params: SqlParam[] = [];
 
     if (buildingId) {

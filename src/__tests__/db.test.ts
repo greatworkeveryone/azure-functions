@@ -1,4 +1,3 @@
-import { describe, test } from "node:test";
 import assert from "node:assert";
 import { TYPES } from "tedious";
 import { buildUpdateSet } from "../db";

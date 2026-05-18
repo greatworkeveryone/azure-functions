@@ -5,10 +5,10 @@
   "main": "dist/functions/*.js",
   "scripts": {
     "prestart": "npm run build",
-    "start": "func start",
+    "start": "npx func start",
     "build": "tsc && cp src/openapi.json dist/openapi.json",
     "watch": "tsc -w",
-    "test": "tsc && node --test dist/__tests__/*.test.js",
+    "test": "tsc && npx jest",
     "lint": "eslint src/"
   },
   "dependencies": {
@@ -18,13 +18,13 @@
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.18.0",
     "tedious": "^18.0.0",
+    "typescript": "^5.5.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "azure-functions-core-tools": "^4.0.0",
-    "eslint": "^9.0.0",
-    "typescript": "^5.5.0"
+    "eslint": "^9.0.0"
   }
 }

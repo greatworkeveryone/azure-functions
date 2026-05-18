@@ -14,19 +14,7 @@ import { closeConnection, createConnection, executeQuery } from "../db";
 import { extractToken, errorResponse, unauthorizedResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { uploadAttachment } from "../mybuildings-client";
-
-const MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
-const ALLOWED_PREFIXES = [
-  "image/",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.",
-  "text/plain",
-];
-
-function isAllowedContentType(contentType: string): boolean {
-  return ALLOWED_PREFIXES.some((p) => contentType.startsWith(p));
-}
+import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
 // ── POST /api/uploadAttachment (multipart/form-data) ─────────────────────────
 // Accepts either `jobId` (preferred — new attachments belong to a Job) or

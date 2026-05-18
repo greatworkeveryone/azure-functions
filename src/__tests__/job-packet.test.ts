@@ -1,4 +1,3 @@
-import { describe, test } from "node:test";
 import assert from "node:assert";
 import { buildJobPacket } from "../pdf/job-packet";
 

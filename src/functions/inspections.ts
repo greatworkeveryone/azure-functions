@@ -23,9 +23,9 @@ import {
   unauthorizedResponse,
 } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 
 const EDIT_INSPECTIONS_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 

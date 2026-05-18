@@ -552,20 +552,104 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         throw err;
       }
     } else {
-      // UPDATE — single statement, no transaction needed.
+      // UPDATE — wrap the diff-snapshot SELECT, the UPDATE, and any audit
+      // JobEvents INSERTs in one transaction so the audit trail can't drift
+      // from the underlying Jobs row. Frontend used to fire these audit events
+      // post-hoc via addJobEvent; doing it here keeps them atomic.
       const setClause = Object.keys(fields).map((c) => `${c}=@${c}`).join(", ");
       params.push({ name: "JobID", type: TYPES.Int, value: JobID });
-      const result = await executeQuery(
-        connection,
-        `UPDATE Jobs SET ${setClause}, LastModifiedDate=SYSUTCDATETIME()
-         OUTPUT INSERTED.JobID
-         WHERE JobID = @JobID;`,
-        params,
-      );
-      if (result.length === 0) {
-        return { status: 404, jsonBody: { error: "Job not found" } };
+
+      await beginTransaction(connection);
+      try {
+        // Snapshot the columns we audit before the UPDATE rewrites them.
+        const previousRows = await executeQuery(
+          connection,
+          "SELECT Status, AssignedTo, AwaitingRole FROM Jobs WHERE JobID = @JobID",
+          [{ name: "JobID", type: TYPES.Int, value: JobID }],
+        );
+        const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
+
+        const result = await executeQuery(
+          connection,
+          `UPDATE Jobs SET ${setClause}, LastModifiedDate=SYSUTCDATETIME()
+           OUTPUT INSERTED.JobID
+           WHERE JobID = @JobID;`,
+          params,
+        );
+        if (result.length === 0) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 404, jsonBody: { error: "Job not found" } };
+        }
+        newJobId = result[0].JobID as number;
+
+        // Diff the three audit-worthy fields and INSERT a JobEvents row per
+        // change. Mirrors the audit trail the frontend used to write via
+        // addJobEvent on success. Only fields explicitly present on the
+        // payload count — an omitted field is "no change", not a clear.
+        if (previous) {
+          const caller = callerFromToken(token);
+          const newStatus = fields.Status as string | null | undefined;
+          const newAssignedTo = fields.AssignedTo as string | null | undefined;
+          const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
+
+          if (newStatus !== undefined && newStatus !== previous.Status) {
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewStatus)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                { name: "Text", type: TYPES.NVarChar, value: `Status: ${previous.Status} → ${newStatus}` },
+                { name: "EventType", type: TYPES.NVarChar, value: "status_change" },
+                { name: "NewStatus", type: TYPES.NVarChar, value: newStatus },
+              ],
+            );
+          }
+
+          if (newAssignedTo !== undefined && newAssignedTo !== previous.AssignedTo) {
+            const fromLabel = (previous.AssignedTo as string | null) || "—";
+            const toLabel = newAssignedTo || null;
+            const text = toLabel
+              ? `Reassigned to ${toLabel} (was ${fromLabel})`
+              : `Unassigned (was ${fromLabel})`;
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewAssignee)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewAssignee)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                { name: "Text", type: TYPES.NVarChar, value: text },
+                { name: "EventType", type: TYPES.NVarChar, value: "assignment_change" },
+                { name: "NewAssignee", type: TYPES.NVarChar, value: toLabel },
+              ],
+            );
+          }
+
+          if (newAwaitingRole !== undefined && newAwaitingRole !== previous.AwaitingRole) {
+            const fromLabel = (previous.AwaitingRole as string | null) || "—";
+            const toLabel = newAwaitingRole || "—";
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewAwaitingRole)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewAwaitingRole)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                { name: "Text", type: TYPES.NVarChar, value: `Handoff: ${fromLabel} → ${toLabel}` },
+                { name: "EventType", type: TYPES.NVarChar, value: "awaiting_role_change" },
+                { name: "NewAwaitingRole", type: TYPES.NVarChar, value: newAwaitingRole },
+              ],
+            );
+          }
+        }
+
+        await commitTransaction(connection);
+      } catch (err) {
+        await rollbackTransaction(connection).catch(() => {});
+        throw err;
       }
-      newJobId = result[0].JobID as number;
     }
 
     const stored = await executeQuery(

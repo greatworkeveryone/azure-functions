@@ -82,7 +82,11 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
     const contractorId = request.query.get("contractorId");
     const active = request.query.get("active");
 
-    let sql = "SELECT * FROM Contractors WHERE 1=1";
+    let sql = `SELECT
+      ContractorID, ContractorName, ContractorCategory,
+      ABN, Active, Suspended,
+      EmailAddress, PhoneNumber, MobileNumber
+    FROM Contractors WHERE 1=1`;
     const params: SqlParam[] = [];
 
     if (contractorId) {

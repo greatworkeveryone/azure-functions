@@ -8,6 +8,10 @@ export interface SqlParam {
   name: string;
   type: any;
   value: any;
+  /** Tedious parameter options — e.g. `{ precision: 10, scale: 2 }` for
+   *  DECIMAL columns. Without this, tedious defaults Decimal to scale 0
+   *  and silently truncates fractional values. */
+  options?: { precision?: number; scale?: number; length?: number };
 }
 
 /**
@@ -138,7 +142,7 @@ export function createConnection(token: string): Promise<Connection> {
 export function executeQuery(
   connection: Connection,
   sql: string,
-  params?: { name: string; type: any; value: any }[]
+  params?: SqlParam[]
 ): Promise<SqlRow[]> {
   return new Promise((resolve, reject) => {
     const rows: SqlRow[] = [];
@@ -153,7 +157,7 @@ export function executeQuery(
 
     if (params) {
       for (const param of params) {
-        request.addParameter(param.name, param.type, param.value);
+        request.addParameter(param.name, param.type, param.value, param.options);
       }
     }
 
