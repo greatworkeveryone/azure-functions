@@ -6,11 +6,15 @@ import {
 } from "@azure/functions";
 import * as fs from "fs";
 import * as path from "path";
+import { extractToken, unauthorizedResponse } from "../auth";
 
 async function swaggerUI(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
   return {
     status: 200,
     headers: { "Content-Type": "text/html" },
@@ -38,6 +42,9 @@ async function openApiSpec(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
   const specPath = path.join(__dirname, "..", "openapi.json");
   const spec = fs.readFileSync(specPath, "utf-8");
 

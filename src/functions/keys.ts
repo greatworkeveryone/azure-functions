@@ -14,6 +14,7 @@ import {
   oidFromToken,
 } from "../auth";
 import { uploadBlob, generateReadSasUrl } from "../blob-storage";
+import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
 const BULK_CREATE_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
 const EDIT_KEYS_ROLES   = ["Admin", "facilities", "timesheet_approval_facilities"] as const;
@@ -913,19 +914,31 @@ async function uploadKeyPhoto(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  if (roleCheck) return roleCheck;
 
   try {
     const formData = await request.formData();
     const file = formData.get("photo") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'photo' field required" } };
 
+    const contentType = file.type || "image/jpeg";
+    if (!contentType.startsWith("image/") || contentType === "image/svg+xml") {
+      return { status: 415, jsonBody: { error: "Only image files are accepted for key photos" } };
+    }
+
+    const size = file.size as number;
+    if (size > MAX_SIZE_BYTES) {
+      return { status: 413, jsonBody: { error: `File exceeds ${MAX_SIZE_BYTES / 1024 / 1024} MB limit` } };
+    }
+
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await uploadBlob(buffer, file.name, file.type || "image/jpeg", "keys");
-    const url = generateReadSasUrl(result.blobName, 7 * 24 * 60 * 60 * 1000); // 7-day SAS for photo preview
+    const result = await uploadBlob(buffer, file.name, contentType, "keys");
+    const url = generateReadSasUrl(result.blobName, 7 * 24 * 60 * 60 * 1000);
     return { status: 200, jsonBody: { blobName: result.blobName, url } };
   } catch (error: any) {
     context.error("uploadKeyPhoto failed:", error.message);
-    return errorResponse("Failed to upload photo", error.message);
+    return errorResponse("Failed to upload photo");
   }
 }
 

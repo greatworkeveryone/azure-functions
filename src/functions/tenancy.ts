@@ -60,6 +60,7 @@ import {
   parseGroups,
   parseMiscFees,
   parseSteps,
+  resolveScheduleAnnual,
   ScheduledRateStep,
   StepDiff,
   upsertGroup,
@@ -72,6 +73,7 @@ import {
   validateUpsertGroupEnvelope,
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
+import { resolveActivePlannerTasks } from "../planner";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -101,6 +103,23 @@ const DECIMAL_OPTS = {
 interface UserRef {
   id: string;
   name: string;
+}
+
+function buildPlannerTaskTitle(
+  triggerType: string,
+  leadTimeDays: number,
+  displayName: string,
+): string {
+  switch (triggerType) {
+    case "lease_expiry":
+      return `Lease expiry — ${displayName} (${leadTimeDays} days)`;
+    case "option_notice":
+      return `Option deadline — ${displayName} (${leadTimeDays} days)`;
+    case "rent_review":
+      return `Rent review — ${displayName} (${leadTimeDays} days)`;
+    default:
+      return `Reminder — ${displayName}`;
+  }
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -359,12 +378,22 @@ function tenantRowToApi(
   );
   const rentPerAnnum = asNum(row.RentPerAnnum);
 
-  // rentPerAnnum is the source of truth. costPerSqm and monthlyRental are
-  // derived from it for display only.
-  const effectiveRentPerAnnum = rentPerAnnum ?? 0;
-  const monthlyRental = effectiveRentPerAnnum / 12;
+  // Parse steps first so we can derive the schedule-aware effective rent.
+  // rentPerAnnum is the stored base; effectiveRentPerAnnum follows the active
+  // schedule row when one exists, falling back to the stored value.
+  const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
+  const today = new Date().toISOString().slice(0, 10);
+  const effectiveRentPerAnnum = resolveScheduleAnnual(
+    steps,
+    rentPerAnnum ?? 0,
+    totalSizeSqm,
+    today,
+  );
+  const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
-    totalSizeSqm > 0 ? effectiveRentPerAnnum / totalSizeSqm : 0;
+    totalSizeSqm > 0
+      ? Math.round((effectiveRentPerAnnum / totalSizeSqm) * 100) / 100
+      : 0;
 
   const expiryIso = toIsoDate(row.Expiry);
   let daysToExpiry: number | undefined;
@@ -407,9 +436,7 @@ function tenantRowToApi(
     fixedReviewPercent: asNum(row.FixedReviewPercent),
     idNo: asStr(row.IdNo),
     incentives: parseIncentives(row.Incentives as string | null | undefined),
-    scheduledRateSteps: parseSteps(
-      row.ScheduledRateSteps as string | null | undefined,
-    ),
+    scheduledRateSteps: steps,
     carparkScheduleGroups: parseGroups(
       row.CarparkScheduleGroups as string | null | undefined,
     ),
@@ -676,6 +703,8 @@ async function getRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
 
   const tenantIdRaw = request.query.get("tenantId");
   if (!tenantIdRaw) {
@@ -752,6 +781,15 @@ async function getRegisterTenant(
        ORDER BY ChangedAt DESC`,
       tenantIdParam,
     );
+    const plannerTaskRows = await executeQuery(
+      connection,
+      `SELECT Id, TriggerType, LeadTimeDays, PlannerTaskId, DueDate,
+              Status, CreatedAt, ResolvedAt
+       FROM dbo.PlannerTasks
+       WHERE EntityType = 'tenant' AND EntityId = @TenantId
+       ORDER BY CreatedAt DESC`,
+      tenantIdParam,
+    );
 
     const occupancies = occupancyRows.map(occupancyRowToApi);
     const notes = noteRows.map(noteRowToApi);
@@ -770,8 +808,26 @@ async function getRegisterTenant(
     }
 
     const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor);
+    const displayName = (tenant as any).tradingName ?? (tenant as any).legalName;
+    const plannerTasks = plannerTaskRows.map((r) => {
+      const triggerType = r.TriggerType as string;
+      const leadTimeDays = r.LeadTimeDays as number;
+      const title = buildPlannerTaskTitle(triggerType, leadTimeDays, displayName);
+      return {
+        id: r.Id as number,
+        triggerType,
+        leadTimeDays,
+        title,
+        dueDate: r.DueDate
+          ? (r.DueDate as Date).toISOString().slice(0, 10)
+          : null,
+        status: r.Status as string,
+        createdAt: (r.CreatedAt as Date).toISOString(),
+        resolvedAt: r.ResolvedAt ? (r.ResolvedAt as Date).toISOString() : null,
+      };
+    });
     const detailBody = {
-      tenant: { ...tenant, history, notes, reviews, rentScheduleChangeLog },
+      tenant: { ...tenant, history, notes, reviews, rentScheduleChangeLog, plannerTasks },
     };
     setCachedTenantDetail(tenantId, row.BuildingId as number, detailBody);
     return { status: 200, jsonBody: detailBody };
@@ -969,6 +1025,18 @@ async function upsertRegisterTenant(
       };
     }
     invalidateTenantAndBuilding(resultId, stored[0].BuildingId as number);
+    const newStatus = body?.Status as string | undefined;
+    const expiryChanged = Object.prototype.hasOwnProperty.call(body, "Expiry");
+    if (newStatus === "vacated" || expiryChanged) {
+      const triggerTypes: Array<"lease_expiry" | "option_notice"> = [
+        "lease_expiry",
+        "option_notice",
+      ];
+      resolveActivePlannerTasks("tenant", resultId, triggerTypes).catch(
+        (err: unknown) =>
+          context.warn("plannerResolve (upsertRegisterTenant):", err instanceof Error ? err.message : String(err)),
+      );
+    }
     return {
       status: 200,
       jsonBody: { tenant: tenantRowToApi(stored[0], [], {}) },
@@ -1736,6 +1804,9 @@ async function applyRentReview(
     }
 
     invalidateTenant(tenantId);
+    resolveActivePlannerTasks("tenant", tenantId, ["rent_review"]).catch(
+      (err: unknown) => context.warn("plannerResolve (applyRentReview):", err instanceof Error ? err.message : String(err)),
+    );
     return {
       status: 200,
       jsonBody: {

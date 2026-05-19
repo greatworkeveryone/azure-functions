@@ -25,13 +25,15 @@ async function graphNotification(
   const body = (await request.json().catch(() => null)) as { value?: GraphChangeNotification[] } | null;
   const notifications: GraphChangeNotification[] = body?.value ?? [];
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
+  if (!clientState) {
+    context.error("graphNotification: GRAPH_SUBSCRIPTION_CLIENT_STATE is not configured — rejecting all notifications");
+    return { status: 202 };
+  }
 
-  const valid = notifications.filter(
-    (n) => !clientState || n.clientState === clientState,
-  );
+  const valid = notifications.filter((n) => n.clientState === clientState);
 
   if (valid.length === 0) {
-    context.warn("graphNotification: no valid notifications (clientState mismatch?)");
+    context.warn("graphNotification: no valid notifications (clientState mismatch)");
     return { status: 202 };
   }
 

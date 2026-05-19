@@ -406,6 +406,9 @@ async function handleClaimEmailAttachment(
     if (!BlobName || typeof BlobName !== "string") {
       return { status: 400, jsonBody: { error: "BlobName (string) required" } };
     }
+    if (!BlobName.startsWith("emails/")) {
+      return { status: 400, jsonBody: { error: "Invalid attachment reference" } };
+    }
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) required" } };
     }

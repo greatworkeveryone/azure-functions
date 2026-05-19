@@ -12,7 +12,7 @@ interface TokenResponse {
   access_token: string;
 }
 
-async function getGraphToken(): Promise<string> {
+export async function getGraphToken(): Promise<string> {
   const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
   if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
     throw new Error(

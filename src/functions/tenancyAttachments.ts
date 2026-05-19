@@ -9,7 +9,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
-import { extractToken, errorResponse, unauthorizedResponse } from "../auth";
+import { extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
@@ -23,13 +23,15 @@ async function handleUploadTenancyAttachment(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
     const form = await request.formData();
     const file = form.get("file") as unknown as File | null;
     const tenantIdRaw = form.get("tenantId");
-    const uploadedBy = form.get("uploadedBy")?.toString() ?? null;
+    const uploadedBy = oidFromToken(token);
 
     if (!file || typeof (file as any).arrayBuffer !== "function") {
       return { status: 400, jsonBody: { error: "Missing 'file' field in multipart body" } };
@@ -108,6 +110,8 @@ async function handleGetTenancyAttachments(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  if (roleCheck) return roleCheck;
 
   const raw = request.query.get("tenantId");
   if (!raw) {

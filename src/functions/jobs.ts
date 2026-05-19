@@ -20,6 +20,7 @@ import {
 } from "../auth";
 import { buildJobPacket } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
+import { resolveActivePlannerTasks } from "../planner";
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
@@ -1008,6 +1009,13 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       await rollbackTransaction(connection).catch(() => {});
       throw err;
     }
+
+      if (ExpectedProgressDate != null) {
+        resolveActivePlannerTasks("job", JobID, ["job_update_due"]).catch(
+          (err: unknown) =>
+            context.warn("plannerResolve (addJobEvent):", err instanceof Error ? err.message : String(err)),
+        );
+      }
 
     const eventRow = await executeQuery(
       connection,

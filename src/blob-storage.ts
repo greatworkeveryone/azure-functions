@@ -125,3 +125,38 @@ export async function uploadPurchaseOrderPdf(
   });
   return { blobName, url: blockBlob.url };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public blob helpers for vacancy images.
+// Blobs in this container are publicly readable without SAS tokens so that
+// WordPress can reference the URLs directly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VACANCIES_CONTAINER = "vacancies";
+
+async function getPublicContainerClient() {
+  const container = getServiceClient().getContainerClient(VACANCIES_CONTAINER);
+  await container.createIfNotExists({ access: "blob" });
+  return container;
+}
+
+export async function uploadPublicBlob(
+  buffer: Buffer,
+  originalName: string,
+  contentType: string,
+  keyPrefix: string,
+): Promise<{ blobName: string; url: string }> {
+  const container = await getPublicContainerClient();
+  const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
+  const blobName = `${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`;
+  const blockBlob = container.getBlockBlobClient(blobName);
+  await blockBlob.uploadData(buffer, {
+    blobHTTPHeaders: { blobContentType: contentType },
+  });
+  return { blobName, url: blockBlob.url };
+}
+
+export async function deletePublicBlob(blobName: string): Promise<void> {
+  const container = await getPublicContainerClient();
+  await container.getBlockBlobClient(blobName).deleteIfExists();
+}

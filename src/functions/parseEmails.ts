@@ -374,14 +374,10 @@ async function adminTriggerEmailParse(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const isDev = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Development";
-
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  if (!isDev) {
-    const roleCheck = await requireRole(request, ["Admin"]);
-    if (roleCheck) return roleCheck;
-  }
+  const roleCheck = requireRole(request, ["Admin"]);
+  if (roleCheck) return roleCheck;
 
   // ?reset=true clears all failed/errored emails back into the queue first,
   // so a manual trigger can recover from bugs that burned through retries.

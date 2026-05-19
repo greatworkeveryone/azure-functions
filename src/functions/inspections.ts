@@ -329,52 +329,81 @@ async function getInspections(
 
     const inspectionIds = inspectionRows.map((r) => r.Id as number);
 
-    // Pull just the structural counts for the list view — no attachments or
-    // contributors needed; the row only shows level/room/point totals.
+    // Pull structural counts for the list view — three aggregate queries, no
+    // attachments or contributors needed.
+    const idParams = inspectionIds.map((id, idx) => ({ name: `I${idx}`, type: TYPES.Int, value: id }));
+    const idParamList = inspectionIds.map((_, idx) => `@I${idx}`).join(",");
+
     const levelRows = inspectionIds.length
       ? await executeQuery(
           connection,
-          `SELECT InspectionId, COUNT(*) AS C
-           FROM dbo.InspectionLevels WHERE InspectionId IN (${inspectionIds.map((_, idx) => `@I${idx}`).join(",")})
-           GROUP BY InspectionId`,
-          inspectionIds.map((id, idx) => ({ name: `I${idx}`, type: TYPES.Int, value: id })),
+          `SELECT InspectionId, COUNT(*) AS C FROM dbo.InspectionLevels
+           WHERE InspectionId IN (${idParamList}) GROUP BY InspectionId`,
+          idParams,
         )
       : [];
     const levelCountByInspection = new Map(levelRows.map((r) => [r.InspectionId as number, r.C as number]));
 
+    const roomRows = inspectionIds.length
+      ? await executeQuery(
+          connection,
+          `SELECT l.InspectionId, COUNT(r.Id) AS C
+           FROM dbo.InspectionLevels l
+           LEFT JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
+           WHERE l.InspectionId IN (${idParamList})
+           GROUP BY l.InspectionId`,
+          idParams,
+        )
+      : [];
+    const roomCountByInspection = new Map(roomRows.map((r) => [r.InspectionId as number, r.C as number]));
+
+    const pointRows = inspectionIds.length
+      ? await executeQuery(
+          connection,
+          `SELECT l.InspectionId, COUNT(p.Id) AS C
+           FROM dbo.InspectionLevels l
+           JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
+           JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
+           WHERE l.InspectionId IN (${idParamList})
+             AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+           GROUP BY l.InspectionId`,
+          idParams,
+        )
+      : [];
+    const filledPointCountByInspection = new Map(pointRows.map((r) => [r.InspectionId as number, r.C as number]));
+
     // Build minimal-but-correct shape for list rows. Detail page calls
     // /getInspection for the full nested structure.
-    const inspections: InspectionApi[] = inspectionRows.map((i) => {
-      const out: InspectionApi = {
-        buildingId: i.BuildingId as number,
-        buildingName: i.BuildingName as string,
-        createdAt: toIso(i.CreatedAt),
-        createdBy: { id: i.CreatedById as string, name: i.CreatedByName as string },
-        id: i.Id as number,
-        lastModified: toIso(i.LastModifiedAt),
-        // Synthesise level placeholders so the row's count math still works.
-        // Frontend only counts levels.length for the row badge.
-        levels: Array.from({ length: levelCountByInspection.get(i.Id as number) ?? 0 }, (_, idx) => ({
-          addedAt: toIso(i.CreatedAt),
-          addedBy: [],
-          id: `placeholder-${i.Id}-${idx}`,
-          name: "",
-          rooms: [],
-        })),
-        revision: i.Revision as number,
-        status: i.Status as "complete" | "draft" | "merged",
-        title: (i.Title as string | null) ?? undefined,
-      };
-      if (i.CompletedAt) {
-        out.completedAt = toIso(i.CompletedAt);
-        out.completedBy = {
-          id: (i.CompletedById as string) ?? "",
-          name: (i.CompletedByName as string) ?? "",
-        };
-      }
-      if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
-      return out;
-    });
+    const inspections: (InspectionApi & { _counts: { filledPoints: number; levels: number; rooms: number } })[] =
+      inspectionRows.map((i) => {
+        const iid = i.Id as number;
+        const out = {
+          buildingId: i.BuildingId as number,
+          buildingName: i.BuildingName as string,
+          createdAt: toIso(i.CreatedAt),
+          createdBy: { id: i.CreatedById as string, name: i.CreatedByName as string },
+          id: iid,
+          lastModified: toIso(i.LastModifiedAt),
+          levels: [],
+          revision: i.Revision as number,
+          status: i.Status as "complete" | "draft" | "merged",
+          title: (i.Title as string | null) ?? undefined,
+          _counts: {
+            filledPoints: filledPointCountByInspection.get(iid) ?? 0,
+            levels: levelCountByInspection.get(iid) ?? 0,
+            rooms: roomCountByInspection.get(iid) ?? 0,
+          },
+        } as InspectionApi & { _counts: { filledPoints: number; levels: number; rooms: number } };
+        if (i.CompletedAt) {
+          out.completedAt = toIso(i.CompletedAt);
+          out.completedBy = {
+            id: (i.CompletedById as string) ?? "",
+            name: (i.CompletedByName as string) ?? "",
+          };
+        }
+        if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
+        return out;
+      });
 
     return { status: 200, jsonBody: { count: inspections.length, inspections } };
   } catch (error: any) {
@@ -862,6 +891,72 @@ async function uploadInspectionAttachment(
   }
 }
 
+// ── POST /api/deleteInspection ───────────────────────────────────────────────
+// Body: { InspectionId: number }
+// Only draft inspections can be deleted. Blobs are orphaned (no storage cleanup here).
+
+async function deleteInspection(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
+
+  let connection;
+  try {
+    const body = (await request.json()) as any;
+    const { InspectionId } = body ?? {};
+    if (!InspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
+
+    connection = await createConnection(token);
+
+    const rows = await executeQuery(
+      connection,
+      `SELECT Id, Status FROM dbo.Inspections WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    if (rows[0].Status !== "draft") {
+      return { status: 400, jsonBody: { error: "Only draft inspections can be deleted" } };
+    }
+
+    // Delete non-cascading child rows first.
+    await executeQuery(
+      connection,
+      `DELETE FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+    );
+    await executeQuery(
+      connection,
+      `DELETE FROM dbo.InspectionOperationLog WHERE InspectionId = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+    );
+    await executeQuery(
+      connection,
+      `DELETE FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id OR SourceInspectionId = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+    );
+
+    // Deleting the root row cascades to levels → rooms → points → attachments.
+    await executeQuery(
+      connection,
+      `DELETE FROM dbo.Inspections WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+    );
+
+    context.log(`deleteInspection: deleted inspection ${InspectionId}`);
+    return { status: 200, jsonBody: { deleted: true } };
+  } catch (error: any) {
+    context.error("deleteInspection failed:", error.message);
+    return errorResponse("Failed to delete inspection", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/mergeInspections ───────────────────────────────────────────────
 // Body: { SourceIds: number[], Title?: string }
 
@@ -1315,6 +1410,7 @@ app.http("createInspection",          { authLevel: "anonymous", handler: createI
 app.http("applyInspectionOps",        { authLevel: "anonymous", handler: applyInspectionOps,        methods: ["POST"] });
 app.http("completeInspection",        { authLevel: "anonymous", handler: completeInspection,        methods: ["POST"] });
 app.http("revertInspection",          { authLevel: "anonymous", handler: revertInspection,          methods: ["POST"] });
+app.http("deleteInspection",          { authLevel: "anonymous", handler: deleteInspection,          methods: ["POST"] });
 app.http("uploadInspectionAttachment",{ authLevel: "anonymous", handler: uploadInspectionAttachment,methods: ["POST"] });
 app.http("mergeInspections",          { authLevel: "anonymous", handler: mergeInspections,          methods: ["POST"] });
 app.http("raiseJobsFromInspection",   { authLevel: "anonymous", handler: raiseJobsFromInspection,   methods: ["POST"] });

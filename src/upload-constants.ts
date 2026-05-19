@@ -9,5 +9,6 @@ export const ALLOWED_CONTENT_TYPE_PREFIXES = [
 ];
 
 export function isAllowedContentType(contentType: string): boolean {
+  if (contentType === "image/svg+xml") return false;
   return ALLOWED_CONTENT_TYPE_PREFIXES.some((p) => contentType.startsWith(p));
 }

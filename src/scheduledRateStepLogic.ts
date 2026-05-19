@@ -219,6 +219,103 @@ export function validateDeleteStepEnvelope(body: unknown):
   return { ok: true, TenantId: TenantId as number, BuildingId: BuildingId as number, stepId: stepId as string };
 }
 
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Walks the rate steps and returns the annual rent for the period that contains
+ * `today`. Mirrors the frontend `resolveScheduleRent` so that the backend-computed
+ * `effectiveRentPerAnnum` / `monthlyRental` / `dollarsToExpiry` are schedule-aware.
+ *
+ * Falls back to `fallbackAnnual` when steps is empty or no non-pending row is found.
+ */
+export function resolveScheduleAnnual(
+  steps: ScheduledRateStep[],
+  fallbackAnnual: number,
+  sqm: number,
+  today: string,
+): number {
+  if (steps.length === 0) return fallbackAnnual;
+
+  const sorted = [...steps].sort((a, b) =>
+    a.effectiveFrom.localeCompare(b.effectiveFrom),
+  );
+
+  let running = fallbackAnnual;
+  let runningSqmRate = sqm > 0 ? fallbackAnnual / sqm : 0;
+  let prevCpiValue: number | null = null;
+  let hasPending = false;
+
+  interface ComputedRow {
+    effectiveFrom: string;
+    effectiveTo?: string;
+    annual: number;
+    pending: boolean;
+  }
+
+  const rows: ComputedRow[] = [];
+
+  for (const step of sorted) {
+    const isRate = step.methodKind !== "commencement";
+    const stepSqm = step.sqm ?? sqm;
+
+    if (step.methodKind === "commencement") {
+      hasPending = false;
+      if (step.baseRentPerAnnum != null) {
+        running = step.baseRentPerAnnum;
+        runningSqmRate = stepSqm > 0 ? step.baseRentPerAnnum / stepSqm : 0;
+      }
+    }
+
+    if (step.methodKind === "cpi" && step.cpiValue == null) hasPending = true;
+    if (
+      (step.methodKind === "market" || step.methodKind === "other") &&
+      step.ratePercent === 0
+    ) hasPending = true;
+
+    if (hasPending) {
+      rows.push({
+        annual: 0,
+        effectiveFrom: step.effectiveFrom,
+        effectiveTo: step.effectiveTo,
+        pending: true,
+      });
+      continue;
+    }
+
+    const effectivePrevCpi = step.cpiValuePrev ?? prevCpiValue;
+    const factor =
+      step.methodKind === "cpi" &&
+      step.cpiValue != null &&
+      effectivePrevCpi != null
+        ? step.cpiValue / effectivePrevCpi
+        : 1 + step.ratePercent / 100;
+
+    if (isRate) {
+      runningSqmRate = runningSqmRate * factor;
+      running = runningSqmRate * stepSqm;
+    }
+
+    if (step.cpiValue != null) prevCpiValue = step.cpiValue;
+
+    rows.push({
+      annual: r2(running),
+      effectiveFrom: step.effectiveFrom,
+      effectiveTo: step.effectiveTo,
+      pending: false,
+    });
+  }
+
+  const current =
+    rows.find(
+      (r) =>
+        !r.pending &&
+        r.effectiveFrom <= today &&
+        (r.effectiveTo == null || r.effectiveTo >= today),
+    ) ?? [...rows].reverse().find((r) => !r.pending);
+
+  return current?.annual ?? fallbackAnnual;
+}
+
 export function parseSteps(raw: string | null | undefined): ScheduledRateStep[] {
   if (!raw) return [];
   try {
