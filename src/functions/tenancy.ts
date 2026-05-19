@@ -33,6 +33,14 @@ import {
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
 import {
+  getCachedTenantList,
+  setCachedTenantList,
+  getCachedTenantDetail,
+  setCachedTenantDetail,
+  invalidateTenant,
+  invalidateTenantAndBuilding,
+} from "../tenant-register-cache";
+import {
   deleteIncentive,
   NOT_FOUND,
   parseIncentives,
@@ -46,12 +54,14 @@ import {
   deleteGroup,
   deleteMiscFee,
   deleteStep,
+  diffSteps,
   MiscFee,
   NOT_FOUND as STEP_NOT_FOUND,
   parseGroups,
   parseMiscFees,
   parseSteps,
   ScheduledRateStep,
+  StepDiff,
   upsertGroup,
   upsertMiscFee,
   upsertStep,
@@ -567,6 +577,9 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
+  const cached = getCachedTenantList(buildingId);
+  if (cached) return { status: 200, jsonBody: cached };
+
   let connection;
   try {
     connection = await createConnection(token);
@@ -634,7 +647,9 @@ async function getRegisterTenants(
       );
     });
 
-    return { status: 200, jsonBody: { tenants } };
+    const body = { tenants };
+    setCachedTenantList(buildingId, body);
+    return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
     return errorResponse("Failed to fetch register tenants", error.message);
@@ -670,6 +685,9 @@ async function getRegisterTenant(
   if (!Number.isFinite(tenantId)) {
     return { status: 400, jsonBody: { error: "tenantId must be a number" } };
   }
+
+  const cachedDetail = getCachedTenantDetail(tenantId);
+  if (cachedDetail) return { status: 200, jsonBody: cachedDetail };
 
   let connection;
   try {
@@ -725,11 +743,21 @@ async function getRegisterTenant(
        ORDER BY EffectiveFrom DESC`,
       tenantIdParam,
     );
+    const changeLogRows = await executeQuery(
+      connection,
+      `SELECT ChangeId, TenantId, BuildingId, StepId, ChangeKind,
+              ChangedAt, ChangedById, ChangedByName, StepSnapshot, Diff
+       FROM dbo.RentScheduleChangeLog
+       WHERE TenantId = @TenantId
+       ORDER BY ChangedAt DESC`,
+      tenantIdParam,
+    );
 
     const occupancies = occupancyRows.map(occupancyRowToApi);
     const notes = noteRows.map(noteRowToApi);
     const reviews = reviewRows.map(reviewRowToApi);
     const history = historyRows.map(historyRowToApi);
+    const rentScheduleChangeLog = changeLogRows.map(changeLogRowToApi);
 
     const noteCountByAnchor: Record<string, number> = {};
     for (const n of notes) {
@@ -742,10 +770,11 @@ async function getRegisterTenant(
     }
 
     const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor);
-    return {
-      status: 200,
-      jsonBody: { tenant: { ...tenant, history, notes, reviews } },
+    const detailBody = {
+      tenant: { ...tenant, history, notes, reviews, rentScheduleChangeLog },
     };
+    setCachedTenantDetail(tenantId, row.BuildingId as number, detailBody);
+    return { status: 200, jsonBody: detailBody };
   } catch (error: any) {
     context.error("getRegisterTenant failed:", error.message);
     return errorResponse("Failed to fetch register tenant", error.message);
@@ -939,6 +968,7 @@ async function upsertRegisterTenant(
         jsonBody: { error: "Tenant disappeared after upsert" },
       };
     }
+    invalidateTenantAndBuilding(resultId, stored[0].BuildingId as number);
     return {
       status: 200,
       jsonBody: { tenant: tenantRowToApi(stored[0], [], {}) },
@@ -1305,6 +1335,7 @@ async function upsertOccupancy(
        FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: effectiveOccupancyId }],
     );
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return {
       status: 200,
       jsonBody: { occupancy: occupancyRowToApi(stored[0]) },
@@ -1338,11 +1369,19 @@ async function deleteOccupancy(
       return { status: 400, jsonBody: { error: "OccupancyId required" } };
     }
     connection = await createConnection(token);
+    const occRows = await executeQuery(
+      connection,
+      `SELECT TenantId, BuildingId FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
+      [{ name: "Id", type: TYPES.NVarChar, value: body.OccupancyId }],
+    );
     await executeQuery(
       connection,
       `DELETE FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: body.OccupancyId }],
     );
+    if (occRows.length > 0) {
+      invalidateTenantAndBuilding(occRows[0].TenantId as number, occRows[0].BuildingId as number);
+    }
     return {
       status: 200,
       jsonBody: { deleted: true, occupancyId: body.OccupancyId },
@@ -1428,6 +1467,7 @@ async function createTenantNote(
        FROM dbo.TenantNotes WHERE NoteId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: NoteId }],
     );
+    invalidateTenant(TenantId);
     return { status: 200, jsonBody: { note: noteRowToApi(stored[0]) } };
   } catch (error: any) {
     context.error("createTenantNote failed:", error.message);
@@ -1453,11 +1493,17 @@ async function deleteTenantNote(
       return { status: 400, jsonBody: { error: "NoteId required" } };
     }
     connection = await createConnection(token);
+    const noteRows = await executeQuery(
+      connection,
+      `SELECT TenantId FROM dbo.TenantNotes WHERE NoteId = @Id`,
+      [{ name: "Id", type: TYPES.NVarChar, value: body.NoteId }],
+    );
     await executeQuery(
       connection,
       `DELETE FROM dbo.TenantNotes WHERE NoteId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: body.NoteId }],
     );
+    if (noteRows.length > 0) invalidateTenant(noteRows[0].TenantId as number);
     return { status: 200, jsonBody: { deleted: true, noteId: body.NoteId } };
   } catch (error: any) {
     context.error("deleteTenantNote failed:", error.message);
@@ -1505,6 +1551,7 @@ async function deleteRegisterTenant(
       };
     }
 
+    invalidateTenant(tenantId);
     await executeQuery(
       connection,
       "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
@@ -1688,6 +1735,7 @@ async function applyRentReview(
       throw err;
     }
 
+    invalidateTenant(tenantId);
     return {
       status: 200,
       jsonBody: {
@@ -1934,6 +1982,7 @@ async function upsertTenantIncentive(
         jsonBody: { error: "Tenant disappeared after upsert" },
       };
     }
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
     const formatted = formatSqlError(error);
@@ -2025,6 +2074,7 @@ async function deleteTenantIncentive(
         jsonBody: { error: "Tenant disappeared after delete" },
       };
     }
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
     const formatted = formatSqlError(error);
@@ -2037,6 +2087,70 @@ async function deleteTenantIncentive(
   } finally {
     if (connection) closeConnection(connection);
   }
+}
+
+// ── Rent schedule change log helpers ─────────────────────────────────────────
+
+interface ChangeLogOpts {
+  tenantId: number;
+  buildingId: number;
+  stepId: string;
+  changeKind: "added" | "updated" | "deleted";
+  changedById: string;
+  changedByName: string;
+  stepSnapshot: ScheduledRateStep;
+  diff: StepDiff | null;
+}
+
+async function insertRentScheduleChangeLog(
+  connection: Connection,
+  opts: ChangeLogOpts,
+): Promise<void> {
+  await executeQuery(
+    connection,
+    `INSERT INTO dbo.RentScheduleChangeLog
+       (ChangeId, TenantId, BuildingId, StepId, ChangeKind,
+        ChangedAt, ChangedById, ChangedByName, StepSnapshot, Diff)
+     VALUES
+       (@ChangeId, @TenantId, @BuildingId, @StepId, @ChangeKind,
+        SYSUTCDATETIME(), @ChangedById, @ChangedByName, @StepSnapshot, @Diff)`,
+    [
+      { name: "ChangeId", type: TYPES.NVarChar, value: randomUuid() },
+      { name: "TenantId", type: TYPES.Int, value: opts.tenantId },
+      { name: "BuildingId", type: TYPES.Int, value: opts.buildingId },
+      { name: "StepId", type: TYPES.NVarChar, value: opts.stepId },
+      { name: "ChangeKind", type: TYPES.NVarChar, value: opts.changeKind },
+      { name: "ChangedById", type: TYPES.NVarChar, value: opts.changedById },
+      { name: "ChangedByName", type: TYPES.NVarChar, value: opts.changedByName },
+      {
+        name: "StepSnapshot",
+        type: TYPES.NVarChar,
+        value: JSON.stringify(opts.stepSnapshot),
+      },
+      {
+        name: "Diff",
+        type: TYPES.NVarChar,
+        value: opts.diff ? JSON.stringify(opts.diff) : null,
+      },
+    ],
+  );
+}
+
+function changeLogRowToApi(row: SqlRow) {
+  return {
+    changeId: row.ChangeId as string,
+    tenantId: row.TenantId as number,
+    buildingId: row.BuildingId as number,
+    stepId: row.StepId as string,
+    changeKind: row.ChangeKind as "added" | "updated" | "deleted",
+    changedAt: toIso(row.ChangedAt),
+    changedBy: {
+      id: (row.ChangedById ?? "") as string,
+      name: (row.ChangedByName ?? "") as string,
+    },
+    stepSnapshot: JSON.parse(row.StepSnapshot as string) as ScheduledRateStep,
+    diff: row.Diff ? (JSON.parse(row.Diff as string) as StepDiff) : null,
+  };
 }
 
 // ── POST /api/upsertScheduledRateStep ────────────────────────────────────────
@@ -2086,6 +2200,8 @@ async function upsertScheduledRateStep(
       };
     }
     const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
+    const oldStep = existing.find((s) => s.id === step.id) ?? null;
+    const changeKind = oldStep ? "updated" : "added";
     const next = upsertStep(existing, step);
 
     await executeQuery(
@@ -2109,6 +2225,18 @@ async function upsertScheduledRateStep(
       ],
     );
 
+    await insertRentScheduleChangeLog(connection, {
+      tenantId: TenantId,
+      buildingId: BuildingId,
+      stepId: step.id,
+      changeKind,
+      changedById: caller.id,
+      changedByName: caller.name,
+      stepSnapshot: step,
+      diff: oldStep ? diffSteps(oldStep, step) : null,
+    });
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { steps: next } };
   } catch (error: any) {
     context.error("upsertScheduledRateStep failed:", error.message);
@@ -2160,6 +2288,7 @@ async function deleteScheduledRateStep(
       return { status: 404, jsonBody: { error: "Tenant not found" } };
     }
     const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
+    const deletedStep = existing.find((s) => s.id === stepId) ?? null;
     const next = deleteStep(existing, stepId);
     if (next === STEP_NOT_FOUND) {
       return { status: 404, jsonBody: { error: "Step not found" } };
@@ -2186,6 +2315,20 @@ async function deleteScheduledRateStep(
       ],
     );
 
+    if (deletedStep) {
+      await insertRentScheduleChangeLog(connection, {
+        tenantId: TenantId,
+        buildingId: BuildingId,
+        stepId,
+        changeKind: "deleted",
+        changedById: caller.id,
+        changedByName: caller.name,
+        stepSnapshot: deletedStep,
+        diff: null,
+      });
+    }
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { steps: next } };
   } catch (error: any) {
     context.error("deleteScheduledRateStep failed:", error.message);
@@ -2667,6 +2810,7 @@ async function upsertCarparkScheduleGroup(
       ],
     );
 
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { groups: next } };
   } catch (error: any) {
     context.error("upsertCarparkScheduleGroup failed:", error.message);
@@ -2748,6 +2892,7 @@ async function deleteCarparkScheduleGroup(
       ],
     );
 
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { groups: next } };
   } catch (error: any) {
     context.error("deleteCarparkScheduleGroup failed:", error.message);
@@ -2823,6 +2968,7 @@ async function upsertMiscFeeHandler(
       ],
     );
 
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { fees: next } };
   } catch (error: any) {
     context.error("upsertMiscFee failed:", error.message);
@@ -2895,6 +3041,7 @@ async function deleteMiscFeeHandler(
       ],
     );
 
+    invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { fees: next } };
   } catch (error: any) {
     context.error("deleteMiscFee failed:", error.message);

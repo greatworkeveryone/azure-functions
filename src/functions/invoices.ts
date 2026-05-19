@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
+import { getCachedApprovalLimits } from "../approval-limits-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
@@ -458,10 +459,7 @@ async function approveJobInvoice(
     //   - user can't approve, director gate fires → same as above (anyone may submit)
     //   - user can't approve, no director gate → 'awaiting_approval' (senior manager picks up)
     const userRoles = rolesForRequest(request);
-    const allLimits = (await executeQuery(
-      connection,
-      `SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits`,
-    )) as ApprovalLimit[];
+    const allLimits = await getCachedApprovalLimits(connection);
     const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
     const userCanApprove = canApproveAmount(userRoles, limitRows, amount);
@@ -775,14 +773,14 @@ async function getApprovalLimits(
   let connection;
   try {
     connection = await createConnection(token);
-    const rows = await executeQuery(
-      connection,
-      "SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits ORDER BY RoleName ASC",
-    ) as { RoleName: string; MaxApprovalAmount: number | null }[];
-    const approvalLimits = rows.map((r) => ({
-      roleName: r.RoleName,
-      maxApprovalAmount: r.MaxApprovalAmount,
-    }));
+    const rows = await getCachedApprovalLimits(connection);
+    const approvalLimits = rows
+      .slice()
+      .sort((a, b) => a.RoleName.localeCompare(b.RoleName))
+      .map((r) => ({
+        roleName: r.RoleName,
+        maxApprovalAmount: r.MaxApprovalAmount,
+      }));
     return { status: 200, jsonBody: { approvalLimits } };
   } catch (error: any) {
     context.error("getApprovalLimits failed:", error.message);
@@ -894,10 +892,7 @@ async function markJobInvoiceMyobCreated(
 
     // Director gate may not have been engaged (e.g. small-amount invoices). Allow
     // MYOB creation when EITHER director_approved OR (approved AND no director was needed).
-    const allLimits = (await executeQuery(
-      connection,
-      `SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits`,
-    )) as ApprovalLimit[];
+    const allLimits = await getCachedApprovalLimits(connection);
     const directorWasRequired = requiresDirectorApproval(amount, allLimits);
     const fullyApproved =
       status === "director_approved" || (status === "approved" && !directorWasRequired);

@@ -3,7 +3,7 @@
 // is submitted; callers include the returned URL in their request body.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { TYPES } from "tedious";
 import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import {
@@ -954,22 +954,26 @@ async function keyImportTemplate(
     const allSubTypes = [...KEY_SUB_TYPES, ...CODE_SUB_TYPES];
     const storageLocations = [...KEY_STORAGE_LOCATIONS];
 
-    const wb = XLSX.utils.book_new();
+    const wb = new ExcelJS.Workbook();
+
+    // Keys sheet — first = active on open
     const headers = [
       "Item Type", "Building", "Key Number", "Level",
       "Description", "Sub Type", "Tenancy Name", "Registration", "Storage Location",
     ];
-    const ws = XLSX.utils.aoa_to_sheet([headers]);
+    const keysWs = wb.addWorksheet("Keys");
+    keysWs.columns = headers.map((h) => ({ header: h, key: h, width: 24 }));
 
-    // Column widths
-    ws["!cols"] = headers.map(() => ({ wch: 24 }));
+    // dataValidations exists at runtime but is absent from the exceljs 4.x type declarations
+    const dvs = (keysWs as any).dataValidations;
+    dvs.add("A2:A1000", { type: "list", allowBlank: true, formulae: ['"key,code"'] });
+    dvs.add("B2:B1000", { type: "list", allowBlank: true, formulae: [`_Buildings!$A$1:$A$${buildingNames.length || 1}`] });
+    dvs.add("F2:F1000", { type: "list", allowBlank: true, formulae: [`_SubTypes!$A$1:$A$${allSubTypes.length}`] });
+    dvs.add("H2:H1000", { type: "list", allowBlank: true, formulae: ['"standard,registered"'] });
+    dvs.add("I2:I1000", { type: "list", allowBlank: true, formulae: [`_StorageLocations!$A$1:$A$${storageLocations.length}`] });
 
-    // Hidden reference sheets for long dropdown lists
-    const buildingsWs = XLSX.utils.aoa_to_sheet(buildingNames.map((n) => [n]));
-    const subTypesWs = XLSX.utils.aoa_to_sheet(allSubTypes.map((n) => [n]));
-    const storageWs = XLSX.utils.aoa_to_sheet(storageLocations.map((n) => [n]));
-
-    // Visible reference sheet showing valid values for every enum field
+    // Info sheet — visible reference for valid values
+    const infoWs = wb.addWorksheet("Info");
     const infoData: (string | null)[][] = [
       ["Field", "Valid Values"],
       ["Item Type", ITEM_TYPES.join(", ")],
@@ -986,55 +990,21 @@ async function keyImportTemplate(
       [null, "• Key Number must be unique per building"],
       [null, "• Sub Type and Storage Location are optional for codes"],
     ];
-    const infoWs = XLSX.utils.aoa_to_sheet(infoData);
-    infoWs["!cols"] = [{ wch: 22 }, { wch: 80 }];
+    infoData.forEach((row) => infoWs.addRow(row));
+    infoWs.getColumn(1).width = 22;
+    infoWs.getColumn(2).width = 80;
 
-    // Keys sheet is first (active on open), Info sheet second, reference sheets follow
-    XLSX.utils.book_append_sheet(wb, ws, "Keys");
-    XLSX.utils.book_append_sheet(wb, infoWs, "Info");
-    XLSX.utils.book_append_sheet(wb, buildingsWs, "_Buildings");
-    XLSX.utils.book_append_sheet(wb, subTypesWs, "_SubTypes");
-    XLSX.utils.book_append_sheet(wb, storageWs, "_StorageLocations");
+    // Hidden reference sheets for dropdown formulae
+    const buildingsWs = wb.addWorksheet("_Buildings", { state: "veryHidden" });
+    buildingNames.forEach((n) => buildingsWs.addRow([n]));
 
-    ws["!dataValidations"] = [
-      // A: Item Type
-      {
-        type: "list" as const,
-        formula1: '"key,code"',
-        showDropDown: false,
-        sqref: "A2:A1000",
-      },
-      // B: Building
-      {
-        type: "list" as const,
-        formula1: `_Buildings!$A$1:$A$${buildingNames.length || 1}`,
-        showDropDown: false,
-        sqref: "B2:B1000",
-      },
-      // F: Sub Type
-      {
-        type: "list" as const,
-        formula1: `_SubTypes!$A$1:$A$${allSubTypes.length}`,
-        showDropDown: false,
-        sqref: "F2:F1000",
-      },
-      // H: Registration
-      {
-        type: "list" as const,
-        formula1: '"standard,registered"',
-        showDropDown: false,
-        sqref: "H2:H1000",
-      },
-      // I: Storage Location
-      {
-        type: "list" as const,
-        formula1: `_StorageLocations!$A$1:$A$${storageLocations.length}`,
-        showDropDown: false,
-        sqref: "I2:I1000",
-      },
-    ];
+    const subTypesWs = wb.addWorksheet("_SubTypes", { state: "veryHidden" });
+    allSubTypes.forEach((n) => subTypesWs.addRow([n]));
 
-    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const storageWs = wb.addWorksheet("_StorageLocations", { state: "veryHidden" });
+    storageLocations.forEach((n) => storageWs.addRow([n]));
+
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
 
     return {
       status: 200,
@@ -1075,11 +1045,32 @@ async function bulkImportKeys(
     if (!file) return { status: 400, jsonBody: { error: "'file' field required" } };
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const wb = XLSX.read(buffer, { type: "buffer" });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
     // Use "Keys" sheet by name — don't rely on index since the template has hidden reference sheets
-    const ws = wb.Sheets["Keys"] ?? wb.Sheets[wb.SheetNames.find((n) => !n.startsWith("_")) ?? wb.SheetNames[0]];
-    const allRows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "", raw: false });
-    // Skip rows where the first cell (Item Type) is empty — catches trailing blank rows in the template
+    const ws = wb.getWorksheet("Keys") ??
+      wb.worksheets.find((s) => !s.name.startsWith("_")) ??
+      wb.worksheets[0];
+    if (!ws) return { status: 400, jsonBody: { error: "No readable sheet found in uploaded file" } };
+
+    // Build header→column index map from row 1
+    const headerMap = new Map<string, number>();
+    ws.getRow(1).eachCell((cell, colNum) => {
+      const h = String(cell.value ?? "").trim();
+      if (h) headerMap.set(h, colNum);
+    });
+
+    // Extract data rows — cells coerced to string matching sheet_to_json({ raw: false }) behaviour
+    const allRows: Record<string, string>[] = [];
+    ws.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      const r: Record<string, string> = {};
+      headerMap.forEach((colNum, header) => {
+        r[header] = String(row.getCell(colNum).value ?? "").trim();
+      });
+      allRows.push(r);
+    });
+    // Skip trailing blank rows
     const rows = allRows.filter((r) => (r["Item Type"] ?? "").trim() !== "" || (r["Building"] ?? "").trim() !== "");
 
     connection = await createConnection(token);

@@ -18,6 +18,7 @@ import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
+import { getCachedApprovalLimits } from "../approval-limits-db";
 import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
 
@@ -288,10 +289,7 @@ async function approveQuote(
     //   4. user can't approve + amount ≤ some non-director limit → 'awaiting_approval'
     // 403 only fires if the amount can't be covered by any role in the system.
     const userRoles = rolesForRequest(request);
-    const allLimits = (await executeQuery(
-      connection,
-      `SELECT RoleName, MaxApprovalAmount FROM ApprovalLimits`,
-    )) as ApprovalLimit[];
+    const allLimits = await getCachedApprovalLimits(connection);
     const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
     const userCanApprove = canApproveAmount(userRoles, limitRows, amount);

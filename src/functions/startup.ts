@@ -22,10 +22,14 @@ app.hook.postInvocation((hookContext) => {
 // If migrations fail the app refuses to start — better than serving requests
 // against a schema that's out of date.
 app.hook.appStart(async (_context) => {
-  // AZURE_FUNCTIONS_ENVIRONMENT is "Production" in Azure, "Development" locally.
-  // Skip migrations locally — the local DB user doesn't have DDL permissions.
-  if (process.env.AZURE_FUNCTIONS_ENVIRONMENT !== "Production") {
-    console.log("startup: skipping migrations (not running in Azure)");
+  const isProduction = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production";
+  const isLocalSql = process.env.LOCAL_SQL === "true";
+
+  // Run migrations in production (Azure SQL) and when using the local Docker DB
+  // (SA account has full DDL). Skip otherwise — Azure SQL per-user accounts
+  // don't have DDL permissions in dev.
+  if (!isProduction && !isLocalSql) {
+    console.log("startup: skipping migrations (not Azure and not local Docker DB)");
     return;
   }
   console.log("startup: running migrations");

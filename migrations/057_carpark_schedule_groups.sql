@@ -6,4 +6,4 @@
 
 ALTER TABLE dbo.Tenants
   ADD CarparkScheduleGroups NVARCHAR(MAX) NULL;
-`
+GO

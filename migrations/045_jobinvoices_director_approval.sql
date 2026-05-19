@@ -35,4 +35,3 @@ GO
 IF NOT EXISTS (SELECT 1 FROM dbo.ApprovalLimits WHERE RoleName = 'director')
   INSERT INTO dbo.ApprovalLimits (RoleName, MaxInvoiceAmount) VALUES ('director', NULL);
 GO
-`

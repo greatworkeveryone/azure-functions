@@ -6,6 +6,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection } from "../db";
+import { invalidateApprovalLimitsCache } from "../approval-limits-db";
 import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 
 interface SetApprovalLimitBody {
@@ -54,6 +55,7 @@ async function setApprovalLimit(
       ],
     );
 
+    invalidateApprovalLimitsCache();
     return { status: 200, jsonBody: { ok: true, roleName: RoleName, maxApprovalAmount: MaxApprovalAmount } };
   } catch (error: any) {
     context.error("setApprovalLimit failed:", error.message);

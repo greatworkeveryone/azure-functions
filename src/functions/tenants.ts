@@ -12,6 +12,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
 import { errorResponse, extractToken, oidFromToken, unauthorizedResponse } from "../auth";
+import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
 interface CallerRef { id: string; name: string }
 
@@ -140,6 +141,7 @@ async function upsertTenant(
         ],
       );
       const newId = inserted[0].TenantId as number;
+      invalidateTenantAndBuilding(newId, BuildingID);
       return { status: 200, jsonBody: { tenant: await loadLegacyTenant(connection, newId) } };
     }
 
@@ -174,6 +176,11 @@ async function upsertTenant(
     const stored = await loadLegacyTenant(connection, TenantID);
     if (!stored) {
       return { status: 404, jsonBody: { error: "Tenant not found" } };
+    }
+    if (typeof BuildingID === "number") {
+      invalidateTenantAndBuilding(TenantID, BuildingID);
+    } else {
+      invalidateTenant(TenantID);
     }
     return { status: 200, jsonBody: { tenant: stored } };
   } catch (error: any) {
@@ -245,6 +252,7 @@ async function deleteTenant(
       [{ name: "Id", type: TYPES.Int, value: TenantID }],
     );
 
+    invalidateTenant(TenantID);
     return { status: 200, jsonBody: { deleted: true, tenantId: TenantID } };
   } catch (error: any) {
     context.error("deleteTenant failed:", error.message);

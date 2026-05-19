@@ -20,6 +20,8 @@ export interface ScheduledRateStep {
   methodKind?: RentScheduleMethodKind;
   /** Raw CPI index value for this period (e.g. 115.6). Present when methodKind="cpi". */
   cpiValue?: number;
+  /** CPI index value from the previous period — stored explicitly so edits are stable. */
+  cpiValuePrev?: number;
   /** Increase % from the previous period. 0 allowed for commencement rows. */
   ratePercent: number;
   note?: string;
@@ -62,6 +64,7 @@ const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   "effectiveTo",
   "methodKind",
   "cpiValue",
+  "cpiValuePrev",
   "ratePercent",
   "note",
   "flagComment",
@@ -86,7 +89,7 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
-  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, ratePercent, note, flagComment } = raw;
+  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, cpiValuePrev, ratePercent, note, flagComment } = raw;
 
   if (id !== undefined && id !== "") {
     if (!isUuidShaped(id)) {
@@ -134,6 +137,12 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
+  if (cpiValuePrev !== undefined) {
+    if (typeof cpiValuePrev !== "number" || !Number.isFinite(cpiValuePrev) || cpiValuePrev <= 0) {
+      return { ok: false, error: "cpiValuePrev must be a positive number" };
+    }
+  }
+
   if (
     typeof ratePercent !== "number" ||
     !Number.isFinite(ratePercent) ||
@@ -171,6 +180,7 @@ export function validateStep(raw: unknown): StepValidationResult {
   if (effectiveTo !== undefined) normalised.effectiveTo = effectiveTo as string;
   if (methodKind !== undefined) normalised.methodKind = methodKind as RentScheduleMethodKind;
   if (cpiValue !== undefined) normalised.cpiValue = cpiValue as number;
+  if (cpiValuePrev !== undefined) normalised.cpiValuePrev = cpiValuePrev as number;
   if (note !== undefined) normalised.note = note as string;
   if (flagComment !== undefined) normalised.flagComment = flagComment as string;
   return { ok: true, step: normalised };
@@ -250,6 +260,39 @@ export function deleteStep(
   return next;
 }
 
+// ── Change log diff ───────────────────────────────────────────────────────────
+
+export type StepDiff = Record<string, { from: unknown; to: unknown }>;
+
+const DIFF_FIELDS: ReadonlyArray<keyof ScheduledRateStep> = [
+  "effectiveFrom",
+  "effectiveTo",
+  "methodKind",
+  "ratePercent",
+  "baseRentPerAnnum",
+  "ahacBasePerAnnum",
+  "sqm",
+  "cpiValue",
+  "cpiValuePrev",
+  "note",
+  "flagComment",
+];
+
+export function diffSteps(
+  prev: ScheduledRateStep,
+  next: ScheduledRateStep,
+): StepDiff | null {
+  const diff: StepDiff = {};
+  for (const field of DIFF_FIELDS) {
+    const from = prev[field];
+    const to = next[field];
+    if (from !== to) {
+      diff[field] = { from: from ?? null, to: to ?? null };
+    }
+  }
+  return Object.keys(diff).length > 0 ? diff : null;
+}
+
 // ── Carpark schedule groups (m057) ────────────────────────────────────────────
 
 export interface CarparkRateStep {
@@ -261,6 +304,8 @@ export interface CarparkRateStep {
   newMonthlyRate?: number;
   /** CPI index value (new period) when methodKind === "cpi". */
   cpiValue?: number;
+  /** CPI index value from the previous period — stored explicitly so edits are stable. */
+  cpiValuePrev?: number;
   /** Rate % when methodKind is fixed / market / other. */
   ratePercent?: number;
   note?: string;
@@ -286,7 +331,7 @@ const GROUP_ALLOWED_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 const RATE_STEP_ALLOWED_KEYS: ReadonlySet<string> = new Set([
-  "id", "effectiveFrom", "methodKind", "newMonthlyRate", "cpiValue", "ratePercent", "note",
+  "id", "effectiveFrom", "methodKind", "newMonthlyRate", "cpiValue", "cpiValuePrev", "ratePercent", "note",
 ]);
 
 const VALID_METHOD_KINDS = new Set<string>(["cpi", "commencement", "fixed", "market", "other"]);
@@ -296,12 +341,13 @@ function validateCarparkRateStep(raw: unknown, idx: number): { ok: true; step: C
   for (const key of Object.keys(raw)) {
     if (!RATE_STEP_ALLOWED_KEYS.has(key)) return { ok: false, error: `Unknown key on rateStep[${idx}]: ${key}` };
   }
-  const { id, effectiveFrom, methodKind, newMonthlyRate, cpiValue, ratePercent, note } = raw;
+  const { id, effectiveFrom, methodKind, newMonthlyRate, cpiValue, cpiValuePrev, ratePercent, note } = raw;
   if (!isUuidShaped(id)) return { ok: false, error: `rateSteps[${idx}].id must be a UUID` };
   if (typeof effectiveFrom !== "string" || !ISO_DATE_RE.test(effectiveFrom)) return { ok: false, error: `rateSteps[${idx}].effectiveFrom must be YYYY-MM-DD` };
   if (methodKind !== undefined && (typeof methodKind !== "string" || !VALID_METHOD_KINDS.has(methodKind))) return { ok: false, error: `rateSteps[${idx}].methodKind is invalid` };
   if (newMonthlyRate !== undefined && (typeof newMonthlyRate !== "number" || !Number.isFinite(newMonthlyRate) || newMonthlyRate < 0)) return { ok: false, error: `rateSteps[${idx}].newMonthlyRate must be a non-negative number` };
   if (cpiValue !== undefined && (typeof cpiValue !== "number" || !Number.isFinite(cpiValue) || cpiValue <= 0)) return { ok: false, error: `rateSteps[${idx}].cpiValue must be a positive number` };
+  if (cpiValuePrev !== undefined && (typeof cpiValuePrev !== "number" || !Number.isFinite(cpiValuePrev) || cpiValuePrev <= 0)) return { ok: false, error: `rateSteps[${idx}].cpiValuePrev must be a positive number` };
   if (ratePercent !== undefined && (typeof ratePercent !== "number" || !Number.isFinite(ratePercent))) return { ok: false, error: `rateSteps[${idx}].ratePercent must be a number` };
   if (note !== undefined && typeof note !== "string") return { ok: false, error: `rateSteps[${idx}].note must be a string` };
   return {
@@ -312,6 +358,7 @@ function validateCarparkRateStep(raw: unknown, idx: number): { ok: true; step: C
       ...(methodKind !== undefined && { methodKind: methodKind as RentScheduleMethodKind }),
       ...(newMonthlyRate !== undefined && { newMonthlyRate: newMonthlyRate as number }),
       ...(cpiValue !== undefined && { cpiValue: cpiValue as number }),
+      ...(cpiValuePrev !== undefined && { cpiValuePrev: cpiValuePrev as number }),
       ...(ratePercent !== undefined && { ratePercent: ratePercent as number }),
       ...(note !== undefined && { note: (note as string).trim() }),
     },
@@ -456,11 +503,12 @@ export interface MiscFee {
   baseAmount: number;
   commencedAt: string;
   endsAt?: string;
+  note?: string;
   rateSteps?: MiscFeeRateStep[];
 }
 
 const FEE_ALLOWED_KEYS: ReadonlySet<string> = new Set([
-  "id", "title", "frequency", "baseAmount", "commencedAt", "endsAt", "rateSteps",
+  "id", "title", "frequency", "baseAmount", "commencedAt", "endsAt", "note", "rateSteps",
 ]);
 
 const FEE_RATE_STEP_ALLOWED_KEYS: ReadonlySet<string> = new Set([
@@ -501,7 +549,7 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
   for (const key of Object.keys(raw)) {
     if (!FEE_ALLOWED_KEYS.has(key)) return { ok: false, error: `Unknown key on fee: ${key}` };
   }
-  const { id, title, frequency, baseAmount, commencedAt, endsAt } = raw;
+  const { id, title, frequency, baseAmount, commencedAt, endsAt, note } = raw;
   if (!isUuidShaped(id)) return { ok: false, error: "fee.id must be a UUID-shaped string" };
   if (typeof title !== "string" || title.trim().length === 0) return { ok: false, error: "fee.title must be a non-empty string" };
   if (title.length > 200) return { ok: false, error: "fee.title must be ≤200 chars" };
@@ -509,6 +557,7 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
   if (typeof baseAmount !== "number" || !Number.isFinite(baseAmount) || baseAmount < 0) return { ok: false, error: "fee.baseAmount must be a non-negative number" };
   if (typeof commencedAt !== "string" || !ISO_DATE_RE.test(commencedAt)) return { ok: false, error: "fee.commencedAt must be an ISO date string (YYYY-MM-DD)" };
   if (endsAt !== undefined && (typeof endsAt !== "string" || !ISO_DATE_RE.test(endsAt))) return { ok: false, error: "fee.endsAt must be an ISO date string (YYYY-MM-DD) if provided" };
+  if (note !== undefined && typeof note !== "string") return { ok: false, error: "fee.note must be a string" };
 
   const { rateSteps } = raw;
   let validatedSteps: MiscFeeRateStep[] | undefined;
@@ -531,6 +580,7 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
       baseAmount,
       commencedAt,
       ...(endsAt !== undefined && { endsAt }),
+      ...(note !== undefined && { note: (note as string).trim() }),
       ...(validatedSteps !== undefined && { rateSteps: validatedSteps }),
     },
   };
@@ -581,6 +631,7 @@ export function parseMiscFees(raw: string | null | undefined): MiscFee[] {
         baseAmount: f.baseAmount as number,
         commencedAt: f.commencedAt as string,
         ...(typeof f.endsAt === "string" && { endsAt: f.endsAt }),
+        ...(typeof f.note === "string" && f.note.length > 0 && { note: f.note }),
         ...(Array.isArray(f.rateSteps) && f.rateSteps.length > 0 && {
           rateSteps: (f.rateSteps as unknown[]).filter(
             (s): s is MiscFeeRateStep =>

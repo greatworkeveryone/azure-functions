@@ -43,44 +43,62 @@ Dev-only flags (already present in the checked-in `local.settings.json`; safe to
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
 - `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect.
 
-### 4. Apply database migrations
-The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. Apply them in order against your dev SQL database — Azure Portal Query editor, `sqlcmd`, or your SQL IDE of choice. Each migration is re-runnable, so re-applying is a no-op if the schema already matches.
+### 4. Start the local SQL Server (Docker)
 
-If you just want a clean dev DB, run every file in `migrations/` from `001_*.sql` through the latest (e.g. `045_jobinvoices_director_approval.sql`). When new migrations land on `main`, apply the new files only.
+The local dev DB runs in Docker — no Azure SQL costs, no IP firewall rules, no AAD token required.
 
-### 5. Grant your Entra ID user SQL access
-In the Azure Portal Query editor for your database, run:
-```sql
-CREATE USER [your-email@domain.com] FROM EXTERNAL PROVIDER;
-ALTER ROLE db_datareader ADD MEMBER [your-email@domain.com];
-ALTER ROLE db_datawriter ADD MEMBER [your-email@domain.com];
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+```bash
+# Start (or restart) the SQL Server container
+docker compose up -d
+
+# First time only — create the dev database
+docker exec -it azure-functions-sql-1 \
+  /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "DevPassword123!" -C \
+  -Q "CREATE DATABASE command_centre_dev"
 ```
 
-### 6. Add your IP to Azure SQL firewall
-Azure Portal → SQL Server (`rp-cc-sql-server`) → Networking → Add your client IP.
-Also enable "Allow Azure services and resources to access this server" (needed for the deployed Function App).
+The container persists data in a named Docker volume (`sql-data`), so it survives restarts. To wipe and start fresh:
 
-### 7. Build and run locally
+```bash
+docker compose down -v   # removes the volume
+docker compose up -d
+```
+
+The `local.settings.json` is already configured for Docker (`LOCAL_SQL=true`, `SQL_SERVER=localhost`). To switch back to Azure SQL temporarily, set `LOCAL_SQL=false` and restore the `SQL_SERVER` / `SQL_DATABASE` values.
+
+### 5. Apply database migrations
+The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. The function host applies them automatically on startup via `runMigrations()`. For a brand-new Docker DB, just start the app and all migrations will run.
+
+To apply manually (e.g. to inspect state):
+```bash
+docker exec -it azure-functions-sql-1 \
+  /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "DevPassword123!" -No -d command_centre_dev \
+  -i migrations/001_initial.sql
+```
+
+### 6. Build and run locally
 ```bash
 npm run build
 npm start
 ```
 
-To test endpoints locally, get an Entra ID token via Azure CLI:
+To test endpoints locally (Docker DB, no AAD token needed):
 ```bash
-az login
-TOKEN=$(az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
-curl -H "Authorization: Bearer $TOKEN" http://localhost:7071/api/getBuildings
-curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:7071/api/syncBuildings
+curl http://localhost:7071/api/getBuildings
+curl -X POST http://localhost:7071/api/syncBuildings
 ```
 
-### 8. Deploy to Azure
+### 7. Deploy to Azure
 1. Run `npm run build`
 2. In VS Code → Azure panel → right-click **rpcc-functions** → **Deploy to Function App...**
 
 All functions deploy together as a single app. To add a new function, create a file in `src/functions/`, register it with `app.http()`, build, and redeploy.
 
-### 9. Set environment variables in Azure
+### 8. Set environment variables in Azure
 In Azure Portal → Function App → Configuration → Application settings. Add:
 - `MYBUILDINGS_API_URL`
 - `MYBUILDINGS_BEARER_TOKEN`
@@ -89,7 +107,7 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 
 These are NOT deployed from `local.settings.json` — that file is local only.
 
-### 10. Enable Entra ID authentication (Easy Auth)
+### 9. Enable Entra ID authentication (Easy Auth)
 After deploying and confirming the functions work:
 
 1. Azure Portal → Function App → **Authentication** → **Add identity provider** → **Microsoft**

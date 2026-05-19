@@ -57,6 +57,9 @@ export function buildUpdateSet<K extends string>(
   return { params, setClause: parts.join(", ") };
 }
 
+// When LOCAL_SQL=true, skip AAD and connect with SQL username/password (Docker dev DB).
+const IS_LOCAL_SQL = process.env.LOCAL_SQL === "true";
+
 // Cache the AAD token across warm invocations. AAD tokens are valid ~1 hour;
 // reusing them avoids a network round-trip + handshake on every request and
 // keeps the SQL DB from being woken purely by token refreshes.
@@ -103,12 +106,79 @@ async function getServiceToken(): Promise<string> {
   return access_token;
 }
 
-export async function createServiceConnection(): Promise<Connection> {
-  const token = await getServiceToken();
-  return createConnection(token);
+// Singleton service connection — reused across invocations within the same process.
+// Keeps the DB warm during active dev; auto-closes after IDLE_TIMEOUT_MS of
+// inactivity so Azure serverless auto-pause can kick in (~60 min later).
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+let _serviceConn: Connection | null = null;
+let _serviceConnPromise: Promise<Connection> | null = null;
+let _idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function _onServiceConnReset() {
+  _serviceConn = null;
+  _serviceConnPromise = null;
+}
+
+function _resetIdleTimer() {
+  if (_idleTimer) clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => {
+    _idleTimer = null;
+    if (_serviceConn) _serviceConn.close();
+    // 'end' event fires → _onServiceConnReset clears the singleton
+  }, IDLE_TIMEOUT_MS);
+  // Don't keep the process alive just for this timer
+  _idleTimer.unref?.();
+}
+
+async function _createFreshServiceConnection(): Promise<Connection> {
+  const conn = IS_LOCAL_SQL
+    ? await createLocalConnection()
+    : await createConnection(await getServiceToken());
+  conn.on("error", _onServiceConnReset);
+  conn.on("end", _onServiceConnReset);
+  _serviceConn = conn;
+  return conn;
+}
+
+export function createServiceConnection(): Promise<Connection> {
+  if (_serviceConnPromise) return _serviceConnPromise;
+  _serviceConnPromise = _createFreshServiceConnection().catch((err) => {
+    _serviceConnPromise = null;
+    throw err;
+  });
+  return _serviceConnPromise;
+}
+
+export function createLocalConnection(): Promise<Connection> {
+  return new Promise((resolve, reject) => {
+    const config = {
+      server: process.env.SQL_SERVER!,
+      authentication: {
+        type: "default" as const,
+        options: {
+          userName: process.env.SQL_USERNAME!,
+          password: process.env.SQL_PASSWORD!,
+        },
+      },
+      options: {
+        database: process.env.SQL_DATABASE!,
+        encrypt: true,
+        trustServerCertificate: true,
+      },
+    };
+
+    const connection = new Connection(config);
+    connection.on("connect", (err) => {
+      if (err) reject(err);
+      else resolve(connection);
+    });
+    connection.connect();
+  });
 }
 
 export function createConnection(token: string): Promise<Connection> {
+  if (IS_LOCAL_SQL) return createLocalConnection();
   return new Promise((resolve, reject) => {
     const config = {
       server: process.env.SQL_SERVER!,
@@ -174,6 +244,12 @@ export function executeQuery(
 }
 
 export function closeConnection(connection: Connection): void {
+  if (connection === _serviceConn) {
+    // Don't close — reset the idle timer so the connection stays warm during
+    // active use but closes 10 min after the last request.
+    _resetIdleTimer();
+    return;
+  }
   connection.close();
 }
 
