@@ -346,3 +346,30 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
   return emails;
 }
 
+export interface GraphUser {
+  id: string;
+  displayName: string;
+  mail: string | null;
+  mobilePhone: string | null;
+}
+
+export async function graphGetGroupUsers(groupId: string): Promise<GraphUser[]> {
+  const token = await getGraphToken();
+  const url = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members?$select=id,displayName,mail,mobilePhone`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`graphGetGroupUsers failed: ${resp.status} — ${text}`);
+  }
+  const data = (await resp.json()) as { value: Array<Record<string, unknown>> };
+  return (data.value ?? [])
+    .filter((m) => m["@odata.type"] === "#microsoft.graph.user" && typeof m.id === "string" && m.id)
+    .map((m) => ({
+      id: m.id as string,
+      displayName: String(m.displayName ?? ""),
+      mail: typeof m.mail === "string" ? m.mail : null,
+      mobilePhone: typeof m.mobilePhone === "string" ? m.mobilePhone : null,
+    }));
+}
