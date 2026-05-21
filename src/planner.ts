@@ -3,6 +3,48 @@ import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { getGraphToken } from "./graph";
 import type { TriggerType } from "./plannerHelpers";
 
+export interface PlanConfig {
+  planId: string;
+  bucketId: string;
+}
+
+export function getPlanConfig(triggerType: TriggerType): PlanConfig {
+  const e = process.env;
+  switch (triggerType) {
+    case "stalled_facilities":
+    case "job_update_due":
+      return {
+        planId:   e.PLANNER_FACILITIES_PLAN_ID             ?? "",
+        bucketId: e.PLANNER_FACILITIES_BUCKET_JOB_UPDATES_ID ?? "",
+      };
+    case "awaiting_accounts":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID          ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_AWAITING_ID ?? "",
+      };
+    case "director_approval":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID           ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_DIRECTOR_ID ?? "",
+      };
+    case "lease_expiry":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID                ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_LEASE_EXPIRY_ID ?? "",
+      };
+    case "option_notice":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID                    ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_OPTION_DEADLINES_ID ?? "",
+      };
+    case "rent_review":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID               ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_RENT_REVIEWS_ID ?? "",
+      };
+  }
+}
+
 export async function graphGetGroupMembers(groupId: string): Promise<string[]> {
   const token = await getGraphToken();
   const resp = await fetch(

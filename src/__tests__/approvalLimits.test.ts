@@ -3,10 +3,10 @@ import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "../fu
 
 const LIMITS: ApprovalLimit[] = [
   { RoleName: "facilities",                    MaxApprovalAmount: 1000.00 },
-  { RoleName: "timesheet_approval_facilities", MaxApprovalAmount: 10000.00 },
-  { RoleName: "timesheet_approval_accounts",   MaxApprovalAmount: 10000.00 },
+  { RoleName: "facilities_manager", MaxApprovalAmount: 10000.00 },
+  { RoleName: "accounts_manager",   MaxApprovalAmount: 10000.00 },
   { RoleName: "accounts",                      MaxApprovalAmount: 1000.00 },
-  { RoleName: "Admin",                         MaxApprovalAmount: null },
+  { RoleName: "admin",                         MaxApprovalAmount: null },
   { RoleName: "director",                      MaxApprovalAmount: null },
 ];
 
@@ -32,22 +32,22 @@ describe("canApproveAmount", () => {
     );
   });
 
-  test("timesheet_approval_facilities with $10000 limit can approve a $9999 invoice", () => {
+  test("facilities_manager with $10000 limit can approve a $9999 invoice", () => {
     assert.strictEqual(
-      canApproveAmount(["timesheet_approval_facilities"], LIMITS, 9999),
+      canApproveAmount(["facilities_manager"], LIMITS, 9999),
       true,
     );
   });
 
-  test("timesheet_approval_facilities cannot approve $10001 invoice", () => {
+  test("facilities_manager cannot approve $10001 invoice", () => {
     assert.strictEqual(
-      canApproveAmount(["timesheet_approval_facilities"], LIMITS, 10001),
+      canApproveAmount(["facilities_manager"], LIMITS, 10001),
       false,
     );
   });
 
   test("Admin with null (unlimited) limit can approve any amount", () => {
-    assert.strictEqual(canApproveAmount(["Admin"], LIMITS, 999999999), true);
+    assert.strictEqual(canApproveAmount(["admin"], LIMITS, 999999999), true);
   });
 
   test("accounts with $1000 limit cannot approve a $1001 invoice", () => {
@@ -59,13 +59,13 @@ describe("canApproveAmount", () => {
   });
 
   test("user with multiple roles uses the highest limit", () => {
-    // facilities = 1000, timesheet_approval_facilities = 10000 → effective = 10000
+    // facilities = 1000, facilities_manager = 10000 → effective = 10000
     assert.strictEqual(
-      canApproveAmount(["facilities", "timesheet_approval_facilities"], LIMITS, 9999),
+      canApproveAmount(["facilities", "facilities_manager"], LIMITS, 9999),
       true,
     );
     assert.strictEqual(
-      canApproveAmount(["facilities", "timesheet_approval_facilities"], LIMITS, 10001),
+      canApproveAmount(["facilities", "facilities_manager"], LIMITS, 10001),
       false,
     );
   });
@@ -73,7 +73,7 @@ describe("canApproveAmount", () => {
   test("user with a limited role and an unlimited role gets unlimited authority", () => {
     // facilities = 1000, Admin = null → effective = unlimited
     assert.strictEqual(
-      canApproveAmount(["facilities", "Admin"], LIMITS, 999999),
+      canApproveAmount(["facilities", "admin"], LIMITS, 999999),
       true,
     );
   });

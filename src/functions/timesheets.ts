@@ -7,6 +7,7 @@ import {
   SqlParam,
 } from "../db";
 import {
+  AppRole,
   errorResponse,
   extractToken,
   forbiddenResponse,
@@ -14,21 +15,21 @@ import {
   unauthorizedResponse,
 } from "../auth";
 
-interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string }
+interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string; role?: string }
 interface SubmitTimesheetBody { timesheetId: number; submit: boolean }
 interface ApproveTimesheetBody { timesheetId: number; approve: boolean }
 
 // ── Role helpers ─────────────────────────────────────────────────────────────
 
-const FACILITIES_ROLES = ["facilities", "timesheet_approval_facilities"] as const;
-const ACCOUNTS_ROLES  = ["accounts",   "timesheet_approval_accounts"]   as const;
-const APPROVAL_ROLES  = ["timesheet_approval_facilities", "timesheet_approval_accounts"] as const;
+const FACILITIES_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
+const ACCOUNTS_ROLES  = [AppRole.ACCOUNTS,   AppRole.ACCOUNTS_APPROVAL]   as const;
+const APPROVAL_ROLES  = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
 
 type TimesheetRole = "facilities" | "accounts";
 
 /** Map the caller's Entra roles to the timesheet role group they belong to. */
 function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
-  if (roles.includes("Admin")) return null; // admin handled separately
+  if (roles.includes(AppRole.ADMIN)) return null; // admin handled separately
   if (roles.some((r) => (FACILITIES_ROLES as readonly string[]).includes(r))) return "facilities";
   if (roles.some((r) => (ACCOUNTS_ROLES  as readonly string[]).includes(r))) return "accounts";
   return null;
@@ -36,16 +37,16 @@ function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
 function managedRoles(roles: string[]): TimesheetRole[] {
-  if (roles.includes("Admin")) return ["facilities", "accounts"];
+  if (roles.includes(AppRole.ADMIN)) return ["facilities", "accounts"];
   const out: TimesheetRole[] = [];
-  if (roles.includes("timesheet_approval_facilities")) out.push("facilities");
-  if (roles.includes("timesheet_approval_accounts"))  out.push("accounts");
+  if (roles.includes(AppRole.FACILITIES_APPROVAL)) out.push("facilities");
+  if (roles.includes(AppRole.ACCOUNTS_APPROVAL))  out.push("accounts");
   return out;
 }
 
 function isApprovalManager(roles: string[]): boolean {
   return (
-    roles.includes("Admin") ||
+    roles.includes(AppRole.ADMIN) ||
     roles.some((r) => (APPROVAL_ROLES as readonly string[]).includes(r))
   );
 }
@@ -129,7 +130,7 @@ async function getTimesheet(
     ];
 
     // If manager, enforce their managed role scope
-    if (!isOwnData && !roles.includes("Admin")) {
+    if (!isOwnData && !roles.includes(AppRole.ADMIN)) {
       const managed = managedRoles(roles);
       sql += ` AND Role IN (${managed.map((_, i) => `@Role${i}`).join(", ")})`;
       managed.forEach((r, i) => params.push({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
@@ -165,7 +166,7 @@ async function upsertTimesheet(
   let connection;
   try {
     const body = (await request.json()) as UpsertTimesheetBody;
-    const { weekStart, data, userId, userDisplayName } = body ?? {};
+    const { weekStart, data, userId, userDisplayName, role: bodyRole } = body ?? {};
 
     if (!weekStart || !data) {
       return { status: 400, jsonBody: { error: "weekStart and data are required" } };
@@ -179,22 +180,18 @@ async function upsertTimesheet(
       return forbiddenResponse("Only approval managers can create timesheets for other users");
     }
 
-    // Determine the role for this timesheet row
+    // Determine the role for this timesheet row — claims are authoritative for
+    // non-admin users; admins supply an explicit role in the body.
+    const validRoles: TimesheetRole[] = ["facilities", "accounts"];
+    const suppliedRole: TimesheetRole | null =
+      bodyRole && (validRoles as string[]).includes(bodyRole) ? bodyRole as TimesheetRole : null;
+
     let timesheetRole: TimesheetRole | null;
     if (isOwnData) {
-      timesheetRole = timesheetRoleFromClaims(roles);
+      timesheetRole = timesheetRoleFromClaims(roles) ?? suppliedRole;
     } else {
       const managed = managedRoles(roles);
-      timesheetRole = managed.length === 1 ? managed[0] : managed[0] ?? null;
-    }
-
-    if (!timesheetRole && !roles.includes("Admin")) {
-      return { status: 400, jsonBody: { error: "Could not determine timesheet role group from token claims" } };
-    }
-
-    // For admin creating for someone else, role must be supplied
-    if (!timesheetRole && roles.includes("Admin")) {
-      return { status: 400, jsonBody: { error: "Admin must supply role in body when creating for another user" } };
+      timesheetRole = suppliedRole ?? (managed.length === 1 ? managed[0] : managed[0] ?? null);
     }
 
     connection = await createConnection(token);
@@ -216,7 +213,7 @@ async function upsertTimesheet(
         return { status: 400, jsonBody: { error: "Timesheet is locked — recall it before editing" } };
       }
 
-      // Update
+      // Update — role is already stored in the row, not needed here
       await executeQuery(
         connection,
         `UPDATE dbo.Timesheets
@@ -237,7 +234,11 @@ async function upsertTimesheet(
       return { status: 200, jsonBody: { timesheet: updated[0] } };
     }
 
-    // Insert
+    // Insert — role is required for new rows
+    if (!timesheetRole) {
+      return { status: 400, jsonBody: { error: "Could not determine timesheet role — supply role in request body" } };
+    }
+
     const inserted = await executeQuery(
       connection,
       `INSERT INTO dbo.Timesheets
@@ -364,7 +365,7 @@ async function approveTimesheet(
   const roles = await rolesForRequest(request);
 
   if (!isApprovalManager(roles)) {
-    return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
+    return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
   let connection;
@@ -390,12 +391,12 @@ async function approveTimesheet(
 
     const row = rows[0];
 
-    if (row.UserID === callerOid && !roles.includes("Admin")) {
+    if (row.UserID === callerOid && !roles.includes(AppRole.ADMIN)) {
       return forbiddenResponse("Cannot approve your own timesheet");
     }
 
     const managed = managedRoles(roles);
-    if (!managed.includes(row.Role as TimesheetRole) && !roles.includes("Admin")) {
+    if (!managed.includes(row.Role as TimesheetRole) && !roles.includes(AppRole.ADMIN)) {
       return forbiddenResponse(`You manage ${managed.join(", ")} timesheets; this is ${row.Role}`);
     }
 
@@ -448,7 +449,7 @@ async function getTimesheets(
 
   const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
-    return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
+    return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
   const managed = managedRoles(roles);
@@ -540,7 +541,7 @@ async function getTimesheetUsers(
 
   const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
-    return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
+    return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
   const managed = managedRoles(roles);
@@ -631,7 +632,7 @@ async function syncTimesheetsToMyob(
 
   const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {
-    return forbiddenResponse("Requires timesheet_approval_facilities or timesheet_approval_accounts");
+    return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
   try {

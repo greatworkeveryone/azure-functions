@@ -3,8 +3,9 @@ import { TYPES } from "tedious";
 import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
+import { resolveActivePlannerTasks } from "../planner";
 
 // ── Approval limit helpers ────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ export function requiresDirectorApproval(
 ): boolean {
   if (!amount || amount <= 0) return false;
   const nonDirector = limits.filter(
-    (l) => l.RoleName !== "director" && l.MaxApprovalAmount !== null,
+    (l) => l.RoleName !== AppRole.DIRECTOR && l.MaxApprovalAmount !== null,
   );
   if (nonDirector.length === 0) return false;
   const threshold = Math.max(...nonDirector.map((l) => l.MaxApprovalAmount as number));
@@ -584,7 +585,7 @@ async function directorApproveJobInvoice(
   if (!token) return unauthorizedResponse();
 
   const userRoles = rolesForRequest(request);
-  if (!userRoles.includes("director")) {
+  if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
@@ -657,6 +658,10 @@ async function directorApproveJobInvoice(
       `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
+    resolveActivePlannerTasks("job", jobId, ["director_approval"]).catch(
+      (err: unknown) =>
+        context.warn("plannerResolve (directorApproveJobInvoice):", err instanceof Error ? err.message : String(err)),
+    );
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {
     context.error("directorApproveJobInvoice failed:", error.message);
@@ -680,7 +685,7 @@ async function undoDirectorApproveJobInvoice(
   if (!token) return unauthorizedResponse();
 
   const userRoles = rolesForRequest(request);
-  if (!userRoles.includes("director")) {
+  if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 

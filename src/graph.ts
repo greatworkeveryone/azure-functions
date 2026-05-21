@@ -353,6 +353,29 @@ export interface GraphUser {
   mobilePhone: string | null;
 }
 
+/**
+ * Maps raw Graph API group member records to typed GraphUser objects.
+ * Filters to real user objects (not nested groups or service principals)
+ * and drops any member without a valid string id.
+ */
+export function mapGroupMembersToUsers(
+  rawMembers: Array<Record<string, unknown>>,
+): GraphUser[] {
+  return rawMembers
+    .filter(
+      (m) =>
+        m["@odata.type"] === "#microsoft.graph.user" &&
+        typeof m.id === "string" &&
+        m.id,
+    )
+    .map((m) => ({
+      id: m.id as string,
+      displayName: String(m.displayName ?? ""),
+      mail: typeof m.mail === "string" ? m.mail : null,
+      mobilePhone: typeof m.mobilePhone === "string" ? m.mobilePhone : null,
+    }));
+}
+
 export async function graphGetGroupUsers(groupId: string): Promise<GraphUser[]> {
   const token = await getGraphToken();
   const url = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members?$select=id,displayName,mail,mobilePhone`;
@@ -364,12 +387,5 @@ export async function graphGetGroupUsers(groupId: string): Promise<GraphUser[]> 
     throw new Error(`graphGetGroupUsers failed: ${resp.status} — ${text}`);
   }
   const data = (await resp.json()) as { value: Array<Record<string, unknown>> };
-  return (data.value ?? [])
-    .filter((m) => m["@odata.type"] === "#microsoft.graph.user" && typeof m.id === "string" && m.id)
-    .map((m) => ({
-      id: m.id as string,
-      displayName: String(m.displayName ?? ""),
-      mail: typeof m.mail === "string" ? m.mail : null,
-      mobilePhone: typeof m.mobilePhone === "string" ? m.mobilePhone : null,
-    }));
+  return mapGroupMembersToUsers(data.value ?? []);
 }

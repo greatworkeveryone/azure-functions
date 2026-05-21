@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { buildAuthorizeUrl, generateAuthState } from "../myob-auth";
 
 // Returns the MYOB authorize URL for the admin to open in a new tab. The
@@ -12,7 +12,7 @@ async function myobAuthStart(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = await requireRole(request, ["Admin"]);
+  const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
 
   try {

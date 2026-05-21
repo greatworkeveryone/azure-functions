@@ -11,7 +11,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
-import { errorResponse, extractToken, oidFromToken, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
 interface CallerRef { id: string; name: string }
@@ -44,6 +44,8 @@ async function getTenants(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   const buildingId = request.query.get("buildingId");
   const tenantId = request.query.get("tenantId");
@@ -104,6 +106,8 @@ async function upsertTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
 
   let connection;
@@ -222,6 +226,8 @@ async function deleteTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {

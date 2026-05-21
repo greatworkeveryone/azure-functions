@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { getValidMyobAccessToken, MyobNotLinkedError } from "../myob-auth";
 
 // Verifies the MYOB integration end-to-end by:
@@ -42,7 +42,7 @@ async function testMyobConnection(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = await requireRole(request, ["Admin"]);
+  const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
 
   const apiBase = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";

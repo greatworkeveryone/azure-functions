@@ -7,7 +7,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection } from "../db";
 import { invalidateApprovalLimitsCache } from "../approval-limits-db";
-import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 
 interface SetApprovalLimitBody {
   RoleName: string;
@@ -23,7 +23,7 @@ async function setApprovalLimit(
   if (!token) return unauthorizedResponse();
 
   const userRoles = rolesForRequest(request);
-  if (!userRoles.includes("Admin")) {
+  if (!userRoles.includes(AppRole.ADMIN)) {
     return { status: 403, jsonBody: { error: "Admin role required" } };
   }
 

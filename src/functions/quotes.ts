@@ -13,7 +13,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
@@ -21,6 +21,7 @@ import {
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
+import { resolveActivePlannerTasks } from "../planner";
 
 const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -904,7 +905,7 @@ async function directorApproveQuote(
   if (!token) return unauthorizedResponse();
 
   const userRoles = rolesForRequest(request);
-  if (!userRoles.includes("director")) {
+  if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
@@ -979,6 +980,10 @@ async function directorApproveQuote(
       connection,
       `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+    );
+    resolveActivePlannerTasks("job", jobId, ["director_approval"]).catch(
+      (err: unknown) =>
+        context.warn("plannerResolve (directorApproveQuote):", err instanceof Error ? err.message : String(err)),
     );
     return { status: 200, jsonBody: { quote: stored[0] } };
   } catch (error: any) {

@@ -25,6 +25,7 @@ import {
   SqlRow,
 } from "../db";
 import {
+  AppRole,
   errorResponse,
   extractToken,
   oidFromToken,
@@ -74,28 +75,37 @@ import {
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
 import { resolveActivePlannerTasks } from "../planner";
+import {
+  deleteInfoSheetRow,
+  deleteInfoSheetSection,
+  InfoSheetRow as InfoSheetRowApi,
+  InfoSheetSection as InfoSheetSectionApi,
+  parseInfoSheetSections,
+  upsertInfoSheetRow,
+  upsertInfoSheetSection,
+} from "../infoSheetLogic";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
 // the column's precision/scale explicitly. Keys match SQL column names.
 const DECIMAL_OPTS = {
-  // DECIMAL(12,2) — money columns
-  RentPerAnnum: { precision: 12, scale: 2 },
-  SecurityDepositHeld: { precision: 12, scale: 2 },
-  OldRentPerAnnum: { precision: 12, scale: 2 },
-  NewRentPerAnnum: { precision: 12, scale: 2 },
-  // DECIMAL(5,2) — percent columns
-  CpiCapPercent: { precision: 5, scale: 2 },
-  CpiFloorPercent: { precision: 5, scale: 2 },
-  EscalationPercent: { precision: 5, scale: 2 },
-  FixedReviewPercent: { precision: 5, scale: 2 },
-  LastReviewIncreasePercent: { precision: 5, scale: 2 },
-  IncreasePercent: { precision: 5, scale: 2 },
-  // DECIMAL(10,3) — CPI index values
-  CpiBaseValue: { precision: 10, scale: 3 },
-  CpiCurrentValue: { precision: 10, scale: 3 },
-  // DECIMAL(10,2) — size
-  SizeSqm: { precision: 10, scale: 2 },
+  // DECIMAL(20,10) — money columns
+  RentPerAnnum: { precision: 20, scale: 10 },
+  SecurityDepositHeld: { precision: 20, scale: 10 },
+  OldRentPerAnnum: { precision: 20, scale: 10 },
+  NewRentPerAnnum: { precision: 20, scale: 10 },
+  // DECIMAL(13,10) — percent columns
+  CpiCapPercent: { precision: 13, scale: 10 },
+  CpiFloorPercent: { precision: 13, scale: 10 },
+  EscalationPercent: { precision: 13, scale: 10 },
+  FixedReviewPercent: { precision: 13, scale: 10 },
+  LastReviewIncreasePercent: { precision: 13, scale: 10 },
+  IncreasePercent: { precision: 13, scale: 10 },
+  // DECIMAL(16,10) — CPI index values
+  CpiBaseValue: { precision: 16, scale: 10 },
+  CpiCurrentValue: { precision: 16, scale: 10 },
+  // DECIMAL(16,10) — size
+  SizeSqm: { precision: 16, scale: 10 },
 } as const;
 
 // ── Caller identity (same shape as inspections.ts) ───────────────────────────
@@ -179,6 +189,12 @@ function summariseBody(
 
 // ── API shapes (match src/types/tenancy.ts on the client) ────────────────────
 
+interface SecurityDepositStep {
+  effectiveFrom: string;
+  monthsRequired: number;
+  actualHeld: number | null;
+}
+
 interface RegisterTenantApi {
   abn?: string;
   accountsEmail?: string;
@@ -211,6 +227,8 @@ interface RegisterTenantApi {
   carparkScheduleGroups: CarparkScheduleGroup[];
   /** m059 — miscellaneous fees (air con, cleaning, etc.). */
   miscFees: MiscFee[];
+  /** m069 — info sheet general sections (header / subheader / body rows). */
+  infoSheetSections: InfoSheetSectionApi[];
   /** Per m040 — text date like "5/1/19". */
   informationSheetAsAt?: string;
   /** Per m040 — file path/reference for the info-sheet doc. */
@@ -243,6 +261,7 @@ interface RegisterTenantApi {
   securityDepositMethod?: string;
   // Free-form per m038: e.g. "Amount equal to 3 months rent plus GST".
   securityDepositRequired?: string;
+  securityDepositSteps: SecurityDepositStep[];
   status: "current" | "holdover" | "pending" | "vacated";
   /** Per m040 — physical street address (vs. PostalAddress). */
   streetAddress?: string;
@@ -336,25 +355,35 @@ function asBool(v: any): boolean | undefined {
   return Boolean(v);
 }
 
+function parseDepositSteps(raw: string | null | undefined): SecurityDepositStep[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as SecurityDepositStep[];
+  } catch {
+    return [];
+  }
+}
+
 /** Compute the traffic-light state from a tenant's NextReviewDate.
  *  Overdue reviews collapse into "amber" along with reviews due within 90
  *  days — the property team treats both the same way (chase action), so
  *  splitting "red" off as a separate alert just adds noise. We keep "red"
  *  in the union for future use (e.g. very-overdue) but never return it. */
 function computeReviewState(
-  nextReviewDate: Date | string | null | undefined,
+  steps: ScheduledRateStep[],
   status: string,
 ): "amber" | "green" | "grey" | "red" {
   if (status === "vacated") return "grey";
-  if (!nextReviewDate) return "grey";
-  const reviewDate =
-    nextReviewDate instanceof Date ? nextReviewDate : new Date(nextReviewDate);
-  if (Number.isNaN(reviewDate.getTime())) return "grey";
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const next = steps
+    .filter((s) => s.effectiveFrom > todayStr)
+    .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))[0];
+  if (!next) return "grey";
   const now = Date.now();
-  const reviewMs = reviewDate.getTime();
   const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-  if (reviewMs < now) return "amber";
-  if (reviewMs - now <= ninetyDaysMs) return "amber";
+  if (new Date(next.effectiveFrom).getTime() - now <= ninetyDaysMs) return "amber";
   return "green";
 }
 
@@ -441,6 +470,7 @@ function tenantRowToApi(
       row.CarparkScheduleGroups as string | null | undefined,
     ),
     miscFees: parseMiscFees(row.MiscFees as string | null | undefined),
+    infoSheetSections: parseInfoSheetSections(row.InfoSheetSections as string | null | undefined),
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
     lastReviewDate: toIsoDate(row.LastReviewDate),
@@ -462,11 +492,12 @@ function tenantRowToApi(
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
     rentPerAnnum,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
-    reviewState: computeReviewState(row.NextReviewDate, status),
+    reviewState: computeReviewState(steps, status),
     reviewType: asStr(row.ReviewType) ?? "none",
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),
     securityDepositRequired: asStr(row.SecurityDepositRequired),
+    securityDepositSteps: parseDepositSteps(row.SecurityDepositSteps as string | null | undefined),
     status,
     streetAddress: asStr(row.StreetAddress),
     tenantId: row.TenantId as number,
@@ -559,13 +590,14 @@ const TENANT_COLUMNS = `
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
   CpiRegion, CpiCapPercent, CpiFloorPercent,
-  SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
+  SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld, SecurityDepositSteps,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
   Incentives,
   ScheduledRateSteps,
   CarparkScheduleGroups,
   MiscFees,
+  InfoSheetSections,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName
 `;
 
@@ -594,6 +626,8 @@ async function getRegisterTenants(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   const buildingIdRaw = request.query.get("buildingId");
   if (!buildingIdRaw) {
@@ -703,7 +737,7 @@ async function getRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const tenantIdRaw = request.query.get("tenantId");
@@ -847,6 +881,8 @@ async function upsertRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
 
   let connection;
@@ -931,6 +967,13 @@ async function upsertRegisterTenant(
       // build SET clauses), so an attacker controlling the request body can't
       // inject a column name they didn't add to this list — the loop ignores
       // unknown keys.
+      // Serialize JSON array fields to strings before the allowlist loop.
+      if (Array.isArray((body as Record<string, unknown>).SecurityDepositSteps)) {
+        (body as Record<string, unknown>).SecurityDepositSteps = JSON.stringify(
+          (body as Record<string, unknown>).SecurityDepositSteps,
+        );
+      }
+
       const allowlist: Record<string, any> = {
         Abn: TYPES.NVarChar,
         AccountsEmail: TYPES.NVarChar,
@@ -970,6 +1013,7 @@ async function upsertRegisterTenant(
         SecurityDepositHeld: TYPES.Decimal,
         SecurityDepositMethod: TYPES.NVarChar,
         SecurityDepositRequired: TYPES.NVarChar,
+        SecurityDepositSteps: TYPES.NVarChar,
         Status: TYPES.NVarChar,
         StreetAddress: TYPES.NVarChar,
         TermMonths: TYPES.Int,
@@ -1222,6 +1266,8 @@ async function upsertOccupancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   let body: Record<string, any> | null = null;
@@ -1429,6 +1475,8 @@ async function deleteOccupancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -1470,6 +1518,8 @@ async function createTenantNote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
 
   let connection;
@@ -1553,6 +1603,8 @@ async function deleteTenantNote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -1592,6 +1644,8 @@ async function deleteRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   let body: Record<string, any> | null = null;
@@ -1650,6 +1704,8 @@ async function applyRentReview(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
 
   let connection;
@@ -1835,6 +1891,8 @@ async function getReviewsDue(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   const buildingIdParam = request.query.get("buildingId");
 
@@ -1882,6 +1940,8 @@ async function getPortfolioOccupancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -1982,7 +2042,7 @@ async function upsertTenantIncentive(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2076,7 +2136,7 @@ async function deleteTenantIncentive(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2234,7 +2294,7 @@ async function upsertScheduledRateStep(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2325,7 +2385,7 @@ async function deleteScheduledRateStep(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2641,6 +2701,8 @@ async function getCarparks(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -2679,6 +2741,8 @@ async function upsertCarpark(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   let body: Record<string, any> | null = null;
@@ -2717,6 +2781,8 @@ async function upsertCarparksBulk(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   let body: any = null;
@@ -2787,6 +2853,8 @@ async function deleteCarpark(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
 
   let connection;
   try {
@@ -2822,7 +2890,7 @@ async function upsertCarparkScheduleGroup(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2902,7 +2970,7 @@ async function deleteCarparkScheduleGroup(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -2976,6 +3044,298 @@ async function deleteCarparkScheduleGroup(
   }
 }
 
+// ── POST /api/upsertInfoSheetSection ─────────────────────────────────────────
+
+const INFO_SHEET_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
+
+async function upsertInfoSheetSectionHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const TenantId = Number(body.TenantId);
+    const BuildingId = Number(body.BuildingId);
+    const section = body.Section as InfoSheetSectionApi | undefined;
+    if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !section?.id || !section.title) {
+      return { status: 400, jsonBody: { error: "TenantId, BuildingId, and Section (id, title) required" } };
+    }
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
+    const next = upsertInfoSheetSection(existing, section);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         InfoSheetSections = @InfoSheetSections,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
+    return { status: 200, jsonBody: { sections: next } };
+  } catch (error: any) {
+    context.error("upsertInfoSheetSection failed:", error.message);
+    return errorResponse("Failed to upsert info sheet section", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteInfoSheetSection ─────────────────────────────────────────
+
+async function deleteInfoSheetSectionHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const TenantId = Number(body.TenantId);
+    const BuildingId = Number(body.BuildingId);
+    const sectionId = body.SectionId as string | undefined;
+    if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId) {
+      return { status: 400, jsonBody: { error: "TenantId, BuildingId, and SectionId required" } };
+    }
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
+    const next = deleteInfoSheetSection(existing, sectionId);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         InfoSheetSections = @InfoSheetSections,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
+    return { status: 200, jsonBody: { deleted: true, sectionId } };
+  } catch (error: any) {
+    context.error("deleteInfoSheetSection failed:", error.message);
+    return errorResponse("Failed to delete info sheet section", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/upsertInfoSheetRow ──────────────────────────────────────────────
+
+async function upsertInfoSheetRowHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const TenantId = Number(body.TenantId);
+    const BuildingId = Number(body.BuildingId);
+    const sectionId = body.SectionId as string | undefined;
+    const row = body.Row as InfoSheetRowApi | undefined;
+    if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId || !row?.id) {
+      return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and Row (id) required" } };
+    }
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
+    const next = upsertInfoSheetRow(existing, sectionId, row);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         InfoSheetSections = @InfoSheetSections,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
+    return { status: 200, jsonBody: { sections: next } };
+  } catch (error: any) {
+    context.error("upsertInfoSheetRow failed:", error.message);
+    return errorResponse("Failed to upsert info sheet row", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/deleteInfoSheetRow ──────────────────────────────────────────────
+
+async function deleteInfoSheetRowHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const TenantId = Number(body.TenantId);
+    const BuildingId = Number(body.BuildingId);
+    const sectionId = body.SectionId as string | undefined;
+    const rowId = body.RowId as string | undefined;
+    if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId || !rowId) {
+      return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and RowId required" } };
+    }
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
+    const next = deleteInfoSheetRow(existing, sectionId, rowId);
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         InfoSheetSections = @InfoSheetSections,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
+    return { status: 200, jsonBody: { deleted: true, sectionId, rowId } };
+  } catch (error: any) {
+    context.error("deleteInfoSheetRow failed:", error.message);
+    return errorResponse("Failed to delete info sheet row", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/upsertMiscFee ───────────────────────────────────────────────────
 
 const MISC_FEE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -2986,7 +3346,7 @@ async function upsertMiscFeeHandler(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -3057,7 +3417,7 @@ async function deleteMiscFeeHandler(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);
@@ -3238,4 +3598,24 @@ app.http("deleteMiscFee", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deleteMiscFeeHandler,
+});
+app.http("upsertInfoSheetSection", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertInfoSheetSectionHandler,
+});
+app.http("deleteInfoSheetSection", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteInfoSheetSectionHandler,
+});
+app.http("upsertInfoSheetRow", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertInfoSheetRowHandler,
+});
+app.http("deleteInfoSheetRow", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: deleteInfoSheetRowHandler,
 });

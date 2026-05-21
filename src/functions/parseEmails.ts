@@ -18,7 +18,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
-import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -376,7 +376,7 @@ async function adminTriggerEmailParse(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin"]);
+  const roleCheck = requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
   // ?reset=true clears all failed/errored emails back into the queue first,
@@ -427,7 +427,7 @@ async function getFlaggedEmails(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isDev) {
-    const roleCheck = await requireRole(request, ["Admin"]);
+    const roleCheck = await requireRole(request, [AppRole.ADMIN]);
     if (roleCheck) return roleCheck;
   }
 

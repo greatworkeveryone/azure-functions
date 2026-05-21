@@ -16,6 +16,7 @@ import {
   SqlRow,
 } from "../db";
 import {
+  AppRole,
   errorResponse,
   extractToken,
   oidFromToken,
@@ -25,7 +26,7 @@ import {
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 
-const EDIT_INSPECTIONS_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
+const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.FACILITIES_APPROVAL] as const;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 

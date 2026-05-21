@@ -2,20 +2,27 @@ import { app, type InvocationContext, type Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import {
+  getPlanConfig,
   graphCompletePlannerTask,
   graphCreatePlannerTask,
   graphGetGroupMembers,
   graphGetPlannerTask,
 } from "../planner";
 import {
+  addDaysUTC,
+  buildAwaitingAccountsTaskDescription,
+  buildDirectorApprovalTaskDescription,
   buildJobTaskDescription,
+  buildStalledJobTaskDescription,
   buildTaskTitle,
   buildTenantTaskDescription,
   computeEventDate,
   isInWindow,
   LEAD_TIMES,
   toIsoDateString,
+  type PlannerAccountsJobRow,
   type PlannerJobRow,
+  type PlannerStalledJobRow,
   type PlannerTenantRow,
   type TriggerType,
 } from "../plannerHelpers";
@@ -26,49 +33,41 @@ const TENANT_TRIGGER_TYPES: TriggerType[] = [
   "rent_review",
 ];
 
-function bucketIdForTriggerType(triggerType: TriggerType): string {
-  const {
-    PLANNER_BUCKET_LEASE_EXPIRY_ID,
-    PLANNER_BUCKET_OPTION_DEADLINES_ID,
-    PLANNER_BUCKET_RENT_REVIEWS_ID,
-    PLANNER_BUCKET_JOB_UPDATES_ID,
-  } = process.env;
-  switch (triggerType) {
-    case "lease_expiry":
-      return PLANNER_BUCKET_LEASE_EXPIRY_ID ?? "";
-    case "option_notice":
-      return PLANNER_BUCKET_OPTION_DEADLINES_ID ?? "";
-    case "rent_review":
-      return PLANNER_BUCKET_RENT_REVIEWS_ID ?? "";
-    case "job_update_due":
-      return PLANNER_BUCKET_JOB_UPDATES_ID ?? "";
-  }
-}
 
-async function plannerSyncTimer(
+export async function plannerSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
   context.log("plannerSyncTimer: starting");
 
-  const { PLANNER_GROUP_ID, PLANNER_PLAN_ID, APP_BASE_URL } = process.env;
+  const {
+    PLANNER_FACILITIES_GROUP_ID,
+    PLANNER_FACILITIES_PLAN_ID,
+    PLANNER_ACCOUNTS_GROUP_ID,
+    PLANNER_ACCOUNTS_PLAN_ID,
+    APP_BASE_URL,
+  } = process.env;
 
-  if (!PLANNER_GROUP_ID || !PLANNER_PLAN_ID || !APP_BASE_URL) {
-    context.error(
-      "plannerSyncTimer: missing PLANNER_GROUP_ID, PLANNER_PLAN_ID, or APP_BASE_URL — skipping",
-    );
+  if (
+    !PLANNER_FACILITIES_GROUP_ID ||
+    !PLANNER_FACILITIES_PLAN_ID ||
+    !PLANNER_ACCOUNTS_GROUP_ID ||
+    !PLANNER_ACCOUNTS_PLAN_ID ||
+    !APP_BASE_URL
+  ) {
+    context.error("plannerSyncTimer: missing Facilities or Accounts plan env vars — skipping");
     return;
   }
 
   let connection;
   try {
-    const assigneeIds = await graphGetGroupMembers(PLANNER_GROUP_ID);
-    if (assigneeIds.length === 0) {
-      context.warn(
-        "plannerSyncTimer: no group members found — tasks will have no assignees",
-      );
-    }
-    context.log(`plannerSyncTimer: ${assigneeIds.length} assignees`);
+    const [facilitiesMembers, accountsMembers] = await Promise.all([
+      graphGetGroupMembers(PLANNER_FACILITIES_GROUP_ID),
+      graphGetGroupMembers(PLANNER_ACCOUNTS_GROUP_ID),
+    ]);
+    context.log(
+      `plannerSyncTimer: facilities=${facilitiesMembers.length} accounts=${accountsMembers.length} members`,
+    );
 
     connection = await createServiceConnection();
     const today = new Date();
@@ -143,23 +142,23 @@ async function plannerSyncTimer(
             APP_BASE_URL,
           );
           const dueDateStr = toIsoDateString(eventDate);
-          const bucketId = bucketIdForTriggerType(triggerType);
+          const { planId, bucketId } = getPlanConfig(triggerType);
 
           if (existing.length === 0) {
             try {
               const taskId = await graphCreatePlannerTask({
-                planId: PLANNER_PLAN_ID,
+                planId,
                 bucketId,
                 title,
                 dueDate: dueDateStr,
-                assigneeIds,
+                assigneeIds: accountsMembers,
                 description,
               });
               await executeQuery(
                 connection,
                 `INSERT INTO dbo.PlannerTasks
-                   (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate)
-                 VALUES ('tenant', @EntityId, @TriggerType, @LeadTimeDays, @TaskId, @DueDate)`,
+                   (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
+                 VALUES ('tenant', @EntityId, @TriggerType, @LeadTimeDays, @TaskId, @DueDate, 'accounts')`,
                 [
                   { name: "EntityId", type: TYPES.Int, value: tenant.tenantId },
                   {
@@ -199,11 +198,11 @@ async function plannerSyncTimer(
           if (rowStatus === "resolved") {
             try {
               const taskId = await graphCreatePlannerTask({
-                planId: PLANNER_PLAN_ID,
+                planId,
                 bucketId,
                 title,
                 dueDate: dueDateStr,
-                assigneeIds,
+                assigneeIds: accountsMembers,
                 description,
               });
               await executeQuery(
@@ -239,11 +238,11 @@ async function plannerSyncTimer(
               skipped++;
             } else {
               const taskId = await graphCreatePlannerTask({
-                planId: PLANNER_PLAN_ID,
+                planId,
                 bucketId,
                 title,
                 dueDate: dueDateStr,
-                assigneeIds,
+                assigneeIds: accountsMembers,
                 description,
               });
               await executeQuery(
@@ -319,23 +318,23 @@ async function plannerSyncTimer(
       const dueDateStr = job.expectedProgressUpdate
         ? toIsoDateString(new Date(job.expectedProgressUpdate))
         : toIsoDateString(today);
-      const bucketId = bucketIdForTriggerType("job_update_due");
+      const { planId: jobPlanId, bucketId: jobBucketId } = getPlanConfig("job_update_due");
 
       if (existing.length === 0) {
         try {
           const taskId = await graphCreatePlannerTask({
-            planId: PLANNER_PLAN_ID,
-            bucketId,
+            planId: jobPlanId,
+            bucketId: jobBucketId,
             title,
             dueDate: dueDateStr,
-            assigneeIds,
+            assigneeIds: facilitiesMembers,
             description,
           });
           await executeQuery(
             connection,
             `INSERT INTO dbo.PlannerTasks
-               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate)
-             VALUES ('job', @EntityId, 'job_update_due', 0, @TaskId, @DueDate)`,
+               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
+             VALUES ('job', @EntityId, 'job_update_due', 0, @TaskId, @DueDate, 'facilities')`,
             [
               { name: "EntityId", type: TYPES.Int, value: job.jobId },
               { name: "TaskId", type: TYPES.NVarChar, value: taskId },
@@ -363,11 +362,11 @@ async function plannerSyncTimer(
             jobSkipped++;
           } else {
             const taskId = await graphCreatePlannerTask({
-              planId: PLANNER_PLAN_ID,
-              bucketId,
+              planId: jobPlanId,
+              bucketId: jobBucketId,
               title,
               dueDate: dueDateStr,
-              assigneeIds,
+              assigneeIds: facilitiesMembers,
               description,
             });
             await executeQuery(
@@ -390,11 +389,11 @@ async function plannerSyncTimer(
       } else {
         try {
           const taskId = await graphCreatePlannerTask({
-            planId: PLANNER_PLAN_ID,
-            bucketId,
+            planId: jobPlanId,
+            bucketId: jobBucketId,
             title,
             dueDate: dueDateStr,
-            assigneeIds,
+            assigneeIds: facilitiesMembers,
             description,
           });
           await executeQuery(
@@ -422,6 +421,317 @@ async function plannerSyncTimer(
     context.log(
       `plannerSyncTimer: jobs — created=${jobCreated} skipped=${jobSkipped}`,
     );
+
+    // ── Stalled jobs (Facilities plan) ─────────────────────────────────────
+
+    const stalledRows = await executeQuery(
+      connection,
+      `SELECT j.JobID, j.Title,
+              COALESCE(b.BuildingName, '') AS BuildingName,
+              CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
+              au.EntraOid AS AssignedToEntraOid
+       FROM dbo.Jobs j
+       LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+       LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
+       WHERE j.IsStalled = 1
+         AND j.IsArchived = 0
+         AND j.Status <> 'Done'
+         AND (j.AwaitingRole IS NULL OR j.AwaitingRole = 'facilities')`,
+    );
+
+    const stalledJobs: PlannerStalledJobRow[] = stalledRows.map((r) => ({
+      jobId: r.JobID as number,
+      title: r.Title as string,
+      buildingName: (r.BuildingName as string | null) ?? null,
+      stalledAt: (r.StalledAt as string | null) ?? null,
+      assignedToEntraOid: (r.AssignedToEntraOid as string | null) ?? null,
+    }));
+
+    let stalledCreated = 0;
+    let stalledSkipped = 0;
+
+    for (const job of stalledJobs) {
+      const existing = await executeQuery(
+        connection,
+        `SELECT Id, PlannerTaskId, Status
+         FROM dbo.PlannerTasks
+         WHERE EntityType = 'job' AND EntityId = @EntityId
+           AND TriggerType = 'stalled_facilities' AND LeadTimeDays = 0`,
+        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
+      );
+
+      const stalledDate = job.stalledAt ? new Date(job.stalledAt) : new Date();
+      const dueDate = addDaysUTC(stalledDate, 2);
+      const dueDateStr = toIsoDateString(dueDate);
+      const title = buildTaskTitle(job.title, "stalled_facilities", 0);
+      const description = buildStalledJobTaskDescription(job, APP_BASE_URL);
+      const { planId, bucketId } = getPlanConfig("stalled_facilities");
+      const assigneeIds = job.assignedToEntraOid
+        ? [job.assignedToEntraOid]
+        : facilitiesMembers;
+
+      if (existing.length === 0) {
+        try {
+          const taskId = await graphCreatePlannerTask({
+            planId,
+            bucketId,
+            title,
+            dueDate: dueDateStr,
+            assigneeIds,
+            description,
+          });
+          await executeQuery(
+            connection,
+            `INSERT INTO dbo.PlannerTasks
+               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
+             VALUES ('job', @EntityId, 'stalled_facilities', 0, @TaskId, @DueDate, 'facilities')`,
+            [
+              { name: "EntityId", type: TYPES.Int,      value: job.jobId },
+              { name: "TaskId",   type: TYPES.NVarChar,  value: taskId },
+              { name: "DueDate",  type: TYPES.Date,      value: new Date(dueDateStr) },
+            ],
+          );
+          stalledCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(
+            `plannerSyncTimer: failed to create stalled task for JobID ${job.jobId}:`,
+            message,
+          );
+        }
+        continue;
+      }
+
+      const row = existing[0];
+      if ((row.Status as string) === "active") {
+        try {
+          const task = await graphGetPlannerTask(row.PlannerTaskId as string);
+          if (task !== null) {
+            stalledSkipped++;
+          } else {
+            const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds, description });
+            await executeQuery(
+              connection,
+              `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId WHERE Id = @Id`,
+              [
+                { name: "TaskId", type: TYPES.NVarChar, value: taskId },
+                { name: "Id",     type: TYPES.Int,      value: row.Id as number },
+              ],
+            );
+            stalledCreated++;
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: error checking stalled task for JobID ${job.jobId}:`, message);
+        }
+      } else {
+        // resolved — job was re-stalled after being unstalled; re-create
+        try {
+          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds, description });
+          await executeQuery(
+            connection,
+            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
+            [
+              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
+              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
+              { name: "Id",      type: TYPES.Int,      value: row.Id as number },
+            ],
+          );
+          stalledCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: failed to recreate stalled task for JobID ${job.jobId}:`, message);
+        }
+      }
+    }
+    context.log(`plannerSyncTimer: stalled — created=${stalledCreated} skipped=${stalledSkipped}`);
+
+    // ── Awaiting accounts (Accounts plan) ──────────────────────────────────
+
+    const awaitingRows = await executeQuery(
+      connection,
+      `SELECT j.JobID, j.Title,
+              COALESCE(b.BuildingName, '') AS BuildingName
+       FROM dbo.Jobs j
+       LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+       WHERE j.IsArchived = 0
+         AND j.Status <> 'Done'
+         AND j.AwaitingRole = 'accounts'`,
+    );
+
+    const awaitingJobs: PlannerAccountsJobRow[] = awaitingRows.map((r) => ({
+      jobId: r.JobID as number,
+      title: r.Title as string,
+      buildingName: (r.BuildingName as string | null) ?? null,
+    }));
+
+    let awaitingCreated = 0;
+    let awaitingSkipped = 0;
+
+    for (const job of awaitingJobs) {
+      const existing = await executeQuery(
+        connection,
+        `SELECT Id, PlannerTaskId, Status FROM dbo.PlannerTasks
+         WHERE EntityType = 'job' AND EntityId = @EntityId
+           AND TriggerType = 'awaiting_accounts' AND LeadTimeDays = 0`,
+        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
+      );
+
+      const dueDateStr = toIsoDateString(new Date());
+      const title = buildTaskTitle(job.title, "awaiting_accounts", 0);
+      const description = buildAwaitingAccountsTaskDescription(job, APP_BASE_URL);
+      const { planId, bucketId } = getPlanConfig("awaiting_accounts");
+
+      if (existing.length === 0) {
+        try {
+          const taskId = await graphCreatePlannerTask({
+            planId, bucketId, title, dueDate: dueDateStr,
+            assigneeIds: accountsMembers, description,
+          });
+          await executeQuery(
+            connection,
+            `INSERT INTO dbo.PlannerTasks
+               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
+             VALUES ('job', @EntityId, 'awaiting_accounts', 0, @TaskId, @DueDate, 'accounts')`,
+            [
+              { name: "EntityId", type: TYPES.Int,     value: job.jobId },
+              { name: "TaskId",   type: TYPES.NVarChar, value: taskId },
+              { name: "DueDate",  type: TYPES.Date,     value: new Date(dueDateStr) },
+            ],
+          );
+          awaitingCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: failed to create awaiting_accounts task for JobID ${job.jobId}:`, message);
+        }
+        continue;
+      }
+
+      if ((existing[0].Status as string) === "active") {
+        try {
+          const task = await graphGetPlannerTask(existing[0].PlannerTaskId as string);
+          if (task !== null) { awaitingSkipped++; }
+        } catch (err: unknown) {
+          context.error(`plannerSyncTimer: error checking awaiting task ${job.jobId}:`, String(err));
+        }
+      } else {
+        // resolved — awaiting role was set back to accounts; re-create
+        try {
+          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds: accountsMembers, description });
+          await executeQuery(
+            connection,
+            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
+            [
+              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
+              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
+              { name: "Id",      type: TYPES.Int,      value: existing[0].Id as number },
+            ],
+          );
+          awaitingCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: failed to recreate awaiting task for JobID ${job.jobId}:`, message);
+        }
+      }
+    }
+    context.log(`plannerSyncTimer: awaiting_accounts — created=${awaitingCreated} skipped=${awaitingSkipped}`);
+
+    // ── Director approval (Accounts plan) ──────────────────────────────────
+
+    const directorRows = await executeQuery(
+      connection,
+      `SELECT sub.JobID, sub.Title, sub.BuildingName
+       FROM (
+         SELECT j.JobID, j.Title,
+                COALESCE(b.BuildingName, '') AS BuildingName,
+                (SELECT COUNT(*) FROM dbo.JobInvoices ji
+                 WHERE ji.JobID = j.JobID AND ji.Status = 'approved') +
+                (SELECT COUNT(*) FROM dbo.Quotes q
+                 WHERE q.JobID = j.JobID AND q.Status = 'awaiting_director')
+                AS DirectorNeededCount
+         FROM dbo.Jobs j
+         LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+         WHERE j.IsArchived = 0 AND j.Status <> 'Done'
+       ) sub
+       WHERE sub.DirectorNeededCount > 0`,
+    );
+
+    const directorJobs: PlannerAccountsJobRow[] = directorRows.map((r) => ({
+      jobId: r.JobID as number,
+      title: r.Title as string,
+      buildingName: (r.BuildingName as string | null) ?? null,
+    }));
+
+    let directorCreated = 0;
+    let directorSkipped = 0;
+
+    for (const job of directorJobs) {
+      const existing = await executeQuery(
+        connection,
+        `SELECT Id, PlannerTaskId, Status FROM dbo.PlannerTasks
+         WHERE EntityType = 'job' AND EntityId = @EntityId
+           AND TriggerType = 'director_approval' AND LeadTimeDays = 0`,
+        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
+      );
+
+      const dueDateStr = toIsoDateString(new Date());
+      const title = buildTaskTitle(job.title, "director_approval", 0);
+      const description = buildDirectorApprovalTaskDescription(job, APP_BASE_URL);
+      const { planId, bucketId } = getPlanConfig("director_approval");
+
+      if (existing.length === 0) {
+        try {
+          const taskId = await graphCreatePlannerTask({
+            planId, bucketId, title, dueDate: dueDateStr,
+            assigneeIds: accountsMembers, description,
+          });
+          await executeQuery(
+            connection,
+            `INSERT INTO dbo.PlannerTasks
+               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
+             VALUES ('job', @EntityId, 'director_approval', 0, @TaskId, @DueDate, 'accounts')`,
+            [
+              { name: "EntityId", type: TYPES.Int,     value: job.jobId },
+              { name: "TaskId",   type: TYPES.NVarChar, value: taskId },
+              { name: "DueDate",  type: TYPES.Date,     value: new Date(dueDateStr) },
+            ],
+          );
+          directorCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: failed to create director_approval task for JobID ${job.jobId}:`, message);
+        }
+        continue;
+      }
+
+      if ((existing[0].Status as string) === "active") {
+        try {
+          const task = await graphGetPlannerTask(existing[0].PlannerTaskId as string);
+          if (task !== null) { directorSkipped++; }
+        } catch (err: unknown) {
+          context.error(`plannerSyncTimer: error checking director task ${job.jobId}:`, String(err));
+        }
+      } else {
+        // resolved — new invoice/quote requiring director sign-off added; re-create
+        try {
+          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds: accountsMembers, description });
+          await executeQuery(
+            connection,
+            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
+            [
+              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
+              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
+              { name: "Id",      type: TYPES.Int,      value: existing[0].Id as number },
+            ],
+          );
+          directorCreated++;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          context.error(`plannerSyncTimer: failed to recreate director task for JobID ${job.jobId}:`, message);
+        }
+      }
+    }
+    context.log(`plannerSyncTimer: director_approval — created=${directorCreated} skipped=${directorSkipped}`);
 
     // ── Resolve overdue tasks ───────────────────────────────────────────────
 

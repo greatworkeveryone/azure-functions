@@ -13,7 +13,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext, Timer } from "@azure/functions";
 import { createConnection, executeQuery, closeConnection } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
-import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { upsertWorkRequest } from "./workRequests";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
@@ -97,7 +97,7 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
 async function syncAllWorkRequestsHttp(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = await requireRole(request, ["Admin"]);
+  const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
 
   const force = request.query.get("force") === "true";

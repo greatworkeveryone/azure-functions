@@ -7,6 +7,7 @@ import ExcelJS from "exceljs";
 import { TYPES } from "tedious";
 import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import {
+  AppRole,
   extractToken,
   unauthorizedResponse,
   errorResponse,
@@ -16,8 +17,8 @@ import {
 import { uploadBlob, generateReadSasUrl } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
-const BULK_CREATE_ROLES = ["Admin", "timesheet_approval_facilities"] as const;
-const EDIT_KEYS_ROLES   = ["Admin", "facilities", "timesheet_approval_facilities"] as const;
+const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.FACILITIES_APPROVAL] as const;
+const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
 
 // ── Caller identity ─────────────────────────────────────────────────────────
 // Mirrors the pattern in inspections.ts. We store both the stable Entra OID
@@ -1036,7 +1037,7 @@ async function keyImportTemplate(
 }
 
 // ── POST /api/bulkImportKeys ──────────────────────────────────────────────────
-// Role-restricted: Admin or timesheet_approval_facilities only.
+// Role-restricted: Admin or facilities_manager only.
 // Accepts multipart/form-data with an 'file' field (XLSX).
 
 async function bulkImportKeys(

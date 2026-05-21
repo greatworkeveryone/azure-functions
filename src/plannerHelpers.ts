@@ -2,7 +2,10 @@ export type TriggerType =
   | "lease_expiry"
   | "option_notice"
   | "rent_review"
-  | "job_update_due";
+  | "job_update_due"         // legacy — existing tasks only, routes to Facilities
+  | "stalled_facilities"     // IsStalled=1 AND AwaitingRole != 'accounts'
+  | "awaiting_accounts"      // AwaitingRole = 'accounts'
+  | "director_approval";     // DirectorNeededCount > 0
 
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
@@ -26,6 +29,20 @@ export interface PlannerJobRow {
   expectedProgressUpdate: string | null;
 }
 
+export interface PlannerStalledJobRow {
+  jobId: number;
+  title: string;
+  buildingName: string | null;
+  stalledAt: string | null;
+  assignedToEntraOid: string | null;
+}
+
+export interface PlannerAccountsJobRow {
+  jobId: number;
+  title: string;
+  buildingName: string | null;
+}
+
 export function formatDDMMYYYY(isoDate: string): string {
   const d = new Date(isoDate);
   const dd = String(d.getUTCDate()).padStart(2, "0");
@@ -38,6 +55,10 @@ function subMonthsUTC(date: Date, months: number): Date {
   return new Date(
     Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - months, date.getUTCDate()),
   );
+}
+
+export function addDaysUTC(date: Date, days: number): Date {
+  return new Date(date.getTime() + days * 86_400_000);
 }
 
 export function computeEventDate(
@@ -91,6 +112,12 @@ export function buildTaskTitle(
       return `Rent review — ${displayName} (${leadTimeDays} days)`;
     case "job_update_due":
       return `Update overdue — ${displayName}`;
+    case "stalled_facilities":
+      return `Job stalled — ${displayName}`;
+    case "awaiting_accounts":
+      return `Awaiting accounts — ${displayName}`;
+    case "director_approval":
+      return `Director approval needed — ${displayName}`;
   }
 }
 
@@ -135,6 +162,31 @@ export function buildJobTaskDescription(
     ? formatDDMMYYYY(job.expectedProgressUpdate)
     : "—";
   return `${location ? location + "\n" : ""}Expected update: ${due}\n${appBaseUrl}/jobs`;
+}
+
+export function buildStalledJobTaskDescription(
+  job: PlannerStalledJobRow,
+  appBaseUrl: string,
+): string {
+  const location = job.buildingName ?? "";
+  const stalledDate = job.stalledAt ? formatDDMMYYYY(job.stalledAt.slice(0, 10)) : "—";
+  return `${location ? location + "\n" : ""}Stalled since: ${stalledDate}\n${appBaseUrl}/jobs/${job.jobId}`;
+}
+
+export function buildAwaitingAccountsTaskDescription(
+  job: PlannerAccountsJobRow,
+  appBaseUrl: string,
+): string {
+  const location = job.buildingName ?? "";
+  return `${location ? location + "\n" : ""}Awaiting accounts action\n${appBaseUrl}/jobs/${job.jobId}`;
+}
+
+export function buildDirectorApprovalTaskDescription(
+  job: PlannerAccountsJobRow,
+  appBaseUrl: string,
+): string {
+  const location = job.buildingName ?? "";
+  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${appBaseUrl}/jobs/${job.jobId}`;
 }
 
 export function toIsoDateString(date: Date): string {

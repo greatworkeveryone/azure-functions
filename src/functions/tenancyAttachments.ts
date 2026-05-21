@@ -9,7 +9,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
-import { extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
+import { AppRole, extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
@@ -23,7 +23,7 @@ async function handleUploadTenancyAttachment(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -110,7 +110,7 @@ async function handleGetTenancyAttachments(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, ["Admin", "facilities"]);
+  const roleCheck = requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
   if (roleCheck) return roleCheck;
 
   const raw = request.query.get("tenantId");

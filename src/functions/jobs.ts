@@ -11,6 +11,7 @@ import {
   SqlRow,
 } from "../db";
 import {
+  AppRole,
   errorResponse,
   extractToken,
   oidFromToken,
@@ -50,29 +51,29 @@ function callerFromToken(token: string): UserRef {
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
 // users get the OR with Job.CreatedBy === caller.name (handled inline).
 const ARCHIVE_ANY_JOB_ROLES = [
-  "Admin",
-  "timesheet_approval_facilities",
-  "timesheet_approval_accounts",
+  AppRole.ADMIN,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.ACCOUNTS_APPROVAL,
 ];
 
 // Anyone who can create or edit jobs. Facilities team owns this day-to-day;
 // approval tiers and admin retain ability to fix things.
 const EDIT_JOBS_ROLES = [
-  "Admin",
-  "facilities",
-  "timesheet_approval_facilities",
-  "accounts",
-  "timesheet_approval_accounts",
+  AppRole.ADMIN,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
 ] as const;
 
 // Anyone who can read jobs. Same set for now — read access is gated only to
 // keep unauthorised tenants/contractors out, not internal staff.
 const VIEW_JOBS_ROLES = [
-  "Admin",
-  "facilities",
-  "timesheet_approval_facilities",
-  "accounts",
-  "timesheet_approval_accounts",
+  AppRole.ADMIN,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
 ] as const;
 
 // ── Column lists ─────────────────────────────────────────────────────────────
@@ -80,6 +81,8 @@ const VIEW_JOBS_ROLES = [
 
 const JOB_COLUMNS = `
   JobID, BuildingID, WorkRequestID, Title, Description, AssignedTo,
+  AssignedToUserID,
+  StalledAt,
   Status, IsStalled, StalledReason, IsInternal, CreationMethod, SourceEmailID,
   SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
   AwaitingRole,
@@ -116,6 +119,7 @@ const JOB_WRITE_COLUMNS = [
   "Title",
   "Description",
   "AssignedTo",
+  "AssignedToUserID",
   "Status",
   "IsStalled",
   "StalledReason",
@@ -163,6 +167,7 @@ interface AddJobEventBody {
   PurchaseOrderID?: number;
   QuoteID?: number;
   NewAssignee?: string;
+  NewAssigneeUserID?: number;
   NewAwaitingRole?: string;
   CreationSource?: string;
 }
@@ -173,6 +178,7 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   Title: TYPES.NVarChar,
   Description: TYPES.NVarChar,
   AssignedTo: TYPES.NVarChar,
+  AssignedToUserID: TYPES.Int,
   Status: TYPES.NVarChar,
   IsStalled: TYPES.Bit,
   StalledReason: TYPES.NVarChar,
@@ -557,7 +563,21 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       // JobEvents INSERTs in one transaction so the audit trail can't drift
       // from the underlying Jobs row. Frontend used to fire these audit events
       // post-hoc via addJobEvent; doing it here keeps them atomic.
-      const setClause = Object.keys(fields).map((c) => `${c}=@${c}`).join(", ");
+
+      // Mirror StalledAt when IsStalled is explicitly set (same logic as addJobEvent).
+      const stalledAtExtra: { clause: string; param: SqlParam } | null =
+        fields.IsStalled !== undefined
+          ? {
+              clause: "StalledAt=@StalledAt",
+              param: { name: "StalledAt", type: TYPES.DateTime2, value: fields.IsStalled ? new Date() : null },
+            }
+          : null;
+
+      const setClause = [
+        ...Object.keys(fields).map((c) => `${c}=@${c}`),
+        ...(stalledAtExtra ? [stalledAtExtra.clause] : []),
+      ].join(", ");
+      if (stalledAtExtra) params.push(stalledAtExtra.param);
       params.push({ name: "JobID", type: TYPES.Int, value: JobID });
 
       await beginTransaction(connection);
@@ -689,8 +709,8 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
   const userRoles = rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r));
-  const isFacilities = userRoles.includes("facilities");
+  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
   try {
@@ -758,6 +778,10 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
       await rollbackTransaction(connection).catch(() => {});
       throw err;
     }
+    resolveActivePlannerTasks("job", JobID, ["stalled_facilities", "awaiting_accounts", "director_approval", "job_update_due"]).catch(
+      (err: unknown) =>
+        context.warn("plannerResolve (archiveJob):", err instanceof Error ? err.message : String(err)),
+    );
     return { status: 200, jsonBody: { archived: JobID } };
   } catch (error: any) {
     context.error("archiveJob failed:", error.message);
@@ -779,8 +803,8 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
   const userRoles = rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r));
-  const isFacilities = userRoles.includes("facilities");
+  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
   try {
@@ -883,6 +907,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       PurchaseOrderID,
       QuoteID,
       NewAssignee,
+      NewAssigneeUserID,
       NewAwaitingRole,
       CreationSource,
     } = body ?? {};
@@ -898,6 +923,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       PurchaseOrderID == null &&
       QuoteID == null &&
       NewAssignee == null &&
+      NewAssigneeUserID == null &&
       NewAwaitingRole == null &&
       CreationSource == null
     ) {
@@ -981,6 +1007,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           type: TYPES.Bit,
           value: isStalledBit,
         });
+        updates.push("StalledAt=@StalledAtMirror");
+        updateParams.push({
+          name: "StalledAtMirror",
+          type: TYPES.DateTime2,
+          value: isStalledBit === 1 ? new Date() : null,
+        });
       }
       if (NewAssignee != null) {
         updates.push("AssignedTo=@AssignedToMirror");
@@ -988,6 +1020,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           name: "AssignedToMirror",
           type: TYPES.NVarChar,
           value: NewAssignee,
+        });
+      }
+      if (NewAssigneeUserID != null) {
+        updates.push("AssignedToUserID=@AssignedToUserIDMirror");
+        updateParams.push({
+          name: "AssignedToUserIDMirror",
+          type: TYPES.Int,
+          value: NewAssigneeUserID,
         });
       }
       if (NewAwaitingRole != null) {
@@ -1014,6 +1054,24 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         resolveActivePlannerTasks("job", JobID, ["job_update_due"]).catch(
           (err: unknown) =>
             context.warn("plannerResolve (addJobEvent):", err instanceof Error ? err.message : String(err)),
+        );
+      }
+      if (isStalledBit === 0) {
+        resolveActivePlannerTasks("job", JobID, ["stalled_facilities"]).catch(
+          (err: unknown) =>
+            context.warn("plannerResolve (stalled cleared):", err instanceof Error ? err.message : String(err)),
+        );
+      }
+      if (NewAwaitingRole !== null && NewAwaitingRole !== undefined && NewAwaitingRole !== "accounts") {
+        resolveActivePlannerTasks("job", JobID, ["awaiting_accounts"]).catch(
+          (err: unknown) =>
+            context.warn("plannerResolve (awaiting role changed):", err instanceof Error ? err.message : String(err)),
+        );
+      }
+      if (NewStatus === "Done") {
+        resolveActivePlannerTasks("job", JobID, ["stalled_facilities", "awaiting_accounts", "director_approval", "job_update_due"]).catch(
+          (err: unknown) =>
+            context.warn("plannerResolve (job done):", err instanceof Error ? err.message : String(err)),
         );
       }
 

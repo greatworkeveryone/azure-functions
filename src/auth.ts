@@ -1,5 +1,15 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 
+export enum AppRole {
+  ACCOUNTS            = "accounts",
+  ACCOUNTS_APPROVAL   = "accounts_manager",
+  ADMIN               = "admin",
+  DIRECTOR            = "director",
+  FACILITIES          = "facilities",
+  FACILITIES_APPROVAL = "facilities_manager",
+  USER                = "user",
+}
+
 export function extractToken(request: HttpRequest): string | null {
   const authHeader = request.headers.get("authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -25,10 +35,11 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
-export function errorResponse(message: string, _details?: string): HttpResponseInit {
+export function errorResponse(message: string, details?: string): HttpResponseInit {
+  const isDev = process.env.DEV_ROLE_OVERRIDE_ENABLED === "true";
   return {
     status: 500,
-    jsonBody: { error: message },
+    jsonBody: isDev && details ? { error: message, details } : { error: message },
   };
 }
 
@@ -61,6 +72,20 @@ export function oidFromToken(token: string): string | null {
   return typeof oid === "string" ? oid : null;
 }
 
+export function userInfoFromToken(token: string): { name: string; email: string } | null {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return null;
+  const name = typeof payload.name === "string" ? payload.name : null;
+  const email =
+    typeof payload.preferred_username === "string"
+      ? payload.preferred_username
+      : typeof payload.upn === "string"
+        ? payload.upn
+        : null;
+  if (!name || !email) return null;
+  return { name, email };
+}
+
 /**
  * Reads the caller's app roles from the X-App-Token header.
  *
@@ -79,7 +104,9 @@ export function rolesFromAppToken(sqlToken: string, appToken: string): string[] 
   if (sqlPayload.oid !== appPayload.oid) return [];
   const roles = appPayload.roles;
   if (!Array.isArray(roles)) return [];
-  return roles.filter((r): r is string => typeof r === "string");
+  return roles
+    .filter((r): r is string => typeof r === "string")
+    .map((r) => r.toLowerCase());
 }
 
 export function rolesForRequest(request: HttpRequest): string[] {
@@ -94,7 +121,7 @@ export function rolesForRequest(request: HttpRequest): string[] {
     if (header) {
       const roles = header
         .split(",")
-        .map((r) => r.trim())
+        .map((r) => r.trim().toLowerCase())
         .filter(Boolean);
       if (roles.length > 0) {
         console.warn(
@@ -118,11 +145,11 @@ export function rolesForRequest(request: HttpRequest): string[] {
  */
 export function requireRole(
   request: HttpRequest,
-  allowed: readonly string[],
+  allowed: readonly AppRole[],
 ): HttpResponseInit | null {
   const roles = rolesForRequest(request);
-  if (roles.includes("Admin")) return null;
-  if (roles.some((r) => allowed.includes(r))) return null;
+  if (roles.includes(AppRole.ADMIN)) return null;
+  if (roles.some((r) => allowed.includes(r as AppRole))) return null;
   return forbiddenResponse(
     `Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`,
   );

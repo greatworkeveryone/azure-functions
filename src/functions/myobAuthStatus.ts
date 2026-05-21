@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { getMyobAuthStatus } from "../myob-auth";
 
 // Returns whether MYOB is linked and when the access token expires. Used by
@@ -11,7 +11,7 @@ async function myobAuthStatus(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const forbidden = await requireRole(request, ["Admin"]);
+  const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
 
   try {
