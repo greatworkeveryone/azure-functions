@@ -52,6 +52,7 @@ function callerFromToken(token: string): UserRef {
 // users get the OR with Job.CreatedBy === caller.name (handled inline).
 const ARCHIVE_ANY_JOB_ROLES = [
   AppRole.ADMIN,
+  AppRole.DIRECTOR,
   AppRole.FACILITIES_APPROVAL,
   AppRole.ACCOUNTS_APPROVAL,
 ];
@@ -60,6 +61,7 @@ const ARCHIVE_ANY_JOB_ROLES = [
 // approval tiers and admin retain ability to fix things.
 const EDIT_JOBS_ROLES = [
   AppRole.ADMIN,
+  AppRole.DIRECTOR,
   AppRole.FACILITIES,
   AppRole.FACILITIES_APPROVAL,
   AppRole.ACCOUNTS,
@@ -70,6 +72,7 @@ const EDIT_JOBS_ROLES = [
 // keep unauthorised tenants/contractors out, not internal staff.
 const VIEW_JOBS_ROLES = [
   AppRole.ADMIN,
+  AppRole.DIRECTOR,
   AppRole.FACILITIES,
   AppRole.FACILITIES_APPROVAL,
   AppRole.ACCOUNTS,
@@ -382,7 +385,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
   const buildingId = request.query.get("buildingId");
@@ -436,7 +439,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
   const jobId = Number(request.query.get("jobId"));
@@ -477,7 +480,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -705,10 +708,10 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate. Per-job ownership scoping for plain `facilities`
   // users happens further down once we know the job's CreatedBy.
-  const roleCheck = requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
@@ -799,10 +802,10 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate; per-job ownership scoping happens below.
-  const roleCheck = requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
   const caller = callerFromToken(token);
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
@@ -890,7 +893,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -1108,7 +1111,7 @@ async function getJobPacketPdf(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
   const jobIdStr = request.params.jobId;

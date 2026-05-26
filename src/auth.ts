@@ -1,4 +1,6 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
+import { TYPES } from "tedious";
+import { closeConnection, createServiceConnection, executeQuery } from "./db";
 
 export enum AppRole {
   ACCOUNTS            = "accounts",
@@ -109,13 +111,7 @@ export function rolesFromAppToken(sqlToken: string, appToken: string): string[] 
     .map((r) => r.toLowerCase());
 }
 
-export function rolesForRequest(request: HttpRequest): string[] {
-  // Dev-only role override — when DEV_ROLE_OVERRIDE_ENABLED is literally
-  // "true" (set in local.settings.json, never in prod app settings) and the
-  // caller sends X-Dev-Roles, those roles REPLACE whatever's on the JWT.
-  // Lets devs exercise role-gated handlers (e.g. director approval) without
-  // re-assigning Entra app roles. Logged so it's obvious in the func terminal
-  // that a request was impersonated.
+export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   if (process.env.DEV_ROLE_OVERRIDE_ENABLED === "true") {
     const header = request.headers.get("x-dev-roles");
     if (header) {
@@ -125,7 +121,7 @@ export function rolesForRequest(request: HttpRequest): string[] {
         .filter(Boolean);
       if (roles.length > 0) {
         console.warn(
-          `[auth] DEV ROLE OVERRIDE active — using roles [${roles.join(", ")}] from X-Dev-Roles header (ignoring JWT roles)`,
+          `[auth] DEV ROLE OVERRIDE active — using roles [${roles.join(", ")}] from X-Dev-Roles header`,
         );
         return roles;
       }
@@ -133,9 +129,24 @@ export function rolesForRequest(request: HttpRequest): string[] {
   }
 
   const sqlToken = extractToken(request);
-  const appToken = request.headers.get("x-app-token");
-  if (!sqlToken || !appToken) return [];
-  return rolesFromAppToken(sqlToken, appToken);
+  if (!sqlToken) return [];
+  const oid = oidFromToken(sqlToken);
+  if (!oid) return [];
+
+  const connection = await createServiceConnection();
+  try {
+    const rows = await executeQuery(
+      connection,
+      `SELECT Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
+      [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
+    );
+    const role = rows[0]?.Role as string | null | undefined;
+    return role ? [role.toLowerCase()] : [];
+  } catch {
+    return [];
+  } finally {
+    closeConnection(connection);
+  }
 }
 
 /**
@@ -143,11 +154,11 @@ export function rolesForRequest(request: HttpRequest): string[] {
  * or a 403 HttpResponseInit otherwise. Callers should early-return on the
  * non-null result. `Admin` implicitly satisfies every role check.
  */
-export function requireRole(
+export async function requireRole(
   request: HttpRequest,
   allowed: readonly AppRole[],
-): HttpResponseInit | null {
-  const roles = rolesForRequest(request);
+): Promise<HttpResponseInit | null> {
+  const roles = await rolesForRequest(request);
   if (roles.includes(AppRole.ADMIN)) return null;
   if (roles.some((r) => allowed.includes(r as AppRole))) return null;
   return forbiddenResponse(

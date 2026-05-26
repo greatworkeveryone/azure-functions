@@ -15,5 +15,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["src/openapi.json"]
+  "exclude": ["src/openapi.json", "src/**/*.test.ts"]
 }

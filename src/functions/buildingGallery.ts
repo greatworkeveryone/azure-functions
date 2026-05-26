@@ -25,7 +25,7 @@ async function handleUploadBuildingHeroImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN]);
+  const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -109,7 +109,7 @@ async function handleDeleteBuildingHeroImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN]);
+  const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
   let connection;

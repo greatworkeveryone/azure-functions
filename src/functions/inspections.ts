@@ -28,7 +28,7 @@ import {
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 
-const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.FACILITIES_APPROVAL] as const;
+const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
@@ -465,7 +465,7 @@ async function createInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -519,7 +519,7 @@ async function applyInspectionOps(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -786,7 +786,7 @@ async function completeInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -832,7 +832,7 @@ async function revertInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -875,7 +875,7 @@ async function uploadInspectionAttachment(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   try {
@@ -918,7 +918,7 @@ async function deleteInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roles = rolesForRequest(request);
+  const roles = await rolesForRequest(request);
   const callerOid = oidFromToken(token);
   const canDeleteAny =
     roles.includes(AppRole.ADMIN) || roles.includes(AppRole.FACILITIES_APPROVAL);
@@ -991,7 +991,7 @@ async function mergeInspections(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -1210,7 +1210,7 @@ async function raiseJobsFromInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;

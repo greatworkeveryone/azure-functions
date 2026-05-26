@@ -33,6 +33,34 @@ const TENANT_TRIGGER_TYPES: TriggerType[] = [
   "rent_review",
 ];
 
+/**
+ * Updates LastSyncedAt / LastError / AttemptCount on a PlannerTasks row.
+ * Called after every Graph API attempt against an existing row so the UI can
+ * show whether the last sync succeeded and surface any error message.
+ */
+async function recordPlannerSyncOutcome(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  connection: any,
+  rowId: number,
+  error: string | null,
+): Promise<void> {
+  await executeQuery(
+    connection,
+    `UPDATE dbo.PlannerTasks
+     SET LastSyncedAt = SYSUTCDATETIME(),
+         LastError = @Error,
+         AttemptCount = AttemptCount + 1
+     WHERE Id = @Id`,
+    [
+      { name: "Id", type: TYPES.Int, value: rowId },
+      {
+        name: "Error",
+        type: TYPES.NVarChar,
+        value: error === null ? null : error.slice(0, 1000),
+      },
+    ],
+  );
+}
 
 export async function plannerSyncTimer(
   _timer: Timer,
@@ -157,8 +185,10 @@ export async function plannerSyncTimer(
               await executeQuery(
                 connection,
                 `INSERT INTO dbo.PlannerTasks
-                   (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
-                 VALUES ('tenant', @EntityId, @TriggerType, @LeadTimeDays, @TaskId, @DueDate, 'accounts')`,
+                   (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType,
+                    LastSyncedAt, LastError, AttemptCount)
+                 VALUES ('tenant', @EntityId, @TriggerType, @LeadTimeDays, @TaskId, @DueDate, 'accounts',
+                         SYSUTCDATETIME(), NULL, 1)`,
                 [
                   { name: "EntityId", type: TYPES.Int, value: tenant.tenantId },
                   {
@@ -209,7 +239,9 @@ export async function plannerSyncTimer(
                 connection,
                 `UPDATE dbo.PlannerTasks
                  SET PlannerTaskId = @TaskId, Status = 'active',
-                     DueDate = @DueDate, ResolvedAt = NULL
+                     DueDate = @DueDate, ResolvedAt = NULL,
+                     LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+                     AttemptCount = AttemptCount + 1
                  WHERE Id = @Id`,
                 [
                   { name: "TaskId", type: TYPES.NVarChar, value: taskId },
@@ -228,6 +260,7 @@ export async function plannerSyncTimer(
                 `plannerSyncTimer: failed to recreate task for tenant ${tenant.tenantId}:`,
                 message,
               );
+              await recordPlannerSyncOutcome(connection, rowId, message);
             }
             continue;
           }
@@ -236,6 +269,7 @@ export async function plannerSyncTimer(
             const task = await graphGetPlannerTask(plannerTaskId);
             if (task !== null) {
               skipped++;
+              await recordPlannerSyncOutcome(connection, rowId, null);
             } else {
               const taskId = await graphCreatePlannerTask({
                 planId,
@@ -248,7 +282,9 @@ export async function plannerSyncTimer(
               await executeQuery(
                 connection,
                 `UPDATE dbo.PlannerTasks
-                 SET PlannerTaskId = @TaskId, DueDate = @DueDate
+                 SET PlannerTaskId = @TaskId, DueDate = @DueDate,
+                     LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+                     AttemptCount = AttemptCount + 1
                  WHERE Id = @Id`,
                 [
                   { name: "TaskId", type: TYPES.NVarChar, value: taskId },
@@ -268,6 +304,7 @@ export async function plannerSyncTimer(
               `plannerSyncTimer: error checking task ${plannerTaskId}:`,
               message,
             );
+            await recordPlannerSyncOutcome(connection, rowId, message);
           }
         }
       }
@@ -745,6 +782,7 @@ export async function plannerSyncTimer(
 
     let resolved = 0;
     for (const row of overdue) {
+      const rowId = row.Id as number;
       const plannerTaskId = row.PlannerTaskId as string;
       try {
         const task = await graphGetPlannerTask(plannerTaskId);
@@ -754,9 +792,11 @@ export async function plannerSyncTimer(
         await executeQuery(
           connection,
           `UPDATE dbo.PlannerTasks
-           SET Status = 'resolved', ResolvedAt = SYSUTCDATETIME()
+           SET Status = 'resolved', ResolvedAt = SYSUTCDATETIME(),
+               LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+               AttemptCount = AttemptCount + 1
            WHERE Id = @Id`,
-          [{ name: "Id", type: TYPES.Int, value: row.Id as number }],
+          [{ name: "Id", type: TYPES.Int, value: rowId }],
         );
         resolved++;
       } catch (err: unknown) {
@@ -765,6 +805,7 @@ export async function plannerSyncTimer(
           `plannerSyncTimer: failed to resolve overdue task ${plannerTaskId}:`,
           message,
         );
+        await recordPlannerSyncOutcome(connection, rowId, message);
       }
     }
     context.log(`plannerSyncTimer: resolved ${resolved} overdue tasks`);

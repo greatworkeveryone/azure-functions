@@ -1,6 +1,33 @@
 import { app, HttpRequest, HttpResponseInit } from "@azure/functions";
 import { runMigrations } from "../migrate";
 import { corsHeaders } from "../cors";
+import { initSentry, Sentry } from "../sentry";
+
+initSentry();
+
+// Capture any error thrown from a handler. Azure Functions are short-lived,
+// so we must await Sentry.flush() — without it the worker can be torn down
+// before the event leaves the process.
+app.hook.postInvocation(async (hookContext) => {
+  if (!hookContext.error) return;
+  const request = hookContext.inputs[0] as HttpRequest | undefined;
+  Sentry.withScope((scope) => {
+    scope.setTag("function", hookContext.invocationContext.functionName);
+    if (request) {
+      const headers: Record<string, string> = {};
+      request.headers.forEach((value, key) => { headers[key] = value; });
+      scope.setSDKProcessingMetadata({
+        normalizedRequest: {
+          method: request.method,
+          url: request.url,
+          headers,
+        },
+      });
+    }
+    Sentry.captureException(hookContext.error);
+  });
+  await Sentry.flush(2000);
+});
 
 // Inject CORS headers into every HTTP response so browsers can call the API
 // from the Static Web App origin without portal-level CORS config.

@@ -376,7 +376,7 @@ async function adminTriggerEmailParse(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN]);
+  const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
   // ?reset=true clears all failed/errored emails back into the queue first,

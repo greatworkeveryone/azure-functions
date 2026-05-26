@@ -289,7 +289,7 @@ async function approveQuote(
     //   3. user can't approve + amount > all non-director limits → 'awaiting_director'
     //   4. user can't approve + amount ≤ some non-director limit → 'awaiting_approval'
     // 403 only fires if the amount can't be covered by any role in the system.
-    const userRoles = rolesForRequest(request);
+    const userRoles = await rolesForRequest(request);
     const allLimits = await getCachedApprovalLimits(connection);
     const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
@@ -904,7 +904,7 @@ async function directorApproveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }

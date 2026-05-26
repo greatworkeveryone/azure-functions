@@ -459,7 +459,7 @@ async function approveJobInvoice(
     //   - user can approve, director gate fires → 'approved' + director email (no job→Done)
     //   - user can't approve, director gate fires → same as above (anyone may submit)
     //   - user can't approve, no director gate → 'awaiting_approval' (senior manager picks up)
-    const userRoles = rolesForRequest(request);
+    const userRoles = await rolesForRequest(request);
     const allLimits = await getCachedApprovalLimits(connection);
     const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
@@ -584,7 +584,7 @@ async function directorApproveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
@@ -684,7 +684,7 @@ async function undoDirectorApproveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }

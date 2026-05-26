@@ -23,7 +23,7 @@ interface ApproveTimesheetBody { timesheetId: number; approve: boolean }
 
 const FACILITIES_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
 const ACCOUNTS_ROLES  = [AppRole.ACCOUNTS,   AppRole.ACCOUNTS_APPROVAL]   as const;
-const APPROVAL_ROLES  = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
+const APPROVAL_ROLES  = [AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
 
 type TimesheetRole = "facilities" | "accounts";
 
@@ -37,7 +37,7 @@ function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
 function managedRoles(roles: string[]): TimesheetRole[] {
-  if (roles.includes(AppRole.ADMIN)) return ["facilities", "accounts"];
+  if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR)) return ["facilities", "accounts"];
   const out: TimesheetRole[] = [];
   if (roles.includes(AppRole.FACILITIES_APPROVAL)) out.push("facilities");
   if (roles.includes(AppRole.ACCOUNTS_APPROVAL))  out.push("accounts");

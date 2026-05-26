@@ -17,8 +17,8 @@ import {
 import { uploadBlob, generateReadSasUrl } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 
-const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.FACILITIES_APPROVAL] as const;
-const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
+const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
+const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
 
 // ── Caller identity ─────────────────────────────────────────────────────────
 // Mirrors the pattern in inspections.ts. We store both the stable Entra OID
@@ -337,7 +337,7 @@ async function createKey(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -418,7 +418,7 @@ async function updateKey(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -476,7 +476,7 @@ async function reportKeyLost(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -537,7 +537,7 @@ async function deleteKey(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -611,7 +611,7 @@ async function restoreKey(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -915,7 +915,7 @@ async function uploadKeyPhoto(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, EDIT_KEYS_ROLES);
+  const roleCheck = await requireRole(request, EDIT_KEYS_ROLES);
   if (roleCheck) return roleCheck;
 
   try {
@@ -1047,7 +1047,7 @@ async function bulkImportKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, BULK_CREATE_ROLES);
+  const roleCheck = await requireRole(request, BULK_CREATE_ROLES);
   if (roleCheck) return roleCheck;
 
   const caller = callerFromToken(token);

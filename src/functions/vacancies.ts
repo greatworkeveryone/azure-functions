@@ -84,7 +84,7 @@ async function handleGetVacancies(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -121,7 +121,7 @@ async function handleGetVacantTenancies(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -191,7 +191,7 @@ async function handleCreateVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -241,7 +241,7 @@ async function handleGetVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   const id = Number(request.query.get("id"));
@@ -283,7 +283,7 @@ async function handleUpdateVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -358,7 +358,7 @@ async function handleDeleteVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -420,7 +420,7 @@ async function handleUploadVacancyImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -495,7 +495,7 @@ async function handleDeleteVacancyImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -562,7 +562,7 @@ async function handleReorderVacancyImages(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -614,7 +614,7 @@ async function handleUploadVacancySlotImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -709,7 +709,7 @@ async function handleDeleteVacancySlotImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -822,7 +822,7 @@ async function handlePublishVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   const wpBase = process.env.WORDPRESS_API_URL;
@@ -940,7 +940,7 @@ async function handleUnpublishVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, VACANCY_ROLES);
+  const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;

@@ -10,7 +10,7 @@ async function triggerPlannerSync(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, TRIGGER_ROLES);
+  const roleCheck = await requireRole(request, TRIGGER_ROLES);
   if (roleCheck) return roleCheck;
 
   await plannerSyncTimer({} as Timer, context);

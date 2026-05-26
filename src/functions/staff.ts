@@ -4,6 +4,7 @@ import { graphGetGroupUsers, type GraphUser } from "../graph";
 
 const STAFF_ROLES = [
   AppRole.ADMIN,
+  AppRole.DIRECTOR,
   AppRole.FACILITIES,
   AppRole.FACILITIES_APPROVAL,
   AppRole.ACCOUNTS,
@@ -33,7 +34,7 @@ async function getStaff(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, STAFF_ROLES);
+  const roleCheck = await requireRole(request, STAFF_ROLES);
   if (roleCheck) return roleCheck;
 
   const groupId = process.env.PLANNER_GROUP_ID;

@@ -22,7 +22,7 @@ async function setApprovalLimit(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const userRoles = rolesForRequest(request);
+  const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.ADMIN)) {
     return { status: 403, jsonBody: { error: "Admin role required" } };
   }

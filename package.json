@@ -15,6 +15,7 @@
   "dependencies": {
     "@azure/functions": "^4.5.0",
     "@azure/storage-blob": "^12.31.0",
+    "@sentry/node": "10.53.1",
     "@types/pdfkit": "^0.17.6",
     "exceljs": "^4.4.0",
     "pdf-lib": "^1.17.1",
