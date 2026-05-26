@@ -14,6 +14,15 @@ const IMAGE_CONTENT_TYPES = new Set([
 
 const GALLERY_SLOT_LABELS = ["Main Room", "Office 1", "Office 2"] as const;
 
+const VACANCY_ROLES = [
+  AppRole.ADMIN,
+  AppRole.DIRECTOR,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
+] as const;
+
 function rowToVacancy(row: SqlRow): Record<string, unknown> {
   return {
     id: row.Id,
@@ -75,7 +84,7 @@ async function handleGetVacancies(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -112,7 +121,7 @@ async function handleGetVacantTenancies(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -182,7 +191,7 @@ async function handleCreateVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -232,7 +241,7 @@ async function handleGetVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   const id = Number(request.query.get("id"));
@@ -274,7 +283,7 @@ async function handleUpdateVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -349,7 +358,7 @@ async function handleDeleteVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -411,7 +420,7 @@ async function handleUploadVacancyImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -486,7 +495,7 @@ async function handleDeleteVacancyImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -553,7 +562,7 @@ async function handleReorderVacancyImages(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -605,7 +614,7 @@ async function handleUploadVacancySlotImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -700,7 +709,7 @@ async function handleDeleteVacancySlotImage(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -813,7 +822,7 @@ async function handlePublishVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   const wpBase = process.env.WORDPRESS_API_URL;
@@ -931,7 +940,7 @@ async function handleUnpublishVacancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = requireRole(request, [AppRole.ADMIN, AppRole.FACILITIES]);
+  const roleCheck = requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;
