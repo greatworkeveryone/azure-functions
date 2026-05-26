@@ -19,8 +19,10 @@ import {
   AppRole,
   errorResponse,
   extractToken,
+  forbiddenResponse,
   oidFromToken,
   requireRole,
+  rolesForRequest,
   unauthorizedResponse,
 } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
@@ -373,9 +375,21 @@ async function getInspections(
       : [];
     const filledPointCountByInspection = new Map(pointRows.map((r) => [r.InspectionId as number, r.C as number]));
 
+    const raisedPointRows = inspectionIds.length
+      ? await executeQuery(
+          connection,
+          `SELECT j.InspectionId, COUNT(DISTINCT j.PointId) AS C
+           FROM dbo.InspectionRaisedJobs j
+           WHERE j.InspectionId IN (${idParamList})
+           GROUP BY j.InspectionId`,
+          idParams,
+        )
+      : [];
+    const raisedPointCountByInspection = new Map(raisedPointRows.map((r) => [r.InspectionId as number, r.C as number]));
+
     // Build minimal-but-correct shape for list rows. Detail page calls
     // /getInspection for the full nested structure.
-    const inspections: (InspectionApi & { _counts: { filledPoints: number; levels: number; rooms: number } })[] =
+    const inspections: (InspectionApi & { _counts: { filledPoints: number; levels: number; raisedPoints: number; rooms: number } })[] =
       inspectionRows.map((i) => {
         const iid = i.Id as number;
         const out = {
@@ -392,9 +406,10 @@ async function getInspections(
           _counts: {
             filledPoints: filledPointCountByInspection.get(iid) ?? 0,
             levels: levelCountByInspection.get(iid) ?? 0,
+            raisedPoints: raisedPointCountByInspection.get(iid) ?? 0,
             rooms: roomCountByInspection.get(iid) ?? 0,
           },
-        } as InspectionApi & { _counts: { filledPoints: number; levels: number; rooms: number } };
+        } as InspectionApi & { _counts: { filledPoints: number; levels: number; raisedPoints: number; rooms: number } };
         if (i.CompletedAt) {
           out.completedAt = toIso(i.CompletedAt);
           out.completedBy = {
@@ -903,8 +918,12 @@ async function deleteInspection(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = requireRole(request, EDIT_INSPECTIONS_ROLES);
-  if (roleCheck) return roleCheck;
+  const roles = rolesForRequest(request);
+  const callerOid = oidFromToken(token);
+  const canDeleteAny =
+    roles.includes(AppRole.ADMIN) || roles.includes(AppRole.FACILITIES_APPROVAL);
+  const canDeleteOwn = roles.includes(AppRole.FACILITIES);
+  if (!canDeleteAny && !canDeleteOwn) return forbiddenResponse();
 
   let connection;
   try {
@@ -916,12 +935,16 @@ async function deleteInspection(
 
     const rows = await executeQuery(
       connection,
-      `SELECT Id, Status FROM dbo.Inspections WHERE Id = @Id`,
+      `SELECT Id, Status, CreatedById FROM dbo.Inspections WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: InspectionId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
     if (rows[0].Status !== "draft") {
       return { status: 400, jsonBody: { error: "Only draft inspections can be deleted" } };
+    }
+
+    if (!canDeleteAny && rows[0].CreatedById !== callerOid) {
+      return forbiddenResponse("You can only delete inspections you created.");
     }
 
     // Delete non-cascading child rows first.
