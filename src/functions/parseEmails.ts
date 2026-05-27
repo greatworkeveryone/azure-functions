@@ -20,6 +20,7 @@ import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { Sentry } from "../sentry";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -363,6 +364,9 @@ async function parseEmailsDailyRetry(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     context.error("parseEmailsDailyRetry batch failed:", message);
+    Sentry.captureException(err, { extra: { context: "parseEmailsDailyRetry batch failed" } });
+  } finally {
+    await Sentry.flush(2000);
   }
 }
 

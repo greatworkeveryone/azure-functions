@@ -37,12 +37,13 @@ In [Microsoft Planner](https://tasks.office.com) → New plan → Create a basic
 **Facilities Tasks plan** — 1 bucket:
 - `Job Updates`
 
-**Accounts Tasks plan** — 5 buckets:
+**Accounts Tasks plan** — 6 buckets:
 - `Awaiting Accounts`
 - `Director Approval`
 - `Lease Expiry`
 - `Option Deadlines`
 - `Rent Reviews`
+- `Oncharge Pending`
 
 ---
 
@@ -106,6 +107,7 @@ Add to Azure Functions App Settings:
 | `PLANNER_ACCOUNTS_BUCKET_LEASE_EXPIRY_ID` | "Lease Expiry" bucket ID |
 | `PLANNER_ACCOUNTS_BUCKET_OPTION_DEADLINES_ID` | "Option Deadlines" bucket ID |
 | `PLANNER_ACCOUNTS_BUCKET_RENT_REVIEWS_ID` | "Rent Reviews" bucket ID |
+| `PLANNER_ACCOUNTS_BUCKET_ONCHARGE_ID` | "Oncharge Pending" bucket ID |
 | `APP_BASE_URL` | e.g. `https://command-centre.example.com` |
 
 Also fill in `local.settings.json` for local testing.
@@ -169,4 +171,6 @@ Verify:
 - Stalled jobs appear in Facilities plan "Job Updates" bucket
 - Awaiting-accounts jobs appear in Accounts plan "Awaiting Accounts" bucket
 - Tenancy tasks appear in Accounts plan buckets
+- Toggling on-charge to tenant for a job creates a task in the "Oncharge Pending" bucket (fires immediately from `upsertJob`; nightly timer reconciles missed fires)
+- Raising an outgoing invoice for that job marks the Oncharge Pending task complete
 - Completing an action in Command Centre marks the corresponding task done

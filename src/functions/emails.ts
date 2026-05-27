@@ -7,11 +7,12 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { graphSendReply, graphFetchEmails, GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { runParseBatch } from "./parseEmails";
+import { checkRateLimit } from "../rateLimit";
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
 // render click-to-open chips without a second round-trip for each file.
@@ -65,6 +66,9 @@ async function getEmails(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   const rawStatuses = request.query.get("statuses") ?? "unread,matched";
   const statusList = rawStatuses
@@ -145,6 +149,9 @@ async function getEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   const emailId = Number(request.query.get("emailId"));
   if (!emailId) {
     return { status: 400, jsonBody: { error: "emailId (number) is required" } };
@@ -190,6 +197,9 @@ async function ingestEmail(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -255,6 +265,9 @@ async function promoteEmailToQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -362,6 +375,9 @@ async function archiveEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -399,6 +415,9 @@ async function flagEmailForReview(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -434,6 +453,9 @@ async function promoteEmailToJob(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -504,6 +526,19 @@ async function promoteEmailToInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`promoteEmailToInvoice:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -561,6 +596,9 @@ async function getEmailThread(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   const emailId = Number(request.query.get("emailId"));
   if (!emailId) {
     return { status: 400, jsonBody: { error: "emailId (number) is required" } };
@@ -597,6 +635,19 @@ async function sendEmailReply(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`sendEmailReply:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   let connection;
   try {
@@ -734,6 +785,9 @@ async function syncEmailsNow(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const mailbox = process.env.GRAPH_MAILBOX_DEV;
   if (!mailbox) {

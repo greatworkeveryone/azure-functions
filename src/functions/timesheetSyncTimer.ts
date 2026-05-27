@@ -1,6 +1,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { createServiceConnection, closeConnection, executeQuery } from "../db";
 import { TYPES } from "tedious";
+import { Sentry } from "../sentry";
 
 // ── Timer trigger: Sunday midnight (UTC) ─────────────────────────────────────
 // Syncs all newly approved timesheets (both facilities and accounts) to MYOB.
@@ -41,18 +42,25 @@ async function timesheetSyncTimer(
         );
         synced++;
         context.log(`timesheetSyncTimer: synced TimesheetID ${row.TimesheetID} (${row.UserDisplayName})`);
-      } catch (err: any) {
-        errors.push(`TimesheetID ${row.TimesheetID}: ${err.message}`);
-        context.error(`timesheetSyncTimer error for TimesheetID ${row.TimesheetID}:`, err.message);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(`TimesheetID ${row.TimesheetID}: ${message}`);
+        context.error(`timesheetSyncTimer error for TimesheetID ${row.TimesheetID}:`, message);
+        Sentry.captureException(err, {
+          extra: { context: `timesheetSyncTimer row TimesheetID=${row.TimesheetID}` },
+        });
       }
     }
 
     context.log(`timesheetSyncTimer: complete — synced=${synced}, errors=${errors.length}`);
-  } catch (error: any) {
-    context.error("timesheetSyncTimer: fatal error:", error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("timesheetSyncTimer: fatal error:", message);
+    Sentry.captureException(error, { extra: { context: "timesheetSyncTimer fatal" } });
     throw error;
   } finally {
     if (connection) closeConnection(connection);
+    await Sentry.flush(2000);
   }
 }
 

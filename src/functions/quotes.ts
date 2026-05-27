@@ -13,7 +13,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
@@ -22,6 +22,7 @@ import { getCachedApprovalLimits } from "../approval-limits-db";
 import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
 import { resolveActivePlannerTasks } from "../planner";
+import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 
 const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -39,6 +40,9 @@ async function getQuotes(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   const jobId = request.query.get("jobId");
   const status = request.query.get("status");
@@ -80,6 +84,9 @@ async function upsertQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -259,6 +266,9 @@ async function approveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -415,6 +425,14 @@ async function approveQuote(
       `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: QuoteID }],
     );
+
+    // Eager-fire the job-bound Planner triggers. Status='awaiting_director'
+    // means the director_approval count for this job has just gone up; the
+    // combined sync also re-checks the other three (all idempotent).
+    if (newStatus === "awaiting_director") {
+      await syncJobActionTriggersStandalone(jobId, (msg) => context.log(msg));
+    }
+
     return { status: 200, jsonBody: { quote: stored[0] } };
   } catch (error: any) {
     context.error("approveQuote failed:", error.message);
@@ -432,6 +450,9 @@ async function rejectQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -509,6 +530,9 @@ async function unapproveQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -614,6 +638,9 @@ async function completeQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -684,6 +711,9 @@ async function uncompleteQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -758,6 +788,9 @@ async function deleteQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -811,6 +844,9 @@ async function validateQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -903,6 +939,9 @@ async function directorApproveQuote(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
@@ -1009,6 +1048,9 @@ async function resendDirectorQuoteEmail(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   let connection;
   try {

@@ -12,7 +12,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 
 interface AddJobRequestedContractorBody {
   jobId: number;
@@ -44,6 +44,9 @@ async function getJobRequestedContractors(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const jobId = request.query.get("jobId");
   if (!jobId) {
@@ -79,6 +82,9 @@ async function addJobRequestedContractor(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -186,6 +192,9 @@ async function removeJobRequestedContractor(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as RemoveJobRequestedContractorBody;
@@ -262,6 +271,9 @@ async function toggleRequestedContractorSent(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

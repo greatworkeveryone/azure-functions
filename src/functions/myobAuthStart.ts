@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { buildAuthorizeUrl, generateAuthState } from "../myob-auth";
+import { checkRateLimit } from "../rateLimit";
 
 // Returns the MYOB authorize URL for the admin to open in a new tab. The
 // browser sends the user to MYOB, MYOB redirects back to /myobAuthCallback
@@ -14,6 +15,16 @@ async function myobAuthStart(
   if (!token) return unauthorizedResponse();
   const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`myobAuthStart:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   try {
     const state = generateAuthState();

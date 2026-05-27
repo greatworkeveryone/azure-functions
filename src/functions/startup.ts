@@ -2,8 +2,21 @@ import { app, HttpRequest, HttpResponseInit } from "@azure/functions";
 import { runMigrations } from "../migrate";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
+import { extractToken, oidFromToken, userInfoFromToken } from "../auth";
 
 initSentry();
+
+// Refuse to boot if production + dev role override would coexist. That
+// combination lets any caller spoof roles via the X-Dev-Roles header and
+// must never reach a deployed environment.
+if (
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production" &&
+  process.env.DEV_ROLE_OVERRIDE_ENABLED === "true"
+) {
+  throw new Error(
+    "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true in a Production environment. Unset it in the Function App configuration.",
+  );
+}
 
 // Capture any error thrown from a handler. Azure Functions are short-lived,
 // so we must await Sentry.flush() — without it the worker can be torn down
@@ -23,6 +36,19 @@ app.hook.postInvocation(async (hookContext) => {
           headers,
         },
       });
+
+      const token = extractToken(request);
+      if (token) {
+        const oid = oidFromToken(token);
+        const userInfo = userInfoFromToken(token);
+        if (oid || userInfo) {
+          scope.setUser({
+            id: oid ?? undefined,
+            email: userInfo?.email,
+            username: userInfo?.name,
+          });
+        }
+      }
     }
     Sentry.captureException(hookContext.error);
   });

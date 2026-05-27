@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createConnection, executeQuery, closeConnection, SqlRow } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
 
 // In-memory cache for the unfiltered Buildings list. Buildings change rarely;
@@ -18,6 +18,9 @@ export function clearBuildingsCache(): void {
 async function getBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const buildingId = request.query.get("buildingId");
   const region = request.query.get("region");

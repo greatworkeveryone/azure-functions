@@ -13,6 +13,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { Sentry } from "../sentry";
 
 function randomUuid(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -75,11 +76,15 @@ async function tenancyReviewScheduleTimer(
           ],
         );
         inserted++;
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
         context.error(
           `failed to insert RentReviews row for TenantId ${row.TenantId}:`,
-          err.message,
+          message,
         );
+        Sentry.captureException(err, {
+          extra: { context: `tenancyReviewScheduleTimer insert TenantId=${row.TenantId}` },
+        });
       }
     }
     context.log(`inserted ${inserted} new RentReviews rows`);
@@ -98,11 +103,14 @@ async function tenancyReviewScheduleTimer(
     context.log(`flipped status on ${flipped.length} RentReviews rows`);
 
     context.log("tenancyReviewScheduleTimer: complete");
-  } catch (error: any) {
-    context.error("tenancyReviewScheduleTimer: fatal:", error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("tenancyReviewScheduleTimer: fatal:", message);
+    Sentry.captureException(error, { extra: { context: "tenancyReviewScheduleTimer fatal" } });
     throw error;
   } finally {
     if (connection) closeConnection(connection);
+    await Sentry.flush(2000);
   }
 }
 

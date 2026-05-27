@@ -36,7 +36,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.createServiceConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
-  delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
+  // Tests use unsigned JWTs and run offline — keep the dev override on so
+  // verifyEntraToken skips JWKS lookup and just decodes the payload. The
+  // dev-roles-header test below re-asserts the override path explicitly.
+  process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
 });
 
 describe("rolesForRequest", () => {

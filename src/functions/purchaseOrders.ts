@@ -14,7 +14,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
@@ -47,6 +47,9 @@ async function getPurchaseOrders(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   const jobId = request.query.get("jobId");
   if (!jobId) {
@@ -90,6 +93,9 @@ async function upsertPurchaseOrder(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -261,6 +267,9 @@ async function previewPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -411,6 +420,9 @@ async function sendPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -513,6 +525,9 @@ async function deletePurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -577,6 +592,9 @@ async function markPurchaseOrderMyobCreated(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -656,6 +674,9 @@ async function unmarkPurchaseOrderMyobCreated(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -739,6 +760,9 @@ async function markPurchaseOrderComplete(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -838,6 +862,9 @@ async function unmarkPurchaseOrderComplete(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

@@ -5,7 +5,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { buildUpdateSet, createConnection, executeQuery, closeConnection } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import {
   applyMyobPayment,
   buildMyobBillUrl,
@@ -30,6 +30,9 @@ async function getPayments(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   const jobId = request.query.get("jobId");
   if (!jobId) {
@@ -65,6 +68,9 @@ async function upsertPayment(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -229,6 +235,9 @@ async function markPaymentPaid(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

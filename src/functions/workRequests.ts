@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { Connection, TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
 import {
@@ -110,6 +110,9 @@ export async function upsertWorkRequest(connection: Connection, wr: MyWorkReques
 async function getWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const buildingId = request.query.get("buildingId");
   const statusId = request.query.get("statusId");
@@ -263,6 +266,9 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   const workRequestId = request.query.get("workRequestId");
   if (!workRequestId) {
     return { status: 400, jsonBody: { error: "workRequestId is required" } };
@@ -316,6 +322,9 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
 async function updateWorkRequest(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -406,6 +415,9 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = await request.json() as CreateWorkRequestPayload;
@@ -466,6 +478,9 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
 async function updateWorkRequestLocal(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -533,6 +548,9 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
 async function resetWorkRequestLocal(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

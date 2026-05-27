@@ -22,6 +22,7 @@ import {
 import { buildJobPacket } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
 import { resolveActivePlannerTasks } from "../planner";
+import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
@@ -463,7 +464,36 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
       `SELECT ${JOB_EVENT_COLUMNS} FROM JobEvents WHERE JobID = @JobID ORDER BY CreatedAt ASC`,
       [{ name: "JobID", type: TYPES.Int, value: jobId }],
     );
-    return { status: 200, jsonBody: { job: { ...rows[0], Events: events } } };
+    const plannerTaskRows = await executeQuery(
+      connection,
+      `SELECT Id, TriggerType, LeadTimeDays, PlannerTaskId, DueDate,
+              Status, CreatedAt, ResolvedAt,
+              LastSyncedAt, LastError, AttemptCount
+       FROM dbo.PlannerTasks
+       WHERE EntityType = 'job' AND EntityId = @JobID
+       ORDER BY CreatedAt DESC`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    );
+    const plannerTasks = plannerTaskRows.map((r) => ({
+      id: r.Id as number,
+      triggerType: r.TriggerType as string,
+      leadTimeDays: r.LeadTimeDays as number,
+      dueDate: r.DueDate
+        ? (r.DueDate as Date).toISOString().slice(0, 10)
+        : null,
+      status: r.Status as string,
+      createdAt: (r.CreatedAt as Date).toISOString(),
+      resolvedAt: r.ResolvedAt ? (r.ResolvedAt as Date).toISOString() : null,
+      lastSyncedAt: r.LastSyncedAt
+        ? (r.LastSyncedAt as Date).toISOString()
+        : null,
+      lastError: (r.LastError as string | null) ?? null,
+      attemptCount: (r.AttemptCount as number | null) ?? 0,
+    }));
+    return {
+      status: 200,
+      jsonBody: { job: { ...rows[0], Events: events, PlannerTasks: plannerTasks } },
+    };
   } catch (error: any) {
     context.error("getJob failed:", error.message);
     return errorResponse("Failed to fetch job", error.message);
@@ -686,6 +716,22 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       `SELECT ${JOB_EVENT_COLUMNS} FROM JobEvents WHERE JobID = @JobID ORDER BY CreatedAt ASC`,
       [{ name: "JobID", type: TYPES.Int, value: newJobId }],
     );
+
+    // Eager-fire the job-bound Planner triggers (awaiting_accounts,
+    // stalled_facilities, oncharge_pending) when any of their inputs were in
+    // the payload. Each trigger's sync is idempotent and no-ops when the
+    // condition doesn't apply. Failures are swallowed internally; the nightly
+    // plannerSyncTimer is the reconciliation safety net.
+    if (
+      fields.IsOnchargeable !== undefined ||
+      fields.IsStalled !== undefined ||
+      fields.AwaitingRole !== undefined ||
+      fields.AssignedToUserID !== undefined ||
+      fields.Status !== undefined
+    ) {
+      await syncJobActionTriggersStandalone(newJobId, (msg) => context.log(msg));
+    }
+
     return { status: 200, jsonBody: { job: { ...stored[0], Events: events } } };
   } catch (error: any) {
     context.error("upsertJob failed:", error.message);

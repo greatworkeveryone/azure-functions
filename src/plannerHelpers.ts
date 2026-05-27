@@ -5,7 +5,8 @@ export type TriggerType =
   | "job_update_due"         // legacy — existing tasks only, routes to Facilities
   | "stalled_facilities"     // IsStalled=1 AND AwaitingRole != 'accounts'
   | "awaiting_accounts"      // AwaitingRole = 'accounts'
-  | "director_approval";     // DirectorNeededCount > 0
+  | "director_approval"      // DirectorNeededCount > 0
+  | "oncharge_pending";      // IsOnchargeable=1 AND no outgoing invoice yet
 
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
@@ -41,6 +42,14 @@ export interface PlannerAccountsJobRow {
   jobId: number;
   title: string;
   buildingName: string | null;
+}
+
+export interface PlannerOnchargeJobRow {
+  jobId: number;
+  title: string;
+  buildingName: string | null;
+  onchargeAmount: number | null;
+  onchargeNotes: string | null;
 }
 
 export function formatDDMMYYYY(isoDate: string): string {
@@ -118,6 +127,8 @@ export function buildTaskTitle(
       return `Awaiting accounts — ${displayName}`;
     case "director_approval":
       return `Director approval needed — ${displayName}`;
+    case "oncharge_pending":
+      return `Oncharge — ${displayName}`;
   }
 }
 
@@ -187,6 +198,19 @@ export function buildDirectorApprovalTaskDescription(
 ): string {
   const location = job.buildingName ?? "";
   return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${appBaseUrl}/jobs/${job.jobId}`;
+}
+
+export function buildOnchargeTaskDescription(
+  job: PlannerOnchargeJobRow,
+  appBaseUrl: string,
+): string {
+  const location = job.buildingName ?? "";
+  const amount =
+    typeof job.onchargeAmount === "number"
+      ? `$${job.onchargeAmount.toLocaleString()}`
+      : "TBC";
+  const notesLine = job.onchargeNotes ? `\nNotes: ${job.onchargeNotes}` : "";
+  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${appBaseUrl}/jobs/${job.jobId}`;
 }
 
 export function toIsoDateString(date: Date): string {

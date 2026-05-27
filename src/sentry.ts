@@ -20,7 +20,7 @@ export function initSentry(): void {
     dsn,
     environment: "production",
     tracesSampleRate: 0.1,
-    sendDefaultPii: true,
+    sendDefaultPii: false,
   });
 
   initialised = true;

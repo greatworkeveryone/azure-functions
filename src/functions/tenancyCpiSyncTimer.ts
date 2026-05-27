@@ -17,6 +17,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { Sentry } from "../sentry";
 
 const ABS_BASE = "https://data.api.abs.gov.au/rest/data/CPI";
 
@@ -60,8 +61,12 @@ async function fetchAbsCpi(
           }
         }
       }
-    } catch (err: any) {
-      context.error(`ABS CPI fetch threw for ${q.region}:`, err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      context.error(`ABS CPI fetch threw for ${q.region}:`, message);
+      Sentry.captureException(err, {
+        extra: { context: `tenancyCpiSyncTimer ABS fetch region=${q.region}` },
+      });
     }
   }
   return out;
@@ -100,19 +105,26 @@ async function tenancyCpiSyncTimer(
           ],
         );
         upserts++;
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
         context.error(
           `tenancyCpiSyncTimer upsert failed (${o.region} ${o.period}):`,
-          err.message,
+          message,
         );
+        Sentry.captureException(err, {
+          extra: { context: `tenancyCpiSyncTimer upsert region=${o.region} period=${o.period}` },
+        });
       }
     }
     context.log(`tenancyCpiSyncTimer: ${upserts} CpiIndex rows upserted`);
-  } catch (error: any) {
-    context.error("tenancyCpiSyncTimer: fatal:", error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("tenancyCpiSyncTimer: fatal:", message);
+    Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer fatal" } });
     throw error;
   } finally {
     if (connection) closeConnection(connection);
+    await Sentry.flush(2000);
   }
 }
 

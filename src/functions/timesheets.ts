@@ -11,6 +11,7 @@ import {
   errorResponse,
   extractToken,
   forbiddenResponse,
+  requireRole,
   rolesForRequest,
   unauthorizedResponse,
 } from "../auth";
@@ -629,6 +630,9 @@ async function syncTimesheetsToMyob(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   const roles = await rolesForRequest(request);
   if (!isApprovalManager(roles)) {

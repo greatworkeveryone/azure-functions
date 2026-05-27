@@ -142,6 +142,9 @@ async function getKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     connection = await createConnection(token);
@@ -240,6 +243,9 @@ async function getKeyDetail(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const id = Number(request.query.get("id"));
   if (!id) return { status: 400, jsonBody: { error: "id query param required" } };
@@ -666,6 +672,9 @@ async function checkoutKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -823,6 +832,9 @@ async function checkinKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -952,6 +964,9 @@ async function keyImportTemplate(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

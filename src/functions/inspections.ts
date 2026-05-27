@@ -314,6 +314,9 @@ async function getInspections(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     connection = await createConnection(token);
@@ -438,6 +441,9 @@ async function getInspection(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   const id = Number(request.query.get("id"));
   if (!id) return { status: 400, jsonBody: { error: "id query param required" } };

@@ -17,6 +17,7 @@ import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { upsertWorkRequest } from "./workRequests";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
+import { Sentry } from "../sentry";
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
@@ -87,8 +88,12 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
     const token = process.env.MYBUILDINGS_BEARER_TOKEN!;
     const { total, syncFrom } = await runSync(token, false, context);
     context.log(`syncAllWorkRequests timer complete: ${total} WRs upserted since ${syncFrom}`);
-  } catch (error: any) {
-    context.error("syncAllWorkRequests timer failed:", error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("syncAllWorkRequests timer failed:", message);
+    Sentry.captureException(error, { extra: { context: "syncAllWorkRequestsTimer failed" } });
+  } finally {
+    await Sentry.flush(2000);
   }
 }
 

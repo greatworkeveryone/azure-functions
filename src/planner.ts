@@ -27,6 +27,11 @@ export function getPlanConfig(triggerType: TriggerType): PlanConfig {
         planId:   e.PLANNER_ACCOUNTS_PLAN_ID           ?? "",
         bucketId: e.PLANNER_ACCOUNTS_BUCKET_DIRECTOR_ID ?? "",
       };
+    case "oncharge_pending":
+      return {
+        planId:   e.PLANNER_ACCOUNTS_PLAN_ID            ?? "",
+        bucketId: e.PLANNER_ACCOUNTS_BUCKET_ONCHARGE_ID ?? "",
+      };
     case "lease_expiry":
       return {
         planId:   e.PLANNER_ACCOUNTS_PLAN_ID                ?? "",

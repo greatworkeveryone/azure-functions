@@ -1,5 +1,6 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { Sentry } from "../sentry";
 
 // ── Timer trigger: 07:30 ACST (Darwin) weekdays ──────────────────────────────
 // The free-tier Azure SQL DB auto-pauses after ~1h idle and takes 30–60s to
@@ -18,11 +19,14 @@ async function sqlKeepWarmTimer(
     connection = await createServiceConnection();
     await executeQuery(connection, "SELECT 1");
     context.log(`sqlKeepWarmTimer: DB warm in ${Date.now() - started}ms`);
-  } catch (error: any) {
-    context.error("sqlKeepWarmTimer: failed to wake DB:", error.message);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("sqlKeepWarmTimer: failed to wake DB:", message);
+    Sentry.captureException(error, { extra: { context: "sqlKeepWarmTimer failed to wake DB" } });
     throw error;
   } finally {
     if (connection) closeConnection(connection);
+    await Sentry.flush(2000);
   }
 }
 

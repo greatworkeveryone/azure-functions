@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchAllContractors, createOrUpdateContractors, MyContractor } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 
 interface UpdateContractorsBody {
   Contractors?: MyContractor[];
@@ -14,6 +14,9 @@ interface UpdateContractorsBody {
 async function syncContractors(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -75,6 +78,9 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     connection = await createConnection(token);
@@ -114,6 +120,9 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
 async function handleUpdateContractors(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   try {
     const body = await request.json() as UpdateContractorsBody;

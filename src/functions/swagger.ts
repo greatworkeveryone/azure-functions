@@ -6,7 +6,7 @@ import {
 } from "@azure/functions";
 import * as fs from "fs";
 import * as path from "path";
-import { extractToken, unauthorizedResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse } from "../auth";
 
 async function swaggerUI(
   request: HttpRequest,
@@ -14,6 +14,9 @@ async function swaggerUI(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ADMIN]);
+  if (denied) return denied;
 
   return {
     status: 200,
@@ -44,6 +47,9 @@ async function openApiSpec(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ADMIN]);
+  if (denied) return denied;
 
   const specPath = path.join(__dirname, "..", "openapi.json");
   const spec = fs.readFileSync(specPath, "utf-8");

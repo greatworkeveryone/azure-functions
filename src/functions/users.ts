@@ -16,6 +16,7 @@ import {
   unauthorizedResponse,
   userInfoFromToken,
 } from "../auth";
+import { checkRateLimit } from "../rateLimit";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
 // Returns all active users. Used to populate assignment dropdowns.
@@ -258,6 +259,21 @@ export async function registerSelf(
 
   const appToken = request.headers.get("x-app-token");
   if (!appToken) return unauthorizedResponse();
+
+  // No verified OID yet (first-login flow) — key by IP so an unauthenticated
+  // attacker can't burn through user creates from a single host.
+  const callerIp =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    request.headers.get("x-azure-clientip") ??
+    "unknown";
+  const rl = checkRateLimit(`registerSelf:${callerIp}`, { limit: 5, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   const oid  = oidFromToken(token);
   const info = userInfoFromToken(appToken);

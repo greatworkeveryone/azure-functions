@@ -23,6 +23,11 @@ module.exports = [
       },
     },
     rules: {
+      // ── No stray console output ────────────────────────────────────────
+      // Sentry captures errors; context.log (Azure Functions logger) writes
+      // to App Insights. Direct console.* should be gone from prod code so
+      // we never leak data into worker logs without going through either.
+      "no-console": ["error", { allow: ["warn", "error"] }],
       // The allowed symbols below are the complete list of names the rule
       // will treat as "already trusted". Each one is either:
       //   - a server-constructed SQL fragment built from allowlisted

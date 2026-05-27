@@ -1,6 +1,13 @@
 import { app, type InvocationContext, type Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { Sentry } from "../sentry";
+import {
+  syncJobAwaitingAccounts,
+  syncJobDirectorApproval,
+  syncJobOnchargePending,
+  syncJobStalled,
+} from "../jobPlannerSync";
 import {
   getPlanConfig,
   graphCompletePlannerTask,
@@ -9,20 +16,14 @@ import {
   graphGetPlannerTask,
 } from "../planner";
 import {
-  addDaysUTC,
-  buildAwaitingAccountsTaskDescription,
-  buildDirectorApprovalTaskDescription,
   buildJobTaskDescription,
-  buildStalledJobTaskDescription,
   buildTaskTitle,
   buildTenantTaskDescription,
   computeEventDate,
   isInWindow,
   LEAD_TIMES,
   toIsoDateString,
-  type PlannerAccountsJobRow,
   type PlannerJobRow,
-  type PlannerStalledJobRow,
   type PlannerTenantRow,
   type TriggerType,
 } from "../plannerHelpers";
@@ -370,8 +371,10 @@ export async function plannerSyncTimer(
           await executeQuery(
             connection,
             `INSERT INTO dbo.PlannerTasks
-               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
-             VALUES ('job', @EntityId, 'job_update_due', 0, @TaskId, @DueDate, 'facilities')`,
+               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType,
+                LastSyncedAt, LastError, AttemptCount)
+             VALUES ('job', @EntityId, 'job_update_due', 0, @TaskId, @DueDate, 'facilities',
+                     SYSUTCDATETIME(), NULL, 1)`,
             [
               { name: "EntityId", type: TYPES.Int, value: job.jobId },
               { name: "TaskId", type: TYPES.NVarChar, value: taskId },
@@ -390,6 +393,7 @@ export async function plannerSyncTimer(
       }
 
       const row = existing[0];
+      const rowId = row.Id as number;
       const rowStatus = row.Status as string;
 
       if (rowStatus === "active") {
@@ -397,6 +401,7 @@ export async function plannerSyncTimer(
           const task = await graphGetPlannerTask(row.PlannerTaskId as string);
           if (task !== null) {
             jobSkipped++;
+            await recordPlannerSyncOutcome(connection, rowId, null);
           } else {
             const taskId = await graphCreatePlannerTask({
               planId: jobPlanId,
@@ -408,10 +413,14 @@ export async function plannerSyncTimer(
             });
             await executeQuery(
               connection,
-              `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId WHERE Id = @Id`,
+              `UPDATE dbo.PlannerTasks
+               SET PlannerTaskId = @TaskId,
+                   LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+                   AttemptCount = AttemptCount + 1
+               WHERE Id = @Id`,
               [
                 { name: "TaskId", type: TYPES.NVarChar, value: taskId },
-                { name: "Id", type: TYPES.Int, value: row.Id as number },
+                { name: "Id", type: TYPES.Int, value: rowId },
               ],
             );
             jobCreated++;
@@ -422,6 +431,7 @@ export async function plannerSyncTimer(
             `plannerSyncTimer: error checking job task ${row.PlannerTaskId}:`,
             message,
           );
+          await recordPlannerSyncOutcome(connection, rowId, message);
         }
       } else {
         try {
@@ -437,12 +447,14 @@ export async function plannerSyncTimer(
             connection,
             `UPDATE dbo.PlannerTasks
              SET PlannerTaskId = @TaskId, Status = 'active',
-                 DueDate = @DueDate, ResolvedAt = NULL
+                 DueDate = @DueDate, ResolvedAt = NULL,
+                 LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+                 AttemptCount = AttemptCount + 1
              WHERE Id = @Id`,
             [
               { name: "TaskId", type: TYPES.NVarChar, value: taskId },
               { name: "DueDate", type: TYPES.Date, value: new Date(dueDateStr) },
-              { name: "Id", type: TYPES.Int, value: row.Id as number },
+              { name: "Id", type: TYPES.Int, value: rowId },
             ],
           );
           jobCreated++;
@@ -452,6 +464,7 @@ export async function plannerSyncTimer(
             `plannerSyncTimer: failed to recreate job task for JobID ${job.jobId}:`,
             message,
           );
+          await recordPlannerSyncOutcome(connection, rowId, message);
         }
       }
     }
@@ -460,315 +473,169 @@ export async function plannerSyncTimer(
     );
 
     // ── Stalled jobs (Facilities plan) ─────────────────────────────────────
+    // Reconciliation sweep — eager fire happens from upsertJob; this catches
+    // missed fires + auto-resolves jobs whose IsStalled flag flipped off.
 
     const stalledRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
-              COALESCE(b.BuildingName, '') AS BuildingName,
-              CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
-              au.EntraOid AS AssignedToEntraOid
+      `SELECT DISTINCT j.JobID
        FROM dbo.Jobs j
-       LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
-       LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
-       WHERE j.IsStalled = 1
-         AND j.IsArchived = 0
-         AND j.Status <> 'Done'
-         AND (j.AwaitingRole IS NULL OR j.AwaitingRole = 'facilities')`,
+       LEFT JOIN dbo.PlannerTasks pt
+         ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
+        AND pt.TriggerType = 'stalled_facilities'
+       WHERE (j.IsStalled = 1 AND j.IsArchived = 0 AND j.Status <> 'Done'
+              AND (j.AwaitingRole IS NULL OR j.AwaitingRole = 'facilities'))
+          OR (pt.Status = 'active')`,
     );
 
-    const stalledJobs: PlannerStalledJobRow[] = stalledRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-      stalledAt: (r.StalledAt as string | null) ?? null,
-      assignedToEntraOid: (r.AssignedToEntraOid as string | null) ?? null,
-    }));
-
-    let stalledCreated = 0;
-    let stalledSkipped = 0;
-
-    for (const job of stalledJobs) {
-      const existing = await executeQuery(
-        connection,
-        `SELECT Id, PlannerTaskId, Status
-         FROM dbo.PlannerTasks
-         WHERE EntityType = 'job' AND EntityId = @EntityId
-           AND TriggerType = 'stalled_facilities' AND LeadTimeDays = 0`,
-        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
-      );
-
-      const stalledDate = job.stalledAt ? new Date(job.stalledAt) : new Date();
-      const dueDate = addDaysUTC(stalledDate, 2);
-      const dueDateStr = toIsoDateString(dueDate);
-      const title = buildTaskTitle(job.title, "stalled_facilities", 0);
-      const description = buildStalledJobTaskDescription(job, APP_BASE_URL);
-      const { planId, bucketId } = getPlanConfig("stalled_facilities");
-      const assigneeIds = job.assignedToEntraOid
-        ? [job.assignedToEntraOid]
-        : facilitiesMembers;
-
-      if (existing.length === 0) {
-        try {
-          const taskId = await graphCreatePlannerTask({
-            planId,
-            bucketId,
-            title,
-            dueDate: dueDateStr,
-            assigneeIds,
-            description,
-          });
-          await executeQuery(
-            connection,
-            `INSERT INTO dbo.PlannerTasks
-               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
-             VALUES ('job', @EntityId, 'stalled_facilities', 0, @TaskId, @DueDate, 'facilities')`,
-            [
-              { name: "EntityId", type: TYPES.Int,      value: job.jobId },
-              { name: "TaskId",   type: TYPES.NVarChar,  value: taskId },
-              { name: "DueDate",  type: TYPES.Date,      value: new Date(dueDateStr) },
-            ],
-          );
-          stalledCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(
-            `plannerSyncTimer: failed to create stalled task for JobID ${job.jobId}:`,
-            message,
-          );
-        }
-        continue;
-      }
-
-      const row = existing[0];
-      if ((row.Status as string) === "active") {
-        try {
-          const task = await graphGetPlannerTask(row.PlannerTaskId as string);
-          if (task !== null) {
-            stalledSkipped++;
-          } else {
-            const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds, description });
-            await executeQuery(
-              connection,
-              `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId WHERE Id = @Id`,
-              [
-                { name: "TaskId", type: TYPES.NVarChar, value: taskId },
-                { name: "Id",     type: TYPES.Int,      value: row.Id as number },
-              ],
-            );
-            stalledCreated++;
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: error checking stalled task for JobID ${job.jobId}:`, message);
-        }
-      } else {
-        // resolved — job was re-stalled after being unstalled; re-create
-        try {
-          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds, description });
-          await executeQuery(
-            connection,
-            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
-            [
-              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
-              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
-              { name: "Id",      type: TYPES.Int,      value: row.Id as number },
-            ],
-          );
-          stalledCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: failed to recreate stalled task for JobID ${job.jobId}:`, message);
-        }
+    let stalledProcessed = 0;
+    let stalledErrors = 0;
+    for (const r of stalledRows) {
+      const jobId = r.JobID as number;
+      try {
+        await syncJobStalled(jobId, {
+          connection,
+          facilitiesMembers,
+          appBaseUrl: APP_BASE_URL,
+          log: (msg) => context.log(msg),
+        });
+        stalledProcessed++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.error(`plannerSyncTimer: stalled_facilities failed for JobID ${jobId}:`, message);
+        Sentry.captureException(err, {
+          tags: { source: "planner_sync_timer", trigger: "stalled_facilities", jobId: String(jobId) },
+        });
+        stalledErrors++;
       }
     }
-    context.log(`plannerSyncTimer: stalled — created=${stalledCreated} skipped=${stalledSkipped}`);
+    context.log(`plannerSyncTimer: stalled_facilities — processed=${stalledProcessed} errors=${stalledErrors}`);
 
     // ── Awaiting accounts (Accounts plan) ──────────────────────────────────
+    // Reconciliation sweep — eager fire happens from upsertJob; this catches
+    // missed fires + auto-resolves jobs whose AwaitingRole flipped away from
+    // 'accounts' without us being notified.
 
     const awaitingRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
-              COALESCE(b.BuildingName, '') AS BuildingName
+      `SELECT DISTINCT j.JobID
        FROM dbo.Jobs j
-       LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
-       WHERE j.IsArchived = 0
-         AND j.Status <> 'Done'
-         AND j.AwaitingRole = 'accounts'`,
+       LEFT JOIN dbo.PlannerTasks pt
+         ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
+        AND pt.TriggerType = 'awaiting_accounts'
+       WHERE (j.IsArchived = 0 AND j.Status <> 'Done' AND j.AwaitingRole = 'accounts')
+          OR (pt.Status = 'active')`,
     );
 
-    const awaitingJobs: PlannerAccountsJobRow[] = awaitingRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-    }));
-
-    let awaitingCreated = 0;
-    let awaitingSkipped = 0;
-
-    for (const job of awaitingJobs) {
-      const existing = await executeQuery(
-        connection,
-        `SELECT Id, PlannerTaskId, Status FROM dbo.PlannerTasks
-         WHERE EntityType = 'job' AND EntityId = @EntityId
-           AND TriggerType = 'awaiting_accounts' AND LeadTimeDays = 0`,
-        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
-      );
-
-      const dueDateStr = toIsoDateString(new Date());
-      const title = buildTaskTitle(job.title, "awaiting_accounts", 0);
-      const description = buildAwaitingAccountsTaskDescription(job, APP_BASE_URL);
-      const { planId, bucketId } = getPlanConfig("awaiting_accounts");
-
-      if (existing.length === 0) {
-        try {
-          const taskId = await graphCreatePlannerTask({
-            planId, bucketId, title, dueDate: dueDateStr,
-            assigneeIds: accountsMembers, description,
-          });
-          await executeQuery(
-            connection,
-            `INSERT INTO dbo.PlannerTasks
-               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
-             VALUES ('job', @EntityId, 'awaiting_accounts', 0, @TaskId, @DueDate, 'accounts')`,
-            [
-              { name: "EntityId", type: TYPES.Int,     value: job.jobId },
-              { name: "TaskId",   type: TYPES.NVarChar, value: taskId },
-              { name: "DueDate",  type: TYPES.Date,     value: new Date(dueDateStr) },
-            ],
-          );
-          awaitingCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: failed to create awaiting_accounts task for JobID ${job.jobId}:`, message);
-        }
-        continue;
-      }
-
-      if ((existing[0].Status as string) === "active") {
-        try {
-          const task = await graphGetPlannerTask(existing[0].PlannerTaskId as string);
-          if (task !== null) { awaitingSkipped++; }
-        } catch (err: unknown) {
-          context.error(`plannerSyncTimer: error checking awaiting task ${job.jobId}:`, String(err));
-        }
-      } else {
-        // resolved — awaiting role was set back to accounts; re-create
-        try {
-          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds: accountsMembers, description });
-          await executeQuery(
-            connection,
-            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
-            [
-              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
-              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
-              { name: "Id",      type: TYPES.Int,      value: existing[0].Id as number },
-            ],
-          );
-          awaitingCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: failed to recreate awaiting task for JobID ${job.jobId}:`, message);
-        }
+    let awaitingProcessed = 0;
+    let awaitingErrors = 0;
+    for (const r of awaitingRows) {
+      const jobId = r.JobID as number;
+      try {
+        await syncJobAwaitingAccounts(jobId, {
+          connection,
+          accountsMembers,
+          appBaseUrl: APP_BASE_URL,
+          log: (msg) => context.log(msg),
+        });
+        awaitingProcessed++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.error(`plannerSyncTimer: awaiting_accounts failed for JobID ${jobId}:`, message);
+        Sentry.captureException(err, {
+          tags: { source: "planner_sync_timer", trigger: "awaiting_accounts", jobId: String(jobId) },
+        });
+        awaitingErrors++;
       }
     }
-    context.log(`plannerSyncTimer: awaiting_accounts — created=${awaitingCreated} skipped=${awaitingSkipped}`);
+    context.log(`plannerSyncTimer: awaiting_accounts — processed=${awaitingProcessed} errors=${awaitingErrors}`);
 
     // ── Director approval (Accounts plan) ──────────────────────────────────
+    // Reconciliation sweep — eager fires happen from approveJobInvoice and
+    // approveQuote (create) + directorApproveJobInvoice / directorApproveQuote
+    // (resolve). This catches missed fires and reject/undo/delete transitions
+    // that aren't eagerly wired (Option A scope — low-traffic edge paths).
 
     const directorRows = await executeQuery(
       connection,
-      `SELECT sub.JobID, sub.Title, sub.BuildingName
-       FROM (
-         SELECT j.JobID, j.Title,
-                COALESCE(b.BuildingName, '') AS BuildingName,
-                (SELECT COUNT(*) FROM dbo.JobInvoices ji
-                 WHERE ji.JobID = j.JobID AND ji.Status = 'approved') +
-                (SELECT COUNT(*) FROM dbo.Quotes q
-                 WHERE q.JobID = j.JobID AND q.Status = 'awaiting_director')
-                AS DirectorNeededCount
-         FROM dbo.Jobs j
-         LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
-         WHERE j.IsArchived = 0 AND j.Status <> 'Done'
-       ) sub
-       WHERE sub.DirectorNeededCount > 0`,
+      `SELECT DISTINCT j.JobID
+       FROM dbo.Jobs j
+       LEFT JOIN dbo.PlannerTasks pt
+         ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
+        AND pt.TriggerType = 'director_approval'
+       WHERE (
+              j.IsArchived = 0 AND j.Status <> 'Done' AND (
+                EXISTS (SELECT 1 FROM dbo.JobInvoices ji
+                        WHERE ji.JobID = j.JobID AND ji.Status = 'approved')
+                OR EXISTS (SELECT 1 FROM dbo.Quotes q
+                           WHERE q.JobID = j.JobID AND q.Status = 'awaiting_director')
+              )
+            )
+          OR (pt.Status = 'active')`,
     );
 
-    const directorJobs: PlannerAccountsJobRow[] = directorRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-    }));
-
-    let directorCreated = 0;
-    let directorSkipped = 0;
-
-    for (const job of directorJobs) {
-      const existing = await executeQuery(
-        connection,
-        `SELECT Id, PlannerTaskId, Status FROM dbo.PlannerTasks
-         WHERE EntityType = 'job' AND EntityId = @EntityId
-           AND TriggerType = 'director_approval' AND LeadTimeDays = 0`,
-        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
-      );
-
-      const dueDateStr = toIsoDateString(new Date());
-      const title = buildTaskTitle(job.title, "director_approval", 0);
-      const description = buildDirectorApprovalTaskDescription(job, APP_BASE_URL);
-      const { planId, bucketId } = getPlanConfig("director_approval");
-
-      if (existing.length === 0) {
-        try {
-          const taskId = await graphCreatePlannerTask({
-            planId, bucketId, title, dueDate: dueDateStr,
-            assigneeIds: accountsMembers, description,
-          });
-          await executeQuery(
-            connection,
-            `INSERT INTO dbo.PlannerTasks
-               (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType)
-             VALUES ('job', @EntityId, 'director_approval', 0, @TaskId, @DueDate, 'accounts')`,
-            [
-              { name: "EntityId", type: TYPES.Int,     value: job.jobId },
-              { name: "TaskId",   type: TYPES.NVarChar, value: taskId },
-              { name: "DueDate",  type: TYPES.Date,     value: new Date(dueDateStr) },
-            ],
-          );
-          directorCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: failed to create director_approval task for JobID ${job.jobId}:`, message);
-        }
-        continue;
-      }
-
-      if ((existing[0].Status as string) === "active") {
-        try {
-          const task = await graphGetPlannerTask(existing[0].PlannerTaskId as string);
-          if (task !== null) { directorSkipped++; }
-        } catch (err: unknown) {
-          context.error(`plannerSyncTimer: error checking director task ${job.jobId}:`, String(err));
-        }
-      } else {
-        // resolved — new invoice/quote requiring director sign-off added; re-create
-        try {
-          const taskId = await graphCreatePlannerTask({ planId, bucketId, title, dueDate: dueDateStr, assigneeIds: accountsMembers, description });
-          await executeQuery(
-            connection,
-            `UPDATE dbo.PlannerTasks SET PlannerTaskId = @TaskId, Status = 'active', DueDate = @DueDate, ResolvedAt = NULL WHERE Id = @Id`,
-            [
-              { name: "TaskId",  type: TYPES.NVarChar, value: taskId },
-              { name: "DueDate", type: TYPES.Date,     value: new Date(dueDateStr) },
-              { name: "Id",      type: TYPES.Int,      value: existing[0].Id as number },
-            ],
-          );
-          directorCreated++;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          context.error(`plannerSyncTimer: failed to recreate director task for JobID ${job.jobId}:`, message);
-        }
+    let directorProcessed = 0;
+    let directorErrors = 0;
+    for (const r of directorRows) {
+      const jobId = r.JobID as number;
+      try {
+        await syncJobDirectorApproval(jobId, {
+          connection,
+          accountsMembers,
+          appBaseUrl: APP_BASE_URL,
+          log: (msg) => context.log(msg),
+        });
+        directorProcessed++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.error(`plannerSyncTimer: director_approval failed for JobID ${jobId}:`, message);
+        Sentry.captureException(err, {
+          tags: { source: "planner_sync_timer", trigger: "director_approval", jobId: String(jobId) },
+        });
+        directorErrors++;
       }
     }
-    context.log(`plannerSyncTimer: director_approval — created=${directorCreated} skipped=${directorSkipped}`);
+    context.log(`plannerSyncTimer: director_approval — processed=${directorProcessed} errors=${directorErrors}`);
+
+    // ── Oncharge pending (Accounts plan) ───────────────────────────────────
+    // Reconciliation sweep — primary trigger is the eager fire from upsertJob
+    // and outgoing-invoice insert. Here we just re-check every job that might
+    // need a task created or resolved, in case the eager call was skipped or
+    // failed.
+
+    const onchargeRows = await executeQuery(
+      connection,
+      `SELECT DISTINCT j.JobID
+       FROM dbo.Jobs j
+       LEFT JOIN dbo.PlannerTasks pt
+         ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
+        AND pt.TriggerType = 'oncharge_pending'
+       WHERE (j.IsOnchargeable = 1 AND j.IsArchived = 0 AND j.Status <> 'Done')
+          OR (pt.Status = 'active')`,
+    );
+
+    let onchargeProcessed = 0;
+    let onchargeErrors = 0;
+    for (const r of onchargeRows) {
+      const jobId = r.JobID as number;
+      try {
+        await syncJobOnchargePending(jobId, {
+          connection,
+          accountsMembers,
+          appBaseUrl: APP_BASE_URL,
+          log: (msg) => context.log(msg),
+        });
+        onchargeProcessed++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.error(`plannerSyncTimer: oncharge_pending failed for JobID ${jobId}:`, message);
+        Sentry.captureException(err, {
+          tags: { source: "planner_sync_timer", trigger: "oncharge_pending", jobId: String(jobId) },
+        });
+        onchargeErrors++;
+      }
+    }
+    context.log(`plannerSyncTimer: oncharge_pending — processed=${onchargeProcessed} errors=${onchargeErrors}`);
 
     // ── Resolve overdue tasks ───────────────────────────────────────────────
 
@@ -813,9 +680,15 @@ export async function plannerSyncTimer(
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     context.error("plannerSyncTimer: fatal:", message);
+    Sentry.captureException(error, { tags: { source: "planner_sync_timer", scope: "fatal" } });
     throw error;
   } finally {
     if (connection) closeConnection(connection);
+    // Timer invocations don't propagate caught errors to the runtime, so the
+    // global postInvocation hook in startup.ts won't auto-flush Sentry. Flush
+    // explicitly so per-job captures from the sweeps actually leave the worker
+    // before the next idle teardown.
+    await Sentry.flush(2000);
   }
 }
 

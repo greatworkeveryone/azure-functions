@@ -11,10 +11,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
-import { extractToken, errorResponse, unauthorizedResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, errorResponse, unauthorizedResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { uploadAttachment } from "../mybuildings-client";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { checkRateLimit } from "../rateLimit";
 
 // ── POST /api/uploadAttachment (multipart/form-data) ─────────────────────────
 // Accepts either `jobId` (preferred — new attachments belong to a Job) or
@@ -25,6 +26,19 @@ import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 async function handleUploadAttachment(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`uploadAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   let connection;
   try {
@@ -130,6 +144,19 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`getAttachments:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   const jobIdRaw = request.query.get("jobId");
   const workRequestIdRaw = request.query.get("workRequestId");
   if (!jobIdRaw && !workRequestIdRaw) {
@@ -205,6 +232,9 @@ async function attachToParent(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -252,6 +282,9 @@ async function detachFromParent(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -293,6 +326,19 @@ async function listParentAttachments(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`listParentAttachments:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   const raw = request.query.get(queryParam);
   if (!raw) {
@@ -342,6 +388,9 @@ async function handleDeleteAttachment(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -399,6 +448,19 @@ async function handleClaimEmailAttachment(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`claimEmailAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -452,6 +514,9 @@ async function handleUpdateAttachmentComment(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   let connection;
   try {

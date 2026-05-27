@@ -1,6 +1,12 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
+import { verifyEntraToken } from "./jwt";
+import { Sentry } from "./sentry";
+
+// Audience claim Entra puts on tokens issued for Azure SQL. Used by
+// rolesForRequest to verify the SQL bearer token before trusting its `oid`.
+const SQL_AUDIENCE = "https://database.windows.net/";
 
 export enum AppRole {
   ACCOUNTS            = "accounts",
@@ -37,8 +43,29 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
-export function errorResponse(message: string, details?: string): HttpResponseInit {
+// Second arg accepts either a raw Error/unknown (preferred — preserves the
+// stack for Sentry) or a string (legacy). Either way we capture to Sentry so
+// no 500 escapes silently.
+export function errorResponse(message: string, errorOrDetails?: unknown): HttpResponseInit {
   const isDev = process.env.DEV_ROLE_OVERRIDE_ENABLED === "true";
+
+  if (errorOrDetails instanceof Error) {
+    Sentry.captureException(errorOrDetails, { extra: { context: message } });
+  } else if (errorOrDetails !== undefined) {
+    Sentry.captureException(new Error(message), {
+      extra: { details: String(errorOrDetails) },
+    });
+  } else {
+    Sentry.captureException(new Error(message));
+  }
+
+  const details =
+    errorOrDetails instanceof Error
+      ? errorOrDetails.message
+      : errorOrDetails === undefined
+        ? undefined
+        : String(errorOrDetails);
+
   return {
     status: 500,
     jsonBody: isDev && details ? { error: message, details } : { error: message },
@@ -95,15 +122,29 @@ export function userInfoFromToken(token: string): { name: string; email: string 
  * (acquired with scope `${clientId}/.default`), so it carries the `roles`
  * claim directly — no Graph call needed.
  *
- * We cross-check the OID in both tokens to ensure the app token belongs to
- * the same user as the SQL token. Both are signed by Entra and acquired in
- * the same browser session, so a mismatch indicates tampering.
+ * We verify the app token's signature against the tenant's JWKS, then
+ * cross-check the OID in both tokens to ensure the app token belongs to the
+ * same user as the SQL token. Without verification a forged X-App-Token
+ * could claim any role.
  */
-export function rolesFromAppToken(sqlToken: string, appToken: string): string[] {
+export async function rolesFromAppToken(
+  sqlToken: string,
+  appToken: string,
+): Promise<string[]> {
+  const expectedAudience = process.env.APP_CLIENT_ID ?? "";
+  if (!expectedAudience) return [];
+
+  const appPayload = await verifyEntraToken(appToken, expectedAudience);
+  if (!appPayload) return [];
+
+  // The SQL token is only used to cross-check OID — we verify it separately
+  // (with its own audience) in rolesForRequest. Decoding the payload here
+  // without verification is fine because the OID match is a defensive check,
+  // not the trust anchor. The trust anchor is the verified app token above.
   const sqlPayload = decodeJwtPayload(sqlToken);
-  const appPayload = decodeJwtPayload(appToken);
-  if (!sqlPayload || !appPayload) return [];
+  if (!sqlPayload) return [];
   if (sqlPayload.oid !== appPayload.oid) return [];
+
   const roles = appPayload.roles;
   if (!Array.isArray(roles)) return [];
   return roles
@@ -130,7 +171,14 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
 
   const sqlToken = extractToken(request);
   if (!sqlToken) return [];
-  const oid = oidFromToken(sqlToken);
+
+  // Verify signature, expiry, issuer and audience against the tenant's JWKS
+  // before trusting the `oid` claim. SQL would reject a forged token at the
+  // DB layer, but here we look the user up via a service connection — SQL
+  // never sees this token, so we must verify it ourselves.
+  const payload = await verifyEntraToken(sqlToken, SQL_AUDIENCE);
+  if (!payload) return [];
+  const oid = typeof payload.oid === "string" ? payload.oid : null;
   if (!oid) return [];
 
   const connection = await createServiceConnection();

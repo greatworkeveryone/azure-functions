@@ -1,10 +1,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { graphFetchEmails, graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { upsertGraphEmails } from "./emails";
 import { runParseBatch } from "./parseEmails";
+import { checkRateLimit } from "../rateLimit";
 
 // ── POST /api/graphNotification ─────────────────────────────────────────────
 // Receives Graph change notifications when new email arrives in the mailbox.
@@ -83,6 +84,19 @@ async function setupGraphSubscription(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ADMIN]);
+  if (denied) return denied;
+
+  const callerOid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`setupGraphSubscription:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   const mailbox = process.env.GRAPH_MAILBOX_DEV;
   const notificationUrl = process.env.GRAPH_NOTIFICATION_URL;

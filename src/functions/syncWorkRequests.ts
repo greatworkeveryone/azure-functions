@@ -1,13 +1,16 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createConnection, closeConnection, executeQuery } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
-import { extractToken, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
 import { upsertWorkRequest } from "./workRequests";
 
 async function syncWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {

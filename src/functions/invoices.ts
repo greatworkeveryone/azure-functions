@@ -3,9 +3,10 @@ import { TYPES } from "tedious";
 import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
-import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { resolveActivePlannerTasks } from "../planner";
+import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 
 // ── Approval limit helpers ────────────────────────────────────────────────────
 
@@ -90,6 +91,9 @@ async function syncInvoices(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = await request.json() as SyncInvoicesBody;
@@ -157,6 +161,9 @@ async function syncInvoices(request: HttpRequest, context: InvocationContext): P
 async function getInvoices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -247,6 +254,9 @@ async function getJobInvoices(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
   const jobId = request.query.get("jobId");
   if (!jobId) return { status: 400, jsonBody: { error: "jobId query param required" } };
 
@@ -277,6 +287,9 @@ async function upsertJobInvoice(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -371,6 +384,13 @@ async function upsertJobInvoice(
           `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: newId }],
         );
+
+        // Outgoing invoice raised → accounts' oncharge work is done. Eager
+        // resolve the Planner task; the nightly sweep is the safety net.
+        if (direction === "outgoing") {
+          await syncJobActionTriggersStandalone(JobID, (msg) => context.log(msg));
+        }
+
         return { status: 200, jsonBody: { invoice: stored[0] } };
       } catch (err) {
         await rollbackTransaction(connection).catch(() => {});
@@ -429,6 +449,9 @@ async function approveJobInvoice(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -561,6 +584,14 @@ async function approveJobInvoice(
       `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
+
+    // Eager-fire the job-bound Planner triggers. Status='approved' means the
+    // director_approval count for this job has just gone up; the combined
+    // sync also re-checks oncharge/awaiting/stalled (all idempotent).
+    if (newStatus === "approved") {
+      await syncJobActionTriggersStandalone(jobId, (msg) => context.log(msg));
+    }
+
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {
     context.error("approveJobInvoice failed:", error.message);
@@ -583,6 +614,9 @@ async function directorApproveJobInvoice(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
@@ -684,6 +718,9 @@ async function undoDirectorApproveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  if (denied) return denied;
+
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
@@ -775,6 +812,9 @@ async function getApprovalLimits(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  if (denied) return denied;
+
   let connection;
   try {
     connection = await createConnection(token);
@@ -804,6 +844,9 @@ async function rejectJobInvoice(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -872,6 +915,9 @@ async function markJobInvoiceMyobCreated(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
 
   let connection;
   try {
@@ -965,6 +1011,9 @@ async function unmarkJobInvoiceMyobCreated(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as UnmarkJobInvoiceMyobCreatedBody;
@@ -1033,6 +1082,9 @@ async function deleteJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) return denied;
+
   let connection;
   try {
     const body = (await request.json()) as DeleteJobInvoiceBody;
@@ -1079,6 +1131,9 @@ async function resendDirectorInvoiceEmail(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  if (denied) return denied;
 
   let connection;
   try {
