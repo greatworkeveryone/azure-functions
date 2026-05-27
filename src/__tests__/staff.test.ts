@@ -136,4 +136,18 @@ describe("mapUsersToStaff", () => {
   test("returns empty array on empty input", () => {
     assert.deepStrictEqual(mapUsersToStaff([]), []);
   });
+
+  test("dedupes users by email (case-insensitive) when merging groups", () => {
+    const overlap: GraphUser[] = [
+      { id: "1", displayName: "Alice Brown", mail: "alice@example.com", mobilePhone: null },
+      { id: "2", displayName: "Mike Davis",  mail: "mike@example.com",  mobilePhone: null },
+      { id: "3", displayName: "Alice Brown", mail: "ALICE@example.com", mobilePhone: null },
+    ];
+    const result = mapUsersToStaff(overlap);
+    assert.strictEqual(result.length, 2);
+    assert.deepStrictEqual(
+      result.map((s) => s.name),
+      ["Alice Brown", "Mike Davis"],
+    );
+  });
 });

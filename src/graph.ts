@@ -228,6 +228,7 @@ export interface GraphEmail {
   internetMessageId: string;
   subject: string | null;
   fromAddress: string | null;
+  fromName: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
   attachmentBlobNames: { blobName: string; fileName: string }[];
@@ -331,11 +332,18 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
       if (!m.hasAttachments) {
         console.log(`[attachments] skipped msg=${m.id} subject="${m.subject}" — hasAttachments=false`);
       }
+      // Graph occasionally returns a `name` that's just the address echoed
+      // back; null it out so the UI keeps using the address-only render path
+      // for those rather than showing the same string twice.
+      const rawName: string | null = m.from?.emailAddress?.name ?? null;
+      const rawAddress: string | null = m.from?.emailAddress?.address ?? null;
+      const fromName = rawName && rawName !== rawAddress ? rawName : null;
       return {
         graphMessageId: m.id,
         internetMessageId: m.internetMessageId ?? m.id,
         subject: m.subject ?? null,
-        fromAddress: m.from?.emailAddress?.address ?? null,
+        fromAddress: rawAddress,
+        fromName,
         bodyContent: m.body?.content ?? null,
         receivedAt: m.receivedDateTime ?? null,
         attachmentBlobNames,

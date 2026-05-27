@@ -436,7 +436,11 @@ function tenantRowToApi(
     dollarsToExpiry = calcDollarsToExpiry(daysToExpiry, effectiveRentPerAnnum);
   }
 
-  const status = (row.Status as RegisterTenantApi["status"]) ?? "current";
+  const storedStatus = (row.Status as RegisterTenantApi["status"]) ?? "current";
+  const status: RegisterTenantApi["status"] =
+    storedStatus === "current" && daysToExpiry !== undefined && daysToExpiry < 0
+      ? "holdover"
+      : storedStatus;
 
   return {
     abn: asStr(row.Abn),
@@ -1956,10 +1960,26 @@ async function getPortfolioOccupancy(
       connection,
       `SELECT t.BuildingId,
               SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN o.SizeSqm ELSE 0 END) AS ActiveSqm,
-              SUM(o.SizeSqm) AS TotalSqm
-       FROM dbo.TenantOccupancies o
-       INNER JOIN dbo.Tenants t ON t.TenantId = o.TenantId
+                       THEN occ.TenantSqm ELSE 0 END) AS ActiveSqm,
+              SUM(occ.TenantSqm) AS TotalSqm,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
+                       THEN t.RentPerAnnum ELSE 0 END) AS AnnualRent,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
+                       THEN 1 ELSE 0 END) AS ActiveTenantCount,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
+                            AND t.Expiry IS NOT NULL
+                       THEN occ.TenantSqm
+                            * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
+                       ELSE 0 END) AS WaleNumeratorSqmDays,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
+                            AND t.Expiry IS NOT NULL
+                       THEN occ.TenantSqm ELSE 0 END) AS WaleDenominatorSqm
+       FROM dbo.Tenants t
+       INNER JOIN (
+         SELECT TenantId, SUM(SizeSqm) AS TenantSqm
+         FROM dbo.TenantOccupancies
+         GROUP BY TenantId
+       ) occ ON occ.TenantId = t.TenantId
        GROUP BY t.BuildingId`,
       [],
     );
@@ -1967,11 +1987,21 @@ async function getPortfolioOccupancy(
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;
+      const annualRent = Number(r.AnnualRent) || 0;
+      const activeTenantCount = Number(r.ActiveTenantCount) || 0;
+      const waleNumerator = Number(r.WaleNumeratorSqmDays) || 0;
+      const waleDenominator = Number(r.WaleDenominatorSqm) || 0;
+      const waleYears =
+        waleDenominator > 0 ? waleNumerator / waleDenominator / 365.25 : 0;
       return {
         activeSqm,
+        activeTenantCount,
+        annualRent,
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
         totalSqm,
+        waleExpirySqm: waleDenominator,
+        waleYears,
       };
     });
 

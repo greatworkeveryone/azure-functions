@@ -16,6 +16,7 @@ import {
 } from "../auth";
 import { uploadBlob, generateReadSasUrl } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
 
 const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
@@ -521,6 +522,10 @@ async function reportKeyLost(
       ],
     );
 
+    // Fire-and-forget — standalone wrapper handles its own connection + errors.
+    // A Planner outage must not fail the user's report.
+    void syncKeyLostReportedStandalone(Id);
+
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error("reportKeyLost failed:", error.message);
@@ -594,6 +599,8 @@ async function deleteKey(
       ],
     );
 
+    void syncKeyLostReportedStandalone(Id);
+
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error("deleteKey failed:", error.message);
@@ -651,6 +658,8 @@ async function restoreKey(
        WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: Id }],
     );
+
+    void syncKeyLostReportedStandalone(Id);
 
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {

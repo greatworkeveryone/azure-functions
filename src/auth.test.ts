@@ -128,4 +128,48 @@ describe("requireRole", () => {
 
     expect(result).toBeNull();
   });
+
+  it("director satisfies any non-admin-only role check", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "director" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+
+    expect(result).toBeNull();
+  });
+
+  it("director is rejected on admin-only role checks", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "director" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.ADMIN]);
+
+    expect(result?.status).toBe(403);
+  });
+
+  it("facilities_manager satisfies a facilities-only check", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "facilities_manager" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.FACILITIES]);
+
+    expect(result).toBeNull();
+  });
+
+  it("accounts_manager satisfies an accounts-only check", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "accounts_manager" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.ACCOUNTS]);
+
+    expect(result).toBeNull();
+  });
 });

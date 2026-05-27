@@ -200,15 +200,40 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
 /**
  * Returns null if the caller has at least one of the required roles,
  * or a 403 HttpResponseInit otherwise. Callers should early-return on the
- * non-null result. `Admin` implicitly satisfies every role check.
+ * non-null result.
+ *
+ * Role hierarchy applied here so call sites don't have to enumerate every
+ * superset role:
+ *   - `admin` satisfies every check.
+ *   - `director` satisfies every non-admin-only check (anything operational).
+ *   - `facilities_manager` satisfies any `facilities` check.
+ *   - `accounts_manager`   satisfies any `accounts` check.
  */
 export async function requireRole(
   request: HttpRequest,
   allowed: readonly AppRole[],
 ): Promise<HttpResponseInit | null> {
   const roles = await rolesForRequest(request);
+
   if (roles.includes(AppRole.ADMIN)) return null;
+
+  if (
+    roles.includes(AppRole.DIRECTOR) &&
+    allowed.some((r) => r !== AppRole.ADMIN)
+  ) return null;
+
+  if (
+    roles.includes(AppRole.FACILITIES_APPROVAL) &&
+    allowed.includes(AppRole.FACILITIES)
+  ) return null;
+
+  if (
+    roles.includes(AppRole.ACCOUNTS_APPROVAL) &&
+    allowed.includes(AppRole.ACCOUNTS)
+  ) return null;
+
   if (roles.some((r) => allowed.includes(r as AppRole))) return null;
+
   return forbiddenResponse(
     `Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`,
   );

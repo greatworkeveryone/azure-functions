@@ -18,13 +18,19 @@ export interface StaffMember {
 
 /**
  * Maps GraphUser records to StaffMember, filtering out users without email,
- * sorted alphabetically by name.
+ * deduping by email (case-insensitive), and sorting alphabetically by name.
  */
 export function mapUsersToStaff(users: GraphUser[]): StaffMember[] {
-  return users
-    .filter((u) => u.mail)
-    .map((u) => ({ email: u.mail!, name: u.displayName }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const seen = new Set<string>();
+  const staff: StaffMember[] = [];
+  for (const u of users) {
+    if (!u.mail) continue;
+    const key = u.mail.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    staff.push({ email: u.mail, name: u.displayName });
+  }
+  return staff.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function getStaff(
@@ -37,15 +43,21 @@ async function getStaff(
   const roleCheck = await requireRole(request, STAFF_ROLES);
   if (roleCheck) return roleCheck;
 
-  const groupId = process.env.PLANNER_GROUP_ID;
-  if (!groupId) {
-    context.error("getStaff: PLANNER_GROUP_ID not configured");
+  const facilitiesGroupId = process.env.PLANNER_FACILITIES_GROUP_ID;
+  const accountsGroupId = process.env.PLANNER_ACCOUNTS_GROUP_ID;
+  if (!facilitiesGroupId || !accountsGroupId) {
+    context.error(
+      "getStaff: PLANNER_FACILITIES_GROUP_ID / PLANNER_ACCOUNTS_GROUP_ID not configured",
+    );
     return errorResponse("Staff directory not configured");
   }
 
   try {
-    const users = await graphGetGroupUsers(groupId);
-    const staff = mapUsersToStaff(users);
+    const [facilities, accounts] = await Promise.all([
+      graphGetGroupUsers(facilitiesGroupId),
+      graphGetGroupUsers(accountsGroupId),
+    ]);
+    const staff = mapUsersToStaff([...facilities, ...accounts]);
 
     return { status: 200, jsonBody: { staff } };
   } catch (error: unknown) {

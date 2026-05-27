@@ -6,7 +6,8 @@ export type TriggerType =
   | "stalled_facilities"     // IsStalled=1 AND AwaitingRole != 'accounts'
   | "awaiting_accounts"      // AwaitingRole = 'accounts'
   | "director_approval"      // DirectorNeededCount > 0
-  | "oncharge_pending";      // IsOnchargeable=1 AND no outgoing invoice yet
+  | "oncharge_pending"       // IsOnchargeable=1 AND no outgoing invoice yet
+  | "lost_key_reported";     // key marked lost — pending facilities decision
 
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
@@ -129,6 +130,8 @@ export function buildTaskTitle(
       return `Director approval needed — ${displayName}`;
     case "oncharge_pending":
       return `Oncharge — ${displayName}`;
+    case "lost_key_reported":
+      return `Lost key — ${displayName}`;
   }
 }
 
@@ -218,4 +221,36 @@ export function toIsoDateString(date: Date): string {
   const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(date.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+export interface PlannerLostKeyRow {
+  KeyId: number;
+  KeyNumber: string;
+  BuildingName: string;
+  LostAt: Date | null;
+  LostByName: string | null;
+  LostComment: string | null;
+  TenancyName: string | null;
+}
+
+export function buildLostKeyTaskDescription(
+  row: PlannerLostKeyRow,
+  appBaseUrl: string,
+): string {
+  const reportedAt = row.LostAt ? toIsoDateString(row.LostAt) : "unknown date";
+  const reporter = row.LostByName ?? "unknown";
+  const tenancy = row.TenancyName ? ` (tenant: ${row.TenancyName})` : "";
+  const comment = row.LostComment ? `\n\nReporter note: ${row.LostComment}` : "";
+  const link = `${appBaseUrl}/keys/${row.KeyId}`;
+  return [
+    `${row.KeyNumber} at ${row.BuildingName}${tenancy} was reported lost on ${reportedAt} by ${reporter}.`,
+    ``,
+    `Decide whether to:`,
+    `  - Recore the cylinder (treats the loss as a security risk; invalidates every copy)`,
+    `  - Cut a replacement only (treats the loss as low-risk)`,
+    `  - Write off and retire the key`,
+    comment,
+    ``,
+    `Open in Command Centre: ${link}`,
+  ].join("\n").trim();
 }

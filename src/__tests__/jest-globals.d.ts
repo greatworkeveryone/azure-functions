@@ -1,11 +1,13 @@
-// Minimal ambient declarations for Jest globals used in this repo's test files.
+// Ambient declarations for Jest globals used in this repo's test files.
 //
-// We avoid adding `@types/jest` as a dependency — only a tiny subset of the
-// Jest API is referenced (describe / test / beforeEach / afterEach), and these
-// are provided by Jest at runtime when `npx jest` runs the compiled suites.
-//
-// The npm `test` script still uses Node's built-in test runner; that runner
-// also injects compatible globals when invoked with `node --test`.
+// Most suites in __tests__/ use Node's built-in `assert` and only need the
+// describe/it/beforeEach/afterEach globals declared below. Newer Jest-style
+// suites (search.test.ts, searchUtils.test.ts) also reference `expect` and
+// the `jest` mocking API — those types come in via `/// <reference>` to the
+// installed `@types/jest` package, which we don't list in the tsconfig
+// `types` array so it stays scoped to test files only.
+
+/// <reference types="jest" />
 
 declare function describe(name: string, fn: () => void): void;
 

@@ -73,9 +73,10 @@ async function recordRowError(
 // look like. Centralising it here keeps the per-trigger functions to just
 // "load state → build params → call reconcile."
 
-interface ReconcileParams {
+export interface ReconcileParams {
   connection: Connection;
-  jobId: number;
+  entityType: "job" | "key";
+  entityId: number;
   triggerType: TriggerType;
   shouldHaveTask: boolean;
   /** PlanType column value — 'accounts' or 'facilities'. Stored on the row
@@ -89,19 +90,20 @@ interface ReconcileParams {
   log?: LogFn;
 }
 
-async function reconcileTask(p: ReconcileParams): Promise<void> {
+export async function reconcileTask(p: ReconcileParams): Promise<void> {
   const {
-    connection, jobId, triggerType, shouldHaveTask,
+    connection, entityType, entityId, triggerType, shouldHaveTask,
     planType, title, description, dueDate, assigneeIds, log,
   } = p;
 
   const existing = await executeQuery(
     connection,
     `SELECT Id, PlannerTaskId, Status FROM dbo.PlannerTasks
-     WHERE EntityType = 'job' AND EntityId = @EntityId
+     WHERE EntityType = @EntityType AND EntityId = @EntityId
        AND TriggerType = @TriggerType AND LeadTimeDays = 0`,
     [
-      { name: "EntityId", type: TYPES.Int, value: jobId },
+      { name: "EntityType", type: TYPES.NVarChar, value: entityType },
+      { name: "EntityId", type: TYPES.Int, value: entityId },
       { name: "TriggerType", type: TYPES.NVarChar, value: triggerType },
     ],
   );
@@ -113,7 +115,7 @@ async function reconcileTask(p: ReconcileParams): Promise<void> {
   if (shouldHaveTask) {
     const { planId, bucketId } = getPlanConfig(triggerType);
     if (!planId || !bucketId) {
-      log?.(`reconcileTask: missing plan/bucket env for ${triggerType} — skipping job ${jobId}`);
+      log?.(`reconcileTask: missing plan/bucket env for ${triggerType} — skipping ${entityType} ${entityId}`);
       return;
     }
 
@@ -126,17 +128,18 @@ async function reconcileTask(p: ReconcileParams): Promise<void> {
         `INSERT INTO dbo.PlannerTasks
            (EntityType, EntityId, TriggerType, LeadTimeDays, PlannerTaskId, DueDate, PlanType,
             LastSyncedAt, LastError, AttemptCount)
-         VALUES ('job', @EntityId, @TriggerType, 0, @TaskId, @DueDate, @PlanType,
+         VALUES (@EntityType, @EntityId, @TriggerType, 0, @TaskId, @DueDate, @PlanType,
                  SYSUTCDATETIME(), NULL, 1)`,
         [
-          { name: "EntityId", type: TYPES.Int, value: jobId },
+          { name: "EntityType", type: TYPES.NVarChar, value: entityType },
+          { name: "EntityId", type: TYPES.Int, value: entityId },
           { name: "TriggerType", type: TYPES.NVarChar, value: triggerType },
           { name: "TaskId", type: TYPES.NVarChar, value: taskId },
           { name: "DueDate", type: TYPES.Date, value: new Date(dueDate) },
           { name: "PlanType", type: TYPES.NVarChar, value: planType },
         ],
       );
-      log?.(`reconcileTask: created ${triggerType} for job ${jobId}`);
+      log?.(`reconcileTask: created ${triggerType} for ${entityType} ${entityId}`);
       return;
     }
 
@@ -186,7 +189,7 @@ async function reconcileTask(p: ReconcileParams): Promise<void> {
         { name: "Id", type: TYPES.Int, value: rowId },
       ],
     );
-    log?.(`reconcileTask: recreated ${triggerType} for job ${jobId}`);
+    log?.(`reconcileTask: recreated ${triggerType} for ${entityType} ${entityId}`);
     return;
   }
 
@@ -199,7 +202,7 @@ async function reconcileTask(p: ReconcileParams): Promise<void> {
       // Continue to mark resolved locally — Graph may have lost the task.
       // Nightly sweep retries the next day if anything is off.
       log?.(
-        `reconcileTask: graph complete failed for ${triggerType} job ${jobId}: ${
+        `reconcileTask: graph complete failed for ${triggerType} ${entityType} ${entityId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -213,7 +216,7 @@ async function reconcileTask(p: ReconcileParams): Promise<void> {
        WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: rowId }],
     );
-    log?.(`reconcileTask: resolved ${triggerType} for job ${jobId}`);
+    log?.(`reconcileTask: resolved ${triggerType} for ${entityType} ${entityId}`);
   }
 }
 
@@ -268,7 +271,8 @@ export async function syncJobOnchargePending(
 
   await reconcileTask({
     connection,
-    jobId,
+    entityType: "job",
+    entityId: jobId,
     triggerType: "oncharge_pending",
     shouldHaveTask,
     planType: "accounts",
@@ -309,7 +313,8 @@ export async function syncJobAwaitingAccounts(
 
   await reconcileTask({
     connection,
-    jobId,
+    entityType: "job",
+    entityId: jobId,
     triggerType: "awaiting_accounts",
     shouldHaveTask,
     planType: "accounts",
@@ -365,7 +370,8 @@ export async function syncJobStalled(
 
   await reconcileTask({
     connection,
-    jobId,
+    entityType: "job",
+    entityId: jobId,
     triggerType: "stalled_facilities",
     shouldHaveTask,
     planType: "facilities",
@@ -412,7 +418,8 @@ export async function syncJobDirectorApproval(
 
   await reconcileTask({
     connection,
-    jobId,
+    entityType: "job",
+    entityId: jobId,
     triggerType: "director_approval",
     shouldHaveTask,
     planType: "accounts",

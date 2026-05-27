@@ -11,6 +11,11 @@ export interface PlanConfig {
 export function getPlanConfig(triggerType: TriggerType): PlanConfig {
   const e = process.env;
   switch (triggerType) {
+    case "lost_key_reported":
+      return {
+        planId:   e.PLANNER_FACILITIES_PLAN_ID              ?? "",
+        bucketId: e.PLANNER_FACILITIES_BUCKET_LOST_KEYS_ID  ?? "",
+      };
     case "stalled_facilities":
     case "job_update_due":
       return {

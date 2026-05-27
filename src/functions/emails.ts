@@ -46,7 +46,7 @@ function hydrateAttachments(
 }
 
 const EMAIL_COLUMNS = `
-  EmailID, FromAddress, Subject, Body, ReceivedAt,
+  EmailID, FromAddress, FromName, Subject, Body, ReceivedAt,
   AttachmentBlobs, MatchedJobID, Status, ProcessedAt, CreatedAt,
   AIParsedAt, AIClassification, AIConfidence, AIParsedData,
   AIFlaggedForReview
@@ -757,14 +757,15 @@ export async function upsertGraphEmails(
     await executeQuery(
       connection,
       `IF NOT EXISTS (SELECT 1 FROM Emails WHERE MessageID = @MessageID)
-         INSERT INTO Emails (MessageID, FromAddress, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs)
-         VALUES (@MessageID, @FromAddress, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs)
+         INSERT INTO Emails (MessageID, FromAddress, FromName, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs)
+         VALUES (@MessageID, @FromAddress, @FromName, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs)
        ELSE IF @AttachmentBlobs IS NOT NULL
          UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
          WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL`,
       [
         { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
         { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
+        { name: "FromName", type: TYPES.NVarChar, value: email.fromName },
         { name: "Subject", type: TYPES.NVarChar, value: email.subject },
         { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
         { name: "ReceivedAt", type: TYPES.DateTime2, value: email.receivedAt ? new Date(email.receivedAt) : null },
