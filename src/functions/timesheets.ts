@@ -11,6 +11,8 @@ import {
   errorResponse,
   extractToken,
   forbiddenResponse,
+  nameFromToken,
+  oidFromToken,
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
@@ -50,35 +52,6 @@ function isApprovalManager(roles: string[]): boolean {
     roles.includes(AppRole.ADMIN) ||
     roles.some((r) => (APPROVAL_ROLES as readonly string[]).includes(r))
   );
-}
-
-/** The oid claim is stored as the `oid` in the JWT payload. */
-function oidFromToken(token: string): string | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
-    const json = Buffer.from(padded, "base64").toString("utf8");
-    const parsed = JSON.parse(json);
-    return typeof parsed.oid === "string" ? parsed.oid : null;
-  } catch {
-    return null;
-  }
-}
-
-function nameFromToken(token: string): string | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
-    const json = Buffer.from(padded, "base64").toString("utf8");
-    const parsed = JSON.parse(json);
-    return typeof parsed.name === "string" ? parsed.name : null;
-  } catch {
-    return null;
-  }
 }
 
 // ── GET /api/getTimesheet ────────────────────────────────────────────────────

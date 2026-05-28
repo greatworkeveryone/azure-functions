@@ -14,7 +14,7 @@ import {
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
-  userInfoFromToken,
+  verifiedIdentityFromRequest,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
 
@@ -254,13 +254,7 @@ export async function registerSelf(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-
-  const appToken = request.headers.get("x-app-token");
-  if (!appToken) return unauthorizedResponse();
-
-  // No verified OID yet (first-login flow) — key by IP so an unauthenticated
+  // Rate-limit before we've established identity — key by source IP so an
   // attacker can't burn through user creates from a single host.
   const callerIp =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
@@ -275,12 +269,13 @@ export async function registerSelf(
     };
   }
 
-  const oid  = oidFromToken(token);
-  const info = userInfoFromToken(appToken);
-
-  if (!oid || !info) {
-    return { status: 400, jsonBody: { error: "Could not extract identity from token" } };
-  }
+  // Verify the token signature before trusting any identity claim. This path
+  // writes the EntraOid→role mapping via a service connection, so Azure SQL
+  // never validates the caller's token for us — an unverified decode would let
+  // a forged token claim a pre-invited row (privilege escalation).
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const { oid, name, email } = identity;
 
   let connection;
   try {
@@ -298,8 +293,8 @@ export async function registerSelf(
         connection,
         `UPDATE dbo.AppUsers SET DisplayName = @DisplayName, Email = @Email WHERE UserID = @UserID`,
         [
-          { name: "DisplayName", type: TYPES.NVarChar, value: info.name },
-          { name: "Email",       type: TYPES.NVarChar, value: info.email },
+          { name: "DisplayName", type: TYPES.NVarChar, value: name },
+          { name: "Email",       type: TYPES.NVarChar, value: email },
           { name: "UserID",      type: TYPES.Int,      value: UserID },
         ],
       );
@@ -311,7 +306,7 @@ export async function registerSelf(
       connection,
       `SELECT UserID, Role FROM dbo.AppUsers
        WHERE Email = @Email AND EntraOid IS NULL AND IsActive = 1`,
-      [{ name: "Email", type: TYPES.NVarChar, value: info.email }],
+      [{ name: "Email", type: TYPES.NVarChar, value: email }],
     );
     if (byEmail.length > 0) {
       const { UserID, Role } = byEmail[0] as { UserID: number; Role: string | null };
@@ -322,7 +317,7 @@ export async function registerSelf(
          WHERE UserID = @UserID`,
         [
           { name: "Oid",         type: TYPES.NVarChar, value: oid },
-          { name: "DisplayName", type: TYPES.NVarChar, value: info.name },
+          { name: "DisplayName", type: TYPES.NVarChar, value: name },
           { name: "UserID",      type: TYPES.Int,      value: UserID },
         ],
       );
@@ -336,8 +331,8 @@ export async function registerSelf(
        OUTPUT INSERTED.UserID
        VALUES (@DisplayName, @Email, @Oid)`,
       [
-        { name: "DisplayName", type: TYPES.NVarChar, value: info.name },
-        { name: "Email",       type: TYPES.NVarChar, value: info.email },
+        { name: "DisplayName", type: TYPES.NVarChar, value: name },
+        { name: "Email",       type: TYPES.NVarChar, value: email },
         { name: "Oid",         type: TYPES.NVarChar, value: oid },
       ],
     );

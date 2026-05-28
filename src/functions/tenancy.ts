@@ -84,6 +84,12 @@ import {
   upsertInfoSheetRow,
   upsertInfoSheetSection,
 } from "../infoSheetLogic";
+import {
+  defaultLeaseAdministration,
+  LeaseAdministration,
+  normaliseLeaseAdministration,
+  parseLeaseAdministration,
+} from "../leaseAdministrationLogic";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -229,6 +235,8 @@ interface RegisterTenantApi {
   miscFees: MiscFee[];
   /** m069 — info sheet general sections (header / subheader / body rows). */
   infoSheetSections: InfoSheetSectionApi[];
+  /** m078 — lease document administration (execution dates, licences, etc.). */
+  leaseAdministration: LeaseAdministration;
   /** Per m040 — text date like "5/1/19". */
   informationSheetAsAt?: string;
   /** Per m040 — file path/reference for the info-sheet doc. */
@@ -475,6 +483,7 @@ function tenantRowToApi(
     ),
     miscFees: parseMiscFees(row.MiscFees as string | null | undefined),
     infoSheetSections: parseInfoSheetSections(row.InfoSheetSections as string | null | undefined),
+    leaseAdministration: parseLeaseAdministration(row.LeaseAdministration as string | null | undefined),
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
     lastReviewDate: toIsoDate(row.LastReviewDate),
@@ -602,6 +611,7 @@ const TENANT_COLUMNS = `
   CarparkScheduleGroups,
   MiscFees,
   InfoSheetSections,
+  LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName
 `;
 
@@ -945,6 +955,7 @@ async function upsertRegisterTenant(
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
+            LeaseAdministration,
             CreatedById, CreatedByName, UpdatedById, UpdatedByName
          )
          OUTPUT INSERTED.TenantId
@@ -962,9 +973,17 @@ async function upsertRegisterTenant(
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
+            @LeaseAdministration,
             @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName
          )`,
-        params,
+        [
+          ...params,
+          {
+            name: "LeaseAdministration",
+            type: TYPES.NVarChar,
+            value: JSON.stringify(defaultLeaseAdministration()),
+          },
+        ],
       );
       resultId = inserted[0].TenantId as number;
     } else {
@@ -2272,7 +2291,8 @@ interface ChangeLogOpts {
 async function insertRentScheduleChangeLog(
   connection: Connection,
   opts: ChangeLogOpts,
-): Promise<void> {
+): Promise<string> {
+  const changeId = randomUuid();
   await executeQuery(
     connection,
     `INSERT INTO dbo.RentScheduleChangeLog
@@ -2282,7 +2302,7 @@ async function insertRentScheduleChangeLog(
        (@ChangeId, @TenantId, @BuildingId, @StepId, @ChangeKind,
         SYSUTCDATETIME(), @ChangedById, @ChangedByName, @StepSnapshot, @Diff)`,
     [
-      { name: "ChangeId", type: TYPES.NVarChar, value: randomUuid() },
+      { name: "ChangeId", type: TYPES.NVarChar, value: changeId },
       { name: "TenantId", type: TYPES.Int, value: opts.tenantId },
       { name: "BuildingId", type: TYPES.Int, value: opts.buildingId },
       { name: "StepId", type: TYPES.NVarChar, value: opts.stepId },
@@ -2301,6 +2321,7 @@ async function insertRentScheduleChangeLog(
       },
     ],
   );
+  return changeId;
 }
 
 function changeLogRowToApi(row: SqlRow) {
@@ -2392,7 +2413,7 @@ async function upsertScheduledRateStep(
       ],
     );
 
-    await insertRentScheduleChangeLog(connection, {
+    const changeId = await insertRentScheduleChangeLog(connection, {
       tenantId: TenantId,
       buildingId: BuildingId,
       stepId: step.id,
@@ -2404,7 +2425,7 @@ async function upsertScheduledRateStep(
     });
 
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { steps: next } };
+    return { status: 200, jsonBody: { steps: next, changeId } };
   } catch (error: any) {
     context.error("upsertScheduledRateStep failed:", error.message);
     return errorResponse("Failed to upsert scheduled rate step", error.message);
@@ -2482,8 +2503,9 @@ async function deleteScheduledRateStep(
       ],
     );
 
+    let changeId: string | undefined;
     if (deletedStep) {
-      await insertRentScheduleChangeLog(connection, {
+      changeId = await insertRentScheduleChangeLog(connection, {
         tenantId: TenantId,
         buildingId: BuildingId,
         stepId,
@@ -2496,7 +2518,7 @@ async function deleteScheduledRateStep(
     }
 
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { steps: next } };
+    return { status: 200, jsonBody: { steps: next, changeId } };
   } catch (error: any) {
     context.error("deleteScheduledRateStep failed:", error.message);
     return errorResponse("Failed to delete scheduled rate step", error.message);
@@ -3372,6 +3394,79 @@ async function deleteInfoSheetRowHandler(
   }
 }
 
+// ── POST /api/upsertLeaseAdministration ───────────────────────────────────────
+// Replaces the whole LeaseAdministration blob (m078). The frontend owns the
+// per-field edit + history note, so this handler just validates and persists.
+
+async function upsertLeaseAdministrationHandler(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  if (roleCheck) return roleCheck;
+
+  const caller = callerFromToken(token);
+  const rl = checkRateLimit(`leaseadmin:${caller.id}`, INFO_SHEET_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  let connection;
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const TenantId = Number(body.TenantId);
+    const BuildingId = Number(body.BuildingId);
+    const raw = body.LeaseAdministration;
+    if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !raw || typeof raw !== "object") {
+      return { status: 400, jsonBody: { error: "TenantId, BuildingId, and LeaseAdministration (object) required" } };
+    }
+
+    const next: LeaseAdministration = normaliseLeaseAdministration(raw);
+
+    connection = await createConnection(token);
+    const rows = await executeQuery(
+      connection,
+      `SELECT TenantId FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
+
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET
+         LeaseAdministration = @LeaseAdministration,
+         UpdatedAt = SYSUTCDATETIME(),
+         UpdatedById = @UpdatedById,
+         UpdatedByName = @UpdatedByName
+       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      [
+        { name: "LeaseAdministration", type: TYPES.NVarChar, value: JSON.stringify(next) },
+        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+        { name: "TenantId", type: TYPES.Int, value: TenantId },
+        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+      ],
+    );
+
+    invalidateTenantAndBuilding(TenantId, BuildingId);
+    return { status: 200, jsonBody: { leaseAdministration: next } };
+  } catch (error: any) {
+    context.error("upsertLeaseAdministration failed:", error.message);
+    return errorResponse("Failed to upsert lease administration", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 // ── POST /api/upsertMiscFee ───────────────────────────────────────────────────
 
 const MISC_FEE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -3654,4 +3749,9 @@ app.http("deleteInfoSheetRow", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deleteInfoSheetRowHandler,
+});
+app.http("upsertLeaseAdministration", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: upsertLeaseAdministrationHandler,
 });

@@ -53,7 +53,7 @@ function decodeWithoutVerify(token: string): JWTPayload | null {
   }
 }
 
-function isDevOverrideEnabled(): boolean {
+export function isDevOverrideEnabled(): boolean {
   return (
     process.env.DEV_ROLE_OVERRIDE_ENABLED === "true" &&
     process.env.AZURE_FUNCTIONS_ENVIRONMENT !== "Production"
@@ -75,7 +75,7 @@ function isDevOverrideEnabled(): boolean {
  */
 export async function verifyEntraToken(
   token: string,
-  expectedAudience: string,
+  expectedAudience: string | string[],
 ): Promise<JWTPayload | null> {
   if (isDevOverrideEnabled()) {
     return decodeWithoutVerify(token);

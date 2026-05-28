@@ -1,12 +1,17 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
-import { verifyEntraToken } from "./jwt";
+import { isDevOverrideEnabled, verifyEntraToken } from "./jwt";
 import { Sentry } from "./sentry";
 
 // Audience claim Entra puts on tokens issued for Azure SQL. Used by
 // rolesForRequest to verify the SQL bearer token before trusting its `oid`.
-const SQL_AUDIENCE = "https://database.windows.net/";
+// Entra emits this with and without a trailing slash depending on token
+// version / scope variant, so we accept both.
+const SQL_AUDIENCE = [
+  "https://database.windows.net/",
+  "https://database.windows.net",
+];
 
 export enum AppRole {
   ACCOUNTS            = "accounts",
@@ -115,6 +120,15 @@ export function userInfoFromToken(token: string): { name: string; email: string 
   return { name, email };
 }
 
+// Display name only. Unlike userInfoFromToken this doesn't require an email
+// claim — used for attribution columns where the name alone is enough. Carries
+// the same "unverified decode" caveat as oidFromToken above.
+export function nameFromToken(token: string): string | null {
+  const payload = decodeJwtPayload(token);
+  const name = payload?.name;
+  return typeof name === "string" ? name : null;
+}
+
 /**
  * Reads the caller's app roles from the X-App-Token header.
  *
@@ -153,7 +167,12 @@ export async function rolesFromAppToken(
 }
 
 export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
-  if (process.env.DEV_ROLE_OVERRIDE_ENABLED === "true") {
+  // Gate the X-Dev-Roles bypass on the same two conditions jwt.ts uses for
+  // signature-skipping — DEV_ROLE_OVERRIDE_ENABLED *and* a non-Production
+  // host. Sharing isDevOverrideEnabled() keeps the two from drifting apart;
+  // previously this checked only the env flag, so a deployment not labelled
+  // Production could have honoured spoofed roles from the header.
+  if (isDevOverrideEnabled()) {
     const header = request.headers.get("x-dev-roles");
     if (header) {
       const roles = header
@@ -195,6 +214,41 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   } finally {
     closeConnection(connection);
   }
+}
+
+/**
+ * Verifies the caller's SQL bearer token and returns their identity from the
+ * verified payload (`oid`, display name, email).
+ *
+ * Use this for write paths that establish identity but talk to the DB via a
+ * *service* connection — e.g. registerSelf, which stamps an `EntraOid` onto a
+ * pre-invited row. In those paths Azure SQL never validates the user's token
+ * for us, so decoding it unverified (oidFromToken/userInfoFromToken) would let
+ * a forged token claim someone else's row. Verifying the signature here is the
+ * only thing preventing that privilege escalation.
+ *
+ * Returns null if the token is missing, fails verification, or lacks the
+ * claims we need — callers should treat null as "reject" (401).
+ */
+export async function verifiedIdentityFromRequest(
+  request: HttpRequest,
+): Promise<{ oid: string; name: string; email: string } | null> {
+  const token = extractToken(request);
+  if (!token) return null;
+
+  const payload = await verifyEntraToken(token, SQL_AUDIENCE);
+  if (!payload || typeof payload.oid !== "string") return null;
+
+  const name = typeof payload.name === "string" ? payload.name : null;
+  const email =
+    typeof payload.preferred_username === "string"
+      ? payload.preferred_username
+      : typeof payload.upn === "string"
+        ? payload.upn
+        : null;
+  if (!name || !email) return null;
+
+  return { oid: payload.oid, name, email };
 }
 
 /**
