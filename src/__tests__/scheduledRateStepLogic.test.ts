@@ -43,13 +43,18 @@ describe("validateStep", () => {
     assert.match(r.error, /effectiveFrom/);
   });
 
-  it("rejects ratePercent = 0", () => {
+  it("accepts ratePercent = 0 (pending market step)", () => {
     const r = validateStep({ id: validId, effectiveFrom: "2026-07-01", ratePercent: 0 });
-    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.ok, true);
   });
 
   it("rejects ratePercent > 100", () => {
     const r = validateStep({ id: validId, effectiveFrom: "2026-07-01", ratePercent: 150 });
+    assert.strictEqual(r.ok, false);
+  });
+
+  it("rejects ratePercent < -100", () => {
+    const r = validateStep({ id: validId, effectiveFrom: "2026-07-01", ratePercent: -150 });
     assert.strictEqual(r.ok, false);
   });
 

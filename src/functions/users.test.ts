@@ -10,6 +10,11 @@ jest.mock("../auth", () => {
     extractToken:      jest.fn().mockReturnValue("mock-token"),
     oidFromToken:      jest.fn().mockReturnValue("caller-oid-123"),
     userInfoFromToken: jest.fn().mockReturnValue({ name: "Test User", email: "test@co.com" }),
+    verifiedIdentityFromRequest: jest.fn().mockResolvedValue({
+      oid: "caller-oid-123",
+      name: "Test User",
+      email: "test@co.com",
+    }),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     errorResponse:     jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
   };
@@ -23,11 +28,12 @@ jest.mock("../db", () => ({
 }));
 
 const auth = require("../auth") as {
-  requireRole:     jest.Mock;
-  rolesForRequest: jest.Mock;
-  extractToken:    jest.Mock;
-  oidFromToken:    jest.Mock;
-  AppRole:         typeof import("../auth").AppRole;
+  requireRole:                 jest.Mock;
+  rolesForRequest:             jest.Mock;
+  extractToken:                jest.Mock;
+  oidFromToken:                jest.Mock;
+  verifiedIdentityFromRequest: jest.Mock;
+  AppRole:                     typeof import("../auth").AppRole;
 };
 
 const db = require("../db") as {
@@ -56,6 +62,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.createServiceConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
+  auth.verifiedIdentityFromRequest.mockResolvedValue({
+    oid: "caller-oid-123",
+    name: "Test User",
+    email: "test@co.com",
+  });
 });
 
 describe("upsertAppUser", () => {

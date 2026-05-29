@@ -143,11 +143,12 @@ export function buildTenantTaskDescription(
   const location = [tenant.buildingName, tenant.firstOccupancy]
     .filter(Boolean)
     .join(" | ");
+  const prefix = location ? `${location}\n` : "";
   const link = `${appBaseUrl}/tenancy/${tenant.tenantId}`;
 
   switch (triggerType) {
     case "lease_expiry":
-      return `${location}\nExpiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
+      return `${prefix}Expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     case "option_notice": {
       const deadline =
         tenant.expiry && tenant.optionNoticeMonths != null
@@ -158,10 +159,10 @@ export function buildTenantTaskDescription(
               ).toISOString(),
             )
           : "—";
-      return `${location}\nOption deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
+      return `${prefix}Option deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     }
     case "rent_review":
-      return `${location}\nReview due: ${tenant.nextReviewDate ? formatDDMMYYYY(tenant.nextReviewDate) : "—"}\nReview type: ${tenant.reviewType ?? "—"}\n${link}`;
+      return `${prefix}Review due: ${tenant.nextReviewDate ? formatDDMMYYYY(tenant.nextReviewDate) : "—"}\nReview type: ${tenant.reviewType ?? "—"}\n${link}`;
     default:
       return link;
   }
