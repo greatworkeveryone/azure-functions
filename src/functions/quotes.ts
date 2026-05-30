@@ -23,6 +23,8 @@ import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
 
 const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -192,11 +194,13 @@ async function upsertQuote(
             { name: "QuoteID", type: TYPES.Int, value: newId },
           ],
         );
-        await executeQuery(
-          connection,
-          "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-          [{ name: "JobID", type: TYPES.Int, value: JobID }],
-        );
+        // First quote attached advances New/Quote → (Awaiting Approval, facilities).
+        // Helper no-ops on subsequent quotes (status already past Quote).
+        await advanceJobStatus(connection, JobID, JobEvent.QUOTE_RECEIVED, {
+          actor: CreatedBy ?? null,
+          quoteId: newId,
+          note: `Quote ${quoteNumber} received — awaiting approval.`,
+        });
 
         await commitTransaction(connection);
 
@@ -378,6 +382,17 @@ async function approveQuote(
         { name: "QuoteID", type: TYPES.Int, value: QuoteID },
       ],
     );
+
+    // Full approval advances the job to (Work, facilities). Quotes still
+    // awaiting director / accounts sign-off don't move status — they stay
+    // in (Awaiting Approval, facilities) until the final approval lands.
+    if (newStatus === "approved") {
+      await advanceJobStatus(connection, jobId, JobEvent.QUOTE_APPROVED, {
+        actor: ApprovedBy ?? null,
+        quoteId: QuoteID,
+        note: `Quote ${quoteLabel} approved — ready for PO.`,
+      });
+    }
 
     // Fire-and-forget director email: packet build + Graph sendMail can take
     // 5–20s with attachments, and we don't want the user's click to block on

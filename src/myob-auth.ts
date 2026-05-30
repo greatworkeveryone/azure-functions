@@ -15,7 +15,7 @@
 //   MYOB_CLIENT_SECRET — "Secret" from the MYOB developer portal
 //   MYOB_REDIRECT_URI  — must match the Redirect URI registered on the MYOB app
 
-import { createHmac, randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { Connection } from "tedious";
 import { TYPES } from "tedious";
 import {
@@ -93,7 +93,10 @@ export function verifyAuthState(state: string): boolean {
       .update(`${timestamp}.${nonce}`)
       .digest("hex")
       .slice(0, 32);
-    if (expected !== hmac) return false;
+    const a = Buffer.from(expected, "hex");
+    const b = Buffer.from(hmac, "hex");
+    if (a.length !== b.length) return false;
+    if (!timingSafeEqual(a, b)) return false;
 
     const age = Date.now() - Number(timestamp);
     return age >= 0 && age <= STATE_TTL_MS;

@@ -10,13 +10,13 @@ import {
   AppRole,
   errorResponse,
   extractToken,
-  oidFromToken,
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import { Sentry } from "../sentry";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
 // Returns all active users. Used to populate assignment dropdowns.
@@ -30,6 +30,8 @@ const VIEW_USERS_ROLES = [
   AppRole.ACCOUNTS,
   AppRole.ACCOUNTS_APPROVAL,
 ] as const;
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function getAppUsers(
   request: HttpRequest,
@@ -89,7 +91,9 @@ export async function getAppUsers(
 
 // ── POST /api/upsertAppUser ───────────────────────────────────────────────────
 // Create or update an AppUser. Admin or Director.
-// Body: { userId?, displayName?, email, entraOid?, role?, isActive? }
+// INSERT body: { email, displayName?, role?, isActive? }
+// UPDATE body: { userId, role?, isActive? } — Email/DisplayName/EntraOid are
+// immutable after the row exists; only Role and IsActive can change.
 
 const MANAGE_USER_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR] as const;
 const VALID_ROLES = new Set(Object.values(AppRole));
@@ -97,8 +101,7 @@ const VALID_ROLES = new Set(Object.values(AppRole));
 interface UpsertAppUserBody {
   userId?: number;
   displayName?: string;
-  email: string;
-  entraOid?: string | null;
+  email?: string;
   role?: string | null;
   isActive?: boolean;
 }
@@ -112,24 +115,34 @@ export async function upsertAppUser(
   const roleCheck = await requireRole(request, MANAGE_USER_ROLES);
   if (roleCheck) return roleCheck;
 
+  // Identity must come from the verified token — audit rows and self-edit
+  // checks rely on a trusted OID, not an unverified body/header value.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`upsertAppUser:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   const callerRoles = await rolesForRequest(request);
-  const callerOid   = oidFromToken(token);
+  const callerIsAdmin = callerRoles.includes(AppRole.ADMIN);
 
   let connection;
   try {
     const body = (await request.json()) as UpsertAppUserBody;
-    const { userId, email, entraOid, role, isActive } = body ?? {};
-    const displayName = body.displayName?.trim() || email;
-
-    if (!email?.trim()) {
-      return { status: 400, jsonBody: { error: "email is required" } };
-    }
+    const { userId, role, isActive } = body ?? {};
 
     if (role !== undefined && role !== null) {
       if (!VALID_ROLES.has(role as AppRole)) {
         return { status: 400, jsonBody: { error: `Invalid role: ${role}` } };
       }
-      if (role === AppRole.ADMIN && !callerRoles.includes(AppRole.ADMIN)) {
+      if (role === AppRole.ADMIN && !callerIsAdmin) {
         return {
           status: 403,
           jsonBody: { error: "Only admins can assign the admin role" },
@@ -140,42 +153,57 @@ export async function upsertAppUser(
     connection = await createServiceConnection();
 
     // Resolve caller display name for audit log.
-    const callerRows = callerOid
-      ? await executeQuery(
-          connection,
-          `SELECT DisplayName FROM dbo.AppUsers WHERE EntraOid = @Oid`,
-          [{ name: "Oid", type: TYPES.NVarChar, value: callerOid }],
-        )
-      : [];
+    const callerRows = await executeQuery(
+      connection,
+      `SELECT DisplayName FROM dbo.AppUsers WHERE EntraOid = @Oid`,
+      [{ name: "Oid", type: TYPES.NVarChar, value: callerOid }],
+    );
     const callerDisplayName =
       (callerRows[0]?.DisplayName as string | undefined) ?? "Unknown";
 
     if (userId) {
-      // Fetch old role before overwriting (for audit log).
+      // UPDATE path — only Role and IsActive are mutable. Reject any request
+      // that tries to rewrite Email/DisplayName/EntraOid post-creation.
+      if (body.email !== undefined || body.displayName !== undefined) {
+        return {
+          status: 400,
+          jsonBody: { error: "Email and displayName are immutable after creation" },
+        };
+      }
+
       const oldRows = await executeQuery(
         connection,
-        `SELECT Role, Email FROM dbo.AppUsers WHERE UserID = @UserID`,
+        `SELECT Role, Email, EntraOid FROM dbo.AppUsers WHERE UserID = @UserID`,
         [{ name: "UserID", type: TYPES.Int, value: userId }],
       );
-      const oldRole     = (oldRows[0]?.Role  as string | null | undefined) ?? null;
-      const targetEmail = (oldRows[0]?.Email as string | undefined) ?? email;
+      if (oldRows.length === 0) {
+        return { status: 404, jsonBody: { error: "User not found" } };
+      }
+      const oldRole       = (oldRows[0].Role     as string | null | undefined) ?? null;
+      const targetEmail   = (oldRows[0].Email    as string | undefined) ?? "";
+      const targetOid     = (oldRows[0].EntraOid as string | null | undefined) ?? null;
+
+      if (oldRole === AppRole.ADMIN && !callerIsAdmin) {
+        return {
+          status: 403,
+          jsonBody: { error: "Only admins can edit admin users" },
+        };
+      }
+
+      if (targetOid && targetOid === callerOid) {
+        return { status: 403, jsonBody: { error: "Cannot edit your own account" } };
+      }
 
       await executeQuery(
         connection,
         `UPDATE dbo.AppUsers
-         SET DisplayName = @DisplayName,
-             Email       = @Email,
-             EntraOid    = COALESCE(@EntraOid, EntraOid),
-             Role        = @Role,
-             IsActive    = @IsActive
+         SET Role     = @Role,
+             IsActive = @IsActive
          WHERE UserID = @UserID`,
         [
-          { name: "UserID",      type: TYPES.Int,      value: userId },
-          { name: "DisplayName", type: TYPES.NVarChar,  value: displayName },
-          { name: "Email",       type: TYPES.NVarChar,  value: email },
-          { name: "EntraOid",    type: TYPES.NVarChar,  value: entraOid ?? null },
-          { name: "Role",        type: TYPES.NVarChar,  value: role ?? null },
-          { name: "IsActive",    type: TYPES.Bit,       value: isActive ?? true },
+          { name: "UserID",   type: TYPES.Int,      value: userId },
+          { name: "Role",     type: TYPES.NVarChar, value: role ?? null },
+          { name: "IsActive", type: TYPES.Bit,      value: isActive ?? true },
         ],
       );
 
@@ -188,7 +216,7 @@ export async function upsertAppUser(
            VALUES
              (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, @OldRole, @NewRole)`,
           [
-            { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid ?? "unknown" },
+            { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
             { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
             { name: "TargetUserID",          type: TYPES.Int,      value: userId },
             { name: "TargetEmail",           type: TYPES.NVarChar, value: targetEmail },
@@ -201,18 +229,37 @@ export async function upsertAppUser(
       return { status: 200, jsonBody: { userId } };
     }
 
-    // New user — pre-invite (no OID required).
+    // INSERT path — pre-invite (no OID until the user logs in via registerSelf).
+    const rawEmail = body.email;
+    if (!rawEmail || !rawEmail.trim()) {
+      return { status: 400, jsonBody: { error: "email is required" } };
+    }
+    const email = rawEmail.trim().toLowerCase();
+    if (!EMAIL_REGEX.test(email)) {
+      return { status: 400, jsonBody: { error: "invalid email" } };
+    }
+
+    const dupRows = await executeQuery(
+      connection,
+      `SELECT 1 AS Hit FROM dbo.AppUsers WHERE LOWER(Email) = @Email AND IsActive = 1`,
+      [{ name: "Email", type: TYPES.NVarChar, value: email }],
+    );
+    if (dupRows.length > 0) {
+      return { status: 409, jsonBody: { error: "email already in use" } };
+    }
+
+    const displayName = body.displayName?.trim() || email;
+
     const inserted = await executeQuery(
       connection,
       `INSERT INTO dbo.AppUsers (DisplayName, Email, EntraOid, Role, InvitedByOid, InvitedAt)
        OUTPUT INSERTED.UserID
-       VALUES (@DisplayName, @Email, @EntraOid, @Role, @InvitedByOid, SYSUTCDATETIME())`,
+       VALUES (@DisplayName, @Email, NULL, @Role, @InvitedByOid, SYSUTCDATETIME())`,
       [
         { name: "DisplayName",  type: TYPES.NVarChar, value: displayName },
         { name: "Email",        type: TYPES.NVarChar, value: email },
-        { name: "EntraOid",     type: TYPES.NVarChar, value: entraOid ?? null },
         { name: "Role",         type: TYPES.NVarChar, value: role ?? null },
-        { name: "InvitedByOid", type: TYPES.NVarChar, value: callerOid ?? null },
+        { name: "InvitedByOid", type: TYPES.NVarChar, value: callerOid },
       ],
     );
     const newUserId = inserted[0].UserID as number;
@@ -226,7 +273,7 @@ export async function upsertAppUser(
          VALUES
            (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, NULL, @NewRole)`,
         [
-          { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid ?? "unknown" },
+          { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
           { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
           { name: "TargetUserID",          type: TYPES.Int,      value: newUserId },
           { name: "TargetEmail",           type: TYPES.NVarChar, value: email },
@@ -254,17 +301,17 @@ export async function registerSelf(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  // Rate-limit before we've established identity — key by source IP so an
-  // attacker can't burn through user creates from a single host.
+  // Pre-verification IP-based fallback so an attacker without a valid token
+  // can't burn through user creates from a single host.
   const callerIp =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
     request.headers.get("x-azure-clientip") ??
     "unknown";
-  const rl = checkRateLimit(`registerSelf:${callerIp}`, { limit: 5, windowMs: 60_000 });
-  if (!rl.allowed) {
+  const ipRl = checkRateLimit(`registerSelf:ip:${callerIp}`, { limit: 5, windowMs: 60_000 });
+  if (!ipRl.allowed) {
     return {
       status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      headers: { "Retry-After": String(Math.ceil(ipRl.retryAfterMs / 1000)) },
       jsonBody: { error: "Rate limit exceeded" },
     };
   }
@@ -275,7 +322,23 @@ export async function registerSelf(
   // a forged token claim a pre-invited row (privilege escalation).
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
-  const { oid, name, email } = identity;
+  const { oid, name, email: rawEmail } = identity;
+
+  // Per-OID limit prevents a single authenticated user from grinding the
+  // endpoint past the IP gate (e.g. behind a shared egress).
+  const oidRl = checkRateLimit(`registerSelf:oid:${oid}`, { limit: 5, windowMs: 60_000 });
+  if (!oidRl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(oidRl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
+  const email = rawEmail.trim().toLowerCase();
+  if (!EMAIL_REGEX.test(email)) {
+    return { status: 400, jsonBody: { error: "invalid email" } };
+  }
 
   let connection;
   try {
@@ -291,11 +354,10 @@ export async function registerSelf(
       const { UserID, Role } = byOid[0] as { UserID: number; Role: string | null };
       await executeQuery(
         connection,
-        `UPDATE dbo.AppUsers SET DisplayName = @DisplayName, Email = @Email WHERE UserID = @UserID`,
+        `UPDATE dbo.AppUsers SET Email = @Email WHERE UserID = @UserID`,
         [
-          { name: "DisplayName", type: TYPES.NVarChar, value: name },
-          { name: "Email",       type: TYPES.NVarChar, value: email },
-          { name: "UserID",      type: TYPES.Int,      value: UserID },
+          { name: "Email",  type: TYPES.NVarChar, value: email },
+          { name: "UserID", type: TYPES.Int,      value: UserID },
         ],
       );
       return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
@@ -304,23 +366,51 @@ export async function registerSelf(
     // Step 2: pre-invited user matched by email (first login after admin invite).
     const byEmail = await executeQuery(
       connection,
-      `SELECT UserID, Role FROM dbo.AppUsers
-       WHERE Email = @Email AND EntraOid IS NULL AND IsActive = 1`,
+      `SELECT UserID, Role, DisplayName FROM dbo.AppUsers
+       WHERE LOWER(Email) = @Email AND EntraOid IS NULL AND IsActive = 1`,
       [{ name: "Email", type: TYPES.NVarChar, value: email }],
     );
-    if (byEmail.length > 0) {
-      const { UserID, Role } = byEmail[0] as { UserID: number; Role: string | null };
-      await executeQuery(
-        connection,
-        `UPDATE dbo.AppUsers
-         SET EntraOid = @Oid, DisplayName = @DisplayName
-         WHERE UserID = @UserID`,
-        [
-          { name: "Oid",         type: TYPES.NVarChar, value: oid },
-          { name: "DisplayName", type: TYPES.NVarChar, value: name },
-          { name: "UserID",      type: TYPES.Int,      value: UserID },
-        ],
-      );
+    if (byEmail.length > 1) {
+      Sentry.captureMessage("ambiguous pre-invite", {
+        level: "error",
+        extra: { email, count: byEmail.length },
+      });
+      return {
+        status: 409,
+        jsonBody: { error: "ambiguous pre-invite — contact admin" },
+      };
+    }
+    if (byEmail.length === 1) {
+      const { UserID, Role, DisplayName } = byEmail[0] as {
+        UserID: number;
+        Role: string | null;
+        DisplayName: string | null;
+      };
+      const existingName = (DisplayName ?? "").trim();
+      // Only adopt the token's display name when the pre-invite row didn't
+      // carry one — never stomp an admin-typed name.
+      if (existingName.length === 0) {
+        await executeQuery(
+          connection,
+          `UPDATE dbo.AppUsers
+           SET EntraOid = @Oid, DisplayName = @DisplayName
+           WHERE UserID = @UserID`,
+          [
+            { name: "Oid",         type: TYPES.NVarChar, value: oid },
+            { name: "DisplayName", type: TYPES.NVarChar, value: name },
+            { name: "UserID",      type: TYPES.Int,      value: UserID },
+          ],
+        );
+      } else {
+        await executeQuery(
+          connection,
+          `UPDATE dbo.AppUsers SET EntraOid = @Oid WHERE UserID = @UserID`,
+          [
+            { name: "Oid",    type: TYPES.NVarChar, value: oid },
+            { name: "UserID", type: TYPES.Int,      value: UserID },
+          ],
+        );
+      }
       return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
     }
 

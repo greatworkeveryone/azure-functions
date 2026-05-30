@@ -11,6 +11,17 @@ import { TYPES } from "tedious";
 const BUILDINGS_CACHE_TTL_MS = 5 * 60 * 1000;
 let buildingsCache: { rows: SqlRow[]; expiresAt: number } | null = null;
 
+// Explicit column list — mirrors the JOB_COLUMNS pattern in jobs.ts.
+// Add new Buildings columns here only after confirming they should be
+// returned to the frontend (no internal tokens, no audit hashes).
+const BUILDING_COLUMNS = `
+  Id, BuildingID, BuildingName, BuildingCode, BuildingAddress,
+  ThirdPartySystem_BuildingID, RegionID, Region, NLA, InvoicingAddress,
+  ContactPhoneNumber, Levels, Active, LastModifiedDate,
+  WRsLastSyncedAt, LastSyncedAt, CreatedAt, UpdatedAt,
+  HeroImageUrl
+`;
+
 export function clearBuildingsCache(): void {
   buildingsCache = null;
 }
@@ -36,7 +47,7 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
   try {
     connection = await createConnection(token);
 
-    let sql = "SELECT * FROM Buildings WHERE 1=1";
+    let sql = `SELECT ${BUILDING_COLUMNS} FROM Buildings WHERE 1=1`;
     const params: { name: string; type: any; value: any }[] = [];
 
     if (buildingId) {

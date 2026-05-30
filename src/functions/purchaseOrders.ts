@@ -30,6 +30,8 @@ import {
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
 import { formatDocNumber } from "../doc-number";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -182,6 +184,15 @@ async function upsertPurchaseOrder(
           ],
         );
         const newId = inserted[0].PurchaseOrderID as number;
+
+        // First PO insert advances (Awaiting Approval, facilities) → (Work, facilities).
+        // No-op if already past that state (subsequent POs, manual moves, etc).
+        await advanceJobStatus(connection, JobID, JobEvent.PO_CREATED, {
+          actor: CreatedBy ?? null,
+          purchaseOrderId: newId,
+          note: `PO ${poNumber} created — work in progress.`,
+        });
+
         await commitTransaction(connection);
 
         const stored = await executeQuery(
@@ -611,7 +622,7 @@ async function markPurchaseOrderMyobCreated(
 
     const rows = await executeQuery(
       connection,
-      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -620,6 +631,7 @@ async function markPurchaseOrderMyobCreated(
     if (rows.length === 0) {
       return { status: 404, jsonBody: { error: "Purchase order not found" } };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -639,7 +651,7 @@ async function markPurchaseOrderMyobCreated(
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} as created in MYOB` },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} as created in MYOB` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
@@ -693,7 +705,7 @@ async function unmarkPurchaseOrderMyobCreated(
 
     const rows = await executeQuery(
       connection,
-      `SELECT CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -708,6 +720,7 @@ async function unmarkPurchaseOrderMyobCreated(
         jsonBody: { error: "Cannot undo MYOB entry — this purchase order has already been marked complete." },
       };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -725,7 +738,7 @@ async function unmarkPurchaseOrderMyobCreated(
        VALUES (@JobID, NULL, @Text, 'po_myob_uncreated', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} from MYOB created` },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} from MYOB created` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
@@ -779,7 +792,7 @@ async function markPurchaseOrderComplete(
 
     const rows = await executeQuery(
       connection,
-      `SELECT MyobCreatedAt, CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT MyobCreatedAt, CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -794,6 +807,7 @@ async function markPurchaseOrderComplete(
         jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
       };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -807,7 +821,7 @@ async function markPurchaseOrderComplete(
       ],
     );
 
-    // Fire PO event
+    // Fire PO-completion event (kept separate from the status_change row).
     await executeQuery(
       connection,
       `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
@@ -815,28 +829,21 @@ async function markPurchaseOrderComplete(
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} complete` },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} complete` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
 
-    // Transition the job: Awaiting Approval, accounts team
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-       VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Awaiting Approval', 'accounts');`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: "Work complete — awaiting accounts approval" },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `UPDATE Jobs SET Status = 'Awaiting Approval', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
-       WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
+    // Advance the job through the state machine. From (Work, facilities) this
+    // lands at (Awaiting Approval, accounts). The previous inline UPDATE
+    // unconditionally clobbered Status to 'Awaiting Approval' regardless of
+    // the prior state — that's the silent-demotion bug. The helper refuses
+    // backward moves, so completing a PO can no longer undo a manual status.
+    await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
+      actor: completedBy ?? null,
+      purchaseOrderId: id,
+      note: `${poLabel} complete — awaiting accounts approval.`,
+    });
 
     const stored = await executeQuery(
       connection,
@@ -881,7 +888,7 @@ async function unmarkPurchaseOrderComplete(
 
     const rows = await executeQuery(
       connection,
-      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -890,6 +897,7 @@ async function unmarkPurchaseOrderComplete(
     if (rows.length === 0) {
       return { status: 404, jsonBody: { error: "Purchase order not found" } };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -909,7 +917,7 @@ async function unmarkPurchaseOrderComplete(
        VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} as complete` },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );

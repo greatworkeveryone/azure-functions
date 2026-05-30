@@ -52,7 +52,11 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
 // stack for Sentry) or a string (legacy). Either way we capture to Sentry so
 // no 500 escapes silently.
 export function errorResponse(message: string, errorOrDetails?: unknown): HttpResponseInit {
-  const isDev = process.env.DEV_ROLE_OVERRIDE_ENABLED === "true";
+  // Mirror the same dual-condition gate jwt.ts / rolesForRequest already use —
+  // checking only the env flag would let a Production deployment with the flag
+  // accidentally set leak raw error detail to clients. isDevOverrideEnabled()
+  // additionally requires AZURE_FUNCTIONS_ENVIRONMENT !== "Production".
+  const isDev = isDevOverrideEnabled();
 
   if (errorOrDetails instanceof Error) {
     Sentry.captureException(errorOrDetails, { extra: { context: message } });

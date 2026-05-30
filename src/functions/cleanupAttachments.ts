@@ -11,14 +11,14 @@
 
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { deleteBlob } from "../blob-storage";
 
 // Hours an attachment must age before we consider it safely ingested upstream.
 const GRACE_HOURS = Number(process.env.ATTACHMENT_DELETE_GRACE_HOURS ?? "48");
 
-async function runCleanup(token: string, context: InvocationContext): Promise<{ scanned: number; deleted: number; failed: number }> {
-  const connection = await createConnection(token);
+async function runCleanup(context: InvocationContext): Promise<{ scanned: number; deleted: number; failed: number }> {
+  const connection = await createServiceConnection();
   try {
     const rows = await executeQuery(
       connection,
@@ -57,11 +57,12 @@ async function cleanupAttachmentsTimer(timer: Timer, context: InvocationContext)
   if (timer.isPastDue) {
     context.warn("cleanupAttachments timer is past due — running now");
   }
-  // Same service-token pattern as syncAllWorkRequestsTimer — whatever auth
-  // strategy that timer ends up using for SQL, this one inherits.
-  const token = process.env.MYBUILDINGS_BEARER_TOKEN!;
+  // Timers run with no user context, so authenticate to Azure SQL via the
+  // service connection (managed identity → SQL access token). The previous
+  // code mis-used MYBUILDINGS_BEARER_TOKEN — that's a static API key for
+  // the myBuildings HTTP service, not an AAD SQL token.
   try {
-    const { deleted, failed, scanned } = await runCleanup(token, context);
+    const { deleted, failed, scanned } = await runCleanup(context);
     context.log(`cleanupAttachments complete: scanned=${scanned}, deleted=${deleted}, failed=${failed}, graceHours=${GRACE_HOURS}`);
   } catch (error: any) {
     context.error("cleanupAttachments failed:", error.message);

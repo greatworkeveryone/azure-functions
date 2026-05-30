@@ -78,7 +78,10 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  // Plain facilities staff need to look contractor names up when filling out
+  // jobs — gating on APPROVAL only forced them through their manager for a
+  // read that's already non-sensitive (name / category / contact details).
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;

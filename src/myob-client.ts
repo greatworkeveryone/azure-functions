@@ -16,7 +16,7 @@
 //                            (default: https://app.myob.com)
 //   MYOB_WEBHOOK_KEY       — secret used to validate incoming webhook HMAC signatures
 
-import { createHmac } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import { getValidMyobAccessToken } from "./myob-auth";
 
 const MYOB_API_BASE        = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
@@ -182,7 +182,10 @@ export function validateMyobWebhookSignature(
   const expected = createHmac("sha256", MYOB_WEBHOOK_KEY)
     .update(rawBody, "utf8")
     .digest("base64");
-  return expected === signatureHeader;
+  const a = Buffer.from(expected, "base64");
+  const b = Buffer.from(signatureHeader, "base64");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 // ── Webhook event shapes ──────────────────────────────────────────────────────

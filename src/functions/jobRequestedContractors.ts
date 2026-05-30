@@ -13,6 +13,8 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
 
 interface AddJobRequestedContractorBody {
   jobId: number;
@@ -136,22 +138,13 @@ async function addJobRequestedContractor(
         ],
       );
 
-      // First contractor added → transition job from New to Quote so it
-      // surfaces in the Quote bucket while waiting for responses.
+      // First contractor added → advance to Quote via the state machine.
+      // The helper no-ops if the job is already past New (handles re-fires).
       if (isFirst) {
-        await executeQuery(
-          connection,
-          `UPDATE Jobs
-           SET Status = 'Quote', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
-           WHERE JobID = @JobID AND Status = 'New';
-           INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-           SELECT @JobID, @CreatedBy, 'Contractors requested — awaiting quotes.', 'status_change', 'Quote', 'facilities'
-           WHERE @@ROWCOUNT > 0;`,
-          [
-            { name: "JobID", type: TYPES.Int, value: jobId },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: addedBy ?? null },
-          ],
-        );
+        await advanceJobStatus(connection, jobId, JobEvent.QUOTE_REQUESTED, {
+          actor: addedBy ?? null,
+          note: `Requested ${contractorName} — awaiting quotes.`,
+        });
       } else {
         await executeQuery(
           connection,

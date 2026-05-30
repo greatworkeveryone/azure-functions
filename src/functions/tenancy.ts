@@ -379,19 +379,17 @@ function parseDepositSteps(raw: string | null | undefined): SecurityDepositStep[
  *  days — the property team treats both the same way (chase action), so
  *  splitting "red" off as a separate alert just adds noise. We keep "red"
  *  in the union for future use (e.g. very-overdue) but never return it. */
-function computeReviewState(
-  steps: ScheduledRateStep[],
+export function computeReviewState(
+  nextReviewDate: string | undefined,
   status: string,
 ): "amber" | "green" | "grey" | "red" {
   if (status === "vacated") return "grey";
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const next = steps
-    .filter((s) => s.effectiveFrom > todayStr)
-    .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))[0];
-  if (!next) return "grey";
+  if (!nextReviewDate) return "grey";
   const now = Date.now();
   const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-  if (new Date(next.effectiveFrom).getTime() - now <= ninetyDaysMs) return "amber";
+  const nextMs = new Date(nextReviewDate + "T00:00:00Z").getTime();
+  if (Number.isNaN(nextMs)) return "grey";
+  if (nextMs - now <= ninetyDaysMs) return "amber";
   return "green";
 }
 
@@ -505,7 +503,7 @@ function tenantRowToApi(
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
     rentPerAnnum,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
-    reviewState: computeReviewState(steps, status),
+    reviewState: computeReviewState(toIsoDate(row.NextReviewDate), status),
     reviewType: asStr(row.ReviewType) ?? "none",
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),

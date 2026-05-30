@@ -14,39 +14,24 @@ import {
   AppRole,
   errorResponse,
   extractToken,
-  oidFromToken,
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
+  verifiedIdentityFromRequest,
 } from "../auth";
+import { checkRateLimit } from "../rateLimit";
+
+const JOB_WRITE_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
+const JOB_ARCHIVE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 import { buildJobPacket } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
-
-// ── Caller identity ──────────────────────────────────────────────────────────
-
-interface UserRef { id: string; name: string }
-
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
-    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function callerFromToken(token: string): UserRef {
-  const claims = decodeJwtPayload(token);
-  const id = oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
-  const name =
-    (claims?.name as string) ?? (claims?.preferred_username as string) ?? "Unknown user";
-  return { id, name };
-}
+import {
+  AwaitingRole,
+  JobStatus,
+  resolveManualTarget,
+} from "../jobStatusMachine";
 
 // Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
@@ -513,6 +498,21 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
   const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
+  // Identity for audit columns (CreatedById, UpdatedBy) must come from the
+  // verified token — never from the body — so a forged payload can't claim
+  // someone else authored or modified the job.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
+  const rl = checkRateLimit(`upsertJob:${identity.oid}`, JOB_WRITE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as UpsertJobBody;
@@ -554,9 +554,21 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       // one transaction. Otherwise a partial failure can strand WR
       // attachments on a non-existent Job (or commit the Job without the
       // matching attachments).
+      //
+      // Server-stamp CreatedBy (display name) and CreatedById (Entra OID)
+      // from the verified token, overriding any body-supplied values. The
+      // ownership compare on archive/unarchive trusts these, so they must
+      // not come from the (forgeable) request body.
+      fields.CreatedBy = identity.name;
+      const filteredParams = params.filter((p) => p.name !== "CreatedBy");
+      filteredParams.push({ name: "CreatedBy", type: TYPES.NVarChar, value: identity.name });
       const cols = Object.keys(fields);
-      const insertCols = cols.join(", ");
-      const insertVals = cols.map((c) => `@${c}`).join(", ");
+      const insertCols = [...cols, "CreatedById"].join(", ");
+      const insertVals = [...cols.map((c) => `@${c}`), "@CreatedById"].join(", ");
+      const insertParams: SqlParam[] = [
+        ...filteredParams,
+        { name: "CreatedById", type: TYPES.NVarChar, value: identity.oid },
+      ];
 
       await beginTransaction(connection);
       try {
@@ -565,7 +577,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           `INSERT INTO Jobs (${insertCols})
            OUTPUT INSERTED.JobID
            VALUES (${insertVals});`,
-          params,
+          insertParams,
         );
         newJobId = inserted[0].JobID as number;
 
@@ -596,6 +608,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       // JobEvents INSERTs in one transaction so the audit trail can't drift
       // from the underlying Jobs row. Frontend used to fire these audit events
       // post-hoc via addJobEvent; doing it here keeps them atomic.
+      //
+      // CreatedBy is immutable post-INSERT; strip any body-supplied value so
+      // a caller can't rewrite the original creator's name on edit.
+      if ("CreatedBy" in fields) {
+        delete fields.CreatedBy;
+        const idx = params.findIndex((p) => p.name === "CreatedBy");
+        if (idx >= 0) params.splice(idx, 1);
+      }
+
 
       // Mirror StalledAt when IsStalled is explicitly set (same logic as addJobEvent).
       const stalledAtExtra: { clause: string; param: SqlParam } | null =
@@ -641,7 +662,9 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         // addJobEvent on success. Only fields explicitly present on the
         // payload count — an omitted field is "no change", not a clear.
         if (previous) {
-          const caller = callerFromToken(token);
+          // Use the verified identity (token signature checked) so audit rows
+          // can't be authored by a forged JWT name claim.
+          const caller = { id: identity.oid, name: identity.name };
           const newStatus = fields.Status as string | null | undefined;
           const newAssignedTo = fields.AssignedTo as string | null | undefined;
           const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
@@ -753,10 +776,25 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate. Per-job ownership scoping for plain `facilities`
-  // users happens further down once we know the job's CreatedBy.
+  // users happens further down once we know the job's CreatedById.
   const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
-  const caller = callerFromToken(token);
+  // Identity must come from the verified token — the ownership check below
+  // compares it against the stored CreatedById, so an unverified value would
+  // let a forged JWT bypass the per-job scope.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const caller = { id: identity.oid, name: identity.name };
+
+  const rl = checkRateLimit(`archiveJob:${identity.oid}`, JOB_ARCHIVE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   const userRoles = await rolesForRequest(request);
   const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
@@ -770,24 +808,33 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     }
     connection = await createConnection(token);
 
-    // Authorisation: load CreatedBy first so we can scope facilities users.
-    // This read sits outside the transaction below — it's only consulted for
-    // permission; the consistency-critical writes are the UPDATE + INSERT pair.
+    // Authorisation: load CreatedById + CreatedBy first so we can scope
+    // facilities users. This read sits outside the transaction below — it's
+    // only consulted for permission; the consistency-critical writes are the
+    // UPDATE + INSERT pair.
     const existing = await executeQuery(
       connection,
-      "SELECT CreatedBy, IsArchived FROM Jobs WHERE JobID = @JobID",
+      "SELECT CreatedBy, CreatedById, IsArchived FROM Jobs WHERE JobID = @JobID",
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
     if (existing.length === 0) {
       return { status: 404, jsonBody: { error: "Job not found" } };
     }
     const createdBy = existing[0].CreatedBy as string | null;
+    const createdById = existing[0].CreatedById as string | null;
     const alreadyArchived = Boolean(existing[0].IsArchived);
     if (alreadyArchived) {
       return { status: 200, jsonBody: { archived: JobID, alreadyArchived: true } };
     }
     if (!canArchiveAny) {
-      const isOwner = isFacilities && createdBy && createdBy === caller.name;
+      // Prefer the verified OID compare when CreatedById is populated. Fall
+      // back to the legacy display-name compare ONLY for historical rows
+      // (CreatedById IS NULL) — those pre-date migration 050 and have no OID.
+      const isOwner = isFacilities && (
+        createdById
+          ? createdById === identity.oid
+          : Boolean(createdBy) && createdBy === caller.name
+      );
       if (!isOwner) {
         return {
           status: 403,
@@ -850,7 +897,20 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   // Baseline ops-role gate; per-job ownership scoping happens below.
   const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
-  const caller = callerFromToken(token);
+  // Identity must come from the verified token — see archiveJob for rationale.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const caller = { id: identity.oid, name: identity.name };
+
+  const rl = checkRateLimit(`unarchiveJob:${identity.oid}`, JOB_ARCHIVE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   const userRoles = await rolesForRequest(request);
   const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
@@ -867,19 +927,26 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
     // Permission read — kept outside the transaction (see archiveJob comment).
     const existing = await executeQuery(
       connection,
-      "SELECT CreatedBy, IsArchived FROM Jobs WHERE JobID = @JobID",
+      "SELECT CreatedBy, CreatedById, IsArchived FROM Jobs WHERE JobID = @JobID",
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
     if (existing.length === 0) {
       return { status: 404, jsonBody: { error: "Job not found" } };
     }
     const createdBy = existing[0].CreatedBy as string | null;
+    const createdById = existing[0].CreatedById as string | null;
     const isArchived = Boolean(existing[0].IsArchived);
     if (!isArchived) {
       return { status: 200, jsonBody: { unarchived: JobID, alreadyActive: true } };
     }
     if (!canArchiveAny) {
-      const isOwner = isFacilities && createdBy && createdBy === caller.name;
+      // CreatedById compare when populated; legacy display-name fallback for
+      // historical rows that pre-date migration 050.
+      const isOwner = isFacilities && (
+        createdById
+          ? createdById === identity.oid
+          : Boolean(createdBy) && createdBy === caller.name
+      );
       if (!isOwner) {
         return {
           status: 403,
@@ -942,12 +1009,26 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
   const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
   if (roleCheck) return roleCheck;
 
+  // CreatedBy on the JobEvents row must come from the verified token. The
+  // body's CreatedBy is ignored — keeping the field on AddJobEventBody is
+  // backward-compat with older clients only.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
+  const rl = checkRateLimit(`addJobEvent:${identity.oid}`, JOB_WRITE_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as AddJobEventBody;
     const {
       JobID,
-      CreatedBy,
       Text,
       NewStatus,
       ExpectedProgressDate,
@@ -993,6 +1074,50 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
 
     connection = await createConnection(token);
 
+    // If the caller is changing status, validate the transition against the
+    // state machine and let the machine compute the resulting awaitingRole
+    // (the caller's NewAwaitingRole on a status-change request is advisory
+    // only — the machine wins).
+    let resolvedNewStatus: string | null = NewStatus ?? null;
+    let resolvedNewAwaitingRole: string | null = NewAwaitingRole ?? null;
+    if (NewStatus != null) {
+      const currentRows = await executeQuery(
+        connection,
+        "SELECT Status, AwaitingRole FROM Jobs WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: JobID }],
+      );
+      if (currentRows.length === 0) {
+        return { status: 404, jsonBody: { error: "Job not found" } };
+      }
+      const currentState = {
+        status: currentRows[0].Status as JobStatus,
+        awaitingRole:
+          (currentRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
+      };
+      // Self-transitions (NewStatus equals current Status) are accepted as
+      // no-ops so the activity event still lands in the feed — e.g. "Quote
+      // received" while the job is already Awaiting Approval, or "Invoice
+      // approved" while parked in Awaiting Approval awaiting payment.
+      if (NewStatus === currentState.status) {
+        resolvedNewStatus = currentState.status;
+        resolvedNewAwaitingRole = currentState.awaitingRole;
+      } else {
+        const target = resolveManualTarget(currentState, NewStatus as JobStatus);
+        if (target == null) {
+          return {
+            status: 422,
+            jsonBody: {
+              error: "Illegal status transition",
+              from: currentState.status,
+              to: NewStatus,
+            },
+          };
+        }
+        resolvedNewStatus = target.status;
+        resolvedNewAwaitingRole = target.awaitingRole;
+      }
+    }
+
     // INSERT JobEvents and the mirror UPDATE Jobs are a logical unit — an
     // event without the mirror leaves the Jobs row out of date (list views
     // read from Jobs, not from the event log), and an update without the
@@ -1015,16 +1140,16 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
          );`,
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           { name: "Text", type: TYPES.NVarChar, value: Text ?? null },
-          { name: "NewStatus", type: TYPES.NVarChar, value: NewStatus ?? null },
+          { name: "NewStatus", type: TYPES.NVarChar, value: resolvedNewStatus },
           { name: "ExpectedProgressDate", type: TYPES.DateTime2, value: ExpectedProgressDate ?? null },
           { name: "IsStalled", type: TYPES.Bit, value: isStalledBit },
           { name: "EventType", type: TYPES.NVarChar, value: EventType ?? null },
           { name: "PurchaseOrderID", type: TYPES.Int, value: PurchaseOrderID ?? null },
           { name: "QuoteID", type: TYPES.Int, value: QuoteID ?? null },
           { name: "NewAssignee", type: TYPES.NVarChar, value: NewAssignee ?? null },
-          { name: "NewAwaitingRole", type: TYPES.NVarChar, value: NewAwaitingRole ?? null },
+          { name: "NewAwaitingRole", type: TYPES.NVarChar, value: resolvedNewAwaitingRole },
           { name: "CreationSource", type: TYPES.NVarChar, value: CreationSource ?? null },
         ],
       );
@@ -1037,9 +1162,9 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       // Mirror the event's fields onto the parent Jobs row so list views stay current.
       const updates: string[] = ["LastModifiedDate=SYSUTCDATETIME()"];
       const updateParams: SqlParam[] = [{ name: "JobID", type: TYPES.Int, value: JobID }];
-      if (NewStatus != null) {
+      if (resolvedNewStatus != null) {
         updates.push("Status=@Status");
-        updateParams.push({ name: "Status", type: TYPES.NVarChar, value: NewStatus });
+        updateParams.push({ name: "Status", type: TYPES.NVarChar, value: resolvedNewStatus });
       }
       if (ExpectedProgressDate != null) {
         updates.push("ExpectedProgressUpdate=@ExpectedProgressUpdate");
@@ -1079,12 +1204,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           value: NewAssigneeUserID,
         });
       }
-      if (NewAwaitingRole != null) {
+      if (resolvedNewAwaitingRole != null) {
         updates.push("AwaitingRole=@AwaitingRoleMirror");
         updateParams.push({
           name: "AwaitingRoleMirror",
           type: TYPES.NVarChar,
-          value: NewAwaitingRole,
+          value: resolvedNewAwaitingRole,
         });
       }
       await executeQuery(

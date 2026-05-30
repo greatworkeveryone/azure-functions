@@ -3,10 +3,18 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
-import { AppRole, extractToken, errorResponse, requireRole, unauthorizedResponse } from "../auth";
+import {
+  AppRole,
+  extractToken,
+  errorResponse,
+  requireRole,
+  unauthorizedResponse,
+  verifiedIdentityFromRequest,
+} from "../auth";
 import { uploadPublicBlob, deletePublicBlob } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
+import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 
 const IMAGE_CONTENT_TYPES = new Set([
   "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
@@ -22,6 +30,87 @@ const VACANCY_ROLES = [
   AppRole.ACCOUNTS,
   AppRole.ACCOUNTS_APPROVAL,
 ] as const;
+
+// ── SSRF protection ──────────────────────────────────────────────────────────
+// Image URLs that hit `fetch(...)` (uploadImageToWp / publishVacancy) and URLs
+// persisted into Vacancies.Images / SlotImages must be pinned to a small set of
+// known-public CDN hosts. Without this we'd happily fetch
+// http://169.254.169.254/... (the IMDS endpoint), arbitrary internal hosts, or
+// attacker-controlled domains. Allowlist is env-driven so deploys can extend it
+// without code changes; defaults to the public blob CDN host.
+const DEFAULT_VACANCY_IMAGE_HOSTS = "cmctest.blob.core.windows.net";
+
+const ALLOWED_VACANCY_IMAGE_HOSTS: ReadonlySet<string> = new Set(
+  (process.env.VACANCY_IMAGE_ALLOWED_HOSTS ?? DEFAULT_VACANCY_IMAGE_HOSTS)
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0),
+);
+
+// Reject any URL that resolves (textually) to a private/loopback IP literal.
+// Defence-in-depth — the allowlist check already filters out IP literal hosts
+// unless explicitly listed, but this catches misconfiguration and dual-stack
+// edge cases.
+function isPrivateIpHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  // IPv6 literals are bracketed in URLs; strip the brackets when present.
+  const stripped = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+  if (stripped === "::1" || stripped === "0:0:0:0:0:0:0:1") return true;
+  if (stripped.startsWith("fc00:") || stripped.startsWith("fd00:")) return true;
+  if (stripped.startsWith("fe80:")) return true;
+  if (stripped === "localhost") return true;
+  if (stripped.startsWith("127.")) return true;
+  if (stripped.startsWith("10.")) return true;
+  if (stripped.startsWith("192.168.")) return true;
+  if (stripped.startsWith("169.254.")) return true; // IMDS / link-local
+  // 172.16.0.0 – 172.31.255.255
+  const m = /^172\.(\d{1,3})\./.exec(stripped);
+  if (m) {
+    const second = Number(m[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+// Azurite (local dev emulator) serves blobs over http://127.0.0.1:10000. When
+// the function app is wired to Azurite we relax the https + loopback guards so
+// the local publish flow works; in any other env the strict rules apply.
+function isAzuriteUrl(url: URL): boolean {
+  if (process.env.AzureWebJobsStorage !== "UseDevelopmentStorage=true") return false;
+  if (url.protocol !== "http:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host !== "127.0.0.1" && host !== "localhost") return false;
+  return url.port === "10000";
+}
+
+export function isAllowedVacancyImageUrl(raw: string): boolean {
+  if (typeof raw !== "string" || raw.length === 0) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (isAzuriteUrl(url)) return true;
+  if (url.protocol !== "https:") return false;
+  const hostname = url.hostname.toLowerCase();
+  if (isPrivateIpHostname(hostname)) return false;
+  // Case-insensitive EXACT host match — no suffix matching, otherwise
+  // `evil.cdn.host.attacker.com` would pass an `endsWith("cdn.host")` check.
+  return ALLOWED_VACANCY_IMAGE_HOSTS.has(hostname);
+}
+
+// ── Rate-limit helper ────────────────────────────────────────────────────────
+const VACANCY_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+const VACANCY_PUBLISH_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
+
+function tooManyRequests(retryAfterMs: number): HttpResponseInit {
+  return {
+    status: 429,
+    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+    jsonBody: { error: "Rate limit exceeded" },
+  };
+}
 
 function rowToVacancy(row: SqlRow): Record<string, unknown> {
   return {
@@ -194,6 +283,11 @@ async function handleCreateVacancy(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`createVacancy:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as {
@@ -286,6 +380,11 @@ async function handleUpdateVacancy(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`updateVacancy:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as {
@@ -361,6 +460,11 @@ async function handleDeleteVacancy(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`deleteVacancy:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as { id: number };
@@ -422,6 +526,11 @@ async function handleUploadVacancyImage(
   if (!token) return unauthorizedResponse();
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`uploadVacancyImage:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -498,6 +607,11 @@ async function handleDeleteVacancyImage(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`deleteVacancyImage:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as { id: number; imageUrl: string };
@@ -565,6 +679,11 @@ async function handleReorderVacancyImages(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`reorderVacancyImages:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as { id: number; images: string[] };
@@ -574,6 +693,17 @@ async function handleReorderVacancyImages(
     }
     if (!Array.isArray(body.images)) {
       return { status: 400, jsonBody: { error: "Missing 'images' array" } };
+    }
+    // SSRF gate — every image URL must pass the host allowlist BEFORE we
+    // persist it. Otherwise an attacker who can call this endpoint can store
+    // an internal URL that later gets fetched server-side from publishVacancy.
+    for (const url of body.images) {
+      if (!isAllowedVacancyImageUrl(url)) {
+        return {
+          status: 400,
+          jsonBody: { error: "One or more image URLs are not in the allowed host list" },
+        };
+      }
     }
 
     connection = await createConnection(token);
@@ -616,6 +746,11 @@ async function handleUploadVacancySlotImage(
   if (!token) return unauthorizedResponse();
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`uploadVacancySlotImage:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -712,6 +847,11 @@ async function handleDeleteVacancySlotImage(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`deleteVacancySlotImage:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as { vacancyId: number; slotLabel: string };
@@ -776,8 +916,18 @@ function wpAuthHeader(): string {
   return `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
 }
 
-async function uploadImageToWp(imageUrl: string): Promise<number | null> {
+async function uploadImageToWp(
+  imageUrl: string,
+  context?: InvocationContext,
+): Promise<number | null> {
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
+  // SSRF gate before issuing a server-side fetch. Silent reject + log so a
+  // single bad URL doesn't fail the whole publish — publishVacancy treats
+  // null returns as "skip this image".
+  if (!isAllowedVacancyImageUrl(imageUrl)) {
+    context?.log(`uploadImageToWp: rejected URL not in allowed hosts: ${imageUrl}`);
+    return null;
+  }
   try {
     const imgResp = await fetch(imageUrl);
     if (!imgResp.ok) return null;
@@ -825,6 +975,13 @@ async function handlePublishVacancy(
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  // Tighter limit than other writes because each call issues N outbound WP
+  // requests (uploadImageToWp loops over every image) — keep blast radius low.
+  const rl = checkRateLimit(`publishVacancy:${identity.oid}`, VACANCY_PUBLISH_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   const wpBase = process.env.WORDPRESS_API_URL;
   if (!wpBase) {
     return { status: 500, jsonBody: { error: "WORDPRESS_API_URL not configured" } };
@@ -864,9 +1021,16 @@ async function handlePublishVacancy(
     const additionalDetails = v.additionalDetails as string[];
 
     context.log(`Publishing vacancy ${body.id} — uploading ${images.length} images to WP`);
+    // SSRF gate — silently skip URLs outside the allowlist (uploadImageToWp
+    // also validates, this just gives us a useful audit log).
+    const safeImages = images.filter((url) => {
+      const ok = isAllowedVacancyImageUrl(url);
+      if (!ok) context.log(`publishVacancy: skipping URL not in allowed hosts: ${url}`);
+      return ok;
+    });
     const mediaIds: number[] = [];
-    for (const url of images) {
-      const id = await uploadImageToWp(url);
+    for (const url of safeImages) {
+      const id = await uploadImageToWp(url, context);
       if (id !== null) mediaIds.push(id);
     }
 
@@ -942,6 +1106,11 @@ async function handleUnpublishVacancy(
   if (!token) return unauthorizedResponse();
   const roleCheck = await requireRole(request, VACANCY_ROLES);
   if (roleCheck) return roleCheck;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`unpublishVacancy:${identity.oid}`, VACANCY_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
