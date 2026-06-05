@@ -32,6 +32,7 @@ import {
 import { formatDocNumber } from "../doc-number";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
+import { decidePurchaseOrderEdit } from "../edit-effects";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -50,7 +51,7 @@ async function getPurchaseOrders(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -96,7 +97,9 @@ async function upsertPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  // Plain accounts staff create / edit POs alongside facilities managers —
+  // approval/send-to-contractor is the gated step, drafting is not.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -239,14 +242,112 @@ async function upsertPurchaseOrder(
       ? `${update.setClause}, UpdatedAt = SYSUTCDATETIME()`
       : "UpdatedAt = SYSUTCDATETIME()";
 
-    await executeQuery(
+    // Read the existing PO before mutating so we can diff for the audit
+    // trail and decide whether to clear the Sent / MYOB markers.
+    const beforeRows = await executeQuery(
       connection,
-      `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-        ...(update?.params ?? []),
-      ],
+      `SELECT PurchaseOrderID, JobID, PONumber, ContractorName,
+              EstimatedCost, CostNotToExceed, SentAt, MyobCreatedAt, CompletedAt
+         FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
+    if (beforeRows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+    const before = beforeRows[0];
+    const jobId = before.JobID as number;
+    const poNumber =
+      (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
+
+    const effects = decidePurchaseOrderEdit(
+      {
+        completedAt: (before.CompletedAt as Date | null) ?? null,
+        contractorName: (before.ContractorName as string | null) ?? null,
+        costNotToExceed:
+          before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
+        estimatedCost:
+          before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
+        myobCreatedAt: (before.MyobCreatedAt as Date | null) ?? null,
+        sentAt: (before.SentAt as Date | null) ?? null,
+      },
+      {
+        contractorName: ContractorName,
+        costNotToExceed: CostNotToExceed,
+        estimatedCost: EstimatedCost,
+      },
+    );
+
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+          ...(update?.params ?? []),
+        ],
+      );
+
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, @CreatedBy, @Text, 'po_edited', @POID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          {
+            name: "Text",
+            type: TYPES.NVarChar,
+            value: `Edited PO ${poNumber}: ${effects.summary}`,
+          },
+          { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
+        ],
+      );
+
+      // Cost moved while a PDF/email had already gone to the contractor or
+      // MYOB had already been told about this PO — the downstream record is
+      // now stale. Clear the markers + log it so the user knows to re-send
+      // / re-record. (Once Completed we treat dollars as historical and
+      // leave markers alone — see decidePurchaseOrderEdit.)
+      if (effects.clearSentMarker || effects.clearMyobMarker) {
+        const clauses: string[] = [];
+        if (effects.clearSentMarker) {
+          clauses.push("SentAt = NULL", "SentBy = NULL");
+        }
+        if (effects.clearMyobMarker) {
+          clauses.push("MyobCreatedAt = NULL", "MyobCreatedBy = NULL");
+        }
+        await executeQuery(
+          connection,
+          `UPDATE PurchaseOrders SET ${clauses.join(", ")} WHERE PurchaseOrderID = @Id`,
+          [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+        );
+        const noteParts: string[] = [];
+        if (effects.clearSentMarker) noteParts.push("re-send to contractor");
+        if (effects.clearMyobMarker) noteParts.push("re-record in MYOB");
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+           VALUES (@JobID, @CreatedBy, @Text, 'po_markers_cleared', @POID);`,
+          [
+            { name: "JobID", type: TYPES.Int, value: jobId },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            {
+              name: "Text",
+              type: TYPES.NVarChar,
+              value: `PO ${poNumber} cost changed — please ${noteParts.join(" and ")}.`,
+            },
+            { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
+          ],
+        );
+      }
+
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+
     const stored = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,

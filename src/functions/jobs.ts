@@ -20,6 +20,11 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import {
+  MAX_LIST_ROWS,
+  parsePagination,
+  paginationSqlSuffix,
+} from "../pagination";
 
 const JOB_WRITE_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
 const JOB_ARCHIVE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -396,16 +401,50 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   try {
     connection = await createConnection(token);
 
+    const pagination = parsePagination(request.query);
+    const whereSql = whereParts.join(" AND ");
+
+    // Apply OFFSET/FETCH when paginating; otherwise TOP enforces the ceiling.
+    const topClause = pagination.active ? "" : `TOP ${MAX_LIST_ROWS} `;
     const jobs = await executeQuery(
       connection,
-      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE ${whereParts.join(" AND ")} ORDER BY LastModifiedDate DESC`,
+      `SELECT ${topClause}${JOB_COLUMNS} FROM Jobs
+       WHERE ${whereSql}
+       ORDER BY LastModifiedDate DESC${paginationSqlSuffix(pagination)}`,
       params,
     );
 
     const eventsByJob = await fetchEventsForJobs(connection, jobs.map((j) => j.JobID as number));
     const payload = jobs.map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
 
-    return { status: 200, jsonBody: { count: payload.length, jobs: payload } };
+    // Total is only meaningful when paginating; otherwise count = payload.length.
+    let total = payload.length;
+    if (pagination.active) {
+      const totalRows = await executeQuery(
+        connection,
+        `SELECT COUNT(*) AS Total FROM Jobs WHERE ${whereSql}`,
+        params,
+      );
+      total = (totalRows[0]?.Total as number) ?? payload.length;
+    }
+
+    const truncated = !pagination.active && payload.length >= MAX_LIST_ROWS;
+    if (truncated) {
+      context.warn(`getJobs: hit MAX_LIST_ROWS ceiling (${MAX_LIST_ROWS}) — caller should paginate`);
+    }
+
+    return {
+      status: 200,
+      jsonBody: {
+        count: payload.length,
+        jobs: payload,
+        total,
+        truncated,
+        ...(pagination.active
+          ? { page: pagination.page, pageSize: pagination.pageSize }
+          : {}),
+      },
+    };
   } catch (error: any) {
     // Tedious SQL errors don't always populate `.message`; the useful detail
     // lives on `.message || .number / .code / .originalError`. Stringify the

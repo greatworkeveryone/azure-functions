@@ -44,7 +44,7 @@ async function getTenants(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (roleCheck) return roleCheck;
 
   const buildingId = request.query.get("buildingId");

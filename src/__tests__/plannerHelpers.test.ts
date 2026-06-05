@@ -299,3 +299,55 @@ describe("buildJobTaskDescription", () => {
     assert.ok(!desc.startsWith("\n"));
   });
 });
+
+// ── plannerTaskKey + groupPlannerTasksByKey ──────────────────────────────────
+
+import { plannerTaskKey, groupPlannerTasksByKey } from "../plannerHelpers";
+
+describe("plannerTaskKey", () => {
+  test("produces a stable string for a composite identity", () => {
+    expect(plannerTaskKey({
+      entityType: "tenant",
+      entityId: 42,
+      triggerType: "lease_expiry",
+      leadTimeDays: 90,
+    })).toBe("tenant|42|lease_expiry|90");
+  });
+
+  test("treats different lead times as different keys", () => {
+    const base = { entityType: "tenant" as const, entityId: 1, triggerType: "lease_expiry" as const };
+    expect(plannerTaskKey({ ...base, leadTimeDays: 30 }))
+      .not.toBe(plannerTaskKey({ ...base, leadTimeDays: 60 }));
+  });
+});
+
+describe("groupPlannerTasksByKey", () => {
+  test("returns an empty Map for an empty input", () => {
+    expect(groupPlannerTasksByKey([]).size).toBe(0);
+  });
+
+  test("keys each row by entityType|entityId|triggerType|leadTimeDays", () => {
+    const rows = [
+      { EntityType: "tenant", EntityId: 1, TriggerType: "lease_expiry", LeadTimeDays: 90,
+        Id: 100, PlannerTaskId: "tA", Status: "active" },
+      { EntityType: "tenant", EntityId: 2, TriggerType: "lease_expiry", LeadTimeDays: 30,
+        Id: 101, PlannerTaskId: "tB", Status: "resolved" },
+    ];
+    const m = groupPlannerTasksByKey(rows);
+    expect(m.size).toBe(2);
+    expect(m.get("tenant|1|lease_expiry|90")?.Id).toBe(100);
+    expect(m.get("tenant|2|lease_expiry|30")?.Status).toBe("resolved");
+  });
+
+  test("last row wins on duplicate key (the DB enforces a unique constraint, but be deterministic)", () => {
+    const rows = [
+      { EntityType: "job", EntityId: 7, TriggerType: "job_update_due", LeadTimeDays: 0,
+        Id: 1, PlannerTaskId: "old", Status: "active" },
+      { EntityType: "job", EntityId: 7, TriggerType: "job_update_due", LeadTimeDays: 0,
+        Id: 2, PlannerTaskId: "new", Status: "active" },
+    ];
+    const m = groupPlannerTasksByKey(rows);
+    expect(m.size).toBe(1);
+    expect(m.get("job|7|job_update_due|0")?.PlannerTaskId).toBe("new");
+  });
+});

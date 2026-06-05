@@ -255,3 +255,41 @@ export function buildLostKeyTaskDescription(
     `Open in Command Centre: ${link}`,
   ].join("\n").trim();
 }
+
+// ── Batch helpers for plannerSyncTimer's existence checks ───────────────────
+// The timer used to issue one SELECT per (entity × trigger × leadTime) inside
+// nested loops to look up an existing PlannerTasks row. These helpers let
+// callers pre-fetch the relevant rows in a single query and look them up by
+// composite key, collapsing N×M×K reads into one.
+
+export interface PlannerTaskRowShape {
+  EntityType: string;
+  EntityId: number;
+  TriggerType: string;
+  LeadTimeDays: number;
+  Id: number;
+  PlannerTaskId: string;
+  Status: string;
+}
+
+export interface PlannerTaskKey {
+  entityType: "tenant" | "job";
+  entityId: number;
+  triggerType: TriggerType;
+  leadTimeDays: number;
+}
+
+export function plannerTaskKey(k: PlannerTaskKey): string {
+  return `${k.entityType}|${k.entityId}|${k.triggerType}|${k.leadTimeDays}`;
+}
+
+export function groupPlannerTasksByKey(
+  rows: PlannerTaskRowShape[],
+): Map<string, PlannerTaskRowShape> {
+  const m = new Map<string, PlannerTaskRowShape>();
+  for (const r of rows) {
+    const k = `${r.EntityType}|${r.EntityId}|${r.TriggerType}|${r.LeadTimeDays}`;
+    m.set(k, r); // last row wins; DB has a unique constraint so this is rare
+  }
+  return m;
+}

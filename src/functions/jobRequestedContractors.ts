@@ -47,7 +47,10 @@ async function getJobRequestedContractors(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  // Accounts also need to see the requested-contractor list — they own the
+  // invoice/PO workflows that key off contractor identity, and the Quotes
+  // step's read-only summary surfaces this list to them.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -85,7 +88,10 @@ async function addJobRequestedContractor(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  // Accounts can drive the quote-request flow too — when work originates
+  // from a tenancy enquiry they often add the contractor themselves rather
+  // than waiting on a facilities manager.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -185,7 +191,8 @@ async function removeJobRequestedContractor(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  // Mirrors addJobRequestedContractor — whoever can add can also undo.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -265,7 +272,9 @@ async function toggleRequestedContractorSent(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  // Same set as add/remove — toggling whether the request email has been
+  // sent is part of the same workflow.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;

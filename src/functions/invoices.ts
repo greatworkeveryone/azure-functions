@@ -7,6 +7,8 @@ import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
+import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
+import { decideApprovalAmountEdit } from "../edit-effects";
 
 // ── Approval limit helpers ────────────────────────────────────────────────────
 
@@ -162,7 +164,7 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   let connection;
@@ -173,32 +175,62 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
     const statusId = request.query.get("statusId");
     const jobCode = request.query.get("jobCode");
 
-    let sql = `SELECT
+    const pagination = parsePagination(request.query);
+    const topClause = pagination.active ? "" : `TOP ${MAX_LIST_ROWS} `;
+
+    let whereSql = "1=1";
+    const params: SqlParam[] = [];
+
+    if (buildingId) {
+      whereSql += " AND BuildingID = @BuildingID";
+      params.push({ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) });
+    }
+    if (statusId) {
+      whereSql += " AND StatusID = @StatusID";
+      params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
+    }
+    if (jobCode) {
+      whereSql += " AND JobCode = @JobCode";
+      params.push({ name: "JobCode", type: TYPES.NVarChar, value: jobCode });
+    }
+
+    const sql = `SELECT ${topClause}
       Id, InvoiceID, InvoiceNumber, WorkRequestID, JobCode,
       BuildingName, BuildingID, ContractorName, ContractorID,
       InvoiceAmount, GSTAmount, TotalAmount, InvoiceDate, DateApproved,
       StatusID, Status, InvoicePDFURL, GLAccountCode,
       CreatedAt, UpdatedAt
-    FROM Invoices WHERE 1=1`;
-    const params: SqlParam[] = [];
-
-    if (buildingId) {
-      sql += " AND BuildingID = @BuildingID";
-      params.push({ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) });
-    }
-    if (statusId) {
-      sql += " AND StatusID = @StatusID";
-      params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
-    }
-    if (jobCode) {
-      sql += " AND JobCode = @JobCode";
-      params.push({ name: "JobCode", type: TYPES.NVarChar, value: jobCode });
-    }
-
-    sql += " ORDER BY InvoiceDate DESC";
+    FROM Invoices WHERE ${whereSql}
+    ORDER BY InvoiceDate DESC${paginationSqlSuffix(pagination)}`;
     const rows = await executeQuery(connection, sql, params);
 
-    return { status: 200, jsonBody: { invoices: rows, count: rows.length } };
+    let total = rows.length;
+    if (pagination.active) {
+      const totalRows = await executeQuery(
+        connection,
+        `SELECT COUNT(*) AS Total FROM Invoices WHERE ${whereSql}`,
+        params,
+      );
+      total = (totalRows[0]?.Total as number) ?? rows.length;
+    }
+
+    const truncated = !pagination.active && rows.length >= MAX_LIST_ROWS;
+    if (truncated) {
+      context.warn(`getInvoices: hit MAX_LIST_ROWS ceiling (${MAX_LIST_ROWS}) — caller should paginate`);
+    }
+
+    return {
+      status: 200,
+      jsonBody: {
+        invoices: rows,
+        count: rows.length,
+        total,
+        truncated,
+        ...(pagination.active
+          ? { page: pagination.page, pageSize: pagination.pageSize }
+          : {}),
+      },
+    };
   } catch (error: any) {
     context.error("Query failed:", error.message);
     return errorResponse("Query failed", error.message);
@@ -254,7 +286,7 @@ async function getJobInvoices(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -288,7 +320,12 @@ async function upsertJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  // Plain accounts staff add and edit invoices day-to-day — the approval
+  // gate (a separate endpoint) is what actually pushes spend forward, so
+  // restricting create/edit to manager-only forced extra hand-offs without
+  // changing the control surface. Facilities managers also need to attach
+  // invoices that land in their inbox before accounts has seen them.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -417,11 +454,97 @@ async function upsertJobInvoice(
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
-    await executeQuery(
+
+    // Read the existing invoice before mutating so we can diff for the audit
+    // trail and detect whether the edit invalidates a prior approval.
+    const beforeRows = await executeQuery(
       connection,
-      `UPDATE JobInvoices SET ${update.setClause} WHERE JobInvoiceID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }, ...update.params],
+      `SELECT JobInvoiceID, JobID, InvoiceNumber, Amount, ContractorName, Status, ApprovedAt
+         FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
+    if (beforeRows.length === 0) {
+      return { status: 404, jsonBody: { error: "Invoice not found" } };
+    }
+    const before = beforeRows[0];
+    const jobId = before.JobID as number;
+    const invoiceNumber =
+      (before.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+
+    const effects = decideApprovalAmountEdit(
+      {
+        amount: before.Amount != null ? Number(before.Amount) : null,
+        approvedAt: (before.ApprovedAt as Date | null) ?? null,
+        contractorName: (before.ContractorName as string | null) ?? null,
+        status: (before.Status as string | null) ?? null,
+      },
+      { amount: Amount, contractorName: ContractorName },
+    );
+
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE JobInvoices SET ${update.setClause} WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }, ...update.params],
+      );
+
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+         VALUES (@JobID, @CreatedBy, @Text, 'invoice_edited', @InvoiceID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          {
+            name: "Text",
+            type: TYPES.NVarChar,
+            value: `Edited invoice ${invoiceNumber}: ${effects.summary}`,
+          },
+          { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+        ],
+      );
+
+      // Material change to an already-approved invoice: tear down the
+      // approval so the next reviewer re-runs the tier check (in particular
+      // the director-amount threshold) against the new amount. Unlike quotes,
+      // invoice approval doesn't drive the job status — the job stays where
+      // it is, just with a pending invoice.
+      if (effects.clearApproval) {
+        await executeQuery(
+          connection,
+          `UPDATE JobInvoices
+              SET Status = 'pending',
+                  ApprovedAt = NULL, ApprovedBy = NULL,
+                  DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
+                  DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
+                  DirectorEmailSentBy = NULL
+            WHERE JobInvoiceID = @Id`,
+          [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+        );
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+           VALUES (@JobID, @CreatedBy, @Text, 'invoice_unapproved', @InvoiceID);`,
+          [
+            { name: "JobID", type: TYPES.Int, value: jobId },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            {
+              name: "Text",
+              type: TYPES.NVarChar,
+              value: `Invoice ${invoiceNumber} amount changed — approval cleared, awaiting re-review.`,
+            },
+            { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+          ],
+        );
+      }
+
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+
     const stored = await executeQuery(
       connection,
       `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobInvoiceID = @Id`,
@@ -812,7 +935,7 @@ async function getApprovalLimits(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   let connection;
@@ -1132,7 +1255,11 @@ async function resendDirectorInvoiceEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  // The director is the one being nudged — restricting resend to them alone
+  // means a stalled approval can only be self-chased. Open this to the
+  // workflow participants (accounts + facilities) so they can re-trigger
+  // the email when the director hasn't acted.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   let connection;

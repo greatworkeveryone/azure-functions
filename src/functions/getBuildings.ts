@@ -30,7 +30,7 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, Object.values(AppRole));
   if (denied) return denied;
 
   const buildingId = request.query.get("buildingId");

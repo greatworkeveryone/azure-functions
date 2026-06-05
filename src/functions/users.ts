@@ -241,7 +241,10 @@ export async function upsertAppUser(
 
     const dupRows = await executeQuery(
       connection,
-      `SELECT 1 AS Hit FROM dbo.AppUsers WHERE LOWER(Email) = @Email AND IsActive = 1`,
+      // Indexed by UX_AppUsers_Email_Active (migration 079). Email is already
+      // lowercased by the caller (line 237); the column-side LOWER() that
+      // previously wrapped this comparison blocked the index seek.
+      `SELECT 1 AS Hit FROM dbo.AppUsers WHERE Email = @Email AND IsActive = 1`,
       [{ name: "Email", type: TYPES.NVarChar, value: email }],
     );
     if (dupRows.length > 0) {
@@ -366,8 +369,10 @@ export async function registerSelf(
     // Step 2: pre-invited user matched by email (first login after admin invite).
     const byEmail = await executeQuery(
       connection,
+      // Indexed by UX_AppUsers_Email_Active (migration 079). Email is already
+      // lowercased by the caller (line 338).
       `SELECT UserID, Role, DisplayName FROM dbo.AppUsers
-       WHERE LOWER(Email) = @Email AND EntraOid IS NULL AND IsActive = 1`,
+       WHERE Email = @Email AND EntraOid IS NULL AND IsActive = 1`,
       [{ name: "Email", type: TYPES.NVarChar, value: email }],
     );
     if (byEmail.length > 1) {
