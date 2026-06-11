@@ -2,6 +2,20 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { createConnection, executeQuery, closeConnection, SqlRow } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
+import { vacanciesReadSasUrl } from "../blob-storage";
+
+// HeroImageUrl is stored bare (no SAS) in the private vacancies container.
+// Mint a short-lived read SAS per request so the client can load it without the
+// storage account permitting anonymous public access. Done at return time (not
+// before caching) so the cached rows keep the long-lived bare URL and every
+// response gets a fresh token. Rows without a hero image are returned as-is.
+function withHeroSasUrls(rows: SqlRow[]): SqlRow[] {
+  return rows.map((row) => {
+    const hero = row.HeroImageUrl as string | null | undefined;
+    if (!hero) return row;
+    return { ...row, HeroImageUrl: vacanciesReadSasUrl(hero) };
+  });
+}
 
 // In-memory cache for the unfiltered Buildings list. Buildings change rarely;
 // 5 minutes is short enough that edits show up quickly and long enough to skip
@@ -37,9 +51,10 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
   const region = request.query.get("region");
 
   if (!buildingId && !region && buildingsCache && buildingsCache.expiresAt > Date.now()) {
+    const rows = withHeroSasUrls(buildingsCache.rows);
     return {
       status: 200,
-      jsonBody: { buildings: buildingsCache.rows, count: buildingsCache.rows.length },
+      jsonBody: { buildings: rows, count: rows.length },
     };
   }
 
@@ -66,7 +81,8 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
       buildingsCache = { rows, expiresAt: Date.now() + BUILDINGS_CACHE_TTL_MS };
     }
 
-    return { status: 200, jsonBody: { buildings: rows, count: rows.length } };
+    const sasRows = withHeroSasUrls(rows);
+    return { status: 200, jsonBody: { buildings: sasRows, count: sasRows.length } };
   } catch (error: any) {
     context.error("Query failed:", error.message);
     return errorResponse("Query failed", error.message);

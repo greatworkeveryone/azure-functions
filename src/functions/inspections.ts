@@ -345,13 +345,22 @@ async function getInspections(
       : [];
     const levelCountByInspection = new Map(levelRows.map((r) => [r.InspectionId as number, r.C as number]));
 
+    // Match the detail view: only count rooms that have at least one non-blank
+    // inspection point. A room whose only point is the blank seed placeholder is
+    // hidden in the read-only detail body, so it must not inflate the list count.
+    // "Non-blank" uses the same predicate as the filled-points query below.
     const roomRows = inspectionIds.length
       ? await executeQuery(
           connection,
           `SELECT l.InspectionId, COUNT(r.Id) AS C
            FROM dbo.InspectionLevels l
-           LEFT JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
+           JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
            WHERE l.InspectionId IN (${idParamList})
+             AND EXISTS (
+               SELECT 1 FROM dbo.InspectionPoints p
+               WHERE p.RoomId = r.Id
+                 AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+             )
            GROUP BY l.InspectionId`,
           idParams,
         )

@@ -11,7 +11,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { uploadPublicBlob, deletePublicBlob } from "../blob-storage";
+import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
@@ -113,16 +113,21 @@ function tooManyRequests(retryAfterMs: number): HttpResponseInit {
 }
 
 function rowToVacancy(row: SqlRow): Record<string, unknown> {
+  const heroImageUrl = (row.HeroImageUrl as string | null) ?? null;
+  const images: string[] = JSON.parse((row.Images as string) ?? "[]");
+  const slotImages: Record<string, string> = JSON.parse((row.SlotImages as string) ?? "{}");
   return {
     id: row.Id,
     title: row.Title,
     buildingId: row.BuildingId ?? null,
-    buildingHeroImageUrl: (row.HeroImageUrl as string | null) ?? null,
+    buildingHeroImageUrl: heroImageUrl ? vacanciesReadSasUrl(heroImageUrl) : null,
     address: row.Address ?? null,
     description: row.Description ?? null,
     additionalDetails: JSON.parse((row.AdditionalDetails as string) ?? "[]"),
-    images: JSON.parse((row.Images as string) ?? "[]"),
-    slotImages: JSON.parse((row.SlotImages as string) ?? "{}"),
+    images: images.map((url) => vacanciesReadSasUrl(url)),
+    slotImages: Object.fromEntries(
+      Object.entries(slotImages).map(([label, url]) => [label, vacanciesReadSasUrl(url)]),
+    ),
     status: row.Status,
     wordpressPostId: row.WordPressPostId ?? null,
     wordpressSlug: row.WordPressSlug ?? null,

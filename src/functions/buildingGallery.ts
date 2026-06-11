@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, requireRole, unauthorizedResponse } from "../auth";
-import { uploadPublicBlob, deletePublicBlob } from "../blob-storage";
+import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { clearBuildingsCache } from "./getBuildings";
 
@@ -87,7 +87,9 @@ async function handleUploadBuildingHeroImage(
     );
 
     clearBuildingsCache();
-    return { jsonBody: { heroImageUrl: url } };
+    // Persist the bare URL (above) but hand the client a short-lived read SAS so
+    // the just-uploaded image loads from the private container.
+    return { jsonBody: { heroImageUrl: vacanciesReadSasUrl(url) } };
   } catch (error: any) {
     return errorResponse("Failed to upload building hero image", error.message);
   } finally {
