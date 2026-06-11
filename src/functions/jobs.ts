@@ -93,6 +93,7 @@ const JOB_COLUMNS = `
   ExpectedProgressUpdate, CompletionDate,
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
   IsOnchargeable, OnchargeAmount, OnchargeNotes,
+  Kind,
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
@@ -131,6 +132,7 @@ const JOB_WRITE_COLUMNS = [
   "IsOnchargeable",
   "OnchargeAmount",
   "OnchargeNotes",
+  "Kind",
   "TenantID",
   "CreationMethod",
   "SourceEmailID",
@@ -190,6 +192,7 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   IsOnchargeable: TYPES.Bit,
   OnchargeAmount: TYPES.Decimal,
   OnchargeNotes: TYPES.NVarChar,
+  Kind: TYPES.NVarChar,
   TenantID: TYPES.Int,
   CreationMethod: TYPES.NVarChar,
   SourceEmailID: TYPES.Int,
@@ -251,6 +254,10 @@ const ALLOWED_PRIORITIES = ["Critical", "High", "Normal", "Low"] as const;
 
 const ALLOWED_CREATION_METHODS = ["manual", "wr", "email", "inspection"] as const;
 
+// Job kind — reactive Facilities works vs scheduled Maintenance servicing
+// (m079). Mirrors JobKind in command-centre/src/types/job.ts.
+const ALLOWED_KINDS = ["facilities", "maintenance"] as const;
+
 const MAX_LEN: Partial<Record<JobColumn, number>> = {
   Title: 200,
   Description: 4000,
@@ -308,6 +315,13 @@ function validateUpsertBody(
     )
   ) {
     return "Invalid CreationMethod";
+  }
+  if (
+    fields.Kind !== undefined &&
+    fields.Kind !== null &&
+    !ALLOWED_KINDS.includes(fields.Kind as (typeof ALLOWED_KINDS)[number])
+  ) {
+    return "Invalid Kind";
   }
   if (fields.OnchargeAmount !== undefined && fields.OnchargeAmount !== null) {
     const n = fields.OnchargeAmount;
@@ -618,7 +632,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         // Snapshot the columns we audit before the UPDATE rewrites them.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, AwaitingRole FROM Jobs WHERE JobID = @JobID",
+          "SELECT Status, AssignedTo, AwaitingRole, Kind FROM Jobs WHERE JobID = @JobID",
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
@@ -645,6 +659,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           const newStatus = fields.Status as string | null | undefined;
           const newAssignedTo = fields.AssignedTo as string | null | undefined;
           const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
+          const newKind = fields.Kind as string | null | undefined;
 
           if (newStatus !== undefined && newStatus !== previous.Status) {
             await executeQuery(
@@ -694,6 +709,22 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
                 { name: "Text", type: TYPES.NVarChar, value: `Handoff: ${fromLabel} → ${toLabel}` },
                 { name: "EventType", type: TYPES.NVarChar, value: "awaiting_role_change" },
                 { name: "NewAwaitingRole", type: TYPES.NVarChar, value: newAwaitingRole },
+              ],
+            );
+          }
+
+          if (newKind !== undefined && newKind !== previous.Kind) {
+            const fromLabel = (previous.Kind as string | null) || "facilities";
+            const toLabel = newKind || "facilities";
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                { name: "Text", type: TYPES.NVarChar, value: `Kind: ${fromLabel} → ${toLabel}` },
+                { name: "EventType", type: TYPES.NVarChar, value: "kind_change" },
               ],
             );
           }
