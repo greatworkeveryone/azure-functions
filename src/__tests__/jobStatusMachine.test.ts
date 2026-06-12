@@ -88,13 +88,85 @@ describe("jobStatusMachine — composite (status, awaitingRole)", () => {
       ).toEqual({ status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES });
     });
 
-    it("(Tenant, *) + TENANT_UNBLOCKED → (Work, facilities)", () => {
+    it("(Tenant, *) + TENANT_UNBLOCKED → (Work, facilities) when no pre-block state captured (legacy)", () => {
       expect(
         nextState(
           { status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES },
           JobEvent.TENANT_UNBLOCKED,
         ),
       ).toEqual({ status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES });
+    });
+
+    it("TENANT_UNBLOCKED restores the captured pre-block state exactly (Awaiting Approval / facilities — quote NOT yet approved)", () => {
+      // The bug: a job blocked at (Awaiting Approval, facilities) used to land
+      // in (Work, facilities) on unblock, skipping QUOTE_APPROVED. With the
+      // pre-block state captured, it must return to where it was.
+      expect(
+        nextState(
+          { status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES },
+          JobEvent.TENANT_UNBLOCKED,
+          {
+            preBlockState: {
+              status: JobStatus.AWAITING_APPROVAL,
+              awaitingRole: AwaitingRole.FACILITIES,
+            },
+          },
+        ),
+      ).toEqual({
+        status: JobStatus.AWAITING_APPROVAL,
+        awaitingRole: AwaitingRole.FACILITIES,
+      });
+    });
+
+    it("TENANT_UNBLOCKED restores a captured accounts-side approval state", () => {
+      expect(
+        nextState(
+          { status: JobStatus.TENANT, awaitingRole: AwaitingRole.ACCOUNTS },
+          JobEvent.TENANT_UNBLOCKED,
+          {
+            preBlockState: {
+              status: JobStatus.AWAITING_APPROVAL,
+              awaitingRole: AwaitingRole.ACCOUNTS,
+            },
+          },
+        ),
+      ).toEqual({
+        status: JobStatus.AWAITING_APPROVAL,
+        awaitingRole: AwaitingRole.ACCOUNTS,
+      });
+    });
+
+    it("TENANT_UNBLOCKED ignores a (Tenant, *) or (Done, *) pre-block state and falls back to (Work, facilities)", () => {
+      // Defensive: a captured pre-block state that is itself Tenant/Done is
+      // nonsensical (you can't block from Done, and a doubly-blocked Tenant
+      // can't be the restore target). Fall back to the legacy safe state.
+      expect(
+        nextState(
+          { status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES },
+          JobEvent.TENANT_UNBLOCKED,
+          {
+            preBlockState: {
+              status: JobStatus.DONE,
+              awaitingRole: AwaitingRole.ACCOUNTS,
+            },
+          },
+        ),
+      ).toEqual({ status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES });
+    });
+
+    it("pre-block state is ignored for non-unblock events", () => {
+      expect(
+        nextState(
+          { status: JobStatus.NEW, awaitingRole: AwaitingRole.FACILITIES },
+          JobEvent.QUOTE_REQUESTED,
+          {
+            preBlockState: {
+              status: JobStatus.AWAITING_APPROVAL,
+              awaitingRole: AwaitingRole.FACILITIES,
+            },
+          },
+        ),
+      ).toEqual({ status: JobStatus.QUOTE, awaitingRole: AwaitingRole.FACILITIES });
     });
   });
 
@@ -291,6 +363,36 @@ describe("jobStatusMachine — composite (status, awaitingRole)", () => {
         ),
       ).toEqual({
         status: JobStatus.TENANT,
+        awaitingRole: AwaitingRole.FACILITIES,
+      });
+    });
+
+    it("Tenant → Work without captured pre-block state lands on (Work, facilities) (legacy)", () => {
+      expect(
+        resolveManualTarget(
+          { status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES },
+          JobStatus.WORK,
+        ),
+      ).toEqual({
+        status: JobStatus.WORK,
+        awaitingRole: AwaitingRole.FACILITIES,
+      });
+    });
+
+    it("Tenant → Work restores the captured pre-block (Awaiting Approval, facilities) — the unblock-bypass fix", () => {
+      expect(
+        resolveManualTarget(
+          { status: JobStatus.TENANT, awaitingRole: AwaitingRole.FACILITIES },
+          JobStatus.WORK,
+          {
+            preBlockState: {
+              status: JobStatus.AWAITING_APPROVAL,
+              awaitingRole: AwaitingRole.FACILITIES,
+            },
+          },
+        ),
+      ).toEqual({
+        status: JobStatus.AWAITING_APPROVAL,
         awaitingRole: AwaitingRole.FACILITIES,
       });
     });

@@ -61,7 +61,44 @@ function statesEqual(a: JobState, b: JobState): boolean {
   return a.status === b.status && a.awaitingRole === b.awaitingRole;
 }
 
-export function nextState(current: JobState, event: JobEvent): JobState | null {
+/**
+ * Optional context the machine consults for the tenant-unblock restore.
+ * `preBlockState` is the composite the job sat in immediately before
+ * TENANT_BLOCKED fired (captured by the caller — see addJobEvent). When
+ * present it is restored exactly on unblock, so a job blocked at
+ * (Awaiting Approval, facilities) returns there instead of leapfrogging into
+ * Work without QUOTE_APPROVED. Legacy blocked jobs with no captured state
+ * fall back to the historical (Work, facilities) landing.
+ */
+export interface TransitionOptions {
+  preBlockState?: JobState;
+}
+
+/** The safe landing for an unblock with no (or a nonsensical) pre-block state. */
+const UNBLOCK_FALLBACK: JobState = { status: JobStatus.WORK, awaitingRole: F };
+
+/**
+ * Resolve where TENANT_UNBLOCKED / a manual Tenant → Work pick lands. Restores
+ * the captured pre-block state when it's a sane re-entry point, otherwise the
+ * legacy fallback. A pre-block state of Tenant or Done is rejected (you can't
+ * have blocked from Done, and a Tenant pre-block can't be a restore target).
+ */
+function resolveUnblockTarget(preBlockState: JobState | undefined): JobState {
+  if (
+    preBlockState &&
+    preBlockState.status !== JobStatus.TENANT &&
+    preBlockState.status !== JobStatus.DONE
+  ) {
+    return preBlockState;
+  }
+  return UNBLOCK_FALLBACK;
+}
+
+export function nextState(
+  current: JobState,
+  event: JobEvent,
+  opts?: TransitionOptions,
+): JobState | null {
   // Tenant block: reachable from any non-Done state, preserves awaitingRole
   // so we know which queue the job came from when it unblocks.
   if (event === JobEvent.TENANT_BLOCKED) {
@@ -69,10 +106,12 @@ export function nextState(current: JobState, event: JobEvent): JobState | null {
       ? null
       : { status: JobStatus.TENANT, awaitingRole: current.awaitingRole };
   }
-  // Returning from a tenant block lands back on Work / facilities.
+  // Returning from a tenant block restores the captured pre-block state
+  // exactly (e.g. back to Awaiting Approval if the quote was never approved),
+  // falling back to (Work, facilities) when none was captured.
   if (event === JobEvent.TENANT_UNBLOCKED) {
     return current.status === JobStatus.TENANT
-      ? { status: JobStatus.WORK, awaitingRole: F }
+      ? resolveUnblockTarget(opts?.preBlockState)
       : null;
   }
   const match = TRANSITIONS.find((t) => statesEqual(t.from, current) && t.event === event);
@@ -109,13 +148,17 @@ export function allowedNextStatuses(current: JobState): JobStatus[] {
 export function resolveManualTarget(
   current: JobState,
   targetStatus: JobStatus,
+  opts?: TransitionOptions,
 ): JobState | null {
   if (!canTransition(current, targetStatus)) return null;
   if (targetStatus === JobStatus.TENANT) {
     return { status: JobStatus.TENANT, awaitingRole: current.awaitingRole };
   }
+  // A manual Tenant → Work pick is the unblock path: restore the captured
+  // pre-block state (so the picker label / write matches where the job
+  // actually returns), falling back to (Work, facilities).
   if (current.status === JobStatus.TENANT && targetStatus === JobStatus.WORK) {
-    return { status: JobStatus.WORK, awaitingRole: F };
+    return resolveUnblockTarget(opts?.preBlockState);
   }
   const edge = TRANSITIONS.find(
     (t) => statesEqual(t.from, current) && t.to.status === targetStatus,

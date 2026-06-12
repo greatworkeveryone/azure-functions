@@ -31,8 +31,36 @@ import {
 } from "../contractor-acronym-db";
 import { formatDocNumber } from "../doc-number";
 import { advanceJobStatus } from "../jobStatusHelpers";
-import { JobEvent } from "../jobStatusMachine";
+import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
+
+/**
+ * Quote-approval guard for PO creation (WP8). Returns an error string if
+ * creating a PO would act as implicit quote approval, else null.
+ *
+ * The machine's PO_CREATED edge moves a job out of (Awaiting Approval,
+ * facilities) → Work. That is the only state where creating a PO transitions
+ * the job — and createPurchaseOrder is callable by plain accounts, a wider set
+ * than the quote-approval authority (approveQuote applies the role approval
+ * limit + director routing, and only then stamps Jobs.ApprovedQuoteID). So a
+ * PO created in that state with no ApprovedQuoteID would leapfrog the manager
+ * approval limit. Block exactly that case; every other state is a no-op
+ * transition and proceeds untouched.
+ */
+export function purchaseOrderApprovalError(job: {
+  status: JobStatus;
+  awaitingRole: AwaitingRole;
+  approvedQuoteId: number | null;
+}): string | null {
+  const leapfrogsApproval =
+    job.status === JobStatus.AWAITING_APPROVAL &&
+    job.awaitingRole === AwaitingRole.FACILITIES &&
+    job.approvedQuoteId == null;
+  if (leapfrogsApproval) {
+    return "Cannot create a purchase order — the quote hasn't been approved yet. Approve the quote first (this enforces the approval limit) before raising a PO.";
+  }
+  return null;
+}
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -130,6 +158,31 @@ async function upsertPurchaseOrder(
 
       await beginTransaction(connection);
       try {
+        // Quote-approval gate: refuse a PO that would leapfrog an unapproved
+        // quote out of (Awaiting Approval, facilities) → Work. Read inside the
+        // tx so the state we guard on is the state advanceJobStatus will act
+        // on. ApprovedQuoteID is only set once approveQuote has applied the
+        // role approval limit + director routing.
+        const jobStateRows = await executeQuery(
+          connection,
+          "SELECT Status, AwaitingRole, ApprovedQuoteID FROM Jobs WHERE JobID = @JobID",
+          [{ name: "JobID", type: TYPES.Int, value: JobID }],
+        );
+        if (jobStateRows.length === 0) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 404, jsonBody: { error: "Job not found" } };
+        }
+        const approvalError = purchaseOrderApprovalError({
+          status: jobStateRows[0].Status as JobStatus,
+          awaitingRole:
+            (jobStateRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
+          approvedQuoteId: (jobStateRows[0].ApprovedQuoteID as number | null) ?? null,
+        });
+        if (approvalError) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 422, jsonBody: { error: approvalError } };
+        }
+
         const acronym =
           typeof ContractorID === "number"
             ? await ensureContractorAcronym(connection, ContractorID)

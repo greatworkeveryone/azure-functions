@@ -34,6 +34,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import {
   AwaitingRole,
+  type JobState,
   JobStatus,
   resolveManualTarget,
 } from "../jobStatusMachine";
@@ -80,6 +81,7 @@ const JOB_COLUMNS = `
   Status, IsStalled, StalledReason, IsInternal, CreationMethod, SourceEmailID,
   SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
   AwaitingRole,
+  PreBlockStatus, PreBlockAwaitingRole,
   ExpectedProgressUpdate, CompletionDate,
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
   IsOnchargeable, OnchargeAmount, OnchargeNotes,
@@ -1150,20 +1152,40 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     // only — the machine wins).
     let resolvedNewStatus: string | null = NewStatus ?? null;
     let resolvedNewAwaitingRole: string | null = NewAwaitingRole ?? null;
+    // Pre-block capture/restore for tenant blocks (WP8). `capturesPreBlock` is
+    // set when this status change blocks the job (→ Tenant): we persist the
+    // composite the job is leaving so unblocking can restore it exactly.
+    // `clearsPreBlock` is set when this change unblocks the job (Tenant → Work):
+    // the restore has already been applied to the resolved target above, so we
+    // null the columns out. Both writes happen in the mirror UPDATE below,
+    // inside the same transaction as the status change.
+    let preBlockToCapture: JobState | null = null;
+    let clearsPreBlock = false;
     if (NewStatus != null) {
       const currentRows = await executeQuery(
         connection,
-        "SELECT Status, AwaitingRole FROM Jobs WHERE JobID = @JobID",
+        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole FROM Jobs WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: JobID }],
       );
       if (currentRows.length === 0) {
         return { status: 404, jsonBody: { error: "Job not found" } };
       }
-      const currentState = {
+      const currentState: JobState = {
         status: currentRows[0].Status as JobStatus,
         awaitingRole:
           (currentRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
       };
+      // The composite the job sat in before it was tenant-blocked, if captured.
+      const preBlockStatus = currentRows[0].PreBlockStatus as JobStatus | null;
+      const preBlockState: JobState | undefined =
+        preBlockStatus != null
+          ? {
+              status: preBlockStatus,
+              awaitingRole:
+                (currentRows[0].PreBlockAwaitingRole as AwaitingRole) ??
+                AwaitingRole.FACILITIES,
+            }
+          : undefined;
       // Self-transitions (NewStatus equals current Status) are accepted as
       // no-ops so the activity event still lands in the feed — e.g. "Quote
       // received" while the job is already Awaiting Approval, or "Invoice
@@ -1172,7 +1194,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         resolvedNewStatus = currentState.status;
         resolvedNewAwaitingRole = currentState.awaitingRole;
       } else {
-        const target = resolveManualTarget(currentState, NewStatus as JobStatus);
+        // Restore the captured pre-block state on a Tenant → Work unblock so
+        // the job returns where it was (e.g. Awaiting Approval) rather than
+        // leapfrogging into Work without the quote ever being approved.
+        const target = resolveManualTarget(currentState, NewStatus as JobStatus, {
+          preBlockState,
+        });
         if (target == null) {
           return {
             status: 422,
@@ -1185,6 +1212,13 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         }
         resolvedNewStatus = target.status;
         resolvedNewAwaitingRole = target.awaitingRole;
+        if (target.status === JobStatus.TENANT) {
+          // Blocking — remember exactly where we came from.
+          preBlockToCapture = currentState;
+        } else if (currentState.status === JobStatus.TENANT) {
+          // Unblocking — the restore is applied; clear the captured columns.
+          clearsPreBlock = true;
+        }
       }
     }
 
@@ -1281,6 +1315,19 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           type: TYPES.NVarChar,
           value: resolvedNewAwaitingRole,
         });
+      }
+      // Capture the pre-block composite when blocking, clear it when
+      // unblocking — same transaction as the status write so the two never
+      // diverge (a Tenant row always carries its restore target; a non-Tenant
+      // row never holds a stale one).
+      if (preBlockToCapture != null) {
+        updates.push("PreBlockStatus=@PreBlockStatus", "PreBlockAwaitingRole=@PreBlockAwaitingRole");
+        updateParams.push(
+          { name: "PreBlockStatus", type: TYPES.NVarChar, value: preBlockToCapture.status },
+          { name: "PreBlockAwaitingRole", type: TYPES.NVarChar, value: preBlockToCapture.awaitingRole },
+        );
+      } else if (clearsPreBlock) {
+        updates.push("PreBlockStatus=NULL", "PreBlockAwaitingRole=NULL");
       }
       await executeQuery(
         connection,
