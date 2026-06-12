@@ -6,6 +6,11 @@ import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
 import {
+  MAX_LIST_ROWS,
+  paginationSqlSuffix,
+  parsePagination,
+} from "../pagination";
+import {
   buildOverlayUpsertSql,
   pickOverlayFields,
   WR_OVERLAY_JOIN,
@@ -111,7 +116,12 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, [
+    AppRole.FACILITIES,
+    AppRole.FACILITIES_APPROVAL,
+    AppRole.ACCOUNTS,
+    AppRole.ACCOUNTS_APPROVAL,
+  ]);
   if (denied) return denied;
 
   const buildingId = request.query.get("buildingId");
@@ -123,6 +133,10 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
   const unlinkedClause = unlinkedOnly
     ? " AND NOT EXISTS (SELECT 1 FROM Jobs j WHERE j.WorkRequestID = wr.WorkRequestID)"
     : "";
+
+  const pagination = parsePagination(request.query);
+  const topClause = pagination.active ? "" : `TOP ${MAX_LIST_ROWS} `;
+  const paginationSuffix = paginationSqlSuffix(pagination);
 
   let connection;
   try {
@@ -174,20 +188,47 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
         );
       }
 
-      let sql = `SELECT ${workRequestSelectColumns()}
-        FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE 1=1${unlinkedClause}`;
+      let whereSqlA = `1=1${unlinkedClause}`;
       const params: SqlParam[] = [];
       if (statusId) {
-        sql += " AND StatusID = @StatusID";
+        whereSqlA += " AND StatusID = @StatusID";
         params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
       }
       if (category) {
-        sql += " AND Category = @Category";
+        whereSqlA += " AND Category = @Category";
         params.push({ name: "Category", type: TYPES.NVarChar, value: category });
       }
-      sql += " ORDER BY WorkRequestID DESC";
-      const rows = await executeQuery(connection, sql, params);
-      return { status: 200, jsonBody: { workRequests: rows, count: rows.length, fromCache: !force } };
+      const sqlA = `SELECT ${topClause}${workRequestSelectColumns()}
+        FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE ${whereSqlA}
+        ORDER BY WorkRequestID DESC${paginationSuffix}`;
+      const rows = await executeQuery(connection, sqlA, params);
+
+      let totalA = rows.length;
+      if (pagination.active) {
+        const totalRows = await executeQuery(
+          connection,
+          `SELECT COUNT(*) AS Total FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE ${whereSqlA}`,
+          params,
+        );
+        totalA = (totalRows[0]?.Total as number) ?? rows.length;
+      }
+
+      const truncatedA = !pagination.active && rows.length >= MAX_LIST_ROWS;
+      if (truncatedA) {
+        context.warn(`getWorkRequests (all-buildings): hit MAX_LIST_ROWS ceiling (${MAX_LIST_ROWS})`);
+      }
+
+      return {
+        status: 200,
+        jsonBody: {
+          workRequests: rows,
+          count: rows.length,
+          fromCache: !force,
+          total: totalA,
+          truncated: truncatedA,
+          ...(pagination.active ? { page: pagination.page, pageSize: pagination.pageSize } : {}),
+        },
+      };
     }
 
     // Per-building sync — check staleness
@@ -230,25 +271,48 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     }
 
     // Return from DB with optional filters
-    let sql = `SELECT ${workRequestSelectColumns()}
-      FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.BuildingID = @BuildingID${unlinkedClause}`;
+    let whereSqlB = `wr.BuildingID = @BuildingID${unlinkedClause}`;
     const params: SqlParam[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
 
     if (statusId) {
-      sql += " AND StatusID = @StatusID";
+      whereSqlB += " AND StatusID = @StatusID";
       params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
     }
     if (category) {
-      sql += " AND Category = @Category";
+      whereSqlB += " AND Category = @Category";
       params.push({ name: "Category", type: TYPES.NVarChar, value: category });
     }
 
-    sql += " ORDER BY WorkRequestID DESC";
-    const rows = await executeQuery(connection, sql, params);
+    const sqlB = `SELECT ${topClause}${workRequestSelectColumns()}
+      FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE ${whereSqlB}
+      ORDER BY WorkRequestID DESC${paginationSuffix}`;
+    const rows = await executeQuery(connection, sqlB, params);
+
+    let totalB = rows.length;
+    if (pagination.active) {
+      const totalRows = await executeQuery(
+        connection,
+        `SELECT COUNT(*) AS Total FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE ${whereSqlB}`,
+        params,
+      );
+      totalB = (totalRows[0]?.Total as number) ?? rows.length;
+    }
+
+    const truncatedB = !pagination.active && rows.length >= MAX_LIST_ROWS;
+    if (truncatedB) {
+      context.warn(`getWorkRequests (per-building): hit MAX_LIST_ROWS ceiling (${MAX_LIST_ROWS})`);
+    }
 
     return {
       status: 200,
-      jsonBody: { workRequests: rows, count: rows.length, fromCache: !force && !isStale },
+      jsonBody: {
+        workRequests: rows,
+        count: rows.length,
+        fromCache: !force && !isStale,
+        total: totalB,
+        truncated: truncatedB,
+        ...(pagination.active ? { page: pagination.page, pageSize: pagination.pageSize } : {}),
+      },
     };
   } catch (error: any) {
     context.error("getWorkRequests failed:", error.message);
@@ -266,7 +330,12 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, [
+    AppRole.FACILITIES,
+    AppRole.FACILITIES_APPROVAL,
+    AppRole.ACCOUNTS,
+    AppRole.ACCOUNTS_APPROVAL,
+  ]);
   if (denied) return denied;
 
   const workRequestId = request.query.get("workRequestId");

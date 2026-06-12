@@ -2,6 +2,20 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { createConnection, executeQuery, closeConnection, SqlRow } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
+import { vacanciesReadSasUrl } from "../blob-storage";
+
+// HeroImageUrl is stored bare (no SAS) in the private vacancies container.
+// Mint a short-lived read SAS per request so the client can load it without the
+// storage account permitting anonymous public access. Done at return time (not
+// before caching) so the cached rows keep the long-lived bare URL and every
+// response gets a fresh token. Rows without a hero image are returned as-is.
+function withHeroSasUrls(rows: SqlRow[]): SqlRow[] {
+  return rows.map((row) => {
+    const hero = row.HeroImageUrl as string | null | undefined;
+    if (!hero) return row;
+    return { ...row, HeroImageUrl: vacanciesReadSasUrl(hero) };
+  });
+}
 
 // In-memory cache for the unfiltered Buildings list. Buildings change rarely;
 // 5 minutes is short enough that edits show up quickly and long enough to skip
@@ -11,6 +25,17 @@ import { TYPES } from "tedious";
 const BUILDINGS_CACHE_TTL_MS = 5 * 60 * 1000;
 let buildingsCache: { rows: SqlRow[]; expiresAt: number } | null = null;
 
+// Explicit column list — mirrors the JOB_COLUMNS pattern in jobs.ts.
+// Add new Buildings columns here only after confirming they should be
+// returned to the frontend (no internal tokens, no audit hashes).
+const BUILDING_COLUMNS = `
+  Id, BuildingID, BuildingName, BuildingCode, BuildingAddress,
+  ThirdPartySystem_BuildingID, RegionID, Region, NLA, InvoicingAddress,
+  ContactPhoneNumber, Levels, Active, LastModifiedDate,
+  WRsLastSyncedAt, LastSyncedAt, CreatedAt, UpdatedAt,
+  HeroImageUrl
+`;
+
 export function clearBuildingsCache(): void {
   buildingsCache = null;
 }
@@ -19,16 +44,17 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, Object.values(AppRole));
   if (denied) return denied;
 
   const buildingId = request.query.get("buildingId");
   const region = request.query.get("region");
 
   if (!buildingId && !region && buildingsCache && buildingsCache.expiresAt > Date.now()) {
+    const rows = withHeroSasUrls(buildingsCache.rows);
     return {
       status: 200,
-      jsonBody: { buildings: buildingsCache.rows, count: buildingsCache.rows.length },
+      jsonBody: { buildings: rows, count: rows.length },
     };
   }
 
@@ -36,7 +62,7 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
   try {
     connection = await createConnection(token);
 
-    let sql = "SELECT * FROM Buildings WHERE 1=1";
+    let sql = `SELECT ${BUILDING_COLUMNS} FROM Buildings WHERE 1=1`;
     const params: { name: string; type: any; value: any }[] = [];
 
     if (buildingId) {
@@ -55,7 +81,8 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
       buildingsCache = { rows, expiresAt: Date.now() + BUILDINGS_CACHE_TTL_MS };
     }
 
-    return { status: 200, jsonBody: { buildings: rows, count: rows.length } };
+    const sasRows = withHeroSasUrls(rows);
+    return { status: 200, jsonBody: { buildings: sasRows, count: sasRows.length } };
   } catch (error: any) {
     context.error("Query failed:", error.message);
     return errorResponse("Query failed", error.message);

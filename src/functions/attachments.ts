@@ -11,11 +11,30 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery } from "../db";
-import { AppRole, extractToken, oidFromToken, requireRole, errorResponse, unauthorizedResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { uploadAttachment } from "../mybuildings-client";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
+
+// Server-generated email-attachment blobs land under emails/{messageId}/...
+// where {messageId} is a sanitised, URL-safe slug. Any blob name claimed via
+// handleClaimEmailAttachment must match this pattern — a caller cannot point
+// the Attachments row at an arbitrary blob path.
+const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
+
+// Explicit column list — mirrors JOB_COLUMNS pattern in jobs.ts.
+// BlobName is included because callers use it to mint a read SAS URL
+// (see `generateReadSasUrl(r.BlobName)` in the response mapping).
+// MyBuildingsConfirmedAt is included for the same SAS-vs-archived
+// decision in the response mapping.
+const ATTACHMENT_COLUMNS = `
+  Id, WorkRequestID, JobID, JobCode,
+  BlobName, OriginalName, Extension, ContentType, SizeBytes,
+  UploadedBy, UploadedAt,
+  MyBuildingsConfirmedAt,
+  Comment
+`;
 
 // ── POST /api/uploadAttachment (multipart/form-data) ─────────────────────────
 // Accepts either `jobId` (preferred — new attachments belong to a Job) or
@@ -30,7 +49,11 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
-  const callerOid = oidFromToken(token) ?? "unknown";
+  // UploadedBy is an audit column — derive from the verified token, never the body.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
   const rl = checkRateLimit(`uploadAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
     return {
@@ -47,7 +70,6 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
     const jobIdRaw = form.get("jobId");
     const workRequestIdRaw = form.get("workRequestId");
     const jobCode = form.get("jobCode")?.toString() ?? null;
-    const uploadedBy = form.get("uploadedBy")?.toString() ?? null;
 
     if (!file || typeof (file as any).arrayBuffer !== "function") {
       return { status: 400, jsonBody: { error: "Missing 'file' field in multipart body" } };
@@ -80,8 +102,12 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
 
     // Blob path uses the strongest scope we have: prefer job-scoped, fall back
     // to wr-scoped for legacy intake. Path is purely organisational — the row
-    // is what actually anchors the file to a Job/WR.
-    const keyPrefix = jobId !== null ? `job-${jobId}` : `${workRequestId}`;
+    // is what actually anchors the file to a Job/WR. Prefix shape is
+    // `attachments/{parentType}/{parentId}/...` so downstream code can reject
+    // attempts to reference blobs outside the expected parent scope.
+    const keyPrefix = jobId !== null
+      ? `attachments/jobs/${jobId}`
+      : `attachments/workRequests/${workRequestId}`;
     const scopeLabel =
       jobId !== null ? `Job ${jobId}` : `WR ${workRequestId}`;
     context.log(`Uploading ${originalName} (${contentType}, ${size} bytes) for ${scopeLabel}`);
@@ -117,7 +143,7 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
         { name: "Extension", type: TYPES.NVarChar, value: extension },
         { name: "ContentType", type: TYPES.NVarChar, value: contentType },
         { name: "SizeBytes", type: TYPES.BigInt, value: size },
-        { name: "UploadedBy", type: TYPES.NVarChar, value: uploadedBy },
+        { name: "UploadedBy", type: TYPES.NVarChar, value: callerOid },
       ],
     );
 
@@ -177,12 +203,12 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
     const rows = jobId !== null
       ? await executeQuery(
           connection,
-          "SELECT * FROM Attachments WHERE JobID=@JobID ORDER BY UploadedAt DESC",
+          `SELECT ${ATTACHMENT_COLUMNS} FROM Attachments WHERE JobID=@JobID ORDER BY UploadedAt DESC`,
           [{ name: "JobID", type: TYPES.Int, value: jobId }],
         )
       : await executeQuery(
           connection,
-          "SELECT * FROM Attachments WHERE WorkRequestID=@WorkRequestID ORDER BY UploadedAt DESC",
+          `SELECT ${ATTACHMENT_COLUMNS} FROM Attachments WHERE WorkRequestID=@WorkRequestID ORDER BY UploadedAt DESC`,
           [{ name: "WorkRequestID", type: TYPES.Int, value: workRequestId }],
         );
 
@@ -392,6 +418,19 @@ async function handleDeleteAttachment(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`deleteAttachment:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -401,9 +440,19 @@ async function handleDeleteAttachment(
     }
 
     connection = await createConnection(token);
+    // Pull UploadedBy alongside the blob name + parent IDs so we can enforce
+    // per-row ownership (IDOR). The JOIN against parent tables is informational —
+    // the comparison rule is admin OR UploadedBy === callerOid. The parent owner
+    // OID is not currently a reliable column on every parent table (display name
+    // strings dominate), so we don't gate on it.
     const rows = await executeQuery(
       connection,
-      "SELECT BlobName, MyBuildingsConfirmedAt FROM Attachments WHERE Id = @Id",
+      `SELECT a.BlobName, a.MyBuildingsConfirmedAt, a.UploadedBy,
+              a.JobID, a.WorkRequestID,
+              j.CreatedBy AS JobCreatedBy
+         FROM Attachments a
+         LEFT JOIN Jobs j ON j.JobID = a.JobID
+        WHERE a.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: attachmentId }],
     );
     if (rows.length === 0) {
@@ -411,6 +460,14 @@ async function handleDeleteAttachment(
     }
     const blobName = rows[0].BlobName as string;
     const archived = rows[0].MyBuildingsConfirmedAt != null;
+    const uploadedBy = rows[0].UploadedBy as string | null;
+
+    const callerRoles = await rolesForRequest(request);
+    const isAdmin = callerRoles.includes(AppRole.ADMIN);
+    const isOwner = uploadedBy != null && uploadedBy === callerOid;
+    if (!isAdmin && !isOwner) {
+      return forbiddenResponse("Only the uploader or an admin can delete this attachment.");
+    }
 
     if (!archived) {
       try {
@@ -451,7 +508,10 @@ async function handleClaimEmailAttachment(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
-  const callerOid = oidFromToken(token) ?? "unknown";
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
   const rl = checkRateLimit(`claimEmailAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
     return {
@@ -464,16 +524,22 @@ async function handleClaimEmailAttachment(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { BlobName, FileName, JobID, ClaimedBy } = body ?? {};
+    const { BlobName, FileName, JobID } = body ?? {};
     if (!BlobName || typeof BlobName !== "string") {
       return { status: 400, jsonBody: { error: "BlobName (string) required" } };
     }
-    if (!BlobName.startsWith("emails/")) {
+    // Only blobs landed by the email-sync pipeline (under emails/{messageId}/)
+    // can be claimed — caller cannot point the row at an arbitrary blob path.
+    if (!EMAIL_BLOB_PREFIX_RE.test(BlobName)) {
       return { status: 400, jsonBody: { error: "Invalid attachment reference" } };
     }
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) required" } };
     }
+
+    // TODO: cross-check the email referenced by the blob path belongs to a job
+    // the caller can write to (per-job ownership). For now the role gate above
+    // plus the server-generated blob-prefix check are the enforced controls.
 
     const extension = typeof FileName === "string" && FileName.includes(".")
       ? FileName.split(".").pop() ?? null
@@ -491,7 +557,7 @@ async function handleClaimEmailAttachment(
         { name: "BlobName", type: TYPES.NVarChar, value: BlobName },
         { name: "OriginalName", type: TYPES.NVarChar, value: FileName ?? BlobName },
         { name: "Extension", type: TYPES.NVarChar, value: extension },
-        { name: "UploadedBy", type: TYPES.NVarChar, value: ClaimedBy ?? null },
+        { name: "UploadedBy", type: TYPES.NVarChar, value: callerOid },
       ],
     );
 
@@ -518,6 +584,19 @@ async function handleUpdateAttachmentComment(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`updateAttachmentComment:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -527,6 +606,27 @@ async function handleUpdateAttachmentComment(
     }
 
     connection = await createConnection(token);
+    // Per-row ownership: only the uploader or an admin can edit the comment.
+    // Parent-table JOIN is informational; gating uses UploadedBy.
+    const ownership = await executeQuery(
+      connection,
+      `SELECT a.UploadedBy, a.JobID, j.CreatedBy AS JobCreatedBy
+         FROM Attachments a
+         LEFT JOIN Jobs j ON j.JobID = a.JobID
+        WHERE a.Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: AttachmentID }],
+    );
+    if (ownership.length === 0) {
+      return { status: 404, jsonBody: { error: "Attachment not found" } };
+    }
+    const uploadedBy = ownership[0].UploadedBy as string | null;
+    const callerRoles = await rolesForRequest(request);
+    const isAdmin = callerRoles.includes(AppRole.ADMIN);
+    const isOwner = uploadedBy != null && uploadedBy === callerOid;
+    if (!isAdmin && !isOwner) {
+      return forbiddenResponse("Only the uploader or an admin can edit this attachment's comment.");
+    }
+
     await executeQuery(
       connection,
       "UPDATE Attachments SET Comment = @Comment WHERE Id = @Id",
@@ -538,7 +638,7 @@ async function handleUpdateAttachmentComment(
 
     const rows = await executeQuery(
       connection,
-      "SELECT * FROM Attachments WHERE Id = @Id",
+      `SELECT ${ATTACHMENT_COLUMNS} FROM Attachments WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: AttachmentID }],
     );
     if (rows.length === 0) {

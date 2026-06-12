@@ -15,14 +15,22 @@ import {
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import {
+  MAX_LIST_ROWS,
+  parsePagination,
+  paginationSqlSuffix,
+} from "../pagination";
+import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
+import { decideApprovalAmountEdit } from "../edit-effects";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
 
 const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -57,17 +65,48 @@ async function getQuotes(
     whereParts.push("Status = @Status");
     params.push({ name: "Status", type: TYPES.NVarChar, value: status });
   }
-  const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+  const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
   let connection;
   try {
     connection = await createConnection(token);
+    const pagination = parsePagination(request.query);
+    const topClause = pagination.active ? "" : `TOP ${MAX_LIST_ROWS} `;
+
     const rows = await executeQuery(
       connection,
-      `SELECT ${QUOTE_COLUMNS} FROM Quotes ${where} ORDER BY CreatedAt DESC`,
+      `SELECT ${topClause}${QUOTE_COLUMNS} FROM Quotes ${whereSql} ORDER BY CreatedAt DESC${paginationSqlSuffix(pagination)}`,
       params,
     );
-    return { status: 200, jsonBody: { count: rows.length, quotes: rows } };
+
+    // Total is only meaningful when paginating; otherwise count = payload.length.
+    let total = rows.length;
+    if (pagination.active) {
+      const totalRows = await executeQuery(
+        connection,
+        `SELECT COUNT(*) AS Total FROM Quotes ${whereSql}`,
+        params,
+      );
+      total = (totalRows[0]?.Total as number) ?? rows.length;
+    }
+
+    const truncated = !pagination.active && rows.length >= MAX_LIST_ROWS;
+    if (truncated) {
+      context.warn(`getQuotes: hit MAX_LIST_ROWS ceiling (${MAX_LIST_ROWS}) — caller should paginate`);
+    }
+
+    return {
+      status: 200,
+      jsonBody: {
+        count: rows.length,
+        quotes: rows,
+        total,
+        truncated,
+        ...(pagination.active
+          ? { page: pagination.page, pageSize: pagination.pageSize }
+          : {}),
+      },
+    };
   } catch (error: any) {
     context.error("getQuotes failed:", error.message);
     return errorResponse("Failed to fetch quotes", error.message);
@@ -85,7 +124,7 @@ async function upsertQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -192,11 +231,13 @@ async function upsertQuote(
             { name: "QuoteID", type: TYPES.Int, value: newId },
           ],
         );
-        await executeQuery(
-          connection,
-          "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-          [{ name: "JobID", type: TYPES.Int, value: JobID }],
-        );
+        // First quote attached advances New/Quote → (Awaiting Approval, facilities).
+        // Helper no-ops on subsequent quotes (status already past Quote).
+        await advanceJobStatus(connection, JobID, JobEvent.QUOTE_RECEIVED, {
+          actor: CreatedBy ?? null,
+          quoteId: newId,
+          note: `Quote ${quoteNumber} received — awaiting approval.`,
+        });
 
         await commitTransaction(connection);
 
@@ -231,11 +272,106 @@ async function upsertQuote(
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
-    await executeQuery(
+    // Read the existing quote before mutating so we can diff for the audit
+    // trail and detect whether the edit invalidates a prior approval.
+    const beforeRows = await executeQuery(
       connection,
-      `UPDATE Quotes SET ${update.setClause} WHERE QuoteID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }, ...update.params],
+      `SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorName, Status, ApprovedAt
+         FROM Quotes WHERE QuoteID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
     );
+    if (beforeRows.length === 0) {
+      return { status: 404, jsonBody: { error: "Quote not found" } };
+    }
+    const before = beforeRows[0];
+    const jobId = before.JobID as number;
+    const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
+
+    const effects = decideApprovalAmountEdit(
+      {
+        amount: before.Amount != null ? Number(before.Amount) : null,
+        approvedAt: (before.ApprovedAt as Date | null) ?? null,
+        contractorName: (before.ContractorName as string | null) ?? null,
+        status: (before.Status as string | null) ?? null,
+      },
+      { amount: Amount, contractorName: ContractorName },
+    );
+
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE Quotes SET ${update.setClause} WHERE QuoteID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: QuoteID }, ...update.params],
+      );
+
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
+         VALUES (@JobID, @CreatedBy, @Text, 'quote_edited', @QuoteID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          {
+            name: "Text",
+            type: TYPES.NVarChar,
+            value: `Edited quote ${quoteNumber}: ${effects.summary}`,
+          },
+          { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+        ],
+      );
+
+      // Material change to an already-approved quote: tear down the approval
+      // so the next reviewer re-runs the tier check against the new amount.
+      // Without this a $150 quote could be edited to $25k and ride through
+      // on the original sign-off without director routing.
+      if (effects.clearApproval) {
+        await executeQuery(
+          connection,
+          `UPDATE Quotes
+              SET Status = 'pending',
+                  ApprovedAt = NULL, ApprovedBy = NULL,
+                  DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
+                  DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
+                  DirectorEmailSentBy = NULL
+            WHERE QuoteID = @Id`,
+          [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+        );
+        await executeQuery(
+          connection,
+          `UPDATE Jobs
+              SET ApprovedQuoteID = NULL, ApprovedBy = NULL, ApprovedAt = NULL,
+                  Status = 'Awaiting Approval', AwaitingRole = 'facilities',
+                  LastModifiedDate = SYSUTCDATETIME()
+            WHERE JobID = @JobID AND ApprovedQuoteID = @QuoteID`,
+          [
+            { name: "JobID", type: TYPES.Int, value: jobId },
+            { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+          ],
+        );
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
+           VALUES (@JobID, @CreatedBy, @Text, 'status_change', @QuoteID);`,
+          [
+            { name: "JobID", type: TYPES.Int, value: jobId },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            {
+              name: "Text",
+              type: TYPES.NVarChar,
+              value: `Quote ${quoteNumber} amount changed — approval cleared, awaiting re-review.`,
+            },
+            { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+          ],
+        );
+      }
+
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+
     const stored = await executeQuery(
       connection,
       `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
@@ -379,6 +515,17 @@ async function approveQuote(
       ],
     );
 
+    // Full approval advances the job to (Work, facilities). Quotes still
+    // awaiting director / accounts sign-off don't move status — they stay
+    // in (Awaiting Approval, facilities) until the final approval lands.
+    if (newStatus === "approved") {
+      await advanceJobStatus(connection, jobId, JobEvent.QUOTE_APPROVED, {
+        actor: ApprovedBy ?? null,
+        quoteId: QuoteID,
+        note: `Quote ${quoteLabel} approved — ready for PO.`,
+      });
+    }
+
     // Fire-and-forget director email: packet build + Graph sendMail can take
     // 5–20s with attachments, and we don't want the user's click to block on
     // it. Uses a fresh connection so the request connection can close in
@@ -451,7 +598,7 @@ async function rejectQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -638,7 +785,7 @@ async function completeQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -712,7 +859,7 @@ async function uncompleteQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -788,7 +935,7 @@ async function deleteQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -845,7 +992,7 @@ async function validateQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -1049,7 +1196,9 @@ async function resendDirectorQuoteEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  // Same reasoning as resendDirectorInvoiceEmail — the workflow participants
+  // who can see the banner need to be able to nudge the director themselves.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   let connection;

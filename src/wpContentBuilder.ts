@@ -6,9 +6,21 @@ export interface WpPostPayload {
   featured_media: number | null;
 }
 
-/** Converts ^N notation to HTML superscript, e.g. "m^2" → "m<sup>2</sup>". */
+/** Escapes the five XML/HTML characters so user-supplied strings can't break
+ *  out of the surrounding tag and inject markup or script. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Converts ^N notation to HTML superscript, e.g. "m^2" → "m<sup>2</sup>".
+ *  Input is HTML-escaped first so any other markup in the source is neutralised. */
 function applyMarkup(text: string): string {
-  return text.replace(/\^(\d+)/g, "<sup>$1</sup>");
+  return escapeHtml(text).replace(/\^(\d+)/g, "<sup>$1</sup>");
 }
 
 /** Wraps text in <p> tags, splitting on blank lines and converting single

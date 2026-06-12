@@ -20,10 +20,13 @@ import {
   buildTaskTitle,
   buildTenantTaskDescription,
   computeEventDate,
+  groupPlannerTasksByKey,
   isInWindow,
   LEAD_TIMES,
+  plannerTaskKey,
   toIsoDateString,
   type PlannerJobRow,
+  type PlannerTaskRowShape,
   type PlannerTenantRow,
   type TriggerType,
 } from "../plannerHelpers";
@@ -140,6 +143,27 @@ export async function plannerSyncTimer(
     let skipped = 0;
     let recreated = 0;
 
+    // Batched prefetch — one query covers every (tenant × trigger) combo so
+    // the inner loop reads from a Map instead of issuing per-iteration SELECTs.
+    // Bound by tenant IDs from this run + the fixed TENANT_TRIGGER_TYPES list.
+    const tenantIds = tenants.map((t) => t.tenantId);
+    const tenantTaskRows = tenantIds.length === 0
+      ? []
+      : await executeQuery(
+          connection,
+          `SELECT EntityType, EntityId, TriggerType, LeadTimeDays,
+                  Id, PlannerTaskId, Status
+           FROM dbo.PlannerTasks
+           WHERE EntityType = 'tenant'
+             AND EntityId IN (${tenantIds.map((_, i) => `@TenantId${i}`).join(",")})
+             AND TriggerType IN (${TENANT_TRIGGER_TYPES.map((_, i) => `@TriggerType${i}`).join(",")})`,
+          [
+            ...tenantIds.map((id, i) => ({ name: `TenantId${i}`, type: TYPES.Int, value: id })),
+            ...TENANT_TRIGGER_TYPES.map((t, i) => ({ name: `TriggerType${i}`, type: TYPES.NVarChar, value: t })),
+          ],
+        );
+    const tenantTaskByKey = groupPlannerTasksByKey(tenantTaskRows as PlannerTaskRowShape[]);
+
     for (const tenant of tenants) {
       for (const triggerType of TENANT_TRIGGER_TYPES) {
         const eventDate = computeEventDate(tenant, triggerType);
@@ -148,20 +172,13 @@ export async function plannerSyncTimer(
         for (const leadTimeDays of LEAD_TIMES) {
           if (!isInWindow(today, eventDate, leadTimeDays)) continue;
 
-          const existing = await executeQuery(
-            connection,
-            `SELECT Id, PlannerTaskId, Status
-             FROM dbo.PlannerTasks
-             WHERE EntityType = 'tenant'
-               AND EntityId = @EntityId
-               AND TriggerType = @TriggerType
-               AND LeadTimeDays = @LeadTimeDays`,
-            [
-              { name: "EntityId", type: TYPES.Int, value: tenant.tenantId },
-              { name: "TriggerType", type: TYPES.NVarChar, value: triggerType },
-              { name: "LeadTimeDays", type: TYPES.Int, value: leadTimeDays },
-            ],
-          );
+          const existingRow = tenantTaskByKey.get(plannerTaskKey({
+            entityType: "tenant",
+            entityId: tenant.tenantId,
+            triggerType,
+            leadTimeDays,
+          }));
+          const existing = existingRow ? [existingRow] : [];
 
           const displayName = tenant.tradingName ?? tenant.legalName;
           const title = buildTaskTitle(displayName, triggerType, leadTimeDays);
@@ -326,7 +343,10 @@ export async function plannerSyncTimer(
        WHERE j.IsArchived = 0
          AND j.Status <> 'Done'
          AND j.ExpectedProgressUpdate IS NOT NULL
-         AND CAST(j.ExpectedProgressUpdate AS DATE) <= CAST(SYSUTCDATETIME() AS DATE)`,
+         -- Sargable form: compare the indexed column directly to the start of
+         -- tomorrow (UTC). Including everything strictly before tomorrow gives
+         -- us "today or earlier" without wrapping the column in CAST.
+         AND j.ExpectedProgressUpdate < DATEADD(DAY, 1, CAST(SYSUTCDATETIME() AS DATE))`,
     );
 
     const jobs: PlannerJobRow[] = jobRows.map((r) => ({
@@ -339,17 +359,32 @@ export async function plannerSyncTimer(
     let jobCreated = 0;
     let jobSkipped = 0;
 
+    // Batched prefetch for the job_update_due trigger. One query covers
+    // every job from this run.
+    const jobIds = jobs.map((j) => j.jobId);
+    const jobTaskRows = jobIds.length === 0
+      ? []
+      : await executeQuery(
+          connection,
+          `SELECT EntityType, EntityId, TriggerType, LeadTimeDays,
+                  Id, PlannerTaskId, Status
+           FROM dbo.PlannerTasks
+           WHERE EntityType = 'job'
+             AND TriggerType = 'job_update_due'
+             AND LeadTimeDays = 0
+             AND EntityId IN (${jobIds.map((_, i) => `@JobId${i}`).join(",")})`,
+          jobIds.map((id, i) => ({ name: `JobId${i}`, type: TYPES.Int, value: id })),
+        );
+    const jobTaskByKey = groupPlannerTasksByKey(jobTaskRows as PlannerTaskRowShape[]);
+
     for (const job of jobs) {
-      const existing = await executeQuery(
-        connection,
-        `SELECT Id, PlannerTaskId, Status
-         FROM dbo.PlannerTasks
-         WHERE EntityType = 'job'
-           AND EntityId = @EntityId
-           AND TriggerType = 'job_update_due'
-           AND LeadTimeDays = 0`,
-        [{ name: "EntityId", type: TYPES.Int, value: job.jobId }],
-      );
+      const existingRow = jobTaskByKey.get(plannerTaskKey({
+        entityType: "job",
+        entityId: job.jobId,
+        triggerType: "job_update_due",
+        leadTimeDays: 0,
+      }));
+      const existing = existingRow ? [existingRow] : [];
 
       const title = buildTaskTitle(job.title, "job_update_due", 0);
       const description = buildJobTaskDescription(job, APP_BASE_URL);
@@ -647,7 +682,12 @@ export async function plannerSyncTimer(
          AND DueDate < CAST(SYSUTCDATETIME() AS DATE)`,
     );
 
-    let resolved = 0;
+    // Phase 1: Graph completes per-row (each task has its own etag).
+    // Phase 2: collected successes get marked resolved in a single batched
+    // UPDATE — eliminates one round-trip per overdue task on the happy path.
+    // Failures stay per-row because recordPlannerSyncOutcome writes the error
+    // message into LastError, which differs per row.
+    const resolvedIds: number[] = [];
     for (const row of overdue) {
       const rowId = row.Id as number;
       const plannerTaskId = row.PlannerTaskId as string;
@@ -656,16 +696,7 @@ export async function plannerSyncTimer(
         if (task) {
           await graphCompletePlannerTask(plannerTaskId, task.etag);
         }
-        await executeQuery(
-          connection,
-          `UPDATE dbo.PlannerTasks
-           SET Status = 'resolved', ResolvedAt = SYSUTCDATETIME(),
-               LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
-               AttemptCount = AttemptCount + 1
-           WHERE Id = @Id`,
-          [{ name: "Id", type: TYPES.Int, value: rowId }],
-        );
-        resolved++;
+        resolvedIds.push(rowId);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         context.error(
@@ -675,6 +706,19 @@ export async function plannerSyncTimer(
         await recordPlannerSyncOutcome(connection, rowId, message);
       }
     }
+
+    if (resolvedIds.length > 0) {
+      await executeQuery(
+        connection,
+        `UPDATE dbo.PlannerTasks
+         SET Status = 'resolved', ResolvedAt = SYSUTCDATETIME(),
+             LastSyncedAt = SYSUTCDATETIME(), LastError = NULL,
+             AttemptCount = AttemptCount + 1
+         WHERE Id IN (${resolvedIds.map((_, i) => `@Id${i}`).join(",")})`,
+        resolvedIds.map((id, i) => ({ name: `Id${i}`, type: TYPES.Int, value: id })),
+      );
+    }
+    const resolved = resolvedIds.length;
     context.log(`plannerSyncTimer: resolved ${resolved} overdue tasks`);
     context.log("plannerSyncTimer: complete");
   } catch (error: unknown) {

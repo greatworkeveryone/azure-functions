@@ -18,8 +18,9 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
-import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -426,13 +427,21 @@ async function getFlaggedEmails(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const isDev = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Development";
-
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  if (!isDev) {
-    const roleCheck = await requireRole(request, [AppRole.ADMIN]);
-    if (roleCheck) return roleCheck;
+  const roleCheck = await requireRole(request, [AppRole.ADMIN]);
+  if (roleCheck) return roleCheck;
+
+  // Cheap per-OID throttle so a runaway admin client (or a stuck dev page on
+  // a refresh loop) can't drown the Emails table in repeated full scans.
+  const oid = oidFromToken(token) ?? "unknown";
+  const rl = checkRateLimit(`getFlaggedEmails:${oid}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
   }
 
   let connection;

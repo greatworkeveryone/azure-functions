@@ -143,11 +143,12 @@ export function buildTenantTaskDescription(
   const location = [tenant.buildingName, tenant.firstOccupancy]
     .filter(Boolean)
     .join(" | ");
+  const prefix = location ? `${location}\n` : "";
   const link = `${appBaseUrl}/tenancy/${tenant.tenantId}`;
 
   switch (triggerType) {
     case "lease_expiry":
-      return `${location}\nExpiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
+      return `${prefix}Expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     case "option_notice": {
       const deadline =
         tenant.expiry && tenant.optionNoticeMonths != null
@@ -158,10 +159,10 @@ export function buildTenantTaskDescription(
               ).toISOString(),
             )
           : "—";
-      return `${location}\nOption deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
+      return `${prefix}Option deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     }
     case "rent_review":
-      return `${location}\nReview due: ${tenant.nextReviewDate ? formatDDMMYYYY(tenant.nextReviewDate) : "—"}\nReview type: ${tenant.reviewType ?? "—"}\n${link}`;
+      return `${prefix}Review due: ${tenant.nextReviewDate ? formatDDMMYYYY(tenant.nextReviewDate) : "—"}\nReview type: ${tenant.reviewType ?? "—"}\n${link}`;
     default:
       return link;
   }
@@ -253,4 +254,42 @@ export function buildLostKeyTaskDescription(
     ``,
     `Open in Command Centre: ${link}`,
   ].join("\n").trim();
+}
+
+// ── Batch helpers for plannerSyncTimer's existence checks ───────────────────
+// The timer used to issue one SELECT per (entity × trigger × leadTime) inside
+// nested loops to look up an existing PlannerTasks row. These helpers let
+// callers pre-fetch the relevant rows in a single query and look them up by
+// composite key, collapsing N×M×K reads into one.
+
+export interface PlannerTaskRowShape {
+  EntityType: string;
+  EntityId: number;
+  TriggerType: string;
+  LeadTimeDays: number;
+  Id: number;
+  PlannerTaskId: string;
+  Status: string;
+}
+
+export interface PlannerTaskKey {
+  entityType: "tenant" | "job";
+  entityId: number;
+  triggerType: TriggerType;
+  leadTimeDays: number;
+}
+
+export function plannerTaskKey(k: PlannerTaskKey): string {
+  return `${k.entityType}|${k.entityId}|${k.triggerType}|${k.leadTimeDays}`;
+}
+
+export function groupPlannerTasksByKey(
+  rows: PlannerTaskRowShape[],
+): Map<string, PlannerTaskRowShape> {
+  const m = new Map<string, PlannerTaskRowShape>();
+  for (const r of rows) {
+    const k = `${r.EntityType}|${r.EntityId}|${r.TriggerType}|${r.LeadTimeDays}`;
+    m.set(k, r); // last row wins; DB has a unique constraint so this is rare
+  }
+  return m;
 }

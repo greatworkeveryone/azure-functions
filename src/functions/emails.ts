@@ -7,12 +7,17 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { createConnection, executeQuery, closeConnection } from "../db";
-import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
-import { graphSendReply, graphFetchEmails, GraphEmail } from "../graph";
+import { graphFetchEmails, GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { runParseBatch } from "./parseEmails";
 import { checkRateLimit } from "../rateLimit";
+
+// Server-generated email-attachment blobs land under emails/{messageId}/...
+// where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
+// claim attempts that point Attachments rows at arbitrary blob paths.
+const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
 // render click-to-open chips without a second round-trip for each file.
@@ -201,12 +206,51 @@ async function ingestEmail(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`ingestEmail:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
     const { MessageID, FromAddress, Subject, Body, ReceivedAt, AttachmentBlobs } = body ?? {};
     if (!MessageID || typeof MessageID !== "string") {
       return { status: 400, jsonBody: { error: "MessageID (string) required" } };
+    }
+
+    // AttachmentBlobs is either a JSON array of blob-name strings or a JSON
+    // array of { blobName, fileName } objects. Reject anything outside the
+    // email-sync prefix so a caller can't slip Attachments rows pointing at
+    // arbitrary blob paths into the inbox.
+    if (typeof AttachmentBlobs === "string" && AttachmentBlobs.length > 0) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(AttachmentBlobs);
+      } catch {
+        return { status: 400, jsonBody: { error: "AttachmentBlobs must be valid JSON" } };
+      }
+      if (!Array.isArray(parsed)) {
+        return { status: 400, jsonBody: { error: "AttachmentBlobs must be a JSON array" } };
+      }
+      for (const entry of parsed) {
+        const blobName = typeof entry === "string"
+          ? entry
+          : (entry && typeof entry === "object" && "blobName" in entry && typeof (entry as { blobName: unknown }).blobName === "string"
+            ? (entry as { blobName: string }).blobName
+            : null);
+        if (!blobName || !EMAIL_BLOB_PREFIX_RE.test(blobName)) {
+          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must reference emails/{messageId}/..." } };
+        }
+      }
     }
 
     connection = await createConnection(token);
@@ -269,13 +313,28 @@ async function promoteEmailToQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`promoteEmailToQuote:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes, CreatedBy } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
+    // CreatedBy is derived from the verified token; body field is ignored.
+    const CreatedBy = callerOid;
 
     connection = await createConnection(token);
 
@@ -378,6 +437,19 @@ async function archiveEmail(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`archiveEmail:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -418,6 +490,19 @@ async function flagEmailForReview(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`flagEmailForReview:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -457,13 +542,28 @@ async function promoteEmailToJob(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`promoteEmailToJob:${callerOid}`, { limit: 60, windowMs: 60_000 });
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, CreatedBy, ExistingJobID } = body ?? {};
+    const { EmailID, ExistingJobID } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
+    // CreatedBy is derived from the verified token; body field is ignored.
+    const CreatedBy = callerOid;
 
     connection = await createConnection(token);
 
@@ -529,8 +629,11 @@ async function promoteEmailToInvoice(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
-  const callerOid = oidFromToken(token) ?? "unknown";
-  const rl = checkRateLimit(`promoteEmailToInvoice:${callerOid}`, { limit: 30, windowMs: 60_000 });
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`promoteEmailToInvoice:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
     return {
       status: 429,
@@ -542,13 +645,15 @@ async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, CreatedBy } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
         jsonBody: { error: "EmailID and JobID (numbers) are required" },
       };
     }
+    // CreatedBy is derived from the verified token; body field is ignored.
+    const CreatedBy = callerOid;
 
     connection = await createConnection(token);
 
@@ -631,7 +736,7 @@ async function getEmailThread(
 
 async function sendEmailReply(
   request: HttpRequest,
-  context: InvocationContext,
+  _context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
@@ -639,105 +744,8 @@ async function sendEmailReply(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
-  const callerOid = oidFromToken(token) ?? "unknown";
-  const rl = checkRateLimit(`sendEmailReply:${callerOid}`, { limit: 30, windowMs: 60_000 });
-  if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
-  }
-
-  let connection;
-  try {
-    const body = (await request.json()) as any;
-    const { EmailID, Body: replyBody, SentBy, ToAddress, Attachments } = body ?? {};
-    if (typeof EmailID !== "number" || typeof replyBody !== "string" || !replyBody.trim()) {
-      return { status: 400, jsonBody: { error: "EmailID (number) and Body (string) required" } };
-    }
-    const attachments: Array<{ fileName: string; contentType: string; contentBase64: string }> =
-      Array.isArray(Attachments) ? Attachments : [];
-
-    connection = await createConnection(token);
-
-    // Fetch email metadata for Graph send (subject + messageId for threading)
-    const emailRows = await executeQuery(
-      connection,
-      `SELECT Subject, MessageID, FromAddress FROM Emails WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
-    if (!emailRows[0]) {
-      return { status: 404, jsonBody: { error: "Email not found" } };
-    }
-    const email = emailRows[0] as { Subject: string | null; MessageID: string | null; FromAddress: string | null };
-
-    const toAddr = ToAddress ?? email.FromAddress ?? null;
-
-    const attachmentNames = attachments.map((a) => a.fileName);
-    const attachmentNamesJson = attachmentNames.length ? JSON.stringify(attachmentNames) : null;
-
-    // Store reply first — Graph send is best-effort.
-    const inserted = await executeQuery(
-      connection,
-      `INSERT INTO EmailReplies (EmailID, Body, ToAddress, SentBy, AttachmentNames)
-       OUTPUT INSERTED.ReplyID
-       VALUES (@EmailID, @Body, @ToAddress, @SentBy, @AttachmentNames)`,
-      [
-        { name: "EmailID", type: TYPES.Int, value: EmailID },
-        { name: "Body", type: TYPES.NVarChar, value: replyBody },
-        { name: "ToAddress", type: TYPES.NVarChar, value: toAddr },
-        { name: "SentBy", type: TYPES.NVarChar, value: SentBy ?? null },
-        { name: "AttachmentNames", type: TYPES.NVarChar, value: attachmentNamesJson },
-      ],
-    );
-    const replyId = inserted[0].ReplyID as number;
-
-    // Attempt Graph send — fail gracefully.
-    let graphSent = false;
-    let graphMessageId: string | null = null;
-    let graphError: string | null = null;
-    if (toAddr) {
-      try {
-        graphMessageId = await graphSendReply(
-          toAddr,
-          email.Subject ?? "(no subject)",
-          replyBody,
-          email.MessageID,
-          attachments.length ? attachments : undefined,
-          SentBy ? [SentBy] : undefined,
-        );
-        graphSent = true;
-      } catch (err: any) {
-        graphError = err?.message ?? "Unknown Graph error";
-        context.warn("Graph sendMail failed (reply still stored):", graphError);
-      }
-    }
-
-    // Update Graph outcome on the stored reply row.
-    await executeQuery(
-      connection,
-      `UPDATE EmailReplies
-       SET GraphSent = @GraphSent, GraphMessageID = @GraphMessageID, GraphError = @GraphError
-       WHERE ReplyID = @ReplyID`,
-      [
-        { name: "GraphSent", type: TYPES.Bit, value: graphSent ? 1 : 0 },
-        { name: "GraphMessageID", type: TYPES.NVarChar, value: graphMessageId },
-        { name: "GraphError", type: TYPES.NVarChar, value: graphError },
-        { name: "ReplyID", type: TYPES.Int, value: replyId },
-      ],
-    );
-
-    return {
-      status: 200,
-      jsonBody: { replyId, graphSent, graphError: graphError ?? undefined },
-    };
-  } catch (error: any) {
-    context.error("sendEmailReply failed:", error.message);
-    return errorResponse("Failed to send email reply", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
+  // disabled 2026-05-30 — see plan
+  return { status: 503, jsonBody: { error: "Outbound mail is temporarily disabled" } };
 }
 
 // ── Shared: upsert a batch of Graph emails into the DB ───────────────────────

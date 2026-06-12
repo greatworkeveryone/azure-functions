@@ -1,5 +1,5 @@
 {
-  "name": "rpcc-functions",
+  "name": "rpcc-api2",
   "version": "1.0.0",
   "description": "RPCC Azure Functions - myBuildings sync and data API",
   "main": "dist/functions/*.js",

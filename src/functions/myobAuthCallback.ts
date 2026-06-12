@@ -37,7 +37,7 @@ async function myobAuthCallback(
   if (error) {
     context.warn(`MYOB OAuth returned error: ${error} — ${errorDescription}`);
     return htmlPage(
-      `<h1>MYOB authorization failed</h1><p>${error}: ${errorDescription ?? ""}</p>`,
+      `<h1>MYOB authorization failed</h1><p>${escapeHtml(error)}: ${escapeHtml(errorDescription ?? "")}</p>`,
       400,
     );
   }
@@ -78,7 +78,8 @@ function escapeHtml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 app.http("myobAuthCallback", {

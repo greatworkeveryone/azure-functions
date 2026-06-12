@@ -27,8 +27,20 @@ app.hook.postInvocation(async (hookContext) => {
   Sentry.withScope((scope) => {
     scope.setTag("function", hookContext.invocationContext.functionName);
     if (request) {
+      // Strip credential-bearing headers before handing them to Sentry —
+      // otherwise the bearer token (and our X-App-Token) ship out with every
+      // captured exception. Match case-insensitively because Functions' header
+      // iterator may surface either casing depending on the runtime.
+      const REDACTED_HEADERS = new Set([
+        "authorization",
+        "x-app-token",
+        "cookie",
+        "proxy-authorization",
+      ]);
       const headers: Record<string, string> = {};
-      request.headers.forEach((value, key) => { headers[key] = value; });
+      request.headers.forEach((value, key) => {
+        headers[key] = REDACTED_HEADERS.has(key.toLowerCase()) ? "[redacted]" : value;
+      });
       scope.setSDKProcessingMetadata({
         normalizedRequest: {
           method: request.method,

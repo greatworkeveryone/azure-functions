@@ -1,4 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { timingSafeEqual } from "crypto";
 import { TYPES } from "tedious";
 import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
@@ -6,6 +7,15 @@ import { graphFetchEmails, graphCreateSubscription, graphRenewSubscription } fro
 import { upsertGraphEmails } from "./emails";
 import { runParseBatch } from "./parseEmails";
 import { checkRateLimit } from "../rateLimit";
+
+/** Constant-time string compare. Returns false on length mismatch instead of
+ *  leaking timing information about the prefix. */
+function timingSafeCompareString(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, "utf8");
+  const bBuf = Buffer.from(b, "utf8");
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
+}
 
 // ── POST /api/graphNotification ─────────────────────────────────────────────
 // Receives Graph change notifications when new email arrives in the mailbox.
@@ -31,7 +41,9 @@ async function graphNotification(
     return { status: 202 };
   }
 
-  const valid = notifications.filter((n) => n.clientState === clientState);
+  const valid = notifications.filter((n) =>
+    typeof n.clientState === "string" && timingSafeCompareString(n.clientState, clientState),
+  );
 
   if (valid.length === 0) {
     context.warn("graphNotification: no valid notifications (clientState mismatch)");

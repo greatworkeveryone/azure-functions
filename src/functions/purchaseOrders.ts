@@ -30,6 +30,9 @@ import {
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
 import { formatDocNumber } from "../doc-number";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
+import { decidePurchaseOrderEdit } from "../edit-effects";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -48,7 +51,7 @@ async function getPurchaseOrders(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -94,7 +97,9 @@ async function upsertPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  // Plain accounts staff create / edit POs alongside facilities managers —
+  // approval/send-to-contractor is the gated step, drafting is not.
+  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
   let connection;
@@ -182,6 +187,15 @@ async function upsertPurchaseOrder(
           ],
         );
         const newId = inserted[0].PurchaseOrderID as number;
+
+        // First PO insert advances (Awaiting Approval, facilities) → (Work, facilities).
+        // No-op if already past that state (subsequent POs, manual moves, etc).
+        await advanceJobStatus(connection, JobID, JobEvent.PO_CREATED, {
+          actor: CreatedBy ?? null,
+          purchaseOrderId: newId,
+          note: `PO ${poNumber} created — work in progress.`,
+        });
+
         await commitTransaction(connection);
 
         const stored = await executeQuery(
@@ -228,14 +242,112 @@ async function upsertPurchaseOrder(
       ? `${update.setClause}, UpdatedAt = SYSUTCDATETIME()`
       : "UpdatedAt = SYSUTCDATETIME()";
 
-    await executeQuery(
+    // Read the existing PO before mutating so we can diff for the audit
+    // trail and decide whether to clear the Sent / MYOB markers.
+    const beforeRows = await executeQuery(
       connection,
-      `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-        ...(update?.params ?? []),
-      ],
+      `SELECT PurchaseOrderID, JobID, PONumber, ContractorName,
+              EstimatedCost, CostNotToExceed, SentAt, MyobCreatedAt, CompletedAt
+         FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
+    if (beforeRows.length === 0) {
+      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    }
+    const before = beforeRows[0];
+    const jobId = before.JobID as number;
+    const poNumber =
+      (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
+
+    const effects = decidePurchaseOrderEdit(
+      {
+        completedAt: (before.CompletedAt as Date | null) ?? null,
+        contractorName: (before.ContractorName as string | null) ?? null,
+        costNotToExceed:
+          before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
+        estimatedCost:
+          before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
+        myobCreatedAt: (before.MyobCreatedAt as Date | null) ?? null,
+        sentAt: (before.SentAt as Date | null) ?? null,
+      },
+      {
+        contractorName: ContractorName,
+        costNotToExceed: CostNotToExceed,
+        estimatedCost: EstimatedCost,
+      },
+    );
+
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+          ...(update?.params ?? []),
+        ],
+      );
+
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, @CreatedBy, @Text, 'po_edited', @POID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          {
+            name: "Text",
+            type: TYPES.NVarChar,
+            value: `Edited PO ${poNumber}: ${effects.summary}`,
+          },
+          { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
+        ],
+      );
+
+      // Cost moved while a PDF/email had already gone to the contractor or
+      // MYOB had already been told about this PO — the downstream record is
+      // now stale. Clear the markers + log it so the user knows to re-send
+      // / re-record. (Once Completed we treat dollars as historical and
+      // leave markers alone — see decidePurchaseOrderEdit.)
+      if (effects.clearSentMarker || effects.clearMyobMarker) {
+        const clauses: string[] = [];
+        if (effects.clearSentMarker) {
+          clauses.push("SentAt = NULL", "SentBy = NULL");
+        }
+        if (effects.clearMyobMarker) {
+          clauses.push("MyobCreatedAt = NULL", "MyobCreatedBy = NULL");
+        }
+        await executeQuery(
+          connection,
+          `UPDATE PurchaseOrders SET ${clauses.join(", ")} WHERE PurchaseOrderID = @Id`,
+          [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+        );
+        const noteParts: string[] = [];
+        if (effects.clearSentMarker) noteParts.push("re-send to contractor");
+        if (effects.clearMyobMarker) noteParts.push("re-record in MYOB");
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+           VALUES (@JobID, @CreatedBy, @Text, 'po_markers_cleared', @POID);`,
+          [
+            { name: "JobID", type: TYPES.Int, value: jobId },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            {
+              name: "Text",
+              type: TYPES.NVarChar,
+              value: `PO ${poNumber} cost changed — please ${noteParts.join(" and ")}.`,
+            },
+            { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
+          ],
+        );
+      }
+
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+
     const stored = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
@@ -611,7 +723,7 @@ async function markPurchaseOrderMyobCreated(
 
     const rows = await executeQuery(
       connection,
-      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -620,6 +732,7 @@ async function markPurchaseOrderMyobCreated(
     if (rows.length === 0) {
       return { status: 404, jsonBody: { error: "Purchase order not found" } };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -639,7 +752,7 @@ async function markPurchaseOrderMyobCreated(
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} as created in MYOB` },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} as created in MYOB` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
@@ -693,7 +806,7 @@ async function unmarkPurchaseOrderMyobCreated(
 
     const rows = await executeQuery(
       connection,
-      `SELECT CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -708,6 +821,7 @@ async function unmarkPurchaseOrderMyobCreated(
         jsonBody: { error: "Cannot undo MYOB entry — this purchase order has already been marked complete." },
       };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -725,7 +839,7 @@ async function unmarkPurchaseOrderMyobCreated(
        VALUES (@JobID, NULL, @Text, 'po_myob_uncreated', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} from MYOB created` },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} from MYOB created` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
@@ -779,7 +893,7 @@ async function markPurchaseOrderComplete(
 
     const rows = await executeQuery(
       connection,
-      `SELECT MyobCreatedAt, CompletedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT MyobCreatedAt, CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -794,6 +908,7 @@ async function markPurchaseOrderComplete(
         jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
       };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -807,7 +922,7 @@ async function markPurchaseOrderComplete(
       ],
     );
 
-    // Fire PO event
+    // Fire PO-completion event (kept separate from the status_change row).
     await executeQuery(
       connection,
       `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
@@ -815,28 +930,21 @@ async function markPurchaseOrderComplete(
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked PO #${id} complete` },
+        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} complete` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );
 
-    // Transition the job: Awaiting Approval, accounts team
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-       VALUES (@JobID, @CreatedBy, @Text, 'status_changed', 'Awaiting Approval', 'accounts');`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: "Work complete — awaiting accounts approval" },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `UPDATE Jobs SET Status = 'Awaiting Approval', AwaitingRole = 'accounts', LastModifiedDate = SYSUTCDATETIME()
-       WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
+    // Advance the job through the state machine. From (Work, facilities) this
+    // lands at (Awaiting Approval, accounts). The previous inline UPDATE
+    // unconditionally clobbered Status to 'Awaiting Approval' regardless of
+    // the prior state — that's the silent-demotion bug. The helper refuses
+    // backward moves, so completing a PO can no longer undo a manual status.
+    await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
+      actor: completedBy ?? null,
+      purchaseOrderId: id,
+      note: `${poLabel} complete — awaiting accounts approval.`,
+    });
 
     const stored = await executeQuery(
       connection,
@@ -881,7 +989,7 @@ async function unmarkPurchaseOrderComplete(
 
     const rows = await executeQuery(
       connection,
-      `SELECT PurchaseOrderID FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
@@ -890,6 +998,7 @@ async function unmarkPurchaseOrderComplete(
     if (rows.length === 0) {
       return { status: 404, jsonBody: { error: "Purchase order not found" } };
     }
+    const poLabel = rows[0].PONumber ?? `PO #${id}`;
 
     await executeQuery(
       connection,
@@ -909,7 +1018,7 @@ async function unmarkPurchaseOrderComplete(
        VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked PO #${id} as complete` },
+        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
     );

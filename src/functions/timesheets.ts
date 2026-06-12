@@ -16,7 +16,25 @@ import {
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
+  verifiedIdentityFromRequest,
 } from "../auth";
+import { checkRateLimit } from "../rateLimit";
+
+const TIMESHEET_UPSERT_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
+const TIMESHEET_SUBMIT_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+// Explicit column list — mirrors JOB_COLUMNS pattern in jobs.ts.
+// Includes Data (the entries JSON) because all four callers return the
+// row to a frontend that renders the timesheet. If a future endpoint
+// needs only metadata, add a TIMESHEET_LIST_COLUMNS variant rather
+// than dropping Data here.
+const TIMESHEET_COLUMNS = `
+  TimesheetID, UserID, UserDisplayName, WeekStartDate, Role, Data,
+  ReadyForApproval, ReadyForApprovalDate,
+  Approved, ApprovedDate, ApprovedBy, ApprovedByName,
+  SentToMyobDate,
+  CreatedOn, CreatedBy, UpdatedOn, UpdatedBy
+`;
 
 interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string; role?: string }
 interface SubmitTimesheetBody { timesheetId: number; submit: boolean }
@@ -65,8 +83,15 @@ async function getTimesheet(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const callerOid = oidFromToken(token);
-  if (!callerOid) return unauthorizedResponse();
+  // Baseline gate — keeps Pending (no-role) accounts out entirely.
+  const baselineDenied = await requireRole(request, [AppRole.USER]);
+  if (baselineDenied) return baselineDenied;
+
+  // Caller identity comes from the verified token, never a query/body param —
+  // a body-supplied userId can only describe the SUBJECT, never the caller.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
 
   const roles = await rolesForRequest(request);
   const weekStart = request.query.get("weekStart");
@@ -131,10 +156,27 @@ async function upsertTimesheet(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const callerOid = oidFromToken(token);
-  if (!callerOid) return unauthorizedResponse();
+  // Baseline gate — keeps Pending (no-role) accounts out entirely.
+  const baselineDenied = await requireRole(request, [AppRole.USER]);
+  if (baselineDenied) return baselineDenied;
 
-  const callerName = nameFromToken(token) ?? "";
+  // Caller identity is taken from the verified token. body.userId can only
+  // identify the SUBJECT (when a manager edits someone else's sheet), never
+  // the caller — otherwise a forged body could spoof who's doing the write.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+  const callerName = identity.name;
+
+  const rl = checkRateLimit(`timesheetUpsert:${callerOid}`, TIMESHEET_UPSERT_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+
   const roles = await rolesForRequest(request);
 
   let connection;
@@ -202,7 +244,7 @@ async function upsertTimesheet(
 
       const updated = await executeQuery(
         connection,
-        "SELECT * FROM dbo.Timesheets WHERE TimesheetID = @Id",
+        `SELECT ${TIMESHEET_COLUMNS} FROM dbo.Timesheets WHERE TimesheetID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: row.TimesheetID }],
       );
       return { status: 200, jsonBody: { timesheet: updated[0] } };
@@ -232,7 +274,7 @@ async function upsertTimesheet(
     const newId = inserted[0].TimesheetID as number;
     const created = await executeQuery(
       connection,
-      "SELECT * FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      `SELECT ${TIMESHEET_COLUMNS} FROM dbo.Timesheets WHERE TimesheetID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: newId }],
     );
     return { status: 200, jsonBody: { timesheet: created[0] } };
@@ -256,8 +298,23 @@ async function submitTimesheetForApproval(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const callerOid = oidFromToken(token);
-  if (!callerOid) return unauthorizedResponse();
+  // Baseline gate — keeps Pending (no-role) accounts out entirely.
+  const baselineDenied = await requireRole(request, [AppRole.USER]);
+  if (baselineDenied) return baselineDenied;
+
+  // Caller identity from verified token — body cannot spoof who is submitting.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+
+  const rl = checkRateLimit(`timesheetSubmit:${callerOid}`, TIMESHEET_SUBMIT_RATE_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
 
   const roles = await rolesForRequest(request);
 
@@ -308,7 +365,7 @@ async function submitTimesheetForApproval(
 
     const updated = await executeQuery(
       connection,
-      "SELECT * FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      `SELECT ${TIMESHEET_COLUMNS} FROM dbo.Timesheets WHERE TimesheetID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     return { status: 200, jsonBody: { timesheet: updated[0] } };
@@ -398,7 +455,7 @@ async function approveTimesheet(
 
     const updated = await executeQuery(
       connection,
-      "SELECT * FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      `SELECT ${TIMESHEET_COLUMNS} FROM dbo.Timesheets WHERE TimesheetID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     return { status: 200, jsonBody: { timesheet: updated[0] } };

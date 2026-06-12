@@ -86,10 +86,25 @@ const KEY_COLUMNS = `
   k.LostAt, k.LostById, k.LostByName, k.LostComment
 `;
 
-// Photo SAS URLs are baked into list/detail responses. 4h was tight — a user
-// who opened the page in the morning would see broken images by mid-afternoon.
-// 24h lasts a working day comfortably without raising the surface area much.
-const PHOTO_SAS_TTL_MS = 24 * 60 * 60 * 1000;
+// Photo SAS URLs are baked into list/detail responses. Tight TTL keeps the
+// blow-radius small if a response is logged or leaked: the URL stops working
+// inside an hour. Clients re-fetch the list/detail to get a fresh URL.
+const PHOTO_SAS_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Prevents CSV/XLSX formula injection. Excel treats a cell starting with =, +,
+ * -, @, tab, or CR as a formula — a malicious building name could exfiltrate
+ * data the first time someone opens the template. Prefixing with a single
+ * quote neutralises the formula trigger while staying readable.
+ */
+function sanitiseCsvCell(s: string): string {
+  if (!s) return s;
+  const first = s.charAt(0);
+  if (first === "=" || first === "+" || first === "-" || first === "@" || first === "\t" || first === "\r") {
+    return `'${s}`;
+  }
+  return s;
+}
 
 const BATCH_COLUMNS = `
   kb.Id AS BatchId, kb.CheckedOutBy, kb.CheckedOutTo,
@@ -956,7 +971,7 @@ async function uploadKeyPhoto(
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const result = await uploadBlob(buffer, file.name, contentType, "keys");
-    const url = generateReadSasUrl(result.blobName, 7 * 24 * 60 * 60 * 1000);
+    const url = generateReadSasUrl(result.blobName, 15 * 60 * 1000);
     return { status: 200, jsonBody: { blobName: result.blobName, url } };
   } catch (error: any) {
     context.error("uploadKeyPhoto failed:", error.message);
@@ -1034,7 +1049,7 @@ async function keyImportTemplate(
 
     // Hidden reference sheets for dropdown formulae
     const buildingsWs = wb.addWorksheet("_Buildings", { state: "veryHidden" });
-    buildingNames.forEach((n) => buildingsWs.addRow([n]));
+    buildingNames.forEach((n) => buildingsWs.addRow([sanitiseCsvCell(n)]));
 
     const subTypesWs = wb.addWorksheet("_SubTypes", { state: "veryHidden" });
     allSubTypes.forEach((n) => subTypesWs.addRow([n]));

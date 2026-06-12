@@ -20,13 +20,24 @@ import {
   errorResponse,
   extractToken,
   forbiddenResponse,
-  oidFromToken,
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
+  verifiedIdentityFromRequest,
 } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
+import { checkRateLimit, RateLimitOpts } from "../rateLimit";
+
+const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+
+function tooManyRequests(retryAfterMs: number): HttpResponseInit {
+  return {
+    status: 429,
+    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+    jsonBody: { error: "Rate limit exceeded" },
+  };
+}
 
 const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 
@@ -34,25 +45,9 @@ const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILIT
 
 interface UserRef { id: string; name: string }
 
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
-    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function callerFromToken(token: string): UserRef {
-  const claims = decodeJwtPayload(token);
-  const id = oidFromToken(token) ?? (claims?.preferred_username as string) ?? "unknown";
-  const name =
-    (claims?.name as string) ?? (claims?.preferred_username as string) ?? "Unknown user";
-  return { id, name };
-}
+// Caller identity is derived from verifiedIdentityFromRequest at each write
+// site so the OID + display name we audit against the row always come from a
+// signature-verified token. No unverified JWT body decoding here.
 
 // ── Row → API shape ──────────────────────────────────────────────────────────
 
@@ -329,7 +324,7 @@ async function getInspections(
               i.MergedIntoId
        FROM dbo.Inspections i
        JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
-       ORDER BY i.LastModifiedAt DESC`,
+       ORDER BY i.Id DESC`,
       [],
     );
 
@@ -350,13 +345,22 @@ async function getInspections(
       : [];
     const levelCountByInspection = new Map(levelRows.map((r) => [r.InspectionId as number, r.C as number]));
 
+    // Match the detail view: only count rooms that have at least one non-blank
+    // inspection point. A room whose only point is the blank seed placeholder is
+    // hidden in the read-only detail body, so it must not inflate the list count.
+    // "Non-blank" uses the same predicate as the filled-points query below.
     const roomRows = inspectionIds.length
       ? await executeQuery(
           connection,
           `SELECT l.InspectionId, COUNT(r.Id) AS C
            FROM dbo.InspectionLevels l
-           LEFT JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
+           JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
            WHERE l.InspectionId IN (${idParamList})
+             AND EXISTS (
+               SELECT 1 FROM dbo.InspectionPoints p
+               WHERE p.RoomId = r.Id
+                 AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+             )
            GROUP BY l.InspectionId`,
           idParams,
         )
@@ -474,6 +478,11 @@ async function createInspection(
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`createInspection:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -481,7 +490,8 @@ async function createInspection(
     if (!BuildingId) {
       return { status: 400, jsonBody: { error: "BuildingId required" } };
     }
-    const caller = callerFromToken(token);
+    // Audit identity comes from the verified token, not unverified JWT claims.
+    const caller: UserRef = { id: identity.oid, name: identity.name };
 
     connection = await createConnection(token);
     const inserted = await executeQuery(
@@ -527,6 +537,11 @@ async function applyInspectionOps(
 
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`applyInspectionOps:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -672,7 +687,10 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
     }
     case "updateRoom": {
       const fields: string[] = [];
-      const params: any[] = [{ name: "RoomId", type: TYPES.NVarChar, value: op.roomId }];
+      const params: { name: string; type: typeof TYPES.NVarChar | typeof TYPES.Int; value: unknown }[] = [
+        { name: "RoomId",       type: TYPES.NVarChar, value: op.roomId },
+        { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+      ];
       if (op.patch?.name !== undefined) {
         fields.push("Name = @Name");
         params.push({ name: "Name", type: TYPES.NVarChar, value: op.patch.name });
@@ -682,9 +700,17 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
         params.push({ name: "Description", type: TYPES.NVarChar, value: op.patch.description ?? null });
       }
       if (fields.length === 0) return;
+      // Scope the UPDATE to the caller's inspection. Without this an op
+      // forged on the client could rename a room belonging to another
+      // inspection just by knowing/guessing its UUID. JOIN through
+      // InspectionLevels asserts the Room → Level → Inspection chain.
       await executeQuery(
         connection,
-        `UPDATE dbo.InspectionRooms SET ${fields.join(", ")} WHERE Id = @RoomId`,
+        `UPDATE r
+           SET ${fields.join(", ")}
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE r.Id = @RoomId AND l.InspectionId = @InspectionId`,
         params,
       );
       return;
@@ -692,8 +718,14 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
     case "removeRoom": {
       await executeQuery(
         connection,
-        `DELETE FROM dbo.InspectionRooms WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.NVarChar, value: op.roomId }],
+        `DELETE r
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE r.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.roomId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
       );
       return;
     }
@@ -717,14 +749,20 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       if (op.patch?.description === undefined) {
         throw new Error("updatePoint requires patch.description");
       }
+      // JOIN Point → Room → Level → Inspection so the WHERE asserts the
+      // point actually lives under the inspection this op claims to mutate.
       await executeQuery(
         connection,
-        `UPDATE dbo.InspectionPoints
-         SET Description = @Description, LastModifiedAt = SYSUTCDATETIME()
-         WHERE Id = @Id`,
+        `UPDATE p
+           SET Description = @Description, LastModifiedAt = SYSUTCDATETIME()
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE p.Id = @Id AND l.InspectionId = @InspectionId`,
         [
-          { name: "Id",          type: TYPES.NVarChar, value: op.pointId },
-          { name: "Description", type: TYPES.NVarChar, value: op.patch.description },
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+          { name: "Description",  type: TYPES.NVarChar, value: op.patch.description },
         ],
       );
       return;
@@ -732,21 +770,35 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
     case "removePoint": {
       await executeQuery(
         connection,
-        `DELETE FROM dbo.InspectionPoints WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
+        `DELETE p
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE p.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
       );
       return;
     }
     case "addAttachment": {
+      // Guard the insert: the target Point must belong to this inspection.
+      // Conditional INSERT … SELECT lets us assert the chain in a single
+      // round trip without a separate existence query.
       await executeQuery(
         connection,
         `INSERT INTO dbo.InspectionAttachments
            (Id, PointId, BlobName, FileName, UploadedAt, UploadedById, UploadedByName)
-         VALUES
-           (@Id, @PointId, @BlobName, @FileName, @UploadedAt, @UploadedById, @UploadedByName)`,
+         SELECT @Id, @PointId, @BlobName, @FileName, @UploadedAt, @UploadedById, @UploadedByName
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE p.Id = @PointId AND l.InspectionId = @InspectionId`,
         [
           { name: "Id",             type: TYPES.NVarChar, value: op.attachmentId },
           { name: "PointId",        type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId",   type: TYPES.Int,      value: inspectionId },
           { name: "BlobName",       type: TYPES.NVarChar, value: op.blobName },
           { name: "FileName",       type: TYPES.NVarChar, value: op.fileName },
           { name: "UploadedAt",     type: TYPES.NVarChar, value: op.uploadedAt },
@@ -757,16 +809,35 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "removeAttachment": {
+      // Scope both the BlobName lookup and the DELETE to this inspection via
+      // the Point → Room → Level chain. Without it any attachment Id from
+      // another inspection could be deleted.
       const rows = await executeQuery(
         connection,
-        `SELECT BlobName FROM dbo.InspectionAttachments WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.NVarChar, value: op.attachmentId }],
+        `SELECT a.BlobName
+         FROM dbo.InspectionAttachments a
+         JOIN dbo.InspectionPoints p ON p.Id = a.PointId
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE a.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.attachmentId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
       );
       const blobName = rows[0]?.BlobName as string | undefined;
       await executeQuery(
         connection,
-        `DELETE FROM dbo.InspectionAttachments WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.NVarChar, value: op.attachmentId }],
+        `DELETE a
+         FROM dbo.InspectionAttachments a
+         JOIN dbo.InspectionPoints p ON p.Id = a.PointId
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE a.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.attachmentId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
       );
       if (blobName) {
         try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
@@ -795,12 +866,17 @@ async function completeInspection(
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`completeInspection:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as any;
     const inspectionId: number | undefined = body?.InspectionId ?? body?.inspectionId;
     if (!inspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
-    const caller = callerFromToken(token);
+    const caller: UserRef = { id: identity.oid, name: identity.name };
 
     connection = await createConnection(token);
     await executeQuery(
@@ -840,6 +916,11 @@ async function revertInspection(
 
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`revertInspection:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -884,6 +965,11 @@ async function uploadInspectionAttachment(
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`uploadInspectionAttachment:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
@@ -925,11 +1011,20 @@ async function deleteInspection(
   if (!token) return unauthorizedResponse();
 
   const roles = await rolesForRequest(request);
-  const callerOid = oidFromToken(token);
   const canDeleteAny =
     roles.includes(AppRole.ADMIN) || roles.includes(AppRole.FACILITIES_APPROVAL);
   const canDeleteOwn = roles.includes(AppRole.FACILITIES);
   if (!canDeleteAny && !canDeleteOwn) return forbiddenResponse();
+
+  // Audit + own-row check both rely on a *verified* OID. oidFromToken just
+  // parses the JWT body without checking the signature — fine when used
+  // alongside requireRole, but a service-connection write that gates on
+  // identity must compare against the verified value.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+  const rl = checkRateLimit(`deleteInspection:${callerOid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -1000,6 +1095,11 @@ async function mergeInspections(
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`mergeInspections:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -1008,7 +1108,7 @@ async function mergeInspections(
     if (sourceIds.length < 2) {
       return { status: 400, jsonBody: { error: "SourceIds (at least 2) required" } };
     }
-    const caller = callerFromToken(token);
+    const caller: UserRef = { id: identity.oid, name: identity.name };
 
     connection = await createConnection(token);
 
@@ -1219,6 +1319,11 @@ async function raiseJobsFromInspection(
   const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
   if (roleCheck) return roleCheck;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`raiseJobsFromInspection:${identity.oid}`, INSPECTION_WRITE_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as RaiseJobsBody;
@@ -1234,7 +1339,7 @@ async function raiseJobsFromInspection(
       return { status: 400, jsonBody: { error: "Defaults.JobType and Defaults.Priority required" } };
     }
 
-    const caller = callerFromToken(token);
+    const caller: UserRef = { id: identity.oid, name: identity.name };
     const descriptionPrefix = (defaults.DescriptionPrefix ?? "").trim();
     const assignee = (defaults.AssigneeName ?? "").trim() || caller.name;
 
