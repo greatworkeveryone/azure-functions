@@ -86,6 +86,7 @@ const JOB_COLUMNS = `
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
   IsOnchargeable, OnchargeAmount, OnchargeNotes,
   Kind,
+  IsContract,
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
@@ -125,6 +126,7 @@ const JOB_WRITE_COLUMNS = [
   "OnchargeAmount",
   "OnchargeNotes",
   "Kind",
+  "IsContract",
   "TenantID",
   "CreationMethod",
   "SourceEmailID",
@@ -185,6 +187,7 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   OnchargeAmount: TYPES.Decimal,
   OnchargeNotes: TYPES.NVarChar,
   Kind: TYPES.NVarChar,
+  IsContract: TYPES.Bit,
   TenantID: TYPES.Int,
   CreationMethod: TYPES.NVarChar,
   SourceEmailID: TYPES.Int,
@@ -694,10 +697,29 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         // Snapshot the columns we audit before the UPDATE rewrites them.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, AwaitingRole, Kind FROM Jobs WHERE JobID = @JobID",
+          "SELECT Status, AssignedTo, AwaitingRole, Kind, IsContract FROM Jobs WHERE JobID = @JobID",
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
+
+        // Guard the contract flip (WP10): isContract may only change while the
+        // job is still New — flipping it mid-flow would invalidate the quote /
+        // contract path the job has already taken. Reject before the UPDATE so
+        // the change never lands.
+        if (previous && fields.IsContract !== undefined) {
+          const prevContract = Boolean(previous.IsContract);
+          const nextContract = Boolean(fields.IsContract);
+          if (prevContract !== nextContract && previous.Status !== "New") {
+            await rollbackTransaction(connection).catch(() => {});
+            return {
+              status: 422,
+              jsonBody: {
+                error:
+                  "Contract status can only be changed while the job is New.",
+              },
+            };
+          }
+        }
 
         const result = await executeQuery(
           connection,
@@ -724,6 +746,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           const newAssignedTo = fields.AssignedTo as string | null | undefined;
           const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
           const newKind = fields.Kind as string | null | undefined;
+          const newIsContract = fields.IsContract as boolean | number | null | undefined;
 
           if (newStatus !== undefined && newStatus !== previous.Status) {
             await executeQuery(
@@ -789,6 +812,30 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
                 { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
                 { name: "Text", type: TYPES.NVarChar, value: `Kind: ${fromLabel} → ${toLabel}` },
                 { name: "EventType", type: TYPES.NVarChar, value: "kind_change" },
+              ],
+            );
+          }
+
+          if (
+            newIsContract !== undefined &&
+            Boolean(newIsContract) !== Boolean(previous.IsContract)
+          ) {
+            const toContract = Boolean(newIsContract);
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                {
+                  name: "Text",
+                  type: TYPES.NVarChar,
+                  value: toContract
+                    ? "Marked as standing-contract (quotes skipped)"
+                    : "Standing-contract flag removed (quoted flow)",
+                },
+                { name: "EventType", type: TYPES.NVarChar, value: "contract_change" },
               ],
             );
           }
@@ -1164,7 +1211,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     if (NewStatus != null) {
       const currentRows = await executeQuery(
         connection,
-        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole FROM Jobs WHERE JobID = @JobID",
+        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole, IsContract FROM Jobs WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: JobID }],
       );
       if (currentRows.length === 0) {
@@ -1197,8 +1244,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         // Restore the captured pre-block state on a Tenant → Work unblock so
         // the job returns where it was (e.g. Awaiting Approval) rather than
         // leapfrogging into Work without the quote ever being approved.
+        // `isContract` opens the standing-contract New → Work fast path
+        // (WORK_AUTHORIZED) — a no-op for every non-contract job.
+        const isContract = Boolean(currentRows[0].IsContract);
         const target = resolveManualTarget(currentState, NewStatus as JobStatus, {
           preBlockState,
+          isContract,
         });
         if (target == null) {
           return {

@@ -216,4 +216,19 @@ describe("createPurchaseOrder quote-approval guard", () => {
     });
     assert.strictEqual(result, null);
   });
+
+  // WP10: a standing-contract job reaches Work via WORK_AUTHORIZED (New → Work),
+  // never sitting in (Awaiting Approval, facilities) with no approved quote. So
+  // its optional PO step is allowed (Work is a no-op for PO_CREATED). The guard
+  // is unchanged — it still blocks the leapfrog state for any quoted job, and
+  // every downstream financial control (invoice approval / limits / director
+  // tier) is enforced identically whether or not the job is a contract job.
+  test("allows a PO on a contract job in Work (optional PO step, no quote round)", () => {
+    const result = purchaseOrderApprovalError({
+      status: JobStatus.WORK,
+      awaitingRole: AwaitingRole.FACILITIES,
+      approvedQuoteId: null,
+    });
+    assert.strictEqual(result, null);
+  });
 });

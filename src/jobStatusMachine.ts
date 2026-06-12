@@ -31,6 +31,9 @@ export enum JobEvent {
   INVOICE_APPROVED = "INVOICE_APPROVED",
   TENANT_BLOCKED = "TENANT_BLOCKED",
   TENANT_UNBLOCKED = "TENANT_UNBLOCKED",
+  // Standing-contract fast path (WP10): authorise work directly from New,
+  // skipping the quote round. Legal ONLY for contract jobs (isContract = true).
+  WORK_AUTHORIZED = "WORK_AUTHORIZED",
 }
 
 export interface JobState {
@@ -72,6 +75,14 @@ function statesEqual(a: JobState, b: JobState): boolean {
  */
 export interface TransitionOptions {
   preBlockState?: JobState;
+  /**
+   * Whether the job runs under a standing maintenance contract (WP10). Contract
+   * jobs are pre-authorised — they may move New → Work via WORK_AUTHORIZED,
+   * skipping the quote round entirely while every financial control (invoice
+   * approval, limits, director tier) stays intact downstream. Defaults to false
+   * (omitted) so non-contract jobs are behaviour-identical to before WP10.
+   */
+  isContract?: boolean;
 }
 
 /** The safe landing for an unblock with no (or a nonsensical) pre-block state. */
@@ -114,6 +125,15 @@ export function nextState(
       ? resolveUnblockTarget(opts?.preBlockState)
       : null;
   }
+  // Standing-contract fast path: New → Work, skipping quotes. Legal only when
+  // the job is a contract job and only from (New, facilities).
+  if (event === JobEvent.WORK_AUTHORIZED) {
+    return opts?.isContract &&
+      current.status === JobStatus.NEW &&
+      current.awaitingRole === F
+      ? { status: JobStatus.WORK, awaitingRole: F }
+      : null;
+  }
   const match = TRANSITIONS.find((t) => statesEqual(t.from, current) && t.event === event);
   return match?.to ?? null;
 }
@@ -126,16 +146,34 @@ export function nextState(
  *
  * Returns false for `current.status === target` (no-op) and for Done (terminal).
  */
-export function canTransition(current: JobState, target: JobStatus): boolean {
+export function canTransition(
+  current: JobState,
+  target: JobStatus,
+  opts?: TransitionOptions,
+): boolean {
   if (current.status === target) return false;
   if (current.status === JobStatus.DONE) return false;
   if (target === JobStatus.TENANT) return true;
   if (current.status === JobStatus.TENANT && target === JobStatus.WORK) return true;
+  // Standing-contract jobs may start work directly from New (WORK_AUTHORIZED),
+  // bypassing the quote round. Non-contract jobs cannot — they keep the
+  // New → Quote/Awaiting-Approval path only.
+  if (
+    opts?.isContract &&
+    current.status === JobStatus.NEW &&
+    current.awaitingRole === F &&
+    target === JobStatus.WORK
+  ) {
+    return true;
+  }
   return TRANSITIONS.some((t) => statesEqual(t.from, current) && t.to.status === target);
 }
 
-export function allowedNextStatuses(current: JobState): JobStatus[] {
-  return Object.values(JobStatus).filter((s) => canTransition(current, s));
+export function allowedNextStatuses(
+  current: JobState,
+  opts?: TransitionOptions,
+): JobStatus[] {
+  return Object.values(JobStatus).filter((s) => canTransition(current, s, opts));
 }
 
 /**
@@ -150,7 +188,7 @@ export function resolveManualTarget(
   targetStatus: JobStatus,
   opts?: TransitionOptions,
 ): JobState | null {
-  if (!canTransition(current, targetStatus)) return null;
+  if (!canTransition(current, targetStatus, opts)) return null;
   if (targetStatus === JobStatus.TENANT) {
     return { status: JobStatus.TENANT, awaitingRole: current.awaitingRole };
   }
@@ -159,6 +197,11 @@ export function resolveManualTarget(
   // actually returns), falling back to (Work, facilities).
   if (current.status === JobStatus.TENANT && targetStatus === JobStatus.WORK) {
     return resolveUnblockTarget(opts?.preBlockState);
+  }
+  // Standing-contract "Start work" — New → Work, no quote. canTransition has
+  // already gated this on opts.isContract, so we only reach here for contracts.
+  if (current.status === JobStatus.NEW && targetStatus === JobStatus.WORK) {
+    return { status: JobStatus.WORK, awaitingRole: F };
   }
   const edge = TRANSITIONS.find(
     (t) => statesEqual(t.from, current) && t.to.status === targetStatus,

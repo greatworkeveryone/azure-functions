@@ -397,4 +397,81 @@ describe("jobStatusMachine — composite (status, awaitingRole)", () => {
       });
     });
   });
+
+  // ── WP10: standing-contract fast path ──────────────────────────────────────
+  // Contract jobs may start work directly from New (WORK_AUTHORIZED), skipping
+  // the quote round. The opt is threaded through nextState / canTransition /
+  // allowedNextStatuses / resolveManualTarget. Non-contract jobs are
+  // behaviour-identical — every test in the blocks above passes UNMODIFIED.
+  describe("WP10 — standing-contract WORK_AUTHORIZED (New → Work, no quote)", () => {
+    const NEW_FAC = { status: JobStatus.NEW, awaitingRole: AwaitingRole.FACILITIES };
+    const WORK_FAC = { status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES };
+
+    it("nextState: (New, facilities) + WORK_AUTHORIZED → (Work, facilities) for a contract job", () => {
+      expect(nextState(NEW_FAC, JobEvent.WORK_AUTHORIZED, { isContract: true })).toEqual(WORK_FAC);
+    });
+
+    it("nextState: WORK_AUTHORIZED is illegal for a non-contract job (no opts)", () => {
+      expect(nextState(NEW_FAC, JobEvent.WORK_AUTHORIZED)).toBeNull();
+      expect(nextState(NEW_FAC, JobEvent.WORK_AUTHORIZED, { isContract: false })).toBeNull();
+    });
+
+    it("nextState: WORK_AUTHORIZED is illegal from any state other than (New, facilities), even for a contract", () => {
+      expect(
+        nextState(
+          { status: JobStatus.QUOTE, awaitingRole: AwaitingRole.FACILITIES },
+          JobEvent.WORK_AUTHORIZED,
+          { isContract: true },
+        ),
+      ).toBeNull();
+      expect(
+        nextState(
+          { status: JobStatus.NEW, awaitingRole: AwaitingRole.ACCOUNTS },
+          JobEvent.WORK_AUTHORIZED,
+          { isContract: true },
+        ),
+      ).toBeNull();
+    });
+
+    it("canTransition: contract job allows New → Work; non-contract does not", () => {
+      expect(canTransition(NEW_FAC, JobStatus.WORK, { isContract: true })).toBe(true);
+      expect(canTransition(NEW_FAC, JobStatus.WORK)).toBe(false);
+      expect(canTransition(NEW_FAC, JobStatus.WORK, { isContract: false })).toBe(false);
+    });
+
+    it("canTransition: a contract job still cannot skip straight to Done from New", () => {
+      expect(canTransition(NEW_FAC, JobStatus.DONE, { isContract: true })).toBe(false);
+    });
+
+    it("allowedNextStatuses: contract from (New, facilities) includes Work; non-contract does not", () => {
+      expect(allowedNextStatuses(NEW_FAC, { isContract: true })).toEqual(
+        expect.arrayContaining([JobStatus.WORK, JobStatus.TENANT]),
+      );
+      expect(allowedNextStatuses(NEW_FAC)).not.toContain(JobStatus.WORK);
+    });
+
+    it("resolveManualTarget: contract New → Work resolves to (Work, facilities)", () => {
+      expect(resolveManualTarget(NEW_FAC, JobStatus.WORK, { isContract: true })).toEqual(WORK_FAC);
+    });
+
+    it("resolveManualTarget: non-contract New → Work is null (illegal)", () => {
+      expect(resolveManualTarget(NEW_FAC, JobStatus.WORK)).toBeNull();
+    });
+
+    it("downstream financial states are unchanged for a contract job (Work → Awaiting Approval/accounts → Done)", () => {
+      // The contract flag only opens the New → Work door. Once in Work the job
+      // is byte-identical to a quoted job: complete → invoice approval → done.
+      expect(nextState(WORK_FAC, JobEvent.WORK_COMPLETED, { isContract: true })).toEqual({
+        status: JobStatus.AWAITING_APPROVAL,
+        awaitingRole: AwaitingRole.ACCOUNTS,
+      });
+      expect(
+        nextState(
+          { status: JobStatus.AWAITING_APPROVAL, awaitingRole: AwaitingRole.ACCOUNTS },
+          JobEvent.INVOICE_APPROVED,
+          { isContract: true },
+        ),
+      ).toEqual({ status: JobStatus.DONE, awaitingRole: AwaitingRole.ACCOUNTS });
+    });
+  });
 });

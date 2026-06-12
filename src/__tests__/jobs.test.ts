@@ -77,3 +77,64 @@ test("does not emit when Kind is absent from the payload (no change)", () => {
 test("emits when flipping maintenance back to facilities", () => {
   assert.strictEqual(shouldEmitKindChange("maintenance", "facilities"), true);
 });
+
+// ── WP10: standing-contract flip guard + audit event ─────────────────────────
+// Mirrors of the inline upsertJob logic: isContract may only flip while the job
+// is still New; a real flip emits a contract_change event. Same mirror-the-guard
+// pattern as above (the handler registers app.http at module scope).
+
+/** Returns an error string if the contract flip should be rejected, else null.
+ *  Mirrors the IsContract guard in upsertJob's UPDATE branch. */
+function contractFlipError(
+  previousStatus: string,
+  previousIsContract: boolean,
+  newIsContract: boolean | undefined,
+): string | null {
+  if (newIsContract === undefined) return null; // not in payload — no change
+  if (Boolean(newIsContract) === previousIsContract) return null; // no-op
+  if (previousStatus !== "New") {
+    return "Contract status can only be changed while the job is New.";
+  }
+  return null;
+}
+
+/** Whether the UPDATE transaction should write a contract_change JobEvent.
+ *  Mirrors `newIsContract !== undefined && Boolean(newIsContract) !== Boolean(previous.IsContract)`. */
+function shouldEmitContractChange(
+  previousIsContract: boolean,
+  newIsContract: boolean | undefined,
+): boolean {
+  return newIsContract !== undefined && Boolean(newIsContract) !== previousIsContract;
+}
+
+test("contractFlipError allows turning on the flag while New", () => {
+  assert.strictEqual(contractFlipError("New", false, true), null);
+});
+
+test("contractFlipError allows turning off the flag while New", () => {
+  assert.strictEqual(contractFlipError("New", true, false), null);
+});
+
+test("contractFlipError rejects flipping the flag once past New", () => {
+  assert.strictEqual(
+    contractFlipError("Work", false, true),
+    "Contract status can only be changed while the job is New.",
+  );
+  assert.strictEqual(
+    contractFlipError("Awaiting Approval", true, false),
+    "Contract status can only be changed while the job is New.",
+  );
+});
+
+test("contractFlipError is a no-op when the flag is absent or unchanged", () => {
+  assert.strictEqual(contractFlipError("Work", true, undefined), null);
+  assert.strictEqual(contractFlipError("Work", true, true), null);
+  assert.strictEqual(contractFlipError("Done", false, false), null);
+});
+
+test("shouldEmitContractChange emits only on a real flip", () => {
+  assert.strictEqual(shouldEmitContractChange(false, true), true);
+  assert.strictEqual(shouldEmitContractChange(true, false), true);
+  assert.strictEqual(shouldEmitContractChange(false, false), false);
+  assert.strictEqual(shouldEmitContractChange(true, undefined), false);
+});
