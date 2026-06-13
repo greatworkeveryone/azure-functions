@@ -82,6 +82,7 @@ const JOB_COLUMNS = `
   SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
   AwaitingRole,
   PreBlockStatus, PreBlockAwaitingRole,
+  AcknowledgedAt, AcknowledgedBy, EscalatedAt, StatusSince,
   ExpectedProgressUpdate, CompletionDate,
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
   IsOnchargeable, OnchargeAmount, OnchargeNotes,
@@ -105,6 +106,7 @@ const JOB_COLUMNS = `
 const JOB_EVENT_COLUMNS = `
   JobEventID, JobID, CreatedAt, CreatedBy, [Text], NewStatus,
   ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID,
+  InvoiceID,
   NewAssignee, NewAwaitingRole, CreationSource
 `;
 
@@ -166,6 +168,7 @@ interface AddJobEventBody {
   EventType?: string;
   PurchaseOrderID?: number;
   QuoteID?: number;
+  InvoiceID?: number;
   NewAssignee?: string;
   NewAssigneeUserID?: number;
   NewAwaitingRole?: string;
@@ -585,10 +588,50 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           jsonBody: { error: "BuildingID, Title, Status are required to create a job" },
         };
       }
+      // D4 machine guard (WP18a): a job is always born in 'New'. Any other
+      // status on create would let a payload sidestep the state machine and
+      // start mid-lifecycle. The frontend always creates as 'New'; reject the
+      // rest at the API boundary.
+      if (fields.Status !== "New") {
+        return {
+          status: 400,
+          jsonBody: { error: "Status must be 'New' when creating a job" },
+        };
+      }
+      // Default AwaitingRole to 'facilities' when the caller omits it — a New
+      // job is always on the facilities side first.
+      if (fields.AwaitingRole === undefined || fields.AwaitingRole === null) {
+        fields.AwaitingRole = "facilities";
+      }
     } else if (typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID must be a number when provided" } };
     } else if (Object.keys(fields).length === 0) {
       return { status: 400, jsonBody: { error: "No job columns provided — nothing to update" } };
+    } else {
+      // D4 machine guard (WP18a): status + awaiting-role transitions are owned
+      // by the state machine via the addJobEvent endpoint. upsertJob edits the
+      // job's descriptive fields only — never the lifecycle. Reject either write
+      // so a stray payload can't bypass the machine (and leave the old inline
+      // status_change / awaiting_role_change audit blocks below dead, so they
+      // were removed).
+      if (fields.Status !== undefined) {
+        return {
+          status: 422,
+          jsonBody: {
+            error:
+              "Status changes must use the addJobEvent endpoint, not upsertJob.",
+          },
+        };
+      }
+      if (fields.AwaitingRole !== undefined) {
+        return {
+          status: 422,
+          jsonBody: {
+            error:
+              "AwaitingRole changes must use the addJobEvent endpoint, not upsertJob.",
+          },
+        };
+      }
     }
 
     // Enum + length checks against the whitelist. Reject fast so we don't
@@ -620,9 +663,16 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       fields.CreatedBy = identity.name;
       const filteredParams = params.filter((p) => p.name !== "CreatedBy");
       filteredParams.push({ name: "CreatedBy", type: TYPES.NVarChar, value: identity.name });
+      // Stamp StatusSince at creation (WP18a) so the escalation age clock has a
+      // starting point for the New state; SYSUTCDATETIME() is inlined (no param)
+      // exactly like LastModifiedDate on the UPDATE path.
       const cols = Object.keys(fields);
-      const insertCols = [...cols, "CreatedById"].join(", ");
-      const insertVals = [...cols.map((c) => `@${c}`), "@CreatedById"].join(", ");
+      const insertCols = [...cols, "CreatedById", "StatusSince"].join(", ");
+      const insertVals = [
+        ...cols.map((c) => `@${c}`),
+        "@CreatedById",
+        "SYSUTCDATETIME()",
+      ].join(", ");
       const insertParams: SqlParam[] = [
         ...filteredParams,
         { name: "CreatedById", type: TYPES.NVarChar, value: identity.oid },
@@ -694,10 +744,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
 
       await beginTransaction(connection);
       try {
-        // Snapshot the columns we audit before the UPDATE rewrites them.
+        // Snapshot the columns we audit before the UPDATE rewrites them. Status
+        // is read only for the contract-flip guard below — upsertJob can no
+        // longer write Status or AwaitingRole (D4 guard rejects both upstream),
+        // so those diff/event blocks were removed.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, AwaitingRole, Kind, IsContract FROM Jobs WHERE JobID = @JobID",
+          "SELECT Status, AssignedTo, Kind, IsContract FROM Jobs WHERE JobID = @JobID",
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
@@ -734,34 +787,18 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         }
         newJobId = result[0].JobID as number;
 
-        // Diff the three audit-worthy fields and INSERT a JobEvents row per
-        // change. Mirrors the audit trail the frontend used to write via
-        // addJobEvent on success. Only fields explicitly present on the
-        // payload count — an omitted field is "no change", not a clear.
+        // Diff the audit-worthy descriptive fields and INSERT a JobEvents row
+        // per change. Status / AwaitingRole are NOT diffed here — they can't be
+        // written through upsertJob (D4 guard); those transitions and their
+        // audit events flow through addJobEvent. Only fields explicitly present
+        // on the payload count — an omitted field is "no change", not a clear.
         if (previous) {
           // Use the verified identity (token signature checked) so audit rows
           // can't be authored by a forged JWT name claim.
           const caller = { id: identity.oid, name: identity.name };
-          const newStatus = fields.Status as string | null | undefined;
           const newAssignedTo = fields.AssignedTo as string | null | undefined;
-          const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
           const newKind = fields.Kind as string | null | undefined;
           const newIsContract = fields.IsContract as boolean | number | null | undefined;
-
-          if (newStatus !== undefined && newStatus !== previous.Status) {
-            await executeQuery(
-              connection,
-              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus)
-               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewStatus)`,
-              [
-                { name: "JobID", type: TYPES.Int, value: newJobId },
-                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
-                { name: "Text", type: TYPES.NVarChar, value: `Status: ${previous.Status} → ${newStatus}` },
-                { name: "EventType", type: TYPES.NVarChar, value: "status_change" },
-                { name: "NewStatus", type: TYPES.NVarChar, value: newStatus },
-              ],
-            );
-          }
 
           if (newAssignedTo !== undefined && newAssignedTo !== previous.AssignedTo) {
             const fromLabel = (previous.AssignedTo as string | null) || "—";
@@ -779,23 +816,6 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
                 { name: "Text", type: TYPES.NVarChar, value: text },
                 { name: "EventType", type: TYPES.NVarChar, value: "assignment_change" },
                 { name: "NewAssignee", type: TYPES.NVarChar, value: toLabel },
-              ],
-            );
-          }
-
-          if (newAwaitingRole !== undefined && newAwaitingRole !== previous.AwaitingRole) {
-            const fromLabel = (previous.AwaitingRole as string | null) || "—";
-            const toLabel = newAwaitingRole || "—";
-            await executeQuery(
-              connection,
-              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewAwaitingRole)
-               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewAwaitingRole)`,
-              [
-                { name: "JobID", type: TYPES.Int, value: newJobId },
-                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
-                { name: "Text", type: TYPES.NVarChar, value: `Handoff: ${fromLabel} → ${toLabel}` },
-                { name: "EventType", type: TYPES.NVarChar, value: "awaiting_role_change" },
-                { name: "NewAwaitingRole", type: TYPES.NVarChar, value: newAwaitingRole },
               ],
             );
           }
@@ -1155,6 +1175,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       EventType,
       PurchaseOrderID,
       QuoteID,
+      InvoiceID,
       NewAssignee,
       NewAssigneeUserID,
       NewAwaitingRole,
@@ -1208,6 +1229,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     // inside the same transaction as the status change.
     let preBlockToCapture: JobState | null = null;
     let clearsPreBlock = false;
+    // True when this event lands the job in a genuinely new status (not a
+    // self-transition no-op). A real transition resets the accountability
+    // clock: StatusSince=now and any prior acknowledgement / escalation is
+    // cleared, because a fresh state needs fresh acknowledgement. Set inside the
+    // real-transition branch below and consumed by the mirror UPDATE.
+    let isRealTransition = false;
     if (NewStatus != null) {
       const currentRows = await executeQuery(
         connection,
@@ -1263,6 +1290,10 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         }
         resolvedNewStatus = target.status;
         resolvedNewAwaitingRole = target.awaitingRole;
+        // The composite actually moved — reset the accountability clock below.
+        isRealTransition =
+          target.status !== currentState.status ||
+          target.awaitingRole !== currentState.awaitingRole;
         if (target.status === JobStatus.TENANT) {
           // Blocking — remember exactly where we came from.
           preBlockToCapture = currentState;
@@ -1284,14 +1315,14 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         connection,
         `INSERT INTO JobEvents (
            JobID, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled,
-           EventType, PurchaseOrderID, QuoteID, NewAssignee, NewAwaitingRole,
-           CreationSource
+           EventType, PurchaseOrderID, QuoteID, InvoiceID, NewAssignee,
+           NewAwaitingRole, CreationSource
          )
          OUTPUT INSERTED.JobEventID
          VALUES (
            @JobID, @CreatedBy, @Text, @NewStatus, @ExpectedProgressDate, @IsStalled,
-           @EventType, @PurchaseOrderID, @QuoteID, @NewAssignee, @NewAwaitingRole,
-           @CreationSource
+           @EventType, @PurchaseOrderID, @QuoteID, @InvoiceID, @NewAssignee,
+           @NewAwaitingRole, @CreationSource
          );`,
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
@@ -1303,6 +1334,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           { name: "EventType", type: TYPES.NVarChar, value: EventType ?? null },
           { name: "PurchaseOrderID", type: TYPES.Int, value: PurchaseOrderID ?? null },
           { name: "QuoteID", type: TYPES.Int, value: QuoteID ?? null },
+          { name: "InvoiceID", type: TYPES.Int, value: InvoiceID ?? null },
           { name: "NewAssignee", type: TYPES.NVarChar, value: NewAssignee ?? null },
           { name: "NewAwaitingRole", type: TYPES.NVarChar, value: resolvedNewAwaitingRole },
           { name: "CreationSource", type: TYPES.NVarChar, value: CreationSource ?? null },
@@ -1379,6 +1411,35 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         );
       } else if (clearsPreBlock) {
         updates.push("PreBlockStatus=NULL", "PreBlockAwaitingRole=NULL");
+      }
+      // Acknowledge event (WP18a): the assignee/manager has seen the current
+      // state and is on it — stamp who/when onto Jobs in the SAME transaction as
+      // the event, identical to the StalledAt mirror above. This resets the
+      // escalation clock (the evaluator COALESCEs AcknowledgedAt first). The
+      // backend keeps no event-type whitelist; "acknowledged" is persisted
+      // verbatim on the JobEvents row by the INSERT above.
+      // Guarded by !isRealTransition so the AcknowledgedAt column is never
+      // assigned twice in one SET (a transition clears it; both can't apply —
+      // and an acknowledge event never carries a NewStatus anyway).
+      if (EventType === "acknowledged" && !isRealTransition) {
+        updates.push("AcknowledgedAt=SYSUTCDATETIME()", "AcknowledgedBy=@AcknowledgedBy");
+        updateParams.push({
+          name: "AcknowledgedBy",
+          type: TYPES.NVarChar,
+          value: identity.name,
+        });
+      }
+      // Real status transition (WP18a): a new state needs fresh acknowledgement,
+      // so reset the clock — StatusSince=now and clear any prior ack/escalation.
+      // Self-transitions (e.g. "Quote received" while already Awaiting Approval)
+      // are no-ops and leave the clock untouched.
+      if (isRealTransition) {
+        updates.push(
+          "StatusSince=SYSUTCDATETIME()",
+          "AcknowledgedAt=NULL",
+          "AcknowledgedBy=NULL",
+          "EscalatedAt=NULL",
+        );
       }
       await executeQuery(
         connection,

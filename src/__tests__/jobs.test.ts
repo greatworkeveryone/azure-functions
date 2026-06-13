@@ -138,3 +138,212 @@ test("shouldEmitContractChange emits only on a real flip", () => {
   assert.strictEqual(shouldEmitContractChange(false, false), false);
   assert.strictEqual(shouldEmitContractChange(true, undefined), false);
 });
+
+// ── WP18a: D4 upsert machine guard (status/awaiting-role ownership) ──────────
+// Mirrors the inline branches in upsertJob: a job is born 'New' with a default
+// AwaitingRole='facilities'; once it exists, neither Status nor AwaitingRole may
+// be written through upsertJob — those transitions go through addJobEvent.
+
+interface UpsertGuardResult {
+  status: number;
+  error?: string;
+  /** The AwaitingRole the create path would persist (after defaulting). */
+  awaitingRole?: string;
+}
+
+/** Mirror of upsertJob's create-path Status/AwaitingRole guard. */
+function upsertCreateGuard(fields: {
+  Status?: string;
+  AwaitingRole?: string | null;
+}): UpsertGuardResult {
+  if (fields.Status !== "New") {
+    return { status: 400, error: "Status must be 'New' when creating a job" };
+  }
+  const awaitingRole =
+    fields.AwaitingRole === undefined || fields.AwaitingRole === null
+      ? "facilities"
+      : fields.AwaitingRole;
+  return { status: 200, awaitingRole };
+}
+
+/** Mirror of upsertJob's update-path Status/AwaitingRole rejection. */
+function upsertUpdateGuard(fields: {
+  Status?: string;
+  AwaitingRole?: string;
+}): UpsertGuardResult {
+  if (fields.Status !== undefined) {
+    return {
+      status: 422,
+      error: "Status changes must use the addJobEvent endpoint, not upsertJob.",
+    };
+  }
+  if (fields.AwaitingRole !== undefined) {
+    return {
+      status: 422,
+      error:
+        "AwaitingRole changes must use the addJobEvent endpoint, not upsertJob.",
+    };
+  }
+  return { status: 200 };
+}
+
+test("create rejects a non-New status with 400", () => {
+  assert.deepStrictEqual(upsertCreateGuard({ Status: "Work" }), {
+    status: 400,
+    error: "Status must be 'New' when creating a job",
+  });
+});
+
+test("create accepts New and defaults AwaitingRole to facilities", () => {
+  assert.deepStrictEqual(upsertCreateGuard({ Status: "New" }), {
+    status: 200,
+    awaitingRole: "facilities",
+  });
+});
+
+test("create defaults AwaitingRole when explicitly null", () => {
+  assert.deepStrictEqual(upsertCreateGuard({ Status: "New", AwaitingRole: null }), {
+    status: 200,
+    awaitingRole: "facilities",
+  });
+});
+
+test("create preserves a provided AwaitingRole on a New job", () => {
+  assert.deepStrictEqual(
+    upsertCreateGuard({ Status: "New", AwaitingRole: "accounts" }),
+    { status: 200, awaitingRole: "accounts" },
+  );
+});
+
+test("update rejects any Status write with 422", () => {
+  assert.deepStrictEqual(upsertUpdateGuard({ Status: "Work" }), {
+    status: 422,
+    error: "Status changes must use the addJobEvent endpoint, not upsertJob.",
+  });
+});
+
+test("update rejects any AwaitingRole write with 422", () => {
+  assert.deepStrictEqual(upsertUpdateGuard({ AwaitingRole: "accounts" }), {
+    status: 422,
+    error:
+      "AwaitingRole changes must use the addJobEvent endpoint, not upsertJob.",
+  });
+});
+
+test("update with no lifecycle fields passes the guard", () => {
+  assert.deepStrictEqual(upsertUpdateGuard({}), { status: 200 });
+});
+
+// ── WP18a: acknowledge mirror + clear-on-transition ──────────────────────────
+// Mirrors the addJobEvent mirror-UPDATE accountability clauses. The acknowledge
+// event stamps AcknowledgedAt/By; a real status transition resets the whole
+// clock (StatusSince=now, ack + escalation cleared); a self-transition no-op
+// leaves it untouched. The two paths never both write AcknowledgedAt.
+
+/** Returns the set of Jobs columns the mirror UPDATE would touch (and their
+ *  symbolic values) given the event type and whether the status really moved.
+ *  Mirrors the `if (EventType === "acknowledged" && !isRealTransition)` and
+ *  `if (isRealTransition)` blocks. */
+function accountabilityMirror(
+  eventType: string | undefined,
+  isRealTransition: boolean,
+  acknowledgedBy: string,
+): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  if (eventType === "acknowledged" && !isRealTransition) {
+    out.AcknowledgedAt = "now";
+    out.AcknowledgedBy = acknowledgedBy;
+  }
+  if (isRealTransition) {
+    out.StatusSince = "now";
+    out.AcknowledgedAt = null;
+    out.AcknowledgedBy = null;
+    out.EscalatedAt = null;
+  }
+  return out;
+}
+
+/** Mirror of the isRealTransition computation in addJobEvent: a composite move
+ *  (status OR awaitingRole changed), never a self-transition. */
+function computeIsRealTransition(
+  from: { status: string; awaitingRole: string },
+  to: { status: string; awaitingRole: string },
+): boolean {
+  return from.status !== to.status || from.awaitingRole !== to.awaitingRole;
+}
+
+test("acknowledge event stamps AcknowledgedAt/By and nothing else", () => {
+  assert.deepStrictEqual(accountabilityMirror("acknowledged", false, "Alice"), {
+    AcknowledgedAt: "now",
+    AcknowledgedBy: "Alice",
+  });
+});
+
+test("a real transition resets the clock and clears ack + escalation", () => {
+  assert.deepStrictEqual(accountabilityMirror(undefined, true, "Alice"), {
+    StatusSince: "now",
+    AcknowledgedAt: null,
+    AcknowledgedBy: null,
+    EscalatedAt: null,
+  });
+});
+
+test("acknowledge never collides with a transition (transition wins, no double-write)", () => {
+  // Defensive: even if both were somehow set, the !isRealTransition guard means
+  // AcknowledgedAt is only ever assigned once (to NULL, by the transition).
+  const mirror = accountabilityMirror("acknowledged", true, "Alice");
+  assert.strictEqual(mirror.AcknowledgedAt, null);
+  assert.strictEqual(mirror.AcknowledgedBy, null);
+  assert.strictEqual(mirror.StatusSince, "now");
+});
+
+test("a plain note (no event type, no transition) touches no accountability columns", () => {
+  assert.deepStrictEqual(accountabilityMirror(undefined, false, "Alice"), {});
+});
+
+test("computeIsRealTransition: status move is real", () => {
+  assert.strictEqual(
+    computeIsRealTransition(
+      { status: "New", awaitingRole: "facilities" },
+      { status: "Quote", awaitingRole: "facilities" },
+    ),
+    true,
+  );
+});
+
+test("computeIsRealTransition: awaitingRole-only move is real", () => {
+  assert.strictEqual(
+    computeIsRealTransition(
+      { status: "Work", awaitingRole: "facilities" },
+      { status: "Awaiting Approval", awaitingRole: "accounts" },
+    ),
+    true,
+  );
+});
+
+test("computeIsRealTransition: self-transition is NOT real (no clock reset)", () => {
+  assert.strictEqual(
+    computeIsRealTransition(
+      { status: "Awaiting Approval", awaitingRole: "facilities" },
+      { status: "Awaiting Approval", awaitingRole: "facilities" },
+    ),
+    false,
+  );
+});
+
+// ── WP18a: D1 close-path InvoiceID threading ─────────────────────────────────
+// The JobEvents INSERT now includes InvoiceID. Mirror the param-build to prove
+// the value (or null) is threaded through.
+
+/** Mirrors the InvoiceID param on the addJobEvent JobEvents INSERT. */
+function invoiceIdParam(invoiceId: number | undefined): number | null {
+  return invoiceId ?? null;
+}
+
+test("InvoiceID threads into the event param when provided", () => {
+  assert.strictEqual(invoiceIdParam(42), 42);
+});
+
+test("InvoiceID defaults to null when omitted", () => {
+  assert.strictEqual(invoiceIdParam(undefined), null);
+});

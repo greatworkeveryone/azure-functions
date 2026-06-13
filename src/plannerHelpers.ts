@@ -5,6 +5,7 @@ export type TriggerType =
   | "job_update_due"         // legacy — existing tasks only, routes to Facilities
   | "stalled_facilities"     // IsStalled=1 AND AwaitingRole != 'accounts'
   | "awaiting_accounts"      // AwaitingRole = 'accounts'
+  | "awaiting_facilities_approval" // Status='Awaiting Approval' AND AwaitingRole='facilities' (quote sign-off)
   | "director_approval"      // DirectorNeededCount > 0
   | "oncharge_pending"       // IsOnchargeable=1 AND no outgoing invoice yet
   | "lost_key_reported";     // key marked lost — pending facilities decision
@@ -126,6 +127,8 @@ export function buildTaskTitle(
       return `Job stalled — ${displayName}`;
     case "awaiting_accounts":
       return `Awaiting accounts — ${displayName}`;
+    case "awaiting_facilities_approval":
+      return `Awaiting approval — ${displayName}`;
     case "director_approval":
       return `Director approval needed — ${displayName}`;
     case "oncharge_pending":
@@ -196,6 +199,14 @@ export function buildAwaitingAccountsTaskDescription(
   return `${location ? location + "\n" : ""}Awaiting accounts action\n${appBaseUrl}/jobs/${job.jobId}`;
 }
 
+export function buildAwaitingFacilitiesApprovalTaskDescription(
+  job: PlannerAccountsJobRow,
+  appBaseUrl: string,
+): string {
+  const location = job.buildingName ?? "";
+  return `${location ? location + "\n" : ""}Quote awaiting approval\n${appBaseUrl}/jobs/${job.jobId}`;
+}
+
 export function buildDirectorApprovalTaskDescription(
   job: PlannerAccountsJobRow,
   appBaseUrl: string,
@@ -215,6 +226,66 @@ export function buildOnchargeTaskDescription(
       : "TBC";
   const notesLine = job.onchargeNotes ? `\nNotes: ${job.onchargeNotes}` : "";
   return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${appBaseUrl}/jobs/${job.jobId}`;
+}
+
+// ── Escalation thresholds (WP18a) ────────────────────────────────────────────
+// How many days an assigned, un-acknowledged, non-terminal job may sit before
+// the daily evaluator escalates it to facilities managers. Keyed by Priority,
+// each env-overridable. Defaults: Critical 2 / High 4 / Normal 7 / Low 14;
+// anything else (or an unset/garbage priority) falls back to DEFAULT (7).
+
+const DEFAULT_ESCALATION_THRESHOLD_DAYS = 7;
+
+/** Read a positive-integer day count from an env var, or return the fallback
+ *  when the var is unset, empty, or not a positive number. */
+function readThresholdEnv(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+): number {
+  const raw = env[key];
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Days a job of the given Priority may age (since the later of last ack /
+ *  status change / creation) before escalating. Pure: env is injected so the
+ *  function is unit-testable without touching process.env. */
+export function escalationThresholdDays(
+  priority: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const fallback = readThresholdEnv(
+    env,
+    "ESCALATION_THRESHOLD_DAYS_DEFAULT",
+    DEFAULT_ESCALATION_THRESHOLD_DAYS,
+  );
+  switch (priority) {
+    case "Critical":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_CRITICAL", 2);
+    case "High":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_HIGH", 4);
+    case "Normal":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_NORMAL", 7);
+    case "Low":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_LOW", 14);
+    default:
+      return fallback;
+  }
+}
+
+/** Facilities-manager email recipients for escalation, parsed from the
+ *  FACILITIES_MANAGER_EMAILS env var (comma-separated). Empty list when unset —
+ *  the evaluator skips the send in that case. Mirrors getDirectorEmails(). */
+export function getFacilitiesManagerEmails(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const raw = env.FACILITIES_MANAGER_EMAILS ?? "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 export function toIsoDateString(date: Date): string {

@@ -246,6 +246,12 @@ async function upsertQuote(
           `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: newId }],
         );
+        // Eager-fire the job-bound Planner triggers. The first quote just moved
+        // the job to (Awaiting Approval, facilities), so the
+        // awaiting_facilities_approval task should appear now rather than waiting
+        // for the nightly sweep. All steps are idempotent and no-op when their
+        // condition doesn't hold.
+        await syncJobActionTriggersStandalone(JobID, (msg) => context.log(msg));
         return { status: 200, jsonBody: { quote: stored[0] } };
       } catch (err) {
         await rollbackTransaction(connection).catch(() => {});

@@ -27,6 +27,14 @@ export function getPlanConfig(triggerType: TriggerType): PlanConfig {
         planId:   e.PLANNER_ACCOUNTS_PLAN_ID          ?? "",
         bucketId: e.PLANNER_ACCOUNTS_BUCKET_AWAITING_ID ?? "",
       };
+    case "awaiting_facilities_approval":
+      // Quote sign-off sits on the Facilities plan. If the bucket env is unset,
+      // bucketId is "" and reconcileTask skips gracefully (same guard the other
+      // facilities triggers rely on) — it never throws.
+      return {
+        planId:   e.PLANNER_FACILITIES_PLAN_ID                       ?? "",
+        bucketId: e.PLANNER_FACILITIES_BUCKET_AWAITING_APPROVAL_ID   ?? "",
+      };
     case "director_approval":
       return {
         planId:   e.PLANNER_ACCOUNTS_PLAN_ID           ?? "",

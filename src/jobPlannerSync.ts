@@ -25,6 +25,7 @@ import { Sentry } from "./sentry";
 import {
   addDaysUTC,
   buildAwaitingAccountsTaskDescription,
+  buildAwaitingFacilitiesApprovalTaskDescription,
   buildDirectorApprovalTaskDescription,
   buildOnchargeTaskDescription,
   buildStalledJobTaskDescription,
@@ -284,7 +285,9 @@ export async function syncJobOnchargePending(
   });
 }
 
-/** Awaiting accounts: job handoff to accounts team. */
+/** Awaiting accounts: job handoff to accounts team. Assigns to the named
+ *  assignee's Entra OID when the job has one (AppUsers join, same as
+ *  syncJobStalled), falling back to the whole Accounts group otherwise. */
 export async function syncJobAwaitingAccounts(
   jobId: number,
   deps: AccountsSyncDeps,
@@ -293,9 +296,11 @@ export async function syncJobAwaitingAccounts(
   const rows = await executeQuery(
     connection,
     `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
-            COALESCE(b.BuildingName, '') AS BuildingName
+            COALESCE(b.BuildingName, '') AS BuildingName,
+            au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
      LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+     LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
      WHERE j.JobID = @JobID`,
     [{ name: "JobID", type: TYPES.Int, value: jobId }],
   );
@@ -311,6 +316,9 @@ export async function syncJobAwaitingAccounts(
     (r.Status as string | null) !== "Done" &&
     (r.AwaitingRole as string | null) === "accounts";
 
+  const assignedToEntraOid = (r.AssignedToEntraOid as string | null) ?? null;
+  const assigneeIds = assignedToEntraOid ? [assignedToEntraOid] : accountsMembers;
+
   await reconcileTask({
     connection,
     entityType: "job",
@@ -321,7 +329,57 @@ export async function syncJobAwaitingAccounts(
     title: buildTaskTitle(job.title, "awaiting_accounts", 0),
     description: buildAwaitingAccountsTaskDescription(job, appBaseUrl),
     dueDate: toIsoDateString(new Date()),
-    assigneeIds: accountsMembers,
+    assigneeIds,
+    log,
+  });
+}
+
+/** Awaiting facilities approval: a quote is parked at
+ *  (Awaiting Approval, facilities) needing sign-off. Mirrors awaiting-accounts
+ *  but on the Facilities plan. Assigns to the named assignee OID when set
+ *  (AppUsers join), falling back to the whole Facilities group. Due today. */
+export async function syncJobAwaitingFacilitiesApproval(
+  jobId: number,
+  deps: FacilitiesSyncDeps,
+): Promise<void> {
+  const { connection, facilitiesMembers, appBaseUrl, log } = deps;
+  const rows = await executeQuery(
+    connection,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
+            COALESCE(b.BuildingName, '') AS BuildingName,
+            au.EntraOid AS AssignedToEntraOid
+     FROM dbo.Jobs j
+     LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+     LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
+     WHERE j.JobID = @JobID`,
+    [{ name: "JobID", type: TYPES.Int, value: jobId }],
+  );
+  if (rows.length === 0) return;
+  const r = rows[0];
+  const job: PlannerAccountsJobRow = {
+    jobId: r.JobID as number,
+    title: r.Title as string,
+    buildingName: (r.BuildingName as string | null) ?? null,
+  };
+  const shouldHaveTask =
+    !Boolean(r.IsArchived) &&
+    (r.Status as string | null) === "Awaiting Approval" &&
+    (r.AwaitingRole as string | null) === "facilities";
+
+  const assignedToEntraOid = (r.AssignedToEntraOid as string | null) ?? null;
+  const assigneeIds = assignedToEntraOid ? [assignedToEntraOid] : facilitiesMembers;
+
+  await reconcileTask({
+    connection,
+    entityType: "job",
+    entityId: jobId,
+    triggerType: "awaiting_facilities_approval",
+    shouldHaveTask,
+    planType: "facilities",
+    title: buildTaskTitle(job.title, "awaiting_facilities_approval", 0),
+    description: buildAwaitingFacilitiesApprovalTaskDescription(job, appBaseUrl),
+    dueDate: toIsoDateString(new Date()),
+    assigneeIds,
     log,
   });
 }
@@ -384,7 +442,9 @@ export async function syncJobStalled(
 }
 
 /** Director approval: any approved invoice or awaiting-director quote on
- *  this job needs director sign-off. Resolves when both queues are empty. */
+ *  this job needs director sign-off. Resolves when both queues are empty.
+ *  Assigns to the named assignee OID when set (AppUsers join), falling back to
+ *  the whole Accounts group. */
 export async function syncJobDirectorApproval(
   jobId: number,
   deps: AccountsSyncDeps,
@@ -394,6 +454,7 @@ export async function syncJobDirectorApproval(
     connection,
     `SELECT j.JobID, j.Title, j.IsArchived, j.Status,
             COALESCE(b.BuildingName, '') AS BuildingName,
+            au.EntraOid AS AssignedToEntraOid,
             (SELECT COUNT(*) FROM dbo.JobInvoices ji
              WHERE ji.JobID = j.JobID AND ji.Status = 'approved') +
             (SELECT COUNT(*) FROM dbo.Quotes q
@@ -401,6 +462,7 @@ export async function syncJobDirectorApproval(
               AS DirectorNeededCount
      FROM dbo.Jobs j
      LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+     LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
      WHERE j.JobID = @JobID`,
     [{ name: "JobID", type: TYPES.Int, value: jobId }],
   );
@@ -416,6 +478,9 @@ export async function syncJobDirectorApproval(
     (r.Status as string | null) !== "Done" &&
     ((r.DirectorNeededCount as number) ?? 0) > 0;
 
+  const assignedToEntraOid = (r.AssignedToEntraOid as string | null) ?? null;
+  const assigneeIds = assignedToEntraOid ? [assignedToEntraOid] : accountsMembers;
+
   await reconcileTask({
     connection,
     entityType: "job",
@@ -426,7 +491,7 @@ export async function syncJobDirectorApproval(
     title: buildTaskTitle(job.title, "director_approval", 0),
     description: buildDirectorApprovalTaskDescription(job, appBaseUrl),
     dueDate: toIsoDateString(new Date()),
-    assigneeIds: accountsMembers,
+    assigneeIds,
     log,
   });
 }
@@ -477,6 +542,7 @@ export async function syncJobActionTriggersStandalone(
     // Graph call doesn't suppress the others.
     const steps: ReadonlyArray<[string, () => Promise<void>]> = [
       ["awaiting_accounts", () => syncJobAwaitingAccounts(jobId, accountsDeps)],
+      ["awaiting_facilities_approval", () => syncJobAwaitingFacilitiesApproval(jobId, facilitiesDeps)],
       ["stalled_facilities", () => syncJobStalled(jobId, facilitiesDeps)],
       ["oncharge_pending", () => syncJobOnchargePending(jobId, accountsDeps)],
       ["director_approval", () => syncJobDirectorApproval(jobId, accountsDeps)],

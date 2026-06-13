@@ -89,10 +89,19 @@ export async function advanceJobStatus(
 
   await executeQuery(
     connection,
+    // A real transition resets the accountability clock (WP18a): StatusSince=now
+    // and any prior acknowledgement / escalation is cleared, because a fresh
+    // state needs fresh acknowledgement. Mirrors the addJobEvent manual path so
+    // system-event transitions (quote received/approved, PO, work complete)
+    // behave identically.
     `UPDATE Jobs
        SET Status = @Status,
            AwaitingRole = @AwaitingRole,
-           LastModifiedDate = SYSUTCDATETIME()
+           LastModifiedDate = SYSUTCDATETIME(),
+           StatusSince = SYSUTCDATETIME(),
+           AcknowledgedAt = NULL,
+           AcknowledgedBy = NULL,
+           EscalatedAt = NULL
      WHERE JobID = @JobID
        AND Status = @ExpectedFromStatus
        AND AwaitingRole = @ExpectedFromRole`,

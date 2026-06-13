@@ -10,7 +10,10 @@ import {
   addDaysUTC,
   buildStalledJobTaskDescription,
   buildAwaitingAccountsTaskDescription,
+  buildAwaitingFacilitiesApprovalTaskDescription,
   buildDirectorApprovalTaskDescription,
+  escalationThresholdDays,
+  getFacilitiesManagerEmails,
   type PlannerTenantRow,
   type PlannerJobRow,
   type PlannerStalledJobRow,
@@ -204,6 +207,97 @@ describe("buildTaskTitle — remaining trigger types", () => {
     assert.strictEqual(
       buildTaskTitle("Replace roof", "director_approval", 0),
       "Director approval needed — Replace roof",
+    );
+  });
+
+  test("awaiting_facilities_approval (WP18a)", () => {
+    assert.strictEqual(
+      buildTaskTitle("Replace roof", "awaiting_facilities_approval", 0),
+      "Awaiting approval — Replace roof",
+    );
+  });
+});
+
+describe("buildAwaitingFacilitiesApprovalTaskDescription (WP18a)", () => {
+  test("includes building name and job link", () => {
+    const desc = buildAwaitingFacilitiesApprovalTaskDescription(
+      ACCOUNTS_JOB,
+      "https://app.example.com",
+    );
+    assert.ok(desc.includes("Jones Building"));
+    assert.ok(desc.includes("Quote awaiting approval"));
+    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+  });
+});
+
+describe("escalationThresholdDays (WP18a)", () => {
+  const EMPTY_ENV: NodeJS.ProcessEnv = {};
+
+  test("defaults by priority with no env overrides", () => {
+    assert.strictEqual(escalationThresholdDays("Critical", EMPTY_ENV), 2);
+    assert.strictEqual(escalationThresholdDays("High", EMPTY_ENV), 4);
+    assert.strictEqual(escalationThresholdDays("Normal", EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays("Low", EMPTY_ENV), 14);
+  });
+
+  test("unknown / null / undefined priority falls back to default (7)", () => {
+    assert.strictEqual(escalationThresholdDays("Bogus", EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays(null, EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays(undefined, EMPTY_ENV), 7);
+  });
+
+  test("per-priority env overrides win", () => {
+    const env: NodeJS.ProcessEnv = {
+      ESCALATION_THRESHOLD_DAYS_CRITICAL: "1",
+      ESCALATION_THRESHOLD_DAYS_HIGH: "3",
+      ESCALATION_THRESHOLD_DAYS_NORMAL: "5",
+      ESCALATION_THRESHOLD_DAYS_LOW: "10",
+    };
+    assert.strictEqual(escalationThresholdDays("Critical", env), 1);
+    assert.strictEqual(escalationThresholdDays("High", env), 3);
+    assert.strictEqual(escalationThresholdDays("Normal", env), 5);
+    assert.strictEqual(escalationThresholdDays("Low", env), 10);
+  });
+
+  test("DEFAULT env override applies to unknown priorities", () => {
+    const env: NodeJS.ProcessEnv = { ESCALATION_THRESHOLD_DAYS_DEFAULT: "3" };
+    assert.strictEqual(escalationThresholdDays("Bogus", env), 3);
+    assert.strictEqual(escalationThresholdDays(null, env), 3);
+    // Named priorities keep their own defaults unless separately overridden.
+    assert.strictEqual(escalationThresholdDays("Critical", env), 2);
+  });
+
+  test("ignores empty / non-positive / non-integer env values, using the default", () => {
+    assert.strictEqual(
+      escalationThresholdDays("Critical", { ESCALATION_THRESHOLD_DAYS_CRITICAL: "" }),
+      2,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("High", { ESCALATION_THRESHOLD_DAYS_HIGH: "0" }),
+      4,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("Low", { ESCALATION_THRESHOLD_DAYS_LOW: "-5" }),
+      14,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("Normal", { ESCALATION_THRESHOLD_DAYS_NORMAL: "abc" }),
+      7,
+    );
+  });
+});
+
+describe("getFacilitiesManagerEmails (WP18a)", () => {
+  test("empty when env unset", () => {
+    assert.deepStrictEqual(getFacilitiesManagerEmails({}), []);
+  });
+
+  test("splits, trims, and drops empties", () => {
+    assert.deepStrictEqual(
+      getFacilitiesManagerEmails({
+        FACILITIES_MANAGER_EMAILS: " a@x.com , b@x.com ,, c@x.com ",
+      }),
+      ["a@x.com", "b@x.com", "c@x.com"],
     );
   });
 });
