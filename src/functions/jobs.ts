@@ -1404,7 +1404,11 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
             context.warn("plannerResolve (stalled cleared):", err instanceof Error ? err.message : String(err)),
         );
       }
-      if (NewAwaitingRole !== null && NewAwaitingRole !== undefined && NewAwaitingRole !== "accounts") {
+      // Key off the machine-resolved role actually written to the row, not the
+      // caller's advisory NewAwaitingRole — the state machine may have resolved
+      // a different role (or none), so the raw value can resolve/skip the
+      // awaiting_accounts planner task against a value that was never persisted.
+      if (resolvedNewAwaitingRole !== null && resolvedNewAwaitingRole !== undefined && resolvedNewAwaitingRole !== "accounts") {
         resolveActivePlannerTasks("job", JobID, ["awaiting_accounts"]).catch(
           (err: unknown) =>
             context.warn("plannerResolve (awaiting role changed):", err instanceof Error ? err.message : String(err)),
