@@ -65,3 +65,6 @@ local.settings.json
 .yarn/install-state.gz
 .pnp.*
 __blobstorage__
+
+# Personal Claude Code settings
+.claude/settings.local.json
