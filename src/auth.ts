@@ -48,6 +48,20 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
+// 503 for "we couldn't determine your permissions right now" — a transient
+// failure of the role lookup, NOT an authorization denial. Distinct from 403 so
+// the client retries (react-query treats non-connection 5xx as retryable) and
+// recovers, instead of showing the user an unresolvable "no permission" error.
+// Wording deliberately avoids connection/timeout keywords so the frontend's
+// isConnectionError() classifier doesn't suppress the retry.
+export function serviceUnavailableResponse(): HttpResponseInit {
+  return {
+    status: 503,
+    headers: { "Retry-After": "1" },
+    jsonBody: { error: "Service temporarily unavailable — please retry." },
+  };
+}
+
 // Second arg accepts either a raw Error/unknown (preferred — preserves the
 // stack for Sentry) or a string (legacy). Either way we capture to Sentry so
 // no 500 escapes silently.
@@ -170,6 +184,79 @@ export async function rolesFromAppToken(
     .map((r) => r.toLowerCase());
 }
 
+// ── Role lookup: cache + in-flight dedup ──────────────────────────────────────
+// Every authorised request resolves the caller's role from dbo.AppUsers over the
+// shared service connection. A single page load fires many requests for the SAME
+// user (oid), which used to stampede the one tedious connection concurrently;
+// collisions there were swallowed into [] and surfaced as spurious 403s. So we:
+//   1. de-dupe concurrent lookups for the same oid onto one in-flight query, and
+//   2. cache the result briefly so follow-up navigation skips the DB entirely.
+// A *failed* lookup is never cached and is re-thrown (RoleLookupError) so the
+// caller answers a retryable 5xx instead of failing closed to a 403.
+
+export class RoleLookupError extends Error {
+  readonly cause: unknown;
+  constructor(oid: string, cause: unknown) {
+    super(`Role lookup failed for oid ${oid}`);
+    this.name = "RoleLookupError";
+    this.cause = cause;
+  }
+}
+
+// Short TTL: long enough to absorb a page-load burst plus a few seconds of
+// navigation, short enough that a role change propagates quickly.
+const ROLE_CACHE_TTL_MS = 30_000;
+const _roleCache = new Map<string, { roles: string[]; expiresAt: number }>();
+const _roleInflight = new Map<string, Promise<string[]>>();
+
+/** Test-only: drop cached/in-flight role lookups so cases don't bleed together. */
+export function clearRoleCache(): void {
+  _roleCache.clear();
+  _roleInflight.clear();
+}
+
+async function queryRolesForOid(oid: string): Promise<string[]> {
+  let connection;
+  try {
+    connection = await createServiceConnection();
+    const rows = await executeQuery(
+      connection,
+      `SELECT Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
+      [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
+    );
+    const role = rows[0]?.Role as string | null | undefined;
+    return role ? [role.toLowerCase()] : [];
+  } catch (err) {
+    // Do NOT return [] — indistinguishable from "user has no role" and yields a
+    // misleading, unrecoverable 403. Surface it so requireRole answers 503.
+    throw new RoleLookupError(oid, err);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+function lookupRolesForOid(oid: string): Promise<string[]> {
+  const cached = _roleCache.get(oid);
+  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.roles);
+
+  const existing = _roleInflight.get(oid);
+  if (existing) return existing;
+
+  const promise = queryRolesForOid(oid)
+    .then((roles) => {
+      // Only successful lookups are cached — a thrown failure leaves no entry,
+      // so the next request retries rather than serving a stale/empty result.
+      _roleCache.set(oid, { roles, expiresAt: Date.now() + ROLE_CACHE_TTL_MS });
+      return roles;
+    })
+    .finally(() => {
+      _roleInflight.delete(oid);
+    });
+
+  _roleInflight.set(oid, promise);
+  return promise;
+}
+
 export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   // Gate the X-Dev-Roles bypass on the same two conditions jwt.ts uses for
   // signature-skipping — DEV_ROLE_OVERRIDE_ENABLED *and* a non-Production
@@ -204,20 +291,9 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   const oid = typeof payload.oid === "string" ? payload.oid : null;
   if (!oid) return [];
 
-  const connection = await createServiceConnection();
-  try {
-    const rows = await executeQuery(
-      connection,
-      `SELECT Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
-      [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
-    );
-    const role = rows[0]?.Role as string | null | undefined;
-    return role ? [role.toLowerCase()] : [];
-  } catch {
-    return [];
-  } finally {
-    closeConnection(connection);
-  }
+  // Cached + de-duped; throws RoleLookupError on a transient lookup failure
+  // rather than swallowing it into [] (which would read as a 403).
+  return lookupRolesForOid(oid);
 }
 
 /**
@@ -266,14 +342,29 @@ export async function verifiedIdentityFromRequest(
  *   - `director` satisfies every non-admin-only check (anything operational).
  *   - `facilities_manager` satisfies any `facilities` check.
  *   - `accounts_manager`   satisfies any `accounts` check.
+ *   - `user` is the baseline tier — satisfied by ANY caller with an assigned,
+ *     active role. Only Pending / no-role accounts (empty roles) fail it, so a
+ *     call site can gate on `[AppRole.USER]` to mean "any authenticated app
+ *     user" without enumerating every operational role.
  */
 export async function requireRole(
   request: HttpRequest,
   allowed: readonly AppRole[],
 ): Promise<HttpResponseInit | null> {
-  const roles = await rolesForRequest(request);
+  let roles: string[];
+  try {
+    roles = await rolesForRequest(request);
+  } catch (err) {
+    // The role lookup itself failed (transient DB/connection) — distinct from
+    // "user has no role". Fail to a retryable 503, never a misleading 403.
+    Sentry.captureException(err, { extra: { context: "requireRole role lookup" } });
+    return serviceUnavailableResponse();
+  }
 
   if (roles.includes(AppRole.ADMIN)) return null;
+
+  // Baseline tier: any assigned, active role satisfies a [USER] gate.
+  if (allowed.includes(AppRole.USER) && roles.length > 0) return null;
 
   if (
     roles.includes(AppRole.DIRECTOR) &&

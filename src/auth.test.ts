@@ -1,6 +1,6 @@
 /// <reference types="jest" />
 import { HttpRequest } from "@azure/functions";
-import { AppRole, requireRole, rolesForRequest } from "./auth";
+import { AppRole, clearRoleCache, requireRole, rolesForRequest } from "./auth";
 
 // Mock the DB module so tests don't need a real SQL connection.
 jest.mock("./db", () => ({
@@ -34,6 +34,9 @@ function makeRequest(headers: Record<string, string> = {}): HttpRequest {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The role cache is module-level state; clear it so a cached role from one
+  // case can't satisfy another that mocks a different role for the same oid.
+  clearRoleCache();
   db.createServiceConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   // Tests use unsigned JWTs and run offline — keep the dev override on so
@@ -74,12 +77,12 @@ describe("rolesForRequest", () => {
     expect(db.createServiceConnection).not.toHaveBeenCalled();
   });
 
-  it("closes the connection even when executeQuery throws", async () => {
+  it("closes the connection and rejects when executeQuery throws", async () => {
     db.executeQuery.mockRejectedValue(new Error("timeout"));
     const token = makeJwt({ oid: "oid" });
     const req = makeRequest({ authorization: `Bearer ${token}` });
 
-    await rolesForRequest(req);
+    await expect(rolesForRequest(req)).rejects.toThrow();
 
     expect(db.closeConnection).toHaveBeenCalled();
   });
@@ -171,5 +174,116 @@ describe("requireRole", () => {
     const result = await requireRole(req, [AppRole.ACCOUNTS]);
 
     expect(result).toBeNull();
+  });
+
+  // USER is the baseline tier: any caller with an assigned, active role
+  // satisfies it. Only Pending / no-role accounts (empty roles) are rejected.
+  // This lets endpoints gate on [AppRole.USER] to mean "any authenticated app
+  // user" without enumerating every operational role.
+  it.each([
+    ["facilities"],
+    ["accounts"],
+    ["facilities_manager"],
+    ["accounts_manager"],
+    ["director"],
+    ["admin"],
+    ["user"],
+  ])("%s satisfies a baseline [USER] check", async (role) => {
+    db.executeQuery.mockResolvedValue([{ Role: role }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.USER]);
+
+    expect(result).toBeNull();
+  });
+
+  it("rejects a Pending (no-role) caller on a baseline [USER] check", async () => {
+    db.executeQuery.mockResolvedValue([]); // no active AppUsers row → []
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.USER]);
+
+    expect(result?.status).toBe(403);
+  });
+});
+
+// ── Transient role-lookup failure ─────────────────────────────────────────────
+// A failure of the role lookup itself (DB/connection error) must NOT be
+// swallowed into [] — that masquerades as "user has no role" and yields a
+// misleading 403 that the user can never resolve. It must surface as a
+// retryable 503 so react-query re-fires and recovers once the connection warms.
+
+describe("requireRole — transient role-lookup failure", () => {
+  it("returns a retryable 503, not a 403, when the role lookup throws", async () => {
+    db.executeQuery.mockRejectedValue(new Error("connection reset by peer"));
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid-lookup-fail-1" })}`,
+    });
+
+    const result = await requireRole(req, [AppRole.FACILITIES]);
+
+    expect(result?.status).toBe(503);
+  });
+});
+
+describe("rolesForRequest — transient role-lookup failure", () => {
+  it("rejects (does not resolve to []) when the lookup throws", async () => {
+    db.executeQuery.mockRejectedValue(new Error("connection reset by peer"));
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "oid-lookup-fail-2" })}`,
+    });
+
+    await expect(rolesForRequest(req)).rejects.toThrow();
+  });
+});
+
+// ── Caching & in-flight de-dup ────────────────────────────────────────────────
+// A page-load burst fires many requests for the same user; these must collapse
+// onto a single DB role lookup rather than stampeding the shared connection.
+
+describe("rolesForRequest — caching & in-flight de-dup", () => {
+  it("de-dupes concurrent lookups for the same oid onto one DB query", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "facilities" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "burst-oid" })}`,
+    });
+
+    const results = await Promise.all([
+      rolesForRequest(req),
+      rolesForRequest(req),
+      rolesForRequest(req),
+    ]);
+
+    expect(results).toEqual([["facilities"], ["facilities"], ["facilities"]]);
+    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a later lookup from cache without re-querying", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "accounts" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "cache-oid" })}`,
+    });
+
+    expect(await rolesForRequest(req)).toEqual(["accounts"]);
+    expect(await rolesForRequest(req)).toEqual(["accounts"]);
+
+    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a failed lookup — a later request retries the DB", async () => {
+    db.executeQuery
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValueOnce([{ Role: "director" }]);
+    const req = makeRequest({
+      authorization: `Bearer ${makeJwt({ oid: "retry-oid" })}`,
+    });
+
+    await expect(rolesForRequest(req)).rejects.toThrow();
+    expect(await rolesForRequest(req)).toEqual(["director"]);
+    expect(db.executeQuery).toHaveBeenCalledTimes(2);
   });
 });

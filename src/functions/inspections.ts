@@ -39,7 +39,17 @@ function tooManyRequests(retryAfterMs: number): HttpResponseInit {
   };
 }
 
-const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
+// Inspection authors = the field inspectors plus their managers. Includes plain
+// FACILITIES: they walk the building and create/edit/complete/merge inspections.
+// Mirrors the frontend `editInspections` / `mergeInspections` capabilities
+// (command-centre constants/roles.ts) and the deleteInspection own-row rule
+// below — all three must agree on who can author an inspection.
+export const EDIT_INSPECTIONS_ROLES = [
+  AppRole.ADMIN,
+  AppRole.DIRECTOR,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+] as const;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
