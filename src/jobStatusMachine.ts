@@ -83,6 +83,13 @@ export interface TransitionOptions {
    * (omitted) so non-contract jobs are behaviour-identical to before WP10.
    */
   isContract?: boolean;
+  /**
+   * Whether the job is internal (done in-house — no contractor, quote, PO or
+   * invoice). Internal jobs may be closed directly to Done from any live state
+   * via the "Finish & Close job" action. Non-internal jobs must still reach
+   * Done through INVOICE_APPROVED. Defaults to false (omitted).
+   */
+  isInternal?: boolean;
 }
 
 /** The safe landing for an unblock with no (or a nonsensical) pre-block state. */
@@ -166,6 +173,12 @@ export function canTransition(
   ) {
     return true;
   }
+  // Internal jobs are finished in-house — no quote/PO/invoice round. They may be
+  // closed directly to Done from any live state. (current.status === Done and the
+  // Done === target no-op are already rejected above.)
+  if (opts?.isInternal && target === JobStatus.DONE) {
+    return true;
+  }
   return TRANSITIONS.some((t) => statesEqual(t.from, current) && t.to.status === target);
 }
 
@@ -202,6 +215,11 @@ export function resolveManualTarget(
   // already gated this on opts.isContract, so we only reach here for contracts.
   if (current.status === JobStatus.NEW && targetStatus === JobStatus.WORK) {
     return { status: JobStatus.WORK, awaitingRole: F };
+  }
+  // Internal close — land on Done, preserving the current awaiting role. Gated by
+  // canTransition above, so this only runs for internal jobs.
+  if (opts?.isInternal && targetStatus === JobStatus.DONE) {
+    return { status: JobStatus.DONE, awaitingRole: current.awaitingRole };
   }
   const edge = TRANSITIONS.find(
     (t) => statesEqual(t.from, current) && t.to.status === targetStatus,

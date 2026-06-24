@@ -1238,7 +1238,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     if (NewStatus != null) {
       const currentRows = await executeQuery(
         connection,
-        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole, IsContract FROM Jobs WHERE JobID = @JobID",
+        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole, IsContract, IsInternal FROM Jobs WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: JobID }],
       );
       if (currentRows.length === 0) {
@@ -1274,9 +1274,11 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         // `isContract` opens the standing-contract New → Work fast path
         // (WORK_AUTHORIZED) — a no-op for every non-contract job.
         const isContract = Boolean(currentRows[0].IsContract);
+        const isInternal = Boolean(currentRows[0].IsInternal);
         const target = resolveManualTarget(currentState, NewStatus as JobStatus, {
           preBlockState,
           isContract,
+          isInternal,
         });
         if (target == null) {
           return {

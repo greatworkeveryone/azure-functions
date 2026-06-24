@@ -475,3 +475,35 @@ describe("jobStatusMachine — composite (status, awaitingRole)", () => {
     });
   });
 });
+
+describe("internal close (isInternal → Done)", () => {
+  const fac = AwaitingRole.FACILITIES;
+
+  it("allows an internal job to close to Done from New", () => {
+    const current = { status: JobStatus.NEW, awaitingRole: fac };
+    expect(canTransition(current, JobStatus.DONE, { isInternal: true })).toBe(true);
+    expect(resolveManualTarget(current, JobStatus.DONE, { isInternal: true })).toEqual({
+      status: JobStatus.DONE,
+      awaitingRole: fac,
+    });
+  });
+
+  it("allows an internal job to close from a legacy Quote state", () => {
+    const current = { status: JobStatus.QUOTE, awaitingRole: fac };
+    expect(resolveManualTarget(current, JobStatus.DONE, { isInternal: true })).toEqual({
+      status: JobStatus.DONE,
+      awaitingRole: fac,
+    });
+  });
+
+  it("does NOT allow a non-internal job to close directly to Done", () => {
+    const current = { status: JobStatus.NEW, awaitingRole: fac };
+    expect(canTransition(current, JobStatus.DONE, { isInternal: false })).toBe(false);
+    expect(resolveManualTarget(current, JobStatus.DONE, { isInternal: false })).toBeNull();
+  });
+
+  it("does not resurrect a Done job", () => {
+    const current = { status: JobStatus.DONE, awaitingRole: AwaitingRole.ACCOUNTS };
+    expect(canTransition(current, JobStatus.DONE, { isInternal: true })).toBe(false);
+  });
+});
