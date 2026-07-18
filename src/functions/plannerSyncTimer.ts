@@ -48,7 +48,6 @@ const TENANT_TRIGGER_TYPES: TriggerType[] = [
  * show whether the last sync succeeded and surface any error message.
  */
 async function recordPlannerSyncOutcome(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   connection: any,
   rowId: number,
   error: string | null,

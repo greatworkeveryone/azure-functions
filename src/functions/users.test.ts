@@ -67,7 +67,6 @@ function makeRequest(body: unknown, headers: Record<string, string> = {}): HttpR
 const ctx = { error: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
 
 // Import after mocks are set up
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { upsertAppUser, registerSelf } = require("./users") as {
   upsertAppUser: (req: HttpRequest, ctx: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
   registerSelf:  (req: HttpRequest, ctx: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;

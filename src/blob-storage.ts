@@ -46,6 +46,16 @@ export interface UploadBlobResult {
   url: string; // account URL of the blob (no SAS yet)
 }
 
+// The extension comes from a client-supplied filename and ends up inside a
+// blob path, so anything beyond plain alphanumerics (slashes, dot-segments,
+// spaces) must be stripped — both to keep blob names path-safe and so minted
+// names always satisfy the inspections addAttachment validator.
+export function sanitizeBlobExtension(originalName: string): string {
+  if (!originalName.includes(".")) return "";
+  const rawExt = originalName.split(".").pop() ?? "";
+  return rawExt.replace(/[^A-Za-z0-9]/g, "").slice(0, 10);
+}
+
 export async function uploadBlob(
   buffer: Buffer,
   originalName: string,
@@ -53,7 +63,7 @@ export async function uploadBlob(
   keyPrefix: string,
 ): Promise<UploadBlobResult> {
   const container = await getContainerClient();
-  const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
+  const ext = sanitizeBlobExtension(originalName);
   const blobName = `${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`;
   const blockBlob = container.getBlockBlobClient(blobName);
   await blockBlob.uploadData(buffer, {
@@ -105,6 +115,49 @@ function generateReadSasUrlForContainer(
  */
 export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS): string {
   return generateReadSasUrlForContainer(CONTAINER_NAME, blobName, ttlMs);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Key handover photos.
+//
+// These are PERMANENT evidence/audit records (who held a key, with a photo of
+// the handover), so they must NOT share the transient `wr-attachments`
+// container — that container's blobs are reaped 48h after upload by
+// cleanupAttachments once ingested upstream. Key photos live in their own
+// private `key-photos` container that no cleanup job touches. Blob names keep
+// the historical `keys/<uuid>.<ext>` shape so stored DB values are unchanged;
+// only the container differs. Reads mint a short-lived SAS at the boundary.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KEY_PHOTOS_CONTAINER = "key-photos";
+
+async function getKeyPhotosContainerClient() {
+  const container = getServiceClient().getContainerClient(KEY_PHOTOS_CONTAINER);
+  await container.createIfNotExists(); // private by default
+  return container;
+}
+
+export async function uploadKeyPhotoBlob(
+  buffer: Buffer,
+  originalName: string,
+  contentType: string,
+): Promise<UploadBlobResult> {
+  const container = await getKeyPhotosContainerClient();
+  const ext = sanitizeBlobExtension(originalName);
+  const blobName = `keys/${randomUUID()}${ext ? "." + ext : ""}`;
+  const blockBlob = container.getBlockBlobClient(blobName);
+  await blockBlob.uploadData(buffer, {
+    blobHTTPHeaders: {
+      blobContentType: contentType,
+      blobContentDisposition: `inline; filename="${encodeURIComponent(originalName)}"`,
+    },
+  });
+  return { blobName, url: blockBlob.url };
+}
+
+/** Time-limited read SAS URL for a key-photo blob in the `key-photos` container. */
+export function keyPhotoReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS): string {
+  return generateReadSasUrlForContainer(KEY_PHOTOS_CONTAINER, blobName, ttlMs);
 }
 
 export async function deleteBlob(blobName: string): Promise<void> {

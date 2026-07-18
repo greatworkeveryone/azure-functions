@@ -57,6 +57,8 @@ import {
   deletePublicBlob,
   vacanciesReadSasUrl,
   vacanciesBlobNameFromUrl,
+  uploadKeyPhotoBlob,
+  keyPhotoReadSasUrl,
 } from "./blob-storage";
 
 beforeAll(() => {
@@ -143,5 +145,31 @@ describe("deletePublicBlob", () => {
     await deletePublicBlob("42/abc.jpg");
     expect(createIfNotExistsMock.mock.calls[0][0]).toBeUndefined();
     expect(deleteIfExistsMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("uploadKeyPhotoBlob", () => {
+  it("uploads to the dedicated private key-photos container with a keys/ blob name", async () => {
+    const result = await uploadKeyPhotoBlob(Buffer.from("img"), "handover.png", "image/png");
+
+    // Private create (no public-access option) — key photos are never public.
+    expect(createIfNotExistsMock).toHaveBeenCalledTimes(1);
+    expect(createIfNotExistsMock.mock.calls[0][0]).toBeUndefined();
+
+    expect(uploadDataMock).toHaveBeenCalledTimes(1);
+    // Blob-name shape is unchanged from the legacy convention (keys/<uuid>.<ext>)
+    // so existing DB values keep the same format — only the container differs.
+    expect(result.blobName).toMatch(/^keys\/.*\.png$/);
+    // The regression this guards: must NOT land in the transient wr-attachments
+    // container that cleanupAttachments reaps.
+    expect(result.url).toContain("/key-photos/");
+    expect(result.url).not.toContain("/wr-attachments/");
+  });
+});
+
+describe("keyPhotoReadSasUrl", () => {
+  it("mints a read SAS against the key-photos container", () => {
+    const out = keyPhotoReadSasUrl("keys/abc.png");
+    expect(out).toBe(`${ACCOUNT_BASE}/key-photos/keys/abc.png?sig=fake&c=key-photos`);
   });
 });

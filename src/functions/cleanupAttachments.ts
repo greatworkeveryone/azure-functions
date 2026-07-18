@@ -20,12 +20,17 @@ const GRACE_HOURS = Number(process.env.ATTACHMENT_DELETE_GRACE_HOURS ?? "48");
 async function runCleanup(context: InvocationContext): Promise<{ scanned: number; deleted: number; failed: number }> {
   const connection = await createServiceConnection();
   try {
+    // Inspection-origin blobs are excluded: raiseJobsFromInspection copies only
+    // the dbo.Attachments catalogue row and SHARES the blob with
+    // dbo.InspectionAttachments (preserving the original UploadedAt), so
+    // reaping them here would destroy photos the inspection still displays.
     const rows = await executeQuery(
       connection,
       `SELECT Id, BlobName, OriginalName, UploadedAt
        FROM Attachments
        WHERE MyBuildingsConfirmedAt IS NULL
-         AND UploadedAt < DATEADD(HOUR, -@GraceHours, SYSUTCDATETIME())`,
+         AND UploadedAt < DATEADD(HOUR, -@GraceHours, SYSUTCDATETIME())
+         AND BlobName NOT LIKE 'inspections/%'`,
       [{ name: "GraceHours", type: TYPES.Int, value: GRACE_HOURS }],
     );
 

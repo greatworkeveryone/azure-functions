@@ -14,7 +14,7 @@ import {
   requireRole,
   oidFromToken,
 } from "../auth";
-import { uploadBlob, generateReadSasUrl } from "../blob-storage";
+import { uploadKeyPhotoBlob, keyPhotoReadSasUrl } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
 
@@ -127,7 +127,7 @@ function formatKey(row: Record<string, unknown>) {
     registration: row.Registration,
     description: row.Description,
     photoUrl: row.PhotoBlobUrl
-      ? generateReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
+      ? keyPhotoReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
       : null,
     storageLocation: row.StorageLocation ?? null,
     dateAdded: row.DateAdded,
@@ -224,7 +224,7 @@ async function getKeys(
             checkedOutAt: row.CheckedOutAt,
             expectedReturnAt: row.ExpectedReturnAt,
             checkOutPhotoUrl: row.CheckOutPhotoBlobUrl
-              ? generateReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+              ? keyPhotoReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
               : null,
             notes: row.Notes ?? null,
             isOverdue: row.IsOverdue === 1,
@@ -234,7 +234,7 @@ async function getKeys(
               keyId: co.KeyId,
               checkedInAt: co.CheckedInAt ?? null,
               checkInPhotoUrl: co.CheckInPhotoBlobUrl
-                ? generateReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+                ? keyPhotoReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
                 : null,
             })),
           }
@@ -321,7 +321,7 @@ async function getKeyDetail(
       checkedOutAt: row.CheckedOutAt,
       expectedReturnAt: row.ExpectedReturnAt,
       checkOutPhotoUrl: row.CheckOutPhotoBlobUrl
-        ? generateReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+        ? keyPhotoReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
         : null,
       notes: row.Notes ?? null,
       isOverdue: row.IsOverdue === 1,
@@ -331,7 +331,7 @@ async function getKeyDetail(
         keyId: co.KeyId,
         checkedInAt: co.CheckedInAt ?? null,
         checkInPhotoUrl: co.CheckInPhotoBlobUrl
-          ? generateReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+          ? keyPhotoReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
           : null,
       })),
     }));
@@ -970,8 +970,8 @@ async function uploadKeyPhoto(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await uploadBlob(buffer, file.name, contentType, "keys");
-    const url = generateReadSasUrl(result.blobName, 15 * 60 * 1000);
+    const result = await uploadKeyPhotoBlob(buffer, file.name, contentType);
+    const url = keyPhotoReadSasUrl(result.blobName, 15 * 60 * 1000);
     return { status: 200, jsonBody: { blobName: result.blobName, url } };
   } catch (error: any) {
     context.error("uploadKeyPhoto failed:", error.message);

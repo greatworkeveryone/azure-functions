@@ -86,6 +86,7 @@ app.hook.postInvocation((hookContext) => {
 // Runs once when the function app initialises, before any requests are served.
 // If migrations fail the app refuses to start — better than serving requests
 // against a schema that's out of date.
+/* eslint-disable no-console -- startup migration diagnostics; the Functions request logger isn't available in the appStart hook, and no request data is logged */
 app.hook.appStart(async (_context) => {
   const isProduction = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production";
   const isLocalSql = process.env.LOCAL_SQL === "true";
@@ -101,3 +102,4 @@ app.hook.appStart(async (_context) => {
   await runMigrations((msg) => console.log(msg));
   console.log("startup: migrations complete");
 });
+/* eslint-enable no-console */

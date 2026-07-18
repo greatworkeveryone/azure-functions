@@ -1,3 +1,4 @@
+/* eslint-disable no-console -- bootstrap diagnostics: these run at init, before Sentry/App Insights logging is available, and log no request data */
 import * as Sentry from "@sentry/node";
 
 let initialised = false;

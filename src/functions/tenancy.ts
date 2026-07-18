@@ -1936,6 +1936,7 @@ async function getReviewsDue(
           },
         ]
       : [];
+    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants
@@ -1945,6 +1946,7 @@ async function getReviewsDue(
        ORDER BY NextReviewDate`,
       params,
     );
+    /* eslint-enable local/no-sql-interpolation */
     const tenants = rows.map((row) => tenantRowToApi(row, [], {}));
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {

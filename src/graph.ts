@@ -264,7 +264,6 @@ async function fetchAndUploadAttachments(
 
   const data = (await resp.json()) as { value: any[] };
   const all = data.value ?? [];
-  console.log(`[attachments] msg=${graphMessageId} raw count=${all.length} types=${all.map((a) => a["@odata.type"]).join(",")}`);
 
   // Accept all file attachments that have a name — isInline is unreliable
   // (Outlook often marks image attachments as inline) and contentBytes is
@@ -272,8 +271,6 @@ async function fetchAndUploadAttachments(
   const fileAttachments = all.filter(
     (a) => a["@odata.type"] === "#microsoft.graph.fileAttachment" && a.name,
   );
-  console.log(`[attachments] msg=${graphMessageId} fileAttachments=${fileAttachments.map((a) => `${a.name}(inline=${a.isInline},size=${a.size})`).join("|")}`);
-
   const results: { blobName: string; fileName: string }[] = [];
   for (const att of fileAttachments) {
     try {
@@ -285,7 +282,6 @@ async function fetchAndUploadAttachments(
         `email-attachments/${graphMessageId}`,
       );
       results.push({ blobName, fileName: att.name });
-      console.log(`[attachments] uploaded ${att.name} → ${blobName}`);
     } catch (err: any) {
       console.error(`[attachments] failed to upload ${att.name} for msg=${graphMessageId}: ${err?.message}`);
     }
@@ -329,9 +325,6 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
               return [];
             })
           : [];
-      if (!m.hasAttachments) {
-        console.log(`[attachments] skipped msg=${m.id} subject="${m.subject}" — hasAttachments=false`);
-      }
       // Graph occasionally returns a `name` that's just the address echoed
       // back; null it out so the UI keeps using the address-only render path
       // for those rather than showing the same string twice.
