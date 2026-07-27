@@ -29,6 +29,8 @@ import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { isDevOverrideEnabled } from "../jwt";
+import { buildInspectionPacket } from "../pdf/inspection-packet";
+import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 
@@ -1843,3 +1845,47 @@ app.http("deleteInspection",          { authLevel: "anonymous", handler: deleteI
 app.http("uploadInspectionAttachment",{ authLevel: "anonymous", handler: uploadInspectionAttachment,methods: ["POST"] });
 app.http("mergeInspections",          { authLevel: "anonymous", handler: mergeInspections,          methods: ["POST"] });
 app.http("raiseJobsFromInspection",   { authLevel: "anonymous", handler: raiseJobsFromInspection,   methods: ["POST"] });
+
+async function getInspectionPacketPdf(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
+  const inspectionId = Number(request.params.inspectionId);
+  if (!Number.isFinite(inspectionId) || inspectionId <= 0) {
+    return { status: 400, jsonBody: { error: "inspectionId must be a positive number" } };
+  }
+
+  let connection;
+  try {
+    connection = await createConnection(token);
+    const input = await loadInspectionPacketInputs(connection, inspectionId);
+    if (!input) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    const pdf = await buildInspectionPacket(input);
+    return {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="inspection-${inspectionId}-report.pdf"`,
+      },
+      body: pdf,
+    };
+  } catch (error: any) {
+    context.error("getInspectionPacketPdf failed:", error.message);
+    return errorResponse("Build inspection packet failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+app.http("getInspectionPacketPdf", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  route: "inspections/{inspectionId}/packet",
+  handler: getInspectionPacketPdf,
+});

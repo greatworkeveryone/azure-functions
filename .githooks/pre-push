@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Mirrors .github/workflows/security.yml so a red Security check is caught locally.
+# Bypass with: git push --no-verify
+
+set -e
+
+# Git hooks run without your shell profile, so nvm-managed node is off PATH when
+# pushing from an IDE or GUI client. Recover it before assuming npm is missing.
+if ! command -v npm >/dev/null 2>&1; then
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+    command -v npm >/dev/null 2>&1 || nvm use default >/dev/null 2>&1 || true
+  fi
+fi
+
+if ! command -v npm >/dev/null 2>&1 && [ -x /opt/homebrew/bin/npm ]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "✗ pre-push: npm not found, so the audit could not run."
+  echo "  This is a PATH problem, not a vulnerability. Push from a terminal where"
+  echo "  'npm -v' works, or install node, then try again."
+  exit 1
+fi
+
+echo "pre-push: auditing production dependencies..."
+
+# Gate is critical, not high — matches security.yml. The outstanding high
+# (brace-expansion via exceljs -> archiver) is unreachable; see CLAUDE.md.
+if ! npm audit --omit=dev --audit-level=critical; then
+  echo ""
+  echo "✗ Critical vulnerabilities in the production tree."
+  echo "  CI (.github/workflows/security.yml) runs this same command and will fail."
+  echo "  Fix, or push with --no-verify if this is a known accepted risk."
+  exit 1
+fi
+
+if ! npm audit --omit=dev --audit-level=high >/dev/null 2>&1; then
+  echo "⚠ high-severity advisories present (non-blocking) — review: npm audit --omit=dev"
+fi
+
+echo "pre-push: verifying package-lock.json is in sync..."
+
+# npm ci fails outright if package.json and the lock file disagree; catch it here.
+if ! npm ls --omit=dev >/dev/null 2>&1; then
+  echo ""
+  echo "✗ package-lock.json is out of sync with package.json."
+  echo "  Run 'npm install' and commit the updated lock file."
+  exit 1
+fi
+
+echo "pre-push: ok"
