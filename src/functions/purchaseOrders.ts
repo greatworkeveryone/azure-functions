@@ -10,7 +10,7 @@ import {
   buildUpdateSet,
   closeConnection,
   commitTransaction,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   rollbackTransaction,
 } from "../db";
@@ -89,7 +89,7 @@ async function getPurchaseOrders(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE JobID = @JobID ORDER BY Seq ASC`,
@@ -147,7 +147,7 @@ async function upsertPurchaseOrder(
       CreatedBy,
     } = body ?? {};
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     if (PurchaseOrderID === undefined) {
       // Create — runs in a tx so the SELECT MAX(Seq) + INSERT pair is atomic
@@ -443,7 +443,7 @@ async function previewPurchaseOrder(
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch PO + Job snapshot + contractor email in one round-trip
     const rows = await executeQuery(
@@ -596,7 +596,7 @@ async function sendPurchaseOrder(
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const contractorRows = await executeQuery(
       connection,
@@ -701,7 +701,7 @@ async function deletePurchaseOrder(
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT SentAt, CompletedAt, PDFBlobName FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
@@ -772,7 +772,7 @@ async function markPurchaseOrderMyobCreated(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -855,7 +855,7 @@ async function unmarkPurchaseOrderMyobCreated(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -942,7 +942,7 @@ async function markPurchaseOrderComplete(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1038,7 +1038,7 @@ async function unmarkPurchaseOrderComplete(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,

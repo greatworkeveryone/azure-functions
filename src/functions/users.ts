@@ -2,8 +2,8 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
-  createServiceConnection,
+  createRequestConnection,
+  createServiceRequestConnection,
   executeQuery,
 } from "../db";
 import {
@@ -48,7 +48,7 @@ export async function getAppUsers(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = canManage
       ? await executeQuery(
@@ -150,7 +150,7 @@ export async function upsertAppUser(
       }
     }
 
-    connection = await createServiceConnection();
+    connection = await createServiceRequestConnection();
 
     // Resolve caller display name for audit log.
     const callerRows = await executeQuery(
@@ -345,7 +345,7 @@ export async function registerSelf(
 
   let connection;
   try {
-    connection = await createServiceConnection();
+    connection = await createServiceRequestConnection();
 
     // Step 1: existing user matched by OID (returning user).
     const byOid = await executeQuery(

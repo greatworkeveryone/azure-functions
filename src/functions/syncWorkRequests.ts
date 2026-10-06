@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, closeConnection, executeQuery } from "../db";
+import { createRequestConnection, closeConnection, executeQuery } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
@@ -28,7 +28,7 @@ async function syncWorkRequests(request: HttpRequest, context: InvocationContext
     const workRequests = await fetchWorkRequests(params);
     context.log(`Fetched ${workRequests.length} work requests`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Resolve the BuildingID myBuildings omits — using the query param when
     // it's a per-building sync, otherwise a name→id lookup from Buildings.

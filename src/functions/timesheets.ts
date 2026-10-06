@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   SqlParam,
 } from "../db";
@@ -113,7 +113,7 @@ async function getTimesheet(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     let sql = `
       SELECT TimesheetID, UserID, UserDisplayName, WeekStartDate, Role, Data,
@@ -210,7 +210,7 @@ async function upsertTimesheet(
       timesheetRole = suppliedRole ?? (managed.length === 1 ? managed[0] : managed[0] ?? null);
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Check if a timesheet exists and is locked
     const existing = await executeQuery(
@@ -330,7 +330,7 @@ async function submitTimesheetForApproval(
       return { status: 400, jsonBody: { error: "submit (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -411,7 +411,7 @@ async function approveTimesheet(
       return { status: 400, jsonBody: { error: "approve (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -487,7 +487,7 @@ async function getTimesheets(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const qRole             = request.query.get("role");
     const qReadyForApproval = request.query.get("readyForApproval");
@@ -579,7 +579,7 @@ async function getTimesheetUsers(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const params: SqlParam[] = [];
     const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
@@ -616,7 +616,7 @@ export async function runMyobSync(
   const errors: string[] = [];
   let synced = 0;
 
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
     const params: SqlParam[] = managed.map((r, i) => ({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));

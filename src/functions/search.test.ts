@@ -11,7 +11,7 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../db", () => ({
-  createConnection: jest.fn(async () => ({})),
+  createRequestConnection: jest.fn(async () => ({})),
   closeConnection: jest.fn(),
   executeQuery: jest.fn(async () => []),
 }));

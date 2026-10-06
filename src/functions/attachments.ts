@@ -10,7 +10,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { uploadAttachment } from "../mybuildings-client";
@@ -128,7 +128,7 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
     }
 
     // Record locally
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
       `INSERT INTO Attachments (JobID, WorkRequestID, JobCode, BlobName, OriginalName, Extension, ContentType, SizeBytes, UploadedBy)
@@ -199,7 +199,7 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = jobId !== null
       ? await executeQuery(
           connection,
@@ -274,7 +274,7 @@ async function attachToParent(
       };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
@@ -323,7 +323,7 @@ async function detachFromParent(
       };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
@@ -377,7 +377,7 @@ async function listParentAttachments(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     const rows = await executeQuery(
       connection,
@@ -439,7 +439,7 @@ async function handleDeleteAttachment(
       return { status: 400, jsonBody: { error: "AttachmentID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     // Pull UploadedBy alongside the blob name + parent IDs so we can enforce
     // per-row ownership (IDOR). The JOIN against parent tables is informational —
     // the comparison rule is admin OR UploadedBy === callerOid. The parent owner
@@ -546,7 +546,7 @@ async function handleClaimEmailAttachment(
       : null;
     const sasUrl = generateReadSasUrl(BlobName);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
       `INSERT INTO Attachments (JobID, BlobName, OriginalName, Extension, UploadedBy)
@@ -605,7 +605,7 @@ async function handleUpdateAttachmentComment(
       return { status: 400, jsonBody: { error: "AttachmentID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     // Per-row ownership: only the uploader or an admin can edit the comment.
     // Parent-table JOIN is informational; gating uses UploadedBy.
     const ownership = await executeQuery(

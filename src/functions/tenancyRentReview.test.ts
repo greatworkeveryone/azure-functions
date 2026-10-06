@@ -41,7 +41,7 @@ jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -69,7 +69,7 @@ const db = require("../db") as {
   beginTransaction:    jest.Mock;
   closeConnection:     jest.Mock;
   commitTransaction:   jest.Mock;
-  createConnection:    jest.Mock;
+  createRequestConnection:    jest.Mock;
   executeQuery:        jest.Mock;
   rollbackTransaction: jest.Mock;
 };
@@ -110,7 +110,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   db.beginTransaction.mockResolvedValue(undefined);
   db.commitTransaction.mockResolvedValue(undefined);

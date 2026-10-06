@@ -8,7 +8,7 @@ import {
   beginTransaction,
   closeConnection,
   commitTransaction,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   rollbackTransaction,
 } from "../db";
@@ -60,7 +60,7 @@ async function getJobRequestedContractors(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
@@ -106,7 +106,7 @@ async function addJobRequestedContractor(
       return { status: 400, jsonBody: { error: "contractorName (string) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     await beginTransaction(connection);
     try {
@@ -207,7 +207,7 @@ async function removeJobRequestedContractor(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -292,7 +292,7 @@ async function toggleRequestedContractorSent(
       return { status: 400, jsonBody: { error: "requestSent (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const updated = await executeQuery(
       connection,

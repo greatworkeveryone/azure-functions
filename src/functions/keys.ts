@@ -5,7 +5,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import ExcelJS from "exceljs";
 import { TYPES } from "tedious";
-import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import {
   AppRole,
   extractToken,
@@ -163,7 +163,7 @@ async function getKeys(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // OUTER APPLY pulls the single most-recent open batch per key so the row
     // count stays 1:1 with dbo.Keys. Codes can have several concurrent open
@@ -268,7 +268,7 @@ async function getKeyDetail(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const keyRows = await executeQuery(
       connection,
@@ -373,7 +373,7 @@ async function createKey(
     }
 
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
@@ -451,7 +451,7 @@ async function updateKey(
 
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `UPDATE dbo.Keys
@@ -509,7 +509,7 @@ async function reportKeyLost(
     const lostComment = trimmedComment === "" ? null : trimmedComment;
 
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Close any open checkout rows for this key
     await executeQuery(
@@ -572,7 +572,7 @@ async function deleteKey(
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
 
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const existing = await executeQuery(
       connection,
@@ -647,7 +647,7 @@ async function restoreKey(
     const { Id } = ((await request.json()) as any) ?? {};
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const existing = await executeQuery(
       connection,
@@ -720,7 +720,7 @@ async function checkoutKeys(
 
     const checkedOutBy = callerFromToken(token).name;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const placeholders = KeyIds.map((_: number, i: number) => `@K${i}`).join(",");
     const params = KeyIds.map((id: number, i: number) => ({ name: `K${i}`, type: TYPES.Int, value: id }));
@@ -871,7 +871,7 @@ async function checkinKeys(
       return { status: 400, jsonBody: { error: "CheckInPhotoBlobUrl required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const placeholders = CheckoutIds.map((_: number, i: number) => `@C${i}`).join(",");
     const params = CheckoutIds.map((id: number, i: number) => ({ name: `C${i}`, type: TYPES.Int, value: id }));
@@ -994,7 +994,7 @@ async function keyImportTemplate(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const buildings = await executeQuery(
       connection,
       `SELECT BuildingName FROM dbo.Buildings WHERE Active = 1 ORDER BY BuildingName`,
@@ -1126,7 +1126,7 @@ async function bulkImportKeys(
     // Skip trailing blank rows
     const rows = allRows.filter((r) => (r["Item Type"] ?? "").trim() !== "" || (r["Building"] ?? "").trim() !== "");
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Load buildings for name→id lookup. The Keys FK references Buildings.BuildingID
     // (not Id), so we must read that column or every insert violates FK_Keys_Buildings_BuildingID.

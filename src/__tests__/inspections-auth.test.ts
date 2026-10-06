@@ -8,7 +8,7 @@ jest.mock("../db", () => ({
   beginTransaction:        jest.fn(),
   closeConnection:         jest.fn(),
   commitTransaction:       jest.fn(),
-  createConnection:        jest.fn(),
+  createRequestConnection:        jest.fn(),
   createServiceConnection: jest.fn(),
   executeQuery:            jest.fn(),
   rollbackTransaction:     jest.fn(),

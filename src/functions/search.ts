@@ -7,7 +7,7 @@ import {
   requireRole,
   unauthorizedResponse,
 } from "../auth";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { escapeLikePattern, validateSearchQuery } from "../searchUtils";
 
 export type SearchResultItem = {
@@ -176,7 +176,7 @@ export async function search(
 
   let conn;
   try {
-    conn = await createConnection(token);
+    conn = await createRequestConnection(token);
     // tedious connections handle one request at a time; run sequentially.
     const tenants = await queryTenants(conn, params);
     const jobs = await queryJobs(conn, params);

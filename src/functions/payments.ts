@@ -4,7 +4,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { buildUpdateSet, createConnection, executeQuery, closeConnection } from "../db";
+import { buildUpdateSet, createRequestConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import {
   applyMyobPayment,
@@ -41,7 +41,7 @@ async function getPayments(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE JobID = @JobID ORDER BY CreatedAt DESC`,
@@ -90,7 +90,7 @@ async function upsertPayment(
       return { status: 400, jsonBody: { error: "JobID and Amount (numbers) required to create" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Compute variance from the linked PO.
     let variance: number | null = null;
@@ -247,7 +247,7 @@ async function markPaymentPaid(
       return { status: 400, jsonBody: { error: "PaymentID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
@@ -355,18 +355,14 @@ async function myobWebhook(
     // (A full implementation would fetch the PaymentPurchase from MYOB and
     //  extract the bill UIDs from the Bills array.)
 
-    // Use a system token for the DB connection (webhook has no user token).
-    // If your DB requires user-level tokens, adapt this to use a service account.
-    const systemToken = process.env.SYSTEM_DB_TOKEN ?? "";
-    if (!systemToken) {
-      context.warn("myobWebhook: no SYSTEM_DB_TOKEN configured — skipping DB update");
-      return { status: 200, jsonBody: { processed: 0, note: "no system token" } };
-    }
-
     let connection;
     let processed = 0;
     try {
-      connection = await createConnection(systemToken);
+      // Webhook has no caller identity — use the app's own service principal.
+      // A fresh connection, not the createServiceConnection() singleton: this
+      // handler is internet-reachable and holds the connection across an
+      // unbounded loop, the worst possible consumer of a shared connection.
+      connection = await createServiceRequestConnection();
       for (const event of paymentEvents) {
         // Match payment by MyobID (the bill UID stored when we created the bill).
         // In a full implementation you'd call GET /Purchase/PaymentPurchase/{event.EntityUID}

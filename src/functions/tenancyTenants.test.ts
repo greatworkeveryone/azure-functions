@@ -41,7 +41,7 @@ jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -67,7 +67,7 @@ const auth = require("../auth") as {
 };
 const db = require("../db") as {
   closeConnection:  jest.Mock;
-  createConnection: jest.Mock;
+  createRequestConnection: jest.Mock;
   executeQuery:     jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
@@ -107,7 +107,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   cache.getCachedTenantList.mockReturnValue(null);
   cache.getCachedTenantDetail.mockReturnValue(null);
@@ -146,7 +146,7 @@ describe("getRegisterTenants", () => {
     const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
     expect(res.status).toBe(200);
     expect(res.jsonBody).toEqual({ tenants: [{ tenantId: 1 }] });
-    expect(db.createConnection).not.toHaveBeenCalled();
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
   it("short-circuits with empty array when no tenants exist", async () => {
@@ -214,7 +214,7 @@ describe("getRegisterTenant", () => {
     cache.getCachedTenantDetail.mockReturnValue({ tenant: { tenantId: 1 } });
     const res = await handlers.getRegisterTenant(makeRequest(null, { tenantId: "1" }), ctx);
     expect(res.status).toBe(200);
-    expect(db.createConnection).not.toHaveBeenCalled();
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the tenant does not exist", async () => {

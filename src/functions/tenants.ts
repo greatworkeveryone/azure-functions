@@ -10,7 +10,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
@@ -64,7 +64,7 @@ async function getTenants(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     // Project new schema to the legacy shape jobs/keys still consume. Levels
     // is derived from the distinct levels in TenantOccupancies.
     const rows = await executeQuery(
@@ -115,7 +115,7 @@ async function upsertTenant(
     const body = (await request.json()) as any;
     const { TenantID, ThirdPartyTenantID, TenantName, BuildingID } = body ?? {};
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     if (TenantID === undefined) {
       // Create — minimum viable register tenant. Defaults match the schema.
@@ -237,7 +237,7 @@ async function deleteTenant(
       return { status: 400, jsonBody: { error: "TenantID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const refCount = await executeQuery(
       connection,
       "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",

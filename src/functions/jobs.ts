@@ -1,7 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
 import {
-  createConnection,
+  createRequestConnection,
   executeQuery,
   closeConnection,
   beginTransaction,
@@ -421,7 +421,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const pagination = parsePagination(request.query);
     const whereSql = whereParts.join(" AND ");
@@ -496,7 +496,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
@@ -641,7 +641,7 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       return { status: 400, jsonBody: { error: validationError } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
@@ -945,7 +945,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Authorisation: load CreatedById + CreatedBy first so we can scope
     // facilities users. This read sits outside the transaction below — it's
@@ -1061,7 +1061,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Permission read — kept outside the transaction (see archiveJob comment).
     const existing = await executeQuery(
@@ -1212,7 +1212,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     const isStalledBit =
       IsStalled == null ? null : IsStalled ? 1 : 0;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // If the caller is changing status, validate the transition against the
     // state machine and let the machine compute the resulting awaitingRole
@@ -1528,7 +1528,7 @@ async function getJobPacketPdf(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const input = await loadJobPacketInputs(connection, jobId);
     const pdf = await buildJobPacket(input);
     return {

@@ -1,7 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { timingSafeEqual } from "crypto";
 import { TYPES } from "tedious";
-import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, createServiceConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { graphFetchEmails, graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { upsertGraphEmails } from "./emails";
@@ -64,7 +64,7 @@ async function graphNotification(
 
   let connection;
   try {
-    connection = await createServiceConnection();
+    connection = await createServiceRequestConnection();
     const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
     const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null;
     const sinceDateTime = rawDate ? new Date(rawDate).toISOString() : undefined;
@@ -131,7 +131,7 @@ async function setupGraphSubscription(
       clientState,
     );
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `MERGE GraphSubscriptions AS target

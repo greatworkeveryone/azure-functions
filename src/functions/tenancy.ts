@@ -18,7 +18,7 @@ import {
   beginTransaction,
   closeConnection,
   commitTransaction,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   rollbackTransaction,
   SqlParam,
@@ -655,7 +655,7 @@ async function getRegisterTenants(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const tenantRows = await executeQuery(
       connection,
@@ -766,7 +766,7 @@ async function getRegisterTenant(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const tenantRows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
@@ -931,7 +931,7 @@ async function upsertRegisterTenant(
       return { status: 400, jsonBody: { error: "LegalName cannot be empty" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const params = buildTenantParams(body, caller);
 
@@ -1325,7 +1325,7 @@ async function upsertOccupancy(
       return { status: 400, jsonBody: { error: "SizeSqm (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch tenant rent fields up-front so the history snapshot is consistent.
     const tenantRows = await executeQuery(
@@ -1511,7 +1511,7 @@ async function deleteOccupancy(
     if (typeof body.OccupancyId !== "string") {
       return { status: 400, jsonBody: { error: "OccupancyId required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const occRows = await executeQuery(
       connection,
       `SELECT TenantId, BuildingId FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
@@ -1582,7 +1582,7 @@ async function createTenantNote(
       return { status: 400, jsonBody: { error: "Body (string) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `INSERT INTO dbo.TenantNotes
@@ -1639,7 +1639,7 @@ async function deleteTenantNote(
     if (typeof body.NoteId !== "string") {
       return { status: 400, jsonBody: { error: "NoteId required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const noteRows = await executeQuery(
       connection,
       `SELECT TenantId FROM dbo.TenantNotes WHERE NoteId = @Id`,
@@ -1683,7 +1683,7 @@ async function deleteRegisterTenant(
       return { status: 400, jsonBody: { error: "TenantId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const refCount = await executeQuery(
       connection,
@@ -1757,7 +1757,7 @@ async function applyRentReview(
       return { status: 400, jsonBody: { error: "NewRentPerAnnum required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const reviewRows = await executeQuery(
       connection,
       `SELECT r.ReviewId, r.TenantId, t.RentPerAnnum, t.ReviewIntervalMonths
@@ -1925,7 +1925,7 @@ async function getReviewsDue(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const where = buildingIdParam ? "WHERE BuildingId = @BuildingId" : "";
     const params = buildingIdParam
       ? [
@@ -1974,7 +1974,7 @@ async function getPortfolioOccupancy(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT t.BuildingId,
@@ -2120,7 +2120,7 @@ async function upsertTenantIncentive(
     }
     const { TenantId, BuildingId, incentive } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
     if (!loaded.found) {
@@ -2214,7 +2214,7 @@ async function deleteTenantIncentive(
     }
     const { TenantId, BuildingId, incentiveId } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
     if (!loaded.found) {
@@ -2371,7 +2371,7 @@ async function upsertScheduledRateStep(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, step } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ScheduledRateSteps FROM dbo.Tenants
@@ -2462,7 +2462,7 @@ async function deleteScheduledRateStep(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, stepId } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ScheduledRateSteps FROM dbo.Tenants
@@ -2770,7 +2770,7 @@ async function getCarparks(
       return { status: 400, jsonBody: { error: "buildingId required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${CARPARK_COLUMNS}
@@ -2811,7 +2811,7 @@ async function upsertCarpark(
       return { status: 400, jsonBody: { error: parsed.error } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const carpark = await upsertCarparkRow(connection, parsed.value);
     return { status: 200, jsonBody: { carpark } };
   } catch (error: any) {
@@ -2854,7 +2854,7 @@ async function upsertCarparksBulk(
       };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const results: Array<
       | { ok: true; carpark: CarparkApi }
@@ -2920,7 +2920,7 @@ async function deleteCarpark(
     if (typeof body.CarparkId !== "string" || !body.CarparkId) {
       return { status: 400, jsonBody: { error: "CarparkId required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `DELETE FROM dbo.Carparks WHERE CarparkId = @Id`,
@@ -2968,7 +2968,7 @@ async function upsertCarparkScheduleGroup(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, group } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT CarparkScheduleGroups FROM dbo.Tenants
@@ -3048,7 +3048,7 @@ async function deleteCarparkScheduleGroup(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, groupId } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT CarparkScheduleGroups FROM dbo.Tenants
@@ -3135,7 +3135,7 @@ async function upsertInfoSheetSectionHandler(
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, and Section (id, title) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
@@ -3207,7 +3207,7 @@ async function deleteInfoSheetSectionHandler(
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, and SectionId required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
@@ -3280,7 +3280,7 @@ async function upsertInfoSheetRowHandler(
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and Row (id) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
@@ -3353,7 +3353,7 @@ async function deleteInfoSheetRowHandler(
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and RowId required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
@@ -3429,7 +3429,7 @@ async function upsertLeaseAdministrationHandler(
 
     const next: LeaseAdministration = normaliseLeaseAdministration(raw);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT TenantId FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
@@ -3497,7 +3497,7 @@ async function upsertMiscFeeHandler(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, fee } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT MiscFees FROM dbo.Tenants
@@ -3568,7 +3568,7 @@ async function deleteMiscFeeHandler(
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
     const { TenantId, BuildingId, feeId } = parsed;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT MiscFees FROM dbo.Tenants

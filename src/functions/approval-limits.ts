@@ -5,7 +5,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, executeQuery, closeConnection } from "../db";
 import { invalidateApprovalLimitsCache } from "../approval-limits-db";
 import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 
@@ -38,7 +38,7 @@ async function setApprovalLimit(
       return { status: 400, jsonBody: { error: "MaxApprovalAmount must be null or a non-negative number" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     await executeQuery(
       connection,

@@ -4,6 +4,14 @@
 
 set -e
 
+# Escape hatch for GUI clients (Fork, VS Code) that can't pass --no-verify.
+#   skip:      git config hooks.skipAudit true
+#   re-enable: git config --unset hooks.skipAudit
+if [ "$(git config --bool --get hooks.skipAudit 2>/dev/null)" = "true" ]; then
+  echo "pre-push: audit skipped (hooks.skipAudit=true — 'git config --unset hooks.skipAudit' to re-enable)"
+  exit 0
+fi
+
 # Git hooks run without your shell profile, so nvm-managed node is off PATH when
 # pushing from an IDE or GUI client. Recover it before assuming npm is missing.
 if ! command -v npm >/dev/null 2>&1; then

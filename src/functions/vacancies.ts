@@ -2,7 +2,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import {
   AppRole,
   extractToken,
@@ -139,7 +139,7 @@ function rowToVacancy(row: SqlRow): Record<string, unknown> {
 }
 
 async function fetchVacancyRow(
-  connection: Awaited<ReturnType<typeof createConnection>>,
+  connection: Awaited<ReturnType<typeof createRequestConnection>>,
   vacancyId: number,
 ): Promise<SqlRow | null> {
   const rows = await executeQuery(
@@ -183,7 +183,7 @@ async function handleGetVacancies(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT v.Id, v.Title, v.Address, v.Status, v.Images, v.LastSyncedAt, v.TenancyId,
@@ -220,7 +220,7 @@ async function handleGetVacantTenancies(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT t.TenantId, t.LegalName, t.BuildingId, b.BuildingName,
@@ -304,7 +304,7 @@ async function handleCreateVacancy(
     const buildingId = typeof body.buildingId === "number" ? body.buildingId : null;
     const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "New vacancy";
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
@@ -350,7 +350,7 @@ async function handleGetVacancy(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT v.*, b.HeroImageUrl
@@ -412,7 +412,7 @@ async function handleUpdateVacancy(
       ? JSON.stringify(body.additionalDetails)
       : undefined;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const updated = await executeQuery(
       connection,
@@ -477,7 +477,7 @@ async function handleDeleteVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch images before deleting so we can clean up Blob Storage
     const rows = await executeQuery(
@@ -571,7 +571,7 @@ async function handleUploadVacancyImage(
 
     context.log(`Uploaded vacancy image: ${url}`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Vacancies
@@ -628,7 +628,7 @@ async function handleDeleteVacancyImage(
       return { status: 400, jsonBody: { error: "Missing 'imageUrl'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -711,7 +711,7 @@ async function handleReorderVacancyImages(
       }
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Vacancies
@@ -784,7 +784,7 @@ async function handleUploadVacancySlotImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Delete existing blob for this slot if present
     const existing = await executeQuery(
@@ -865,7 +865,7 @@ async function handleDeleteVacancySlotImage(
       return { status: 400, jsonBody: { error: "Missing 'vacancyId' or 'slotLabel'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -999,7 +999,7 @@ async function handlePublishVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT v.*, b.BuildingName, b.HeroImageUrl
@@ -1124,7 +1124,7 @@ async function handleUnpublishVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,

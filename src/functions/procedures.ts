@@ -16,7 +16,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
   errorResponse,
@@ -75,13 +75,16 @@ export async function getProcedures(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  const denied = await requireRole(request, [AppRole.USER]);
+  if (denied) return denied;
+
   // A transient 503 from the role lookup counts as "cannot see drafts" —
   // hiding drafts on failure is the safe direction.
   const canSeeDrafts = (await requireRole(request, EDITOR_GATE)) === null;
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT p.Slug, p.Category, p.Audience, p.SortOrder, p.Owner,
@@ -177,7 +180,7 @@ export async function saveProcedureDraft(
 
     const author = userInfoFromToken(token);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `BEGIN TRANSACTION;
@@ -254,7 +257,7 @@ export async function publishProcedure(
       return { status: 403, jsonBody: { error: "Could not identify the approver" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `BEGIN TRANSACTION;

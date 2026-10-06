@@ -24,7 +24,7 @@ jest.mock("../db", () => ({
   beginTransaction:        jest.fn(),
   closeConnection:         jest.fn(),
   commitTransaction:       jest.fn(),
-  createConnection:        jest.fn(),
+  createRequestConnection:        jest.fn(),
   createServiceConnection: jest.fn(),
   executeQuery:            jest.fn(),
   rollbackTransaction:     jest.fn(),
@@ -40,7 +40,7 @@ const db = require("../db") as {
   beginTransaction:        jest.Mock;
   closeConnection:         jest.Mock;
   commitTransaction:       jest.Mock;
-  createConnection:        jest.Mock;
+  createRequestConnection:        jest.Mock;
   createServiceConnection: jest.Mock;
   executeQuery:            jest.Mock;
   rollbackTransaction:     jest.Mock;
@@ -144,7 +144,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   clearRoleCache();
   _resetRateLimitForTests();
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.createServiceConnection.mockResolvedValue({});
   db.beginTransaction.mockResolvedValue(undefined);
   db.commitTransaction.mockResolvedValue(undefined);

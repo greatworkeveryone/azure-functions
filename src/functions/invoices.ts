@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { buildUpdateSet, createConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
+import { buildUpdateSet, createRequestConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
@@ -109,7 +109,7 @@ async function syncInvoices(request: HttpRequest, context: InvocationContext): P
     const invoices = await fetchInvoices(params);
     context.log(`Fetched ${invoices.length} invoices`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     let inserted = 0;
     let updated = 0;
 
@@ -169,7 +169,7 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const buildingId = request.query.get("buildingId");
     const statusId = request.query.get("statusId");
@@ -294,7 +294,7 @@ async function getJobInvoices(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${JOB_INVOICE_COLUMNS} FROM JobInvoices WHERE JobID = @JobID ORDER BY CreatedAt DESC`,
@@ -345,7 +345,7 @@ async function upsertJobInvoice(
       CreatedBy,
     } = body ?? {};
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     if (JobInvoiceID === undefined) {
       if (typeof JobID !== "number") {
@@ -584,7 +584,7 @@ async function approveJobInvoice(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch invoice — need Amount for limit check, Direction to decide whether
     // to roll the job to Done (only incoming/contractor invoices do that).
@@ -660,7 +660,7 @@ async function approveJobInvoice(
       void (async () => {
         let bgConnection;
         try {
-          bgConnection = await createConnection(token);
+          bgConnection = await createRequestConnection(token);
           const { sendDirectorApprovalEmail } = await import("../email/director-emails");
           const result = await sendDirectorApprovalEmail({
             connection: bgConnection,
@@ -754,7 +754,7 @@ async function directorApproveJobInvoice(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -857,7 +857,7 @@ async function undoDirectorApproveJobInvoice(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -940,7 +940,7 @@ async function getApprovalLimits(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await getCachedApprovalLimits(connection);
     const approvalLimits = rows
       .slice()
@@ -979,7 +979,7 @@ async function rejectJobInvoice(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       "SELECT JobID, InvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
@@ -1050,7 +1050,7 @@ async function markJobInvoiceMyobCreated(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1145,7 +1145,7 @@ async function unmarkJobInvoiceMyobCreated(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1216,7 +1216,7 @@ async function deleteJobInvoice(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       "SELECT Status FROM JobInvoices WHERE JobInvoiceID = @Id",
@@ -1270,7 +1270,7 @@ async function resendDirectorInvoiceEmail(
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,

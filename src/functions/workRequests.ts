@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
+import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
@@ -140,7 +140,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // No buildingId — return all WRs from DB. On force=true also sync all
     // buildings using lastmodifieddate so the dashboard data stays current.
@@ -345,7 +345,7 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Get the DB snapshot for comparison
     const existing = await executeQuery(
@@ -404,7 +404,7 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
       return { status: 400, jsonBody: { error: "WorkRequestID is required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Read current DB state for conflict check
     const existing = await executeQuery(
@@ -506,7 +506,7 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
     }
 
     // Resolve BuildingID (myBuildings list omits it; payload may have it)
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     let buildingId: number | undefined = fresh.BuildingID ?? (typeof body.BuildingID === "number" ? body.BuildingID : undefined);
     if (!buildingId && fresh.BuildingName) {
       const rows = await executeQuery(
@@ -572,7 +572,7 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
       };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const presentColumns = Object.keys(accepted);
     const sql = buildOverlayUpsertSql(presentColumns);
@@ -628,7 +628,7 @@ async function resetWorkRequestLocal(request: HttpRequest, context: InvocationCo
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       "DELETE FROM WorkRequestOverrides WHERE WorkRequestID = @WorkRequestID",

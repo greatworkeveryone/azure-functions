@@ -9,7 +9,7 @@ import {
   buildUpdateSet,
   closeConnection,
   commitTransaction,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   rollbackTransaction,
 } from "../db";
@@ -69,7 +69,7 @@ async function getQuotes(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const pagination = parsePagination(request.query);
     const topClause = pagination.active ? "" : `TOP ${MAX_LIST_ROWS} `;
 
@@ -144,7 +144,7 @@ async function upsertQuote(
       CreatedBy,
     } = body ?? {};
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     if (QuoteID === undefined) {
       // Create — runs in a tx so the SELECT MAX(Seq) + INSERT pair is atomic.
@@ -419,7 +419,7 @@ async function approveQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const quoteRows = await executeQuery(
       connection,
@@ -541,7 +541,7 @@ async function approveQuote(
       void (async () => {
         let bgConnection;
         try {
-          bgConnection = await createConnection(token);
+          bgConnection = await createRequestConnection(token);
           const { sendDirectorApprovalEmail } = await import("../email/director-emails");
           const result = await sendDirectorApprovalEmail({
             connection: bgConnection,
@@ -615,7 +615,7 @@ async function rejectQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch parent job + quote number for the history event before we mutate.
     const quoteRows = await executeQuery(
@@ -695,7 +695,7 @@ async function unapproveQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -802,7 +802,7 @@ async function completeQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -876,7 +876,7 @@ async function uncompleteQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -952,7 +952,7 @@ async function deleteQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT Status FROM Quotes WHERE QuoteID = @Id`,
@@ -1009,7 +1009,7 @@ async function validateQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const quoteRows = await executeQuery(
       connection,
@@ -1109,7 +1109,7 @@ async function directorApproveQuote(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1215,7 +1215,7 @@ async function resendDirectorQuoteEmail(
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,

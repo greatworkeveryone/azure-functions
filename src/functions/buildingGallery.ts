@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, requireRole, unauthorizedResponse } from "../auth";
 import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
@@ -54,7 +54,7 @@ async function handleUploadBuildingHeroImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Delete existing hero image blob if present
     const existing = await executeQuery(
@@ -122,7 +122,7 @@ async function handleDeleteBuildingHeroImage(
       return { status: 400, jsonBody: { error: "Missing 'buildingId'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,

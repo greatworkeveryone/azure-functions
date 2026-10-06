@@ -11,7 +11,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext, Timer } from "@azure/functions";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, executeQuery, closeConnection } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
@@ -22,7 +22,7 @@ import { Sentry } from "../sentry";
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
 async function runSync(token: string, force: boolean, context: InvocationContext): Promise<{ total: number; syncFrom: string }> {
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     // Use the oldest WRsLastSyncedAt across all buildings as the incremental
     // from-date so no building is missed. Force resets to the 2-year window.

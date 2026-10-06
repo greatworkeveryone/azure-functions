@@ -96,11 +96,12 @@ export function errorResponse(message: string, errorOrDetails?: unknown): HttpRe
 }
 
 // ── Identity extraction ──────────────────────────────────────────────────────
-// Decodes the JWT payload without signature verification. This is safe here
-// because the same token is passed to Azure SQL, which performs full Entra
-// signature verification end-to-end — a forged token is rejected by SQL before
-// it can do anything. We only use the decoded payload for the `oid` claim (user
-// identity), never for authorization decisions directly.
+// Decodes the JWT payload without signature verification. Handlers no longer
+// pass this token to Azure SQL, so SQL does not verify it for us any more.
+// It's safe here because every call site sits behind requireRole /
+// rolesForRequest, which run verifyEntraToken on this same token before any
+// decoded claim is trusted — that's the trust anchor. Never use these decoders
+// to make an authorization decision on their own.
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");

@@ -17,7 +17,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { checkRateLimit } from "../rateLimit";
@@ -26,6 +26,9 @@ import { Sentry } from "../sentry";
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const TODDLER_URL = process.env.TODDLER_URL ?? "";
+// Must equal toddler's SERVICE_KEY_COMMAND_CENTRE. /parse-incoming rejects
+// anonymous calls with 401, so without it every parse burns a retry.
+const TODDLER_SERVICE_KEY = process.env.TODDLER_SERVICE_KEY ?? "";
 const TODDLER_TIMEOUT_MS = Number(process.env.TODDLER_TIMEOUT_MS ?? "180000");
 const BATCH_SIZE = Number(process.env.AI_PARSE_BATCH_SIZE ?? "5");
 const MAX_ATTEMPTS = 3;
@@ -90,7 +93,10 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
   try {
     const response = await fetch(`${TODDLER_URL}/parse-incoming`, {
       body: JSON.stringify(req),
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Service-Key": TODDLER_SERVICE_KEY,
+      },
       method: "POST",
       signal: controller.signal,
     });
@@ -111,7 +117,7 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
 // AIParseError IS NULL) are left untouched.
 
 async function resetFailedEmails(token: string): Promise<number> {
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     const rows = (await executeQuery(
       connection,
@@ -149,7 +155,7 @@ async function claimBatch(
   token: string,
   batchSize: number,
 ): Promise<ClaimedEmail[]> {
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     // Mark rows that have burned through their retries. We stamp AIParsedAt
     // so the queue filter stops picking them up, flag them for admin review,
@@ -194,7 +200,7 @@ async function writeSuccess(
   result: ToddlerResponse,
 ): Promise<void> {
   const flag = result.confidence === "low" || result.classification === "unknown";
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     await executeQuery(
       connection,
@@ -236,7 +242,7 @@ async function recordTransientError(
   // Transient failure (network, Toddler down, timeout). Keep AIParsedAt null
   // so the next run retries — only the error text and hint fields are
   // touched here. Attempt counter was incremented by claimBatch already.
-  const connection = await createConnection(token);
+  const connection = await createRequestConnection(token);
   try {
     await executeQuery(
       connection,
@@ -288,6 +294,10 @@ export async function runParseBatch(
     context.log("runParseBatch: TODDLER_URL not configured — skipping (AI service not yet deployed)");
     return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
   }
+  if (!TODDLER_SERVICE_KEY) {
+    context.error("runParseBatch: TODDLER_SERVICE_KEY not configured — skipping (every call would 401)");
+    return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
+  }
 
   let claimed: ClaimedEmail[];
   try {
@@ -317,9 +327,10 @@ export async function runParseBatch(
         html: email.Body ?? "",
         subject: email.Subject,
       });
-      if (result.error && !result.data) {
+      if (result.error) {
         // Toddler returned 200 but the LLM itself errored — treat as transient
-        // so the email stays in the queue and gets retried.
+        // so the email stays in the queue and gets retried. Toddler always
+        // sends data: {} on failure, so `error` is the only discriminator.
         await recordTransientError(token, email.EmailID, new Error(result.error));
         errored++;
       } else {
@@ -446,7 +457,7 @@ async function getFlaggedEmails(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${FLAGGED_COLUMNS}

@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { AppRole, requireRole } from "../auth";
-import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
 
 // Captured once at module load so the value reflects when the worker started.
 const startedAt = new Date().toISOString();
@@ -39,7 +39,7 @@ async function health(request: HttpRequest, context: InvocationContext): Promise
   // the function itself is happy.
   let connection;
   try {
-    connection = await createServiceConnection();
+    connection = await createServiceRequestConnection();
     await executeQuery(connection, "SELECT 1 AS Ok", []);
     return { status: 200, jsonBody: { ...base, db: "ok" } };
   } catch (err) {

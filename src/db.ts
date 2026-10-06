@@ -66,11 +66,21 @@ const IS_LOCAL_SQL = process.env.LOCAL_SQL === "true";
 let cachedServiceToken: { value: string; expiresAt: number } | null = null;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
-async function getServiceToken(): Promise<string> {
-  if (cachedServiceToken && cachedServiceToken.expiresAt > Date.now() + TOKEN_REFRESH_SKEW_MS) {
-    return cachedServiceToken.value;
-  }
+// In-flight de-dup: on a cold start or at the hourly token expiry, many
+// concurrent requests can miss the cache at once. Without this, each one
+// fires its own client-credential POST to Entra, which throttles a burst
+// like that — and every throttled request becomes a 500. Mirrors
+// _roleInflight / lookupRolesForOid in auth.ts.
+let _serviceTokenInflight: Promise<string> | null = null;
 
+/** Test-only: drop the cached service token so cases don't bleed together.
+ *  Mirrors clearRoleCache() in auth.ts. */
+export function clearServiceTokenCache(): void {
+  cachedServiceToken = null;
+  _serviceTokenInflight = null;
+}
+
+async function _fetchServiceToken(): Promise<string> {
   const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
   if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
     throw new Error("Graph credentials not configured for service DB connection");
@@ -104,6 +114,43 @@ async function getServiceToken(): Promise<string> {
     expiresAt: Date.now() + expires_in * 1000,
   };
   return access_token;
+}
+
+async function getServiceToken(): Promise<string> {
+  if (cachedServiceToken && cachedServiceToken.expiresAt > Date.now() + TOKEN_REFRESH_SKEW_MS) {
+    return cachedServiceToken.value;
+  }
+
+  if (_serviceTokenInflight) return _serviceTokenInflight;
+
+  const promise = _fetchServiceToken().finally(() => {
+    _serviceTokenInflight = null;
+  });
+  // A failed fetch must not be cached (unchanged — _fetchServiceToken only
+  // assigns cachedServiceToken on success) and must clear the in-flight
+  // holder so the next request retries — the .finally() above does that
+  // unconditionally, same discipline as queryRolesForOid.
+  _serviceTokenInflight = promise;
+  return promise;
+}
+
+export type ConnectionTokenSource = "service" | "user";
+
+/**
+ * Which identity a per-request handler connection authenticates as.
+ *
+ * Service by default. SQL_USER_CONNECTION=true restores the legacy per-caller
+ * identity, which requires every user to have a contained database principal —
+ * kept only as a rollback lever.
+ */
+export function requestTokenSource(): ConnectionTokenSource {
+  return process.env.SQL_USER_CONNECTION === "true" ? "user" : "service";
+}
+
+export function requestConnectionToken(userToken: string): Promise<string> {
+  return requestTokenSource() === "user"
+    ? Promise.resolve(userToken)
+    : getServiceToken();
 }
 
 // Singleton service connection — reused across invocations within the same process.
@@ -207,6 +254,40 @@ export function createConnection(token: string): Promise<Connection> {
 
     connection.connect();
   });
+}
+
+/**
+ * Per-request connection for HTTP handler data access.
+ *
+ * Authenticates as the app's service principal, NOT the caller. Authorisation
+ * is enforced by requireRole against dbo.AppUsers — never by SQL grants, which
+ * are uniform for every caller (no RLS, no SESSION_CONTEXT, no SUSER_NAME()
+ * filtering anywhere in this repo, and server auditing is off). Connecting as
+ * the caller bought nothing and meant every new user needed a database
+ * principal created by hand, which silently 500'd the whole app when missed.
+ *
+ * Returns a FRESH connection, never the createServiceConnection() singleton:
+ * a tedious Connection cannot serve concurrent Requests, and handler traffic is
+ * concurrent. This keeps today's one-connection-per-request semantics exactly.
+ *
+ * `userToken` is used only when SQL_USER_CONNECTION=true (rollback path).
+ */
+export async function createRequestConnection(userToken: string): Promise<Connection> {
+  if (IS_LOCAL_SQL) return createLocalConnection();
+  return createConnection(await requestConnectionToken(userToken));
+}
+
+/**
+ * Fresh service-principal connection for callers that have no user identity at
+ * all — webhooks invoked by third parties. Unlike createServiceConnection()
+ * this is NOT the singleton, so it is safe under concurrent HTTP traffic.
+ * Unlike createRequestConnection() it takes no user token, so the
+ * SQL_USER_CONNECTION rollback lever cannot redirect it to a caller identity
+ * that does not exist.
+ */
+export async function createServiceRequestConnection(): Promise<Connection> {
+  if (IS_LOCAL_SQL) return createLocalConnection();
+  return createConnection(await getServiceToken());
 }
 
 export function executeQuery(

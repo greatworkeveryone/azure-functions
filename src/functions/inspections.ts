@@ -8,7 +8,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   beginTransaction,
   commitTransaction,
@@ -351,7 +351,7 @@ export async function getInspections(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inspectionRows = await executeQuery(
       connection,
@@ -501,7 +501,7 @@ async function getInspection(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const inspection = await loadInspection(connection, id);
     if (!inspection) return { status: 404, jsonBody: { error: "Inspection not found" } };
     return { status: 200, jsonBody: { inspection } };
@@ -540,7 +540,7 @@ async function createInspection(
     // Audit identity comes from the verified token, not unverified JWT claims.
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
       `INSERT INTO dbo.Inspections (BuildingId, Title, CreatedById, CreatedByName)
@@ -607,7 +607,7 @@ export async function applyInspectionOps(
       return { status: 400, jsonBody: { error: `Too many ops in one batch (max ${MAX_OPS_PER_BATCH})` } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     await beginTransaction(connection);
     const applied: string[] = [];
@@ -1078,7 +1078,7 @@ export async function completeInspection(
     if (!inspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1142,7 +1142,7 @@ async function revertInspection(
     const inspectionId: number | undefined = body?.InspectionId ?? body?.inspectionId;
     if (!inspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Ownership gate: base editors may only reopen an inspection they created;
     // admin / director / facilities_approval may reopen any (mirrors the
@@ -1264,7 +1264,7 @@ export async function deleteInspection(
     const { InspectionId } = body ?? {};
     if (!InspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1368,7 +1368,7 @@ export async function mergeInspections(
     }
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const placeholders = sourceIds.map((_, idx) => `@S${idx}`).join(",");
     const params = sourceIds.map((id, idx) => ({ name: `S${idx}`, type: TYPES.Int, value: id }));
@@ -1634,7 +1634,7 @@ export async function raiseJobsFromInspection(
     const descriptionPrefix = (defaults.DescriptionPrefix ?? "").trim();
     const assignee = (defaults.AssigneeName ?? "").trim() || caller.name;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Hydrate inspection state from the DB — never trust the client for the
     // text/level/room fields that go onto a real Job.
@@ -1863,7 +1863,7 @@ async function getInspectionPacketPdf(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const input = await loadInspectionPacketInputs(connection, inspectionId);
     if (!input) return { status: 404, jsonBody: { error: "Inspection not found" } };
     const pdf = await buildInspectionPacket(input);

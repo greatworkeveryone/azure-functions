@@ -8,7 +8,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
@@ -63,7 +63,7 @@ async function handleUploadTenancyAttachment(
     const { blobName } = await uploadBlob(buffer, originalName, contentType, `tenancy-${tenantId}`);
     const sasUrl = generateReadSasUrl(blobName);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
@@ -124,7 +124,7 @@ async function handleGetTenancyAttachments(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT a.*

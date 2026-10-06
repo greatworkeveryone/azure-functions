@@ -20,18 +20,21 @@ import { Connection } from "tedious";
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
-  createServiceConnection,
+  createRequestConnection,
+  createServiceRequestConnection,
   executeQuery,
 } from "./db";
 
-// Token storage reads/writes use the signed-in user's SQL connection when a
-// token is available (every admin request has one). The OAuth callback runs
-// without a user token — MYOB drives that redirect — so it falls back to the
-// service-principal connection. The service principal must be a SQL user in
-// prod; locally that path is only exercised during the actual auth dance.
+// Token storage reads/writes connect as the app's service principal either
+// way. Both branches return a FRESH connection, never the singleton: every
+// caller here is an app.http handler, and myobAuthCallback in particular is
+// internet-reachable and runs with sqlToken: null because MYOB drives that
+// redirect. The branch survives only so the SQL_USER_CONNECTION rollback lever
+// still reaches the paths that do have a caller token.
 async function openDbConnection(sqlToken: string | null): Promise<Connection> {
-  return sqlToken ? createConnection(sqlToken) : createServiceConnection();
+  return sqlToken
+    ? createRequestConnection(sqlToken)
+    : createServiceRequestConnection();
 }
 
 const MYOB_AUTHORIZE_URL = "https://secure.myob.com/oauth2/account/authorize/";

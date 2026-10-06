@@ -6,7 +6,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { graphFetchEmails, GraphEmail } from "../graph";
@@ -111,7 +111,7 @@ async function getEmails(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const countRows = await executeQuery(
       connection,
@@ -164,7 +164,7 @@ async function getEmail(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${EMAIL_COLUMNS} FROM Emails WHERE EmailID = @Id`,
@@ -253,7 +253,7 @@ async function ingestEmail(
       }
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Best-effort match by subject — subjects like "Re: Job #123 ..." link
     // the email to the target job so the UI can display it in context.
@@ -336,7 +336,7 @@ async function promoteEmailToQuote(
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const emailRows = await executeQuery(
       connection,
@@ -458,7 +458,7 @@ async function archiveEmail(
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
@@ -511,7 +511,7 @@ async function flagEmailForReview(
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `UPDATE Emails SET AIFlaggedForReview = 1 WHERE EmailID = @Id`,
@@ -565,7 +565,7 @@ async function promoteEmailToJob(
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     let jobId: number;
 
@@ -655,7 +655,7 @@ async function promoteEmailToInvoice(
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
@@ -711,7 +711,7 @@ async function getEmailThread(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ReplyID, EmailID, Body, ToAddress, SentBy, SentAt,
@@ -805,7 +805,7 @@ async function syncEmailsNow(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
     const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null;
     const sinceDateTime = rawDate ? new Date(rawDate).toISOString() : undefined;

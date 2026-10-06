@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
+import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchAllContractors, createOrUpdateContractors, MyContractor } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 
@@ -24,7 +24,7 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
     const contractors = await fetchAllContractors();
     context.log(`Fetched ${contractors.length} contractors`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     let inserted = 0;
     let updated = 0;
 
@@ -87,7 +87,7 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const contractorId = request.query.get("contractorId");
     const active = request.query.get("active");

@@ -8,7 +8,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
   errorResponse,
@@ -37,9 +37,14 @@ export async function getFeatureFlags(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
+  // Authorisation, not just token presence. Before handlers stopped connecting
+  // as the caller, Azure SQL validated this token for us; now nothing else does.
+  const denied = await requireRole(request, [AppRole.USER]);
+  if (denied) return denied;
+
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT FeatureKey, RoleName, Visibility, UpdatedAt, UpdatedBy FROM dbo.FeatureFlags`,
@@ -98,7 +103,7 @@ export async function upsertFeatureFlag(
 
     const editor = userInfoFromToken(token);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       `MERGE dbo.FeatureFlags AS target

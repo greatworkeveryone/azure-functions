@@ -21,10 +21,10 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../db", () => ({
-  closeConnection:         jest.fn(),
-  createConnection:        jest.fn(),
-  createServiceConnection: jest.fn(),
-  executeQuery:            jest.fn(),
+  closeConnection:                jest.fn(),
+  createRequestConnection:        jest.fn(),
+  createServiceRequestConnection: jest.fn(),
+  executeQuery:                   jest.fn(),
 }));
 
 jest.mock("../sentry", () => ({
@@ -44,9 +44,9 @@ const auth = require("../auth") as {
 };
 
 const db = require("../db") as {
-  closeConnection:         jest.Mock;
-  createServiceConnection: jest.Mock;
-  executeQuery:            jest.Mock;
+  closeConnection:                jest.Mock;
+  createServiceRequestConnection: jest.Mock;
+  executeQuery:                   jest.Mock;
 };
 
 const sentry = require("../sentry") as {
@@ -75,7 +75,7 @@ const { upsertAppUser, registerSelf } = require("./users") as {
 beforeEach(() => {
   jest.clearAllMocks();
   rateLimit._resetRateLimitForTests();
-  db.createServiceConnection.mockResolvedValue({});
+  db.createServiceRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   auth.verifiedIdentityFromRequest.mockResolvedValue({
     oid: "caller-oid-123",

@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, executeQuery, closeConnection, SqlRow } from "../db";
+import { createRequestConnection, executeQuery, closeConnection, SqlRow } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
 import { vacanciesReadSasUrl } from "../blob-storage";
@@ -60,7 +60,7 @@ async function getBuildings(request: HttpRequest, context: InvocationContext): P
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     let sql = `SELECT ${BUILDING_COLUMNS} FROM Buildings WHERE 1=1`;
     const params: { name: string; type: any; value: any }[] = [];

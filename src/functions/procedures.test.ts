@@ -25,7 +25,7 @@ jest.mock("../auth", () => ({
 
 jest.mock("../db", () => ({
   closeConnection: jest.fn(),
-  createConnection: jest.fn().mockResolvedValue({}),
+  createRequestConnection: jest.fn().mockResolvedValue({}),
   executeQuery: jest.fn().mockResolvedValue([]),
 }));
 
@@ -84,7 +84,11 @@ describe("getProcedures", () => {
   });
 
   it("filters drafts out for everyone else — presentation is not security", async () => {
-    auth.requireRole.mockResolvedValue(FORBIDDEN);
+    // Caller passes the baseline [USER] gate (any assigned role) but not the
+    // editor-tier gate used for canSeeDrafts.
+    auth.requireRole.mockImplementation((_req: unknown, allowed: string[]) =>
+      Promise.resolve(allowed.includes("user") ? null : FORBIDDEN),
+    );
     db.executeQuery.mockResolvedValue([versionRow("draft"), versionRow("published")]);
     const response = await getProcedures(emptyRequest, context);
     const record = (response.jsonBody as any).procedures[0];

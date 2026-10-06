@@ -38,6 +38,8 @@ Update the values in `local.settings.json`:
 - `MYBUILDINGS_BEARER_TOKEN` — your myBuildings API Bearer token
 - `SQL_SERVER` — your Azure SQL server (e.g. `rpcc-server.database.windows.net`)
 - `SQL_DATABASE` — your database name
+- `TODDLER_URL` — codename-toddler base URL (unset = email AI parsing skipped)
+- `TODDLER_SERVICE_KEY` — must equal toddler's `SERVICE_KEY_COMMAND_CENTRE`; sent as `X-Service-Key`
 
 Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
@@ -104,6 +106,8 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 - `MYBUILDINGS_BEARER_TOKEN`
 - `SQL_SERVER`
 - `SQL_DATABASE`
+- `TODDLER_URL`
+- `TODDLER_SERVICE_KEY`
 
 These are NOT deployed from `local.settings.json` — that file is local only.
 
@@ -137,14 +141,23 @@ This protects all endpoints at the platform level — unauthenticated requests a
 1. React app authenticates user via MSAL (Entra ID)
 2. React app acquires a token scoped to `https://database.windows.net/user_impersonation`
 3. React app calls the Azure Function with that token in the Authorization header
-4. Azure Function uses the user's token to connect to Azure SQL (permissions enforced per user)
+4. Azure Function connects to Azure SQL as the app's service principal; authorisation is enforced by `requireRole` against `dbo.AppUsers`, not by SQL grants
 5. For sync: Function also calls myBuildings API with the stored Bearer token to fetch data
 6. Data is upserted into the Buildings table
 
 ## Auth flow
 
 ```
-User → MSAL login → React App → Azure Function → Azure SQL (user's token)
+User → MSAL login → React App → Azure Function → Azure SQL (service principal)
+                                       │                ↑
+                                       │      authorisation happens HERE,
+                                       │      not at the SQL layer:
+                                       └───── requireRole vs dbo.AppUsers
                                        ↓
                               myBuildings API (static Bearer token)
 ```
+
+The caller's Entra token is still sent and verified — it establishes identity
+and drives `requireRole`. It is no longer used to connect to SQL. See
+[Database access model](docs/db-access.md) for why, and for how to onboard a
+new user (there is no SQL step).
