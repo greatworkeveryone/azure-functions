@@ -40,6 +40,19 @@ Update the values in `local.settings.json`:
 - `SQL_DATABASE` — your database name
 - `TODDLER_URL` — codename-toddler base URL (unset = email AI parsing skipped)
 - `TODDLER_SERVICE_KEY` — must equal toddler's `SERVICE_KEY_COMMAND_CENTRE`; sent as `X-Service-Key`
+- `ORG_EMAIL_DOMAINS` — comma-separated accepted domains of the tenant (e.g. `randazzo.properties`). Mail from these domains counts as sender-authenticated only when Exchange stamped it `X-MS-Exchange-Organization-AuthAs: Internal`; unset = no internal mail is authenticated, so emailed director decisions from colleagues are refused (see `src/email/sender-auth.ts`)
+- `TODDLER_TIMEOUT_MS` — per-email parse request budget (default `180000`)
+- `TODDLER_WARMUP_TIMEOUT_MS` — budget for `POST /warmup` before each parse run (default `240000`; covers a cold GPU replica; capped by the run's 540 s deadline)
+- `AI_PARSE_BATCH_SIZE` — upper bound on emails per parse run (default `5`); the deadline usually stops a run first
+- `AI_PARSE_SKIP_SENDERS` — optional comma list of sender substrings (e.g. `no-reply@,notifications@mybuildings`), matched case-insensitively against the From address; include the `@` to avoid broad matches. Matching mail is classified `unknown` without a model call
+- `GRAPH_MAILBOX_DEV` — the mailbox Graph sync reads (also required by `syncEmailsNow`)
+- `AzureWebJobsStorage` — hosts the `email-sync` queue (webhook / manual sync / admin trigger -> `processEmailSync`) and `email-sync-poison`; no extra setting. Locally, run Azurite.
+
+Email pipeline behaviour:
+- Parse claims take a 600 s lease; transient failures retry only after it expires (about 10 min apart).
+- Toddler 400/422 responses are permanent: the email is flagged, not retried.
+- The daily retry also enqueues a mail sync, a backstop if the Graph webhook subscription dies (gap of up to a day).
+- `host.json`: `functionTimeout` 10 min; queue `batchSize` 1, `maxDequeueCount` 3, `visibilityTimeout` 30 s.
 
 Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
@@ -73,6 +86,8 @@ The `local.settings.json` is already configured for Docker (`LOCAL_SQL=true`, `S
 
 ### 5. Apply database migrations
 The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. The function host applies them automatically on startup via `runMigrations()`. For a brand-new Docker DB, just start the app and all migrations will run.
+
+Email-pipeline migrations `089_job_events_source_email.sql` → `092_email_provenance_auth.sql` apply on startup like the rest. `getEmails` / `getEmail` / `ingestEmail` select 092's columns, so the host must start (and migrate) cleanly before serving. `091_emails_messageid_unique.sql` skips the unique index with a PRINT if duplicate `MessageID`s exist but is still recorded in `schema_migrations`; after resolving the duplicates, delete its row there and restart to create the index.
 
 To apply manually (e.g. to inspect state):
 ```bash
@@ -108,8 +123,14 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 - `SQL_DATABASE`
 - `TODDLER_URL`
 - `TODDLER_SERVICE_KEY`
+- `ORG_EMAIL_DOMAINS`
+- `GRAPH_MAILBOX_DEV`
+- `TODDLER_TIMEOUT_MS` (optional, default 180000)
+- `TODDLER_WARMUP_TIMEOUT_MS` (optional, default 240000)
+- `AI_PARSE_BATCH_SIZE` (optional, default 5)
+- `AI_PARSE_SKIP_SENDERS` (optional)
 
-These are NOT deployed from `local.settings.json` — that file is local only.
+`AzureWebJobsStorage` must also be set (it hosts the `email-sync` queue). These are NOT deployed from `local.settings.json` — that file is local only.
 
 ### 9. Enable Entra ID authentication (Easy Auth)
 After deploying and confirming the functions work:

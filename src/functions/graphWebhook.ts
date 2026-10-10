@@ -1,11 +1,10 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { timingSafeEqual } from "crypto";
 import { TYPES } from "tedious";
-import { createRequestConnection, createServiceConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
-import { graphFetchEmails, graphCreateSubscription, graphRenewSubscription } from "../graph";
-import { upsertGraphEmails } from "./emails";
-import { runParseBatch } from "./parseEmails";
+import { graphCreateSubscription, graphRenewSubscription } from "../graph";
+import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 
 /** Constant-time string compare. Returns false on length mismatch instead of
@@ -21,8 +20,12 @@ function timingSafeCompareString(a: string, b: string): boolean {
 // Receives Graph change notifications when new email arrives in the mailbox.
 // Also handles the one-time validation POST that Graph sends when a
 // subscription is first created (validationToken in query params).
+//
+// Validate and enqueue only — no Graph fetch, no attachment download, no
+// parsing. processEmailSync (parseEmails.ts) does all of that off the
+// "email-sync" queue.
 
-async function graphNotification(
+export async function graphNotification(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -33,11 +36,19 @@ async function graphNotification(
   }
 
   interface GraphChangeNotification { clientState?: string; subscriptionId?: string; changeType?: string; resource?: string }
-  const body = (await request.json().catch(() => null)) as { value?: GraphChangeNotification[] } | null;
-  const notifications: GraphChangeNotification[] = body?.value ?? [];
+  const body = (await request.json().catch(() => null)) as { value?: unknown } | null;
+  const rawValue: unknown = body?.value;
+  // Entries are untrusted JSON: keep only non-null objects.
+  const notifications: GraphChangeNotification[] = (Array.isArray(rawValue) ? rawValue : []).filter(
+    (n: unknown): n is GraphChangeNotification => typeof n === "object" && n !== null,
+  );
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
   if (!clientState) {
     context.error("graphNotification: GRAPH_SUBSCRIPTION_CLIENT_STATE is not configured — rejecting all notifications");
+    return { status: 202 };
+  }
+  if (notifications.length === 0) {
+    context.warn("graphNotification: no notifications in body (malformed or empty)");
     return { status: 202 };
   }
 
@@ -50,39 +61,13 @@ async function graphNotification(
     return { status: 202 };
   }
 
-  const mailbox = process.env.GRAPH_MAILBOX_DEV;
-  if (!mailbox) {
-    context.error("graphNotification: GRAPH_MAILBOX_DEV not configured");
-    return { status: 202 };
-  }
+  // One message per POST however many notifications it carries — the sync
+  // fetches everything since the newest stored row anyway.
+  enqueueEmailSync(context, "graph");
 
-  const parseToken = process.env.MYBUILDINGS_BEARER_TOKEN;
-  if (!parseToken) {
-    context.error("graphNotification: MYBUILDINGS_BEARER_TOKEN not configured");
-    return { status: 202 };
-  }
-
-  let connection;
-  try {
-    connection = await createServiceRequestConnection();
-    const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
-    const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null;
-    const sinceDateTime = rawDate ? new Date(rawDate).toISOString() : undefined;
-
-    const emails = await graphFetchEmails(mailbox, sinceDateTime);
-    await upsertGraphEmails(connection, emails);
-    closeConnection(connection);
-    connection = undefined;
-
-    await runParseBatch(parseToken, context);
-    context.log(`graphNotification: synced ${emails.length} emails from ${mailbox} (since=${sinceDateTime ?? "beginning"})`);
-  } catch (err: any) {
-    context.error("graphNotification sync failed:", err.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
-
-  // Graph requires 202 within 10 seconds or it retries
+  // Graph wants the 202 within 3 s (10 s only for validation and retries);
+  // slower than that on >10% of calls in 10 min and it marks the endpoint
+  // slow and delays notifications by 10 minutes.
   return { status: 202 };
 }
 
@@ -226,6 +211,7 @@ async function renewGraphSubscription(
 app.http("graphNotification", {
   methods: ["POST"],
   authLevel: "anonymous",
+  extraOutputs: [emailSyncQueueOutput],
   handler: graphNotification,
 });
 

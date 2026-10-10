@@ -13,7 +13,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -31,14 +31,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
-
-const QUOTE_COLUMNS = `
-  QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
-  Amount, Currency, Notes, QuotePDFBlobName, SourceEmailID, ReceivedAt,
-  Status, ApprovedAt, ApprovedBy, AIValidatedAt, AIValidatedBy,
-  CreatedAt, CreatedBy,
-  DirectorApprovedAt, DirectorApprovedBy, DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy
-`;
+import { QUOTE_COLUMNS, approveDirectorQuote, rejectQuote as rejectQuoteWrite } from "../quote-decisions";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -597,7 +590,15 @@ async function approveQuote(
 
 // ── POST /api/rejectQuote ────────────────────────────────────────────────────
 
-async function rejectQuote(
+// The quote card offers Reject only on 'pending'; an 'awaiting_director'
+// quote may also be turned down. Anything else is a 409 from the helper.
+const IN_APP_REJECTABLE_STATUSES = ["pending", "awaiting_director"] as const;
+
+interface RejectQuoteBody {
+  QuoteID?: unknown;
+}
+
+export async function rejectQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -607,63 +608,52 @@ async function rejectQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  // Actor from the verified token. A RejectedBy in the body is ignored.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { QuoteID, RejectedBy } = body ?? {};
+    const body = ((await request.json().catch(() => null)) ?? {}) as RejectQuoteBody;
+    const { QuoteID } = body;
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
     connection = await createRequestConnection(token);
 
-    // Fetch parent job + quote number for the history event before we mutate.
-    const quoteRows = await executeQuery(
-      connection,
-      "SELECT JobID, QuoteNumber FROM Quotes WHERE QuoteID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    if (quoteRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Quote not found" } };
+    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts.
+    await beginTransaction(connection);
+    let outcome;
+    try {
+      outcome = await rejectQuoteWrite(connection, {
+        expectedStatuses: IN_APP_REJECTABLE_STATUSES,
+        quoteId: QuoteID,
+        rejectedBy: identity.name,
+      });
+      if (!outcome.ok) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: outcome.status, jsonBody: { error: outcome.error } };
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    const jobId = quoteRows[0].JobID as number;
-    const quoteNumber = (quoteRows[0].QuoteNumber as string | null) ?? `#${QuoteID}`;
 
-    await executeQuery(
-      connection,
-      "UPDATE Quotes SET Status = 'rejected' WHERE QuoteID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents
-         (JobID, CreatedBy, [Text], EventType, QuoteID)
-       VALUES (@JobID, @CreatedBy, @Text, 'quote_rejected', @QuoteID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: RejectedBy ?? null },
-        {
-          name: "Text",
-          type: TYPES.NVarChar,
-          value: `Rejected quote ${quoteNumber}`,
-        },
-        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
-      ],
-    );
-    await executeQuery(
-      connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
-    const stored = await executeQuery(
-      connection,
-      `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    return { status: 200, jsonBody: { quote: stored[0] } };
-  } catch (error: any) {
-    context.error("rejectQuote failed:", error.message);
-    return errorResponse("Reject quote failed", error.message);
+    // Rejecting from awaiting_director closes the director's Planner task. Best-effort.
+    if (outcome.previousStatus === "awaiting_director") {
+      try {
+        await resolveActivePlannerTasks("job", outcome.jobId, ["director_approval"]);
+      } catch (err: unknown) {
+        context.warn("plannerResolve (rejectQuote):", err instanceof Error ? err.message : String(err));
+      }
+    }
+    return { status: 200, jsonBody: { quote: outcome.quote } };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("rejectQuote failed:", message);
+    return errorResponse("Reject quote failed", message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -1079,14 +1069,16 @@ app.http("completeQuote", { methods: ["POST"], authLevel: "anonymous", handler: 
 app.http("uncompleteQuote", { methods: ["POST"], authLevel: "anonymous", handler: uncompleteQuote });
 
 // ── POST /api/directorApproveQuote ───────────────────────────────────────────
-// Body: { QuoteID, ApprovedBy }
+// Body: { QuoteID } — the approver is the verified caller, never the body.
 // Director-only: closes the gate on a quote that's been sitting in
 // 'awaiting_director' since the initial approval. Sets status='approved',
 // stamps DirectorApprovedAt/By, and finally mirrors ApprovedQuoteID onto Jobs.
 
-interface DirectorApproveQuoteBody { QuoteID: number; ApprovedBy?: string }
+interface DirectorApproveQuoteBody {
+  QuoteID?: unknown;
+}
 
-async function directorApproveQuote(
+export async function directorApproveQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -1096,91 +1088,54 @@ async function directorApproveQuote(
   const denied = await requireRole(request, [AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  // Director-only by policy. requireRole lets admin through via the role
+  // hierarchy, so re-check the literal role. Admins are deliberately
+  // excluded — keep this check.
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as DirectorApproveQuoteBody;
-    const { QuoteID, ApprovedBy } = body ?? {};
+    const body = ((await request.json().catch(() => null)) ?? {}) as DirectorApproveQuoteBody;
+    const { QuoteID } = body;
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
 
     connection = await createRequestConnection(token);
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT JobID, QuoteNumber, ContractorName, Status FROM Quotes WHERE QuoteID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Quote not found" } };
-
-    const jobId = rows[0].JobID as number;
-    const quoteNumber = (rows[0].QuoteNumber as string | null) ?? `#${QuoteID}`;
-    const contractorName = rows[0].ContractorName as string | null;
-    const status = (rows[0].Status as string) ?? "";
-
-    if (status === "approved") {
-      return { status: 400, jsonBody: { error: "Quote is already fully approved" } };
+    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts.
+    await beginTransaction(connection);
+    let outcome;
+    try {
+      outcome = await approveDirectorQuote(connection, {
+        approvedBy: identity.name,
+        quoteId: QuoteID,
+      });
+      if (!outcome.ok) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: outcome.status, jsonBody: { error: outcome.error } };
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    if (status !== "awaiting_director") {
-      return { status: 400, jsonBody: { error: "Quote must be in awaiting_director state" } };
-    }
 
-    await executeQuery(
-      connection,
-      `UPDATE Quotes
-         SET Status = 'approved',
-             DirectorApprovedAt = SYSUTCDATETIME(),
-             DirectorApprovedBy = @ApprovedBy
-       WHERE QuoteID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: QuoteID },
-        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `UPDATE Jobs
-         SET ApprovedQuoteID = @QuoteID,
-             ApprovedBy = @ApprovedBy,
-             ApprovedAt = SYSUTCDATETIME(),
-             LastModifiedDate = SYSUTCDATETIME()
-       WHERE JobID = @JobID`,
-      [
-        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
-       VALUES (@JobID, @CreatedBy, @Text, 'quote_director_approved', @QuoteID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
-        { name: "Text", type: TYPES.NVarChar, value: `Director-approved ${quoteNumber}${contractorName ? ` from ${contractorName}` : ""}` },
-        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
-      ],
-    );
-
-    const stored = await executeQuery(
-      connection,
-      `SELECT ${QUOTE_COLUMNS} FROM Quotes WHERE QuoteID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    resolveActivePlannerTasks("job", jobId, ["director_approval"]).catch(
+    resolveActivePlannerTasks("job", outcome.jobId, ["director_approval"]).catch(
       (err: unknown) =>
         context.warn("plannerResolve (directorApproveQuote):", err instanceof Error ? err.message : String(err)),
     );
-    return { status: 200, jsonBody: { quote: stored[0] } };
-  } catch (error: any) {
-    context.error("directorApproveQuote failed:", error.message);
-    return errorResponse("Director approve quote failed", error.message);
+    return { status: 200, jsonBody: { quote: outcome.quote } };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("directorApproveQuote failed:", message);
+    return errorResponse("Director approve quote failed", message);
   } finally {
     if (connection) closeConnection(connection);
   }

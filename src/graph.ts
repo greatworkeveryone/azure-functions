@@ -5,8 +5,12 @@
 //   GRAPH_CLIENT_SECRET  — App registration client secret
 //   GRAPH_SENDER_EMAIL   — Mailbox to send from (e.g. floorplan-dev@randazzo.properties)
 //
+//   ORG_EMAIL_DOMAINS    — tenant's accepted domains, for sender auth (src/email/sender-auth.ts)
+//
 // If any credential is absent, graphSendReply throws — callers should catch
 // and record the error rather than blocking the DB write.
+
+import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
 
 interface TokenResponse {
   access_token: string;
@@ -224,6 +228,9 @@ export async function graphRenewSubscription(subscriptionId: string): Promise<st
 }
 
 export interface GraphEmail {
+  attachmentBlobNames: { blobName: string; fileName: string }[];
+  // Trimmed auth headers for audit / the approval UI (≤ 2000 chars).
+  authenticationResults: string | null;
   graphMessageId: string;
   internetMessageId: string;
   subject: string | null;
@@ -231,7 +238,16 @@ export interface GraphEmail {
   fromName: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
-  attachmentBlobNames: { blobName: string; fileName: string }[];
+  // DMARC pass aligned with From, or Exchange-authenticated internal sender.
+  senderAuthenticated: boolean;
+}
+
+function toMessageHeaders(raw: unknown): MessageHeader[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (h): h is MessageHeader =>
+      typeof h === "object" && h !== null && typeof h.name === "string" && typeof h.value === "string",
+  );
 }
 
 async function fetchAttachmentBytes(
@@ -289,13 +305,18 @@ async function fetchAndUploadAttachments(
   return results;
 }
 
-export async function graphFetchEmails(mailbox: string, sinceDateTime?: string): Promise<GraphEmail[]> {
+export async function graphFetchEmails(
+  mailbox: string,
+  sinceDateTime?: string,
+  knownMessageIds: ReadonlySet<string> = new Set(),
+): Promise<GraphEmail[]> {
   const token = await getGraphToken();
 
   const url = new URL(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`,
   );
-  url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments");
+  // internetMessageHeaders is only returned when $selected; it feeds sender auth.
+  url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments,internetMessageHeaders");
   if (sinceDateTime) {
     url.searchParams.set("$filter", `receivedDateTime ge ${sinceDateTime}`);
   }
@@ -316,8 +337,15 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
 
   const data = (await resp.json()) as { value: any[] };
 
+  // The `ge` window always re-lists the newest stored message(s). Drop them
+  // before their attachments are re-uploaded as orphan blobs. Keyed like
+  // upsertGraphEmails keys MessageID.
+  const fresh = (data.value ?? []).filter(
+    (m) => !knownMessageIds.has(m.internetMessageId ?? m.id),
+  );
+
   const emails = await Promise.all(
-    (data.value ?? []).map(async (m) => {
+    fresh.map(async (m) => {
       const attachmentBlobNames =
         m.hasAttachments && m.id
           ? await fetchAndUploadAttachments(mailbox, m.id, token).catch((err: any) => {
@@ -331,6 +359,7 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
       const rawName: string | null = m.from?.emailAddress?.name ?? null;
       const rawAddress: string | null = m.from?.emailAddress?.address ?? null;
       const fromName = rawName && rawName !== rawAddress ? rawName : null;
+      const auth = assessSenderAuth(toMessageHeaders(m.internetMessageHeaders), rawAddress ?? "");
       return {
         graphMessageId: m.id,
         internetMessageId: m.internetMessageId ?? m.id,
@@ -340,6 +369,8 @@ export async function graphFetchEmails(mailbox: string, sinceDateTime?: string):
         bodyContent: m.body?.content ?? null,
         receivedAt: m.receivedDateTime ?? null,
         attachmentBlobNames,
+        authenticationResults: auth.summary,
+        senderAuthenticated: auth.authenticated,
       };
     }),
   );

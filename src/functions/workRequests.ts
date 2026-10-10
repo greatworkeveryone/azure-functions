@@ -241,7 +241,10 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     const lastSynced: Date | null = buildingRows[0]?.WRsLastSyncedAt ?? null;
     const isStale = !lastSynced || (Date.now() - new Date(lastSynced).getTime() > CACHE_TTL_MS);
 
-    if (force || isStale) {
+    // Manual buildings (negative IDs, migration 093) don't exist in myBuildings.
+    const isManualBuilding = parseInt(buildingId) <= 0;
+
+    if (!isManualBuilding && (force || isStale)) {
       // Both force and incremental syncs use lastmodifieddate to avoid pulling
       // the entire WR history. Force sync resets to the 2-year default window;
       // incremental sync uses the last-synced timestamp for minimal fetching.
