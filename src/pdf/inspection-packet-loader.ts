@@ -55,24 +55,33 @@ export async function loadInspectionPacketInputs(
         roomIds.map((rid, idx) => ({ name: `R${idx}`, type: TYPES.NVarChar, value: rid })),
       )
     : [];
-  // Match the read-only view (isBlankInspectionPoint / visibleInspectionLevels):
-  // rooms seed with a blank placeholder point, hidden in the Summary modal — drop
-  // points with an empty/whitespace description so the PDF's contents AND totals
-  // agree with the modal the download launches from.
-  const keptPointRows = pointRows.filter(
-    (r) => ((r.Description as string | null) ?? "").trim().length > 0,
-  );
-  const pointIds = keptPointRows.map((r) => r.Id as string);
-
-  const attachmentRows = pointIds.length
+  // Photos are loaded for EVERY point, before deciding which are blank: a point
+  // holding just a photo is a real finding, so "has a photo" is part of the
+  // blank test below.
+  const allPointIds = pointRows.map((r) => r.Id as string);
+  const attachmentRows = allPointIds.length
     ? await executeQuery(
         connection,
         `SELECT PointId, BlobName, FileName FROM dbo.InspectionAttachments
-          WHERE PointId IN (${pointIds.map((_, idx) => `@P${idx}`).join(",")})
+          WHERE PointId IN (${allPointIds.map((_, idx) => `@P${idx}`).join(",")})
           ORDER BY UploadedAt`,
-        pointIds.map((pid, idx) => ({ name: `P${idx}`, type: TYPES.NVarChar, value: pid })),
+        allPointIds.map((pid, idx) => ({ name: `P${idx}`, type: TYPES.NVarChar, value: pid })),
       )
     : [];
+  const attachmentsByPoint = groupBy(attachmentRows, (r) => r.PointId as string);
+
+  // Match the read-only view (isBlankInspectionPoint / visibleInspectionLevels):
+  // rooms seed with a blank placeholder point, hidden in the Summary modal. A
+  // point is blank only when it has NO description AND NO photo — drop those so
+  // the PDF's contents AND totals agree with the modal the download launches
+  // from, but never a photo-only finding. (Same rule as NON_BLANK_POINT_SQL in
+  // functions/inspections.ts and the frontend helper — change all three together.)
+  const keptPointRows = pointRows.filter(
+    (r) =>
+      ((r.Description as string | null) ?? "").trim().length > 0 ||
+      attachmentsByPoint.has(r.Id as string),
+  );
+  const pointIds = keptPointRows.map((r) => r.Id as string);
 
   const raisedRows = pointIds.length
     ? await executeQuery(
@@ -90,7 +99,6 @@ export async function loadInspectionPacketInputs(
 
   const roomsByLevel = groupBy(roomRows, (r) => r.LevelId as string);
   const pointsByRoom = groupBy(keptPointRows, (r) => r.RoomId as string);
-  const attachmentsByPoint = groupBy(attachmentRows, (r) => r.PointId as string);
   const jobsByPoint = groupBy(raisedRows, (r) => r.PointId as string);
 
   // Mirror visibleInspectionLevels: keep only non-blank points, drop rooms left

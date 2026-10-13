@@ -182,13 +182,21 @@ export function buildJobTaskDescription(
   return `${location ? location + "\n" : ""}Expected update: ${due}\n${appBaseUrl}/jobs`;
 }
 
+/** Deep link to a job in the web app. The app has NO `/jobs/:id` path — the
+ *  Jobs board is query-param routed and `?jobId=` opens the job modal. Same
+ *  format as `buildJobUrl` in email/director-emails.ts; every Planner task that
+ *  points at a job must go through here so the links can't drift again. */
+export function jobLink(appBaseUrl: string, jobId: number): string {
+  return `${appBaseUrl.trim().replace(/\/+$/, "")}/jobs?jobId=${jobId}`;
+}
+
 export function buildStalledJobTaskDescription(
   job: PlannerStalledJobRow,
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
   const stalledDate = job.stalledAt ? formatDDMMYYYY(job.stalledAt.slice(0, 10)) : "—";
-  return `${location ? location + "\n" : ""}Stalled since: ${stalledDate}\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Stalled since: ${stalledDate}\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 export function buildAwaitingAccountsTaskDescription(
@@ -196,7 +204,7 @@ export function buildAwaitingAccountsTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Awaiting accounts action\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Awaiting accounts action\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 export function buildAwaitingFacilitiesApprovalTaskDescription(
@@ -204,7 +212,7 @@ export function buildAwaitingFacilitiesApprovalTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Quote awaiting approval\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Quote awaiting approval\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 export function buildDirectorApprovalTaskDescription(
@@ -212,7 +220,7 @@ export function buildDirectorApprovalTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 export function buildOnchargeTaskDescription(
@@ -225,7 +233,7 @@ export function buildOnchargeTaskDescription(
       ? `$${job.onchargeAmount.toLocaleString()}`
       : "TBC";
   const notesLine = job.onchargeNotes ? `\nNotes: ${job.onchargeNotes}` : "";
-  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 // ── Escalation thresholds (WP18a) ────────────────────────────────────────────

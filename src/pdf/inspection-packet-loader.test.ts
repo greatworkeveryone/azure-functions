@@ -228,4 +228,134 @@ describe("loadInspectionPacketInputs", () => {
     expect(room.points[0].description).toBe("Leaking tap");
     expect(input!.totals).toEqual({ levels: 1, rooms: 1, issues: 1, jobs: 0 });
   });
+
+  // IN1: a finding with a photo but no description is still a finding. The
+  // blank test is "no description AND no photo" — so photos must be loaded for
+  // every point BEFORE blank points are dropped.
+  it("keeps a photo-only point (empty description, has a photo) in the tree and in totals.issues", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [{ Id: "lvl-1", Name: "Level 2" }],
+      rooms: [{ Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" }],
+      points: [
+        { Id: "pt-1", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [{ PointId: "pt-1", BlobName: "inspections/aaa", FileName: "crack.jpg" }],
+      raisedJobs: [],
+    });
+    mockDownload.mockResolvedValue(Buffer.from("img"));
+
+    const input = await loadInspectionPacketInputs({} as never, 42);
+
+    const points = input!.levels[0].rooms[0].points;
+    expect(points).toHaveLength(1);
+    expect(points[0].description).toBe("");
+    expect(points[0].photos).toHaveLength(1);
+    expect(input!.totals).toEqual({ levels: 1, rooms: 1, issues: 1, jobs: 0 });
+  });
+
+  it("keeps a whitespace-only description when the point has a photo", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [{ Id: "lvl-1", Name: "Level 2" }],
+      rooms: [{ Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" }],
+      points: [
+        { Id: "pt-1", RoomId: "room-1", Description: "   ", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [{ PointId: "pt-1", BlobName: "inspections/aaa", FileName: "crack.jpg" }],
+      raisedJobs: [],
+    });
+    mockDownload.mockResolvedValue(Buffer.from("img"));
+
+    const input = await loadInspectionPacketInputs({} as never, 42);
+    expect(input!.totals.issues).toBe(1);
+  });
+
+  it("keeps a photo-only finding's room and level even when it is the only point there", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [
+        { Id: "lvl-1", Name: "Level 2" },
+        { Id: "lvl-2", Name: "Level 3" },
+      ],
+      rooms: [
+        { Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" },
+        { Id: "room-2", LevelId: "lvl-2", Name: "Bathroom" },
+      ],
+      points: [
+        { Id: "pt-1", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+        // Bathroom holds only a blank placeholder: no description, no photo.
+        { Id: "pt-2", RoomId: "room-2", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [{ PointId: "pt-1", BlobName: "inspections/aaa", FileName: "crack.jpg" }],
+      raisedJobs: [],
+    });
+    mockDownload.mockResolvedValue(Buffer.from("img"));
+
+    const input = await loadInspectionPacketInputs({} as never, 42);
+
+    expect(input!.levels.map((l) => l.name)).toEqual(["Level 2"]);
+    expect(input!.totals).toEqual({ levels: 1, rooms: 1, issues: 1, jobs: 0 });
+  });
+
+  it("still drops a point with no description AND no photo, next to a photo-only sibling", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [{ Id: "lvl-1", Name: "Level 2" }],
+      rooms: [{ Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" }],
+      points: [
+        { Id: "pt-1", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+        { Id: "pt-2", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [{ PointId: "pt-2", BlobName: "inspections/bbb", FileName: "b.jpg" }],
+      raisedJobs: [],
+    });
+    mockDownload.mockResolvedValue(Buffer.from("img"));
+
+    const input = await loadInspectionPacketInputs({} as never, 42);
+    const points = input!.levels[0].rooms[0].points;
+    expect(points).toHaveLength(1);
+    expect(points[0].photos).toHaveLength(1);
+  });
+
+  it("queries photos for the blank-description points too (they decide whether a point is blank)", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [{ Id: "lvl-1", Name: "Level 2" }],
+      rooms: [{ Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" }],
+      points: [
+        { Id: "pt-text", RoomId: "room-1", Description: "Leak", AddedByName: "Jane Doe", AddedAt: CREATED },
+        { Id: "pt-blank", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [],
+      raisedJobs: [],
+    });
+
+    await loadInspectionPacketInputs({} as never, 42);
+
+    const attachmentCall = mockQuery.mock.calls.find(([, sql]) =>
+      (sql as string).includes("FROM dbo.InspectionAttachments"),
+    );
+    expect(attachmentCall).toBeDefined();
+    const pointParams = (attachmentCall![2] as { value: string }[]).map((p) => p.value);
+    expect(pointParams).toEqual(expect.arrayContaining(["pt-text", "pt-blank"]));
+  });
+
+  it("counts a photo-only finding's raised job in totals.jobs", async () => {
+    wire({
+      inspection: [BASE_HEADER],
+      levels: [{ Id: "lvl-1", Name: "Level 2" }],
+      rooms: [{ Id: "room-1", LevelId: "lvl-1", Name: "Kitchen" }],
+      points: [
+        { Id: "pt-1", RoomId: "room-1", Description: "", AddedByName: "Jane Doe", AddedAt: CREATED },
+      ],
+      attachments: [{ PointId: "pt-1", BlobName: "inspections/aaa", FileName: "crack.jpg" }],
+      raisedJobs: [{ PointId: "pt-1", JobId: 77 }],
+    });
+    mockDownload.mockResolvedValue(Buffer.from("img"));
+
+    const input = await loadInspectionPacketInputs({} as never, 42);
+    expect(input!.levels[0].rooms[0].points[0].raisedJobIds).toEqual([77]);
+    expect(input!.totals.jobs).toBe(1);
+  });
 });

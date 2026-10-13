@@ -12,12 +12,15 @@ import {
   buildAwaitingAccountsTaskDescription,
   buildAwaitingFacilitiesApprovalTaskDescription,
   buildDirectorApprovalTaskDescription,
+  buildOnchargeTaskDescription,
   escalationThresholdDays,
+  jobLink,
   getFacilitiesManagerEmails,
   type PlannerTenantRow,
   type PlannerJobRow,
   type PlannerStalledJobRow,
   type PlannerAccountsJobRow,
+  type PlannerOnchargeJobRow,
 } from "../plannerHelpers";
 
 const BASE_TENANT: PlannerTenantRow = {
@@ -168,7 +171,7 @@ describe("buildStalledJobTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildStalledJobTaskDescription(STALLED_JOB, "https://app.example.com");
     assert.ok(desc.includes("Smith Tower"));
-    assert.ok(desc.includes("https://app.example.com/jobs/7"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=7"));
   });
 });
 
@@ -176,7 +179,7 @@ describe("buildAwaitingAccountsTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, "https://app.example.com");
     assert.ok(desc.includes("Jones Building"));
-    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
   });
 });
 
@@ -184,7 +187,7 @@ describe("buildDirectorApprovalTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, "https://app.example.com");
     assert.ok(desc.includes("Jones Building"));
-    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
   });
 });
 
@@ -226,7 +229,51 @@ describe("buildAwaitingFacilitiesApprovalTaskDescription (WP18a)", () => {
     );
     assert.ok(desc.includes("Jones Building"));
     assert.ok(desc.includes("Quote awaiting approval"));
-    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
+  });
+});
+
+// PL1: the web app has no /jobs/:id route (the Jobs board is query-param routed),
+// so a `/jobs/{id}` link in a Planner task 404s. Every job task must use
+// `/jobs?jobId={id}`.
+const ONCHARGE_JOB: PlannerOnchargeJobRow = {
+  jobId: 9,
+  title: "Replace carpet",
+  buildingName: "Jones Building",
+  onchargeAmount: 1250,
+  onchargeNotes: null,
+};
+
+describe("Planner job links (PL1)", () => {
+  const BASE = "https://app.example.com";
+  const descriptions: [string, string, number][] = [
+    ["stalled", buildStalledJobTaskDescription(STALLED_JOB, BASE), 7],
+    ["awaiting accounts", buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["quote approval", buildAwaitingFacilitiesApprovalTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["director approval", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["on-charge", buildOnchargeTaskDescription(ONCHARGE_JOB, BASE), 9],
+  ];
+
+  test.each(descriptions)("%s task links to /jobs?jobId={id}, never a /jobs/{id} path", (_label, desc, jobId) => {
+    assert.ok(desc.includes(`${BASE}/jobs?jobId=${jobId}`), desc);
+    assert.ok(!desc.includes(`${BASE}/jobs/${jobId}`), desc);
+  });
+
+  test("jobLink builds the query-param deep link", () => {
+    assert.strictEqual(jobLink(BASE, 4821), "https://app.example.com/jobs?jobId=4821");
+  });
+
+  test("jobLink tolerates a trailing slash or stray whitespace on APP_BASE_URL", () => {
+    assert.strictEqual(jobLink("https://app.example.com/", 5), "https://app.example.com/jobs?jobId=5");
+    assert.strictEqual(jobLink(" https://app.example.com// ", 5), "https://app.example.com/jobs?jobId=5");
+  });
+
+  test("on-charge description keeps the amount, notes and a working link", () => {
+    const desc = buildOnchargeTaskDescription({ ...ONCHARGE_JOB, onchargeNotes: "Tenant damage" }, BASE);
+    assert.ok(desc.includes("Jones Building"));
+    assert.ok(desc.includes("On-charge to tenant: $1,250"));
+    assert.ok(desc.includes("Notes: Tenant damage"));
+    assert.ok(desc.endsWith(`${BASE}/jobs?jobId=9`));
   });
 });
 
