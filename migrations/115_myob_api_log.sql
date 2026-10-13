@@ -62,10 +62,21 @@ BEGIN
     END TRY
     BEGIN CATCH
       -- No ledger tables here: ordinary table plus a trigger that refuses changes.
+      -- Table and trigger commit together (same as 094): a table that
+      -- survived without its trigger would be skipped by every later start
+      -- and stay editable for good.
       IF OBJECT_ID('dbo.MyobApiLog', 'U') IS NULL
       BEGIN
-        EXEC(N'CREATE TABLE dbo.MyobApiLog (' + @cols + N');');
-        EXEC(N'CREATE TRIGGER dbo.TR_MyobApiLog_AppendOnly ON dbo.MyobApiLog INSTEAD OF UPDATE, DELETE AS BEGIN THROW 51000, ''MyobApiLog is append-only'', 1; END;');
+        BEGIN TRANSACTION;
+        BEGIN TRY
+          EXEC(N'CREATE TABLE dbo.MyobApiLog (' + @cols + N');');
+          EXEC(N'CREATE TRIGGER dbo.TR_MyobApiLog_AppendOnly ON dbo.MyobApiLog INSTEAD OF UPDATE, DELETE AS BEGIN THROW 51000, ''MyobApiLog is append-only'', 1; END;');
+          COMMIT TRANSACTION;
+        END TRY
+        BEGIN CATCH
+          IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+          THROW;
+        END CATCH
       END
     END CATCH
   END CATCH
