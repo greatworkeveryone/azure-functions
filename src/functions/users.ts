@@ -1,10 +1,13 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import {
+  beginTransaction,
   closeConnection,
+  commitTransaction,
   createRequestConnection,
   createServiceRequestConnection,
   executeQuery,
+  rollbackTransaction,
 } from "../db";
 import {
   AppRole,
@@ -15,6 +18,8 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { record } from "../ledger";
+import { ledgerUserActor } from "../ledger/actor";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 
@@ -155,11 +160,17 @@ export async function upsertAppUser(
     // Resolve caller display name for audit log.
     const callerRows = await executeQuery(
       connection,
-      `SELECT DisplayName FROM dbo.AppUsers WHERE EntraOid = @Oid`,
+      `SELECT UserID, DisplayName FROM dbo.AppUsers WHERE EntraOid = @Oid`,
       [{ name: "Oid", type: TYPES.NVarChar, value: callerOid }],
     );
     const callerDisplayName =
       (callerRows[0]?.DisplayName as string | undefined) ?? "Unknown";
+    // Who the decision ledger records as having changed the role.
+    const ledgerActor = ledgerUserActor({
+      name: identity.name || callerDisplayName,
+      roles: callerRoles,
+      userId: (callerRows[0]?.UserID as number | undefined) ?? null,
+    });
 
     if (userId) {
       // UPDATE path — only Role and IsActive are mutable. Reject any request
@@ -194,36 +205,55 @@ export async function upsertAppUser(
         return { status: 403, jsonBody: { error: "Cannot edit your own account" } };
       }
 
-      await executeQuery(
-        connection,
-        `UPDATE dbo.AppUsers
-         SET Role     = @Role,
-             IsActive = @IsActive
-         WHERE UserID = @UserID`,
-        [
-          { name: "UserID",   type: TYPES.Int,      value: userId },
-          { name: "Role",     type: TYPES.NVarChar, value: role ?? null },
-          { name: "IsActive", type: TYPES.Bit,      value: isActive ?? true },
-        ],
-      );
+      // The role the UPDATE leaves in place (an omitted role is written as NULL).
+      const newRole = role ?? null;
 
-      // Write audit row only if role actually changed.
-      if (role !== undefined && role !== oldRole) {
+      // The role change, its UserRoleAudit row and its ledger row commit or roll
+      // back together: no ledger row, no decision.
+      await beginTransaction(connection);
+      try {
         await executeQuery(
           connection,
-          `INSERT INTO dbo.UserRoleAudit
-             (ChangedByOid, ChangedByDisplayName, TargetUserID, TargetEmail, OldRole, NewRole)
-           VALUES
-             (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, @OldRole, @NewRole)`,
+          `UPDATE dbo.AppUsers
+           SET Role     = @Role,
+               IsActive = @IsActive
+           WHERE UserID = @UserID`,
           [
-            { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
-            { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
-            { name: "TargetUserID",          type: TYPES.Int,      value: userId },
-            { name: "TargetEmail",           type: TYPES.NVarChar, value: targetEmail },
-            { name: "OldRole",               type: TYPES.NVarChar, value: oldRole },
-            { name: "NewRole",               type: TYPES.NVarChar, value: role ?? null },
+            { name: "UserID",   type: TYPES.Int,      value: userId },
+            { name: "Role",     type: TYPES.NVarChar, value: newRole },
+            { name: "IsActive", type: TYPES.Bit,      value: isActive ?? true },
           ],
         );
+
+        // Write audit and ledger rows only if role actually changed.
+        if (newRole !== oldRole) {
+          await executeQuery(
+            connection,
+            `INSERT INTO dbo.UserRoleAudit
+               (ChangedByOid, ChangedByDisplayName, TargetUserID, TargetEmail, OldRole, NewRole)
+             VALUES
+               (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, @OldRole, @NewRole)`,
+            [
+              { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
+              { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
+              { name: "TargetUserID",          type: TYPES.Int,      value: userId },
+              { name: "TargetEmail",           type: TYPES.NVarChar, value: targetEmail },
+              { name: "OldRole",               type: TYPES.NVarChar, value: oldRole },
+              { name: "NewRole",               type: TYPES.NVarChar, value: newRole },
+            ],
+          );
+          await record(connection, {
+            action: "user.role_change",
+            actor: ledgerActor,
+            after: { role: newRole },
+            before: { role: oldRole },
+            subject: { id: userId, type: "app_user" },
+          });
+        }
+        await commitTransaction(connection);
+      } catch (err) {
+        await rollbackTransaction(connection).catch(() => {});
+        throw err;
       }
 
       return { status: 200, jsonBody: { userId } };
@@ -253,36 +283,53 @@ export async function upsertAppUser(
 
     const displayName = body.displayName?.trim() || email;
 
-    const inserted = await executeQuery(
-      connection,
-      `INSERT INTO dbo.AppUsers (DisplayName, Email, EntraOid, Role, InvitedByOid, InvitedAt)
-       OUTPUT INSERTED.UserID
-       VALUES (@DisplayName, @Email, NULL, @Role, @InvitedByOid, SYSUTCDATETIME())`,
-      [
-        { name: "DisplayName",  type: TYPES.NVarChar, value: displayName },
-        { name: "Email",        type: TYPES.NVarChar, value: email },
-        { name: "Role",         type: TYPES.NVarChar, value: role ?? null },
-        { name: "InvitedByOid", type: TYPES.NVarChar, value: callerOid },
-      ],
-    );
-    const newUserId = inserted[0].UserID as number;
-
-    // Audit log for the initial role assignment.
-    if (role) {
-      await executeQuery(
+    // The invite, its UserRoleAudit row and its ledger row commit or roll back
+    // together: no ledger row, no decision.
+    let newUserId: number;
+    await beginTransaction(connection);
+    try {
+      const inserted = await executeQuery(
         connection,
-        `INSERT INTO dbo.UserRoleAudit
-           (ChangedByOid, ChangedByDisplayName, TargetUserID, TargetEmail, OldRole, NewRole)
-         VALUES
-           (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, NULL, @NewRole)`,
+        `INSERT INTO dbo.AppUsers (DisplayName, Email, EntraOid, Role, InvitedByOid, InvitedAt)
+         OUTPUT INSERTED.UserID
+         VALUES (@DisplayName, @Email, NULL, @Role, @InvitedByOid, SYSUTCDATETIME())`,
         [
-          { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
-          { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
-          { name: "TargetUserID",          type: TYPES.Int,      value: newUserId },
-          { name: "TargetEmail",           type: TYPES.NVarChar, value: email },
-          { name: "NewRole",               type: TYPES.NVarChar, value: role },
+          { name: "DisplayName",  type: TYPES.NVarChar, value: displayName },
+          { name: "Email",        type: TYPES.NVarChar, value: email },
+          { name: "Role",         type: TYPES.NVarChar, value: role ?? null },
+          { name: "InvitedByOid", type: TYPES.NVarChar, value: callerOid },
         ],
       );
+      newUserId = inserted[0].UserID as number;
+
+      // Audit log for the initial role assignment.
+      if (role) {
+        await executeQuery(
+          connection,
+          `INSERT INTO dbo.UserRoleAudit
+             (ChangedByOid, ChangedByDisplayName, TargetUserID, TargetEmail, OldRole, NewRole)
+           VALUES
+             (@ChangedByOid, @ChangedByDisplayName, @TargetUserID, @TargetEmail, NULL, @NewRole)`,
+          [
+            { name: "ChangedByOid",         type: TYPES.NVarChar, value: callerOid },
+            { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
+            { name: "TargetUserID",          type: TYPES.Int,      value: newUserId },
+            { name: "TargetEmail",           type: TYPES.NVarChar, value: email },
+            { name: "NewRole",               type: TYPES.NVarChar, value: role },
+          ],
+        );
+        await record(connection, {
+          action: "user.role_change",
+          actor: ledgerActor,
+          after: { role },
+          before: { role: null },
+          subject: { id: newUserId, type: "app_user" },
+        });
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
 
     return { status: 201, jsonBody: { userId: newUserId } };
