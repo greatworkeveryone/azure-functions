@@ -13,7 +13,9 @@
 //               Critical and High, with no quote received
 //   invoice     5 business days since an invoice arrived, still undecided
 //   past due    the job's next-update date (Jobs.ExpectedProgressUpdate) is
-//               before today in Darwin; the job has no separate due date
+//               before today in Darwin; the job has no separate due date, and
+//               that date defaults to a week out, so the policy is seeded
+//               inactive until Jobs has a real one
 
 import { formatDarwinDateTime } from "../../ledger/darwinTime";
 import { escalationThresholdDays } from "../../plannerHelpers";

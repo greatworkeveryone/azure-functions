@@ -101,7 +101,8 @@ describe("dbo.Escalations", () => {
 });
 
 describe("dbo.EscalationPolicies and its seed", () => {
-  const seed = [...code.matchAll(/\(N'([a-z_.]+)', N'(attention|authority)', ([01]), N'(business|wall)', N'(yes|reminder|nudge|no)',\s*N'(\[.*?\])'\)/g)].map((m) => ({
+  const seed = [...code.matchAll(/\(N'([a-z_.]+)', N'(attention|authority)', ([01]), N'(business|wall)', N'(yes|reminder|nudge|no)',\s*N'(\[.*?\])', ([01])\)/g)].map((m) => ({
+    active: m[7] === "1",
     autoReescalate: m[5],
     clock: m[4],
     kind: m[2],
@@ -146,6 +147,20 @@ describe("dbo.EscalationPolicies and its seed", () => {
       ].sort(),
     );
     expect(seed.some((p) => /^(quote|invoice|purchase_order)\./.test(p.policyKey))).toBe(false);
+  });
+
+  it("seeds job.past_due inactive until Jobs has a real due date, and every other policy active", () => {
+    // The next-update date defaults to a week out, so escalating on it would be noise.
+    expect(byKey["job.past_due"].active).toBe(false);
+    expect(seed.filter((p) => !p.active).map((p) => p.policyKey)).toEqual(["job.past_due"]);
+    expect(seed).toHaveLength(22);
+  });
+
+  it("writes the seeded Active value on insert only, so an admin's switch survives a re-run", () => {
+    expect(code).toMatch(/INSERT \(PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active, UpdatedBy\)/);
+    expect(code).toMatch(/source\.Ladder, source\.Active, N'migration:098_escalations'/);
+    expect(code).toMatch(/AS v \(PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active\)/);
+    expect(code).not.toMatch(/WHEN\s+MATCHED/i);
   });
 
   it("gives every seeded ladder valid JSON the engine can read", () => {

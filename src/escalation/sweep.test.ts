@@ -351,6 +351,42 @@ describe("job policies", () => {
     expect(world.calls.raise).toEqual([]);
   });
 
+  it("leaves job.past_due alone while it is seeded off, whatever the jobs look like, and says so in a dry run", async () => {
+    const world = makeWorld();
+    world.policies["job.past_due"] = policy("job.past_due", { active: false });
+    world.jobs = [job({ expectedProgressUpdate: ago(5 * DAY), jobId: 1, statusSince: ago(1 * DAY) }), job({ expectedProgressUpdate: ago(30 * DAY), jobId: 2, statusSince: ago(1 * DAY) })];
+
+    const live = await sweep(world);
+    expect(world.calls.raise).toEqual([]);
+    expect(live.raised).toBe(0);
+
+    const log = jest.fn();
+    const dry = await sweep(world, { dryRun: true, log });
+    expect(dry.raised).toBe(0);
+    expect(log).toHaveBeenCalledWith("escalationSweep: job.past_due is switched off (Active = 0), so it is skipped");
+  });
+
+  it("switches job.past_due on again when an admin sets it active", async () => {
+    const world = makeWorld();
+    world.policies["job.past_due"] = policy("job.past_due", { active: true });
+    world.jobs = [job({ expectedProgressUpdate: ago(5 * DAY), jobId: 1, statusSince: ago(1 * DAY) })];
+
+    await sweep(world);
+
+    expect(raisedKeys(world)).toEqual(["job.past_due:1"]);
+  });
+
+  it("still ends an existing past-due escalation when its condition clears, even with the policy off", async () => {
+    const world = makeWorld();
+    world.policies["job.past_due"] = policy("job.past_due", { active: false });
+    world.jobs = [job({ expectedProgressUpdate: ago(-3 * DAY), jobId: 1, statusSince: ago(1 * DAY) })];
+    world.rows = [esc({ dueAt: ago(-5), policyKey: "job.past_due" })];
+
+    await sweep(world);
+
+    expect(world.calls.autoResolve).toHaveLength(1);
+  });
+
   it("works without any PLANNER_* setting or FACILITIES_MANAGER_EMAILS, which it never reads", async () => {
     const world = makeWorld();
     world.jobs = [job({ statusSince: ago(9 * DAY) })];

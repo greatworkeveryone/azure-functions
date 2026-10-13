@@ -392,11 +392,11 @@ describe("approval authority: shared vectors", () => {
   });
 
   it("keeps the authority tables as agreed, frozen", () => {
-    expect(ROLE_ORDER).toEqual(["facilities", "accounts", "facilities_manager", "accounts_manager", "director"]);
+    expect(ROLE_ORDER).toEqual(["facilities", "accounts", "facilities_manager", "accounts_manager", "cfo", "director"]);
     expect(SUBJECT_ELIGIBLE_ROLES).toEqual({
-      invoice: ["accounts", "accounts_manager", "admin", "director"],
-      purchase_order: ["facilities_manager", "accounts_manager", "admin", "director"],
-      quote: ["facilities_manager", "accounts", "accounts_manager", "admin", "director"],
+      invoice: ["accounts", "accounts_manager", "cfo", "admin", "director"],
+      purchase_order: ["facilities_manager", "accounts_manager", "cfo", "admin", "director"],
+      quote: ["facilities_manager", "accounts", "accounts_manager", "cfo", "admin", "director"],
     });
     expect(ATTRIBUTED_APPROVAL_ROLES).toEqual({ invoice: [], purchase_order: [], quote: ["facilities"] });
     for (const table of [SUBJECT_ELIGIBLE_ROLES, ATTRIBUTED_APPROVAL_ROLES]) {
@@ -413,6 +413,48 @@ describe("approval authority: backend only", () => {
     const tables = [ROLE_ORDER, ...Object.values(SUBJECT_ELIGIBLE_ROLES), ...Object.values(ATTRIBUTED_APPROVAL_ROLES)];
     const known: string[] = Object.values(AppRole);
     expect(tables.flat().filter((role) => !known.includes(role))).toEqual([]);
+  });
+
+  // WP20 put the CFO between accounts_manager and director. No cfo ApprovalLimits row
+  // exists yet (the amount is open, Q8), so these use an assumed one.
+  describe("the CFO between accounts_manager and director", () => {
+    const CFO: Identity = { email: "cfo@example.com", roles: ["cfo"], userId: 108 };
+    const withCfo: AuthorityFacts = ladder([...PROD, { limit: 50000, role: "cfo" }], 100000);
+    const roles = (route: Approver[]): (string | undefined)[] => route.map((step) => step.role);
+
+    it("sits just below the director in the escalation order", () => {
+      expect(ROLE_ORDER.slice(-3)).toEqual(["accounts_manager", "cfo", "director"]);
+    });
+
+    it.each<Subject>(["quote", "invoice", "purchase_order"])("may approve a %s on its own authority", (subject) => {
+      expect(SUBJECT_ELIGIBLE_ROLES[subject]).toContain("cfo");
+    });
+
+    it("is a step between the managers and the director once it has a limit", () => {
+      expect(roles(decideAuthority(inputOf("invoice", 15000), withCfo).route)).toEqual(["accounts_manager", "cfo", "director"]);
+      expect(roles(decideAuthority(inputOf("invoice", 30000), withCfo).route)).toEqual(["cfo", "director"]);
+      expect(roles(decideAuthority(inputOf("quote", 30000), withCfo).route)).toEqual(["cfo", "director"]);
+      expect(roles(decideAuthority(inputOf("purchase_order", 30000), withCfo).route)).toEqual(["cfo", "director"]);
+      // above its limit and still under the director gate, only the director is left
+      expect(roles(decideAuthority(inputOf("invoice", 60000), withCfo).route)).toEqual(["director"]);
+    });
+
+    it("comes after a manager with the same limit", () => {
+      const tied = ladder([...PROD, { limit: 20000, role: "cfo" }], 100000);
+      expect(roles(decideAuthority(inputOf("invoice", 15000), tied).route)).toEqual(["accounts_manager", "cfo", "director"]);
+    });
+
+    it("approves within its own limit and not beyond it", () => {
+      expect(canApprove(CFO, inputOf("invoice", 30000), withCfo)).toEqual({ allowed: true, basis: "own_authority" });
+      expect(canApprove(CFO, inputOf("invoice", 60000), withCfo)).toEqual({ actorLimit: 50000, allowed: false, reason: "over_limit" });
+    });
+
+    it("approves nothing until it has a limit row: no row, no authority", () => {
+      for (const subject of ["quote", "invoice", "purchase_order"] as const) {
+        expect(canApprove(CFO, inputOf(subject, 100), FACTS.prod)).toEqual({ actorLimit: undefined, allowed: false, reason: "not_eligible" });
+        expect(roles(decideAuthority(inputOf(subject, 100), FACTS.prod).route)).not.toContain("cfo");
+      }
+    });
   });
 
   it("keeps the core pure: no imports, clock, environment or console", () => {

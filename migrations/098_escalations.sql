@@ -17,9 +17,15 @@
 -- Additive and re-runnable: every statement sits behind IF OBJECT_ID or IF NOT
 -- EXISTS and no existing table is touched. The policies are seeded with MERGE
 -- ... WHEN NOT MATCHED THEN INSERT only, so running this again never overwrites
--- a policy an admin has edited. Seeds cover every row of PLAN §3.7 except the
--- quote, invoice and purchase_order policies (WP21), and quote.attribution_*
--- (their adapter waits for the attribution table); those packages seed their own.
+-- a policy an admin has edited (a switch flipped included). Seeds cover every
+-- row of PLAN §3.7 except the quote, invoice and purchase_order policies (WP21),
+-- and quote.attribution_* (their adapter waits for the attribution table); those
+-- packages seed their own.
+--
+-- job.past_due is seeded INACTIVE. A job has no due date of its own yet, only the
+-- next-update date (Jobs.ExpectedProgressUpdate), which defaults to a week out, so
+-- escalating on it would be noise. Switch it on once Jobs has a real due date, by
+-- setting Active to 1 on that one policy row (and UpdatedBy to who did it).
 --
 -- Ladder JSON: an array of entries, in escalation order, each with one of
 --   { "role": "<AppUsers.Role>" }      everyone active in that role
@@ -156,59 +162,59 @@ GO
 
 -- Seed. role@hours in PLAN §3.7 is { "role": ..., "slaHours": hours }; hours are
 -- business hours on the Darwin clock (8 = one business day) unless Clock is
--- 'wall'. A level without hours has no SLA.
-;WITH Seed (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder) AS (
+-- 'wall'. A level without hours has no SLA. The last value is Active.
+;WITH Seed (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active) AS (
   SELECT * FROM (VALUES
     (N'job.stalled_unacknowledged', N'attention', 0, N'business', N'yes',
-      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]'),
+      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]', 1),
     (N'job.unassigned', N'attention', 0, N'business', N'yes',
-      N'[{"role":"facilities_manager","slaHours":8},{"role":"director","slaHours":16}]'),
+      N'[{"role":"facilities_manager","slaHours":8},{"role":"director","slaHours":16}]', 1),
     (N'job.manual', N'attention', 0, N'business', N'yes',
-      N'[{"token":"raiser_manager","slaHours":8},{"role":"director","slaHours":16}]'),
+      N'[{"token":"raiser_manager","slaHours":8},{"role":"director","slaHours":16}]', 1),
     (N'job.critical', N'attention', 1, N'wall', N'yes',
-      N'[{"role":"facilities_manager","slaHours":2},{"role":"director","slaHours":4}]'),
+      N'[{"role":"facilities_manager","slaHours":2},{"role":"director","slaHours":4}]', 1),
     (N'job.quote_not_back', N'attention', 0, N'business', N'yes',
-      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]'),
+      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]', 1),
     (N'job.invoice_waiting', N'attention', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":16},{"role":"cfo","slaHours":16},{"role":"director"}]'),
+      N'[{"role":"accounts_manager","slaHours":16},{"role":"cfo","slaHours":16},{"role":"director"}]', 1),
     (N'job.past_due', N'attention', 0, N'business', N'yes',
-      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]'),
+      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]', 0),
     (N'rent_review.not_commenced', N'attention', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":40},{"role":"director","slaHours":40}]'),
+      N'[{"role":"accounts_manager","slaHours":40},{"role":"director","slaHours":40}]', 1),
     (N'rent_review.overdue', N'attention', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":16},{"role":"director","slaHours":40}]'),
+      N'[{"role":"accounts_manager","slaHours":16},{"role":"director","slaHours":40}]', 1),
     (N'rent_review.approval', N'authority', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":16},{"role":"cfo","slaHours":16},{"role":"director"}]'),
+      N'[{"role":"accounts_manager","slaHours":16},{"role":"cfo","slaHours":16},{"role":"director"}]', 1),
     (N'rent_review.market_referral', N'authority', 0, N'business', N'nudge',
-      N'[{"role":"director","slaHours":80}]'),
+      N'[{"role":"director","slaHours":80}]', 1),
     (N'rent_review.index_late', N'attention', 0, N'business', N'no',
-      N'[{"role":"admin"}]'),
+      N'[{"role":"admin"}]', 1),
     (N'rent_review.closeout', N'attention', 0, N'business', N'no',
-      N'[{"role":"accounts_manager","slaHours":80}]'),
+      N'[{"role":"accounts_manager","slaHours":80}]', 1),
     (N'billing.run_approval', N'authority', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":8},{"role":"cfo","slaHours":8},{"role":"director"}]'),
+      N'[{"role":"accounts_manager","slaHours":8},{"role":"cfo","slaHours":8},{"role":"director"}]', 1),
     (N'comms.contractor_no_reply', N'attention', 0, N'business', N'yes',
-      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]'),
+      N'[{"role":"facilities_manager","slaHours":16},{"role":"director","slaHours":16}]', 1),
     (N'comms.legal_notice_approval', N'authority', 0, N'business', N'reminder',
-      N'[{"role":"director","slaHours":16}]'),
+      N'[{"role":"director","slaHours":16}]', 1),
     (N'comms.arrears_exhausted', N'authority', 0, N'business', N'nudge',
-      N'[{"role":"director","slaHours":40}]'),
+      N'[{"role":"director","slaHours":40}]', 1),
     (N'lease.option_deadline', N'attention', 0, N'business', N'yes',
-      N'[{"role":"accounts_manager","slaHours":40},{"role":"director"}]'),
+      N'[{"role":"accounts_manager","slaHours":40},{"role":"director"}]', 1),
     (N'lease.option_lapsed', N'attention', 0, N'business', N'no',
-      N'[{"role":"director"}]'),
+      N'[{"role":"director"}]', 1),
     (N'lease.renewal', N'authority', 0, N'business', N'nudge',
-      N'[{"role":"director","slaHours":80}]'),
+      N'[{"role":"director","slaHours":80}]', 1),
     (N'any.manual', N'attention', 0, N'business', N'yes',
-      N'[{"token":"raiser_manager","slaHours":8},{"role":"director","slaHours":16}]'),
+      N'[{"token":"raiser_manager","slaHours":8},{"role":"director","slaHours":16}]', 1),
     (N'system.health', N'attention', 0, N'business', N'no',
-      N'[{"role":"admin"}]')
-  ) AS v (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder)
+      N'[{"role":"admin"}]', 1)
+  ) AS v (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active)
 )
 MERGE dbo.EscalationPolicies AS target
 USING Seed AS source
   ON target.PolicyKey = source.PolicyKey
 WHEN NOT MATCHED BY TARGET THEN
-  INSERT (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, UpdatedBy)
-  VALUES (source.PolicyKey, source.Kind, source.Urgent, source.Clock, source.AutoReescalate, source.Ladder, N'migration:098_escalations');
+  INSERT (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active, UpdatedBy)
+  VALUES (source.PolicyKey, source.Kind, source.Urgent, source.Clock, source.AutoReescalate, source.Ladder, source.Active, N'migration:098_escalations');
 GO

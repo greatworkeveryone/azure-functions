@@ -7,9 +7,10 @@
 //     reminder at the top (autoReescalate on the policy decides).
 //  3. Jobs that meet a job policy and have no live escalation for it get one:
 //     stalled and unacknowledged, unassigned, quote not back, invoice waiting,
-//     past due. What a person already closed is not raised again until the
-//     condition's clock moves; a new email linked to the job is the exception for
-//     a stalled job (follow-up).
+//     past due. A policy switched off in dbo.EscalationPolicies is skipped, and
+//     job.past_due is seeded off until Jobs has a real due date. What a person
+//     already closed is not raised again until the condition's clock moves; a new
+//     email linked to the job is the exception for a stalled job (follow-up).
 //  4. A new email linked to a job with an open attention escalation restarts its
 //     clock at its current level and tells the target again (a same-level
 //     supersede). Emergencies (urgent) are not delayed by it.
@@ -273,6 +274,9 @@ async function raiseForJobs(run: Run): Promise<void> {
   for (const key of SWEEP_JOB_POLICIES) {
     const policy = await run.deps.getPolicy(run.connection, key, run.now.getTime());
     if (policy?.active) policies.set(key, policy);
+    else if (run.options.dryRun) {
+      run.options.log(`escalationSweep: ${key} ${policy ? "is switched off (Active = 0)" : "has no row in dbo.EscalationPolicies"}, so it is skipped`);
+    }
   }
   if (policies.size === 0) return;
 
