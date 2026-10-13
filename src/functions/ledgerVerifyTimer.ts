@@ -15,6 +15,13 @@ import { Sentry } from "../sentry";
 // portal → SQL database → Ledger). Until it is, sys.database_ledger_digest_locations
 // is empty and this timer reports that it skipped, instead of failing.
 
+// DecisionLedger (094) and MyobApiLog (115) fall back to ordinary tables with
+// an append-only trigger when the database refuses ledger tables. Those have no
+// digests, so verifying with only fallback tables fails (37392) every night.
+const SELECT_LEDGER_TABLES_SQL = `SELECT name, ledger_type_desc AS LedgerType
+  FROM sys.tables
+ WHERE schema_id = SCHEMA_ID('dbo') AND name IN ('DecisionLedger', 'MyobApiLog')`;
+
 // Locations as the JSON array the verify procedure expects (Microsoft's
 // documented query); NULL when there are no rows. A fresh connection, not the
 // shared singleton: verification can run for a while.
@@ -31,6 +38,18 @@ async function ledgerVerifyTimer(
   let connection;
   try {
     connection = await createServiceRequestConnection();
+
+    const tables = await executeQuery(connection, SELECT_LEDGER_TABLES_SQL);
+    for (const t of tables) {
+      if (t.LedgerType === "NON_LEDGER_TABLE") {
+        context.log(`ledgerVerifyTimer: ${t.name} is the trigger-protected fallback, not a ledger table`);
+      }
+    }
+    if (!tables.some((t) => typeof t.LedgerType === "string" && t.LedgerType !== "NON_LEDGER_TABLE")) {
+      context.log("ledgerVerifyTimer: no ledger tables in use — verification skipped");
+      return;
+    }
+
     const rows = await executeQuery(connection, SELECT_LOCATIONS_SQL);
     const locations = (rows[0]?.Locations as string | null | undefined) ?? null;
 

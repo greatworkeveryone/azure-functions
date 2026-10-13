@@ -70,10 +70,16 @@ describe("migration 115_myob_api_log.sql", () => {
     expect(code).toMatch(/SYSTEM_VERSIONING = OFF, LEDGER = ON \(APPEND_ONLY = ON\)/);
   });
 
-  it("falls back to an ordinary table, automatically, in the innermost CATCH", () => {
-    const afterCatch = code.slice(code.lastIndexOf("BEGIN CATCH"));
-    expect(afterCatch).toMatch(/CREATE TABLE dbo\.MyobApiLog/);
-    expect(afterCatch).not.toMatch(/LEDGER/);
+  it("creates the fallback table and its trigger in one transaction, without the ledger clause", () => {
+    const tx = code.slice(code.indexOf("BEGIN TRANSACTION"), code.indexOf("COMMIT TRANSACTION"));
+    expect(tx).toMatch(/CREATE TABLE dbo\.MyobApiLog/);
+    expect(tx).toMatch(/CREATE TRIGGER dbo\.TR_MyobApiLog_AppendOnly/);
+    expect(tx).not.toMatch(/LEDGER/);
+  });
+
+  it("rolls the fallback back and rethrows rather than leave an unprotected table", () => {
+    const lastCatch = code.slice(code.lastIndexOf("BEGIN CATCH"));
+    expect(lastCatch).toMatch(/IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;/);
   });
 
   it("makes the fallback refuse UPDATE and DELETE with THROW 51000", () => {
