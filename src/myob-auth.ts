@@ -24,6 +24,7 @@ import {
   createServiceRequestConnection,
   executeQuery,
 } from "./db";
+import { myobRequest, type MyobActor } from "./myob-api-log";
 
 // Token storage reads/writes connect as the app's service principal either
 // way. Both branches return a FRESH connection, never the singleton: every
@@ -131,24 +132,34 @@ export function buildAuthorizeUrl(state: string): string {
 
 // ── Token exchange + refresh ─────────────────────────────────────────────────
 
+// Through myobRequest like every other MYOB call, so token exchanges and
+// refreshes are in the audit log too (the log redacts the secrets in them).
 async function postTokenRequest(
   body: URLSearchParams,
+  actor: MyobActor,
+  purpose: string,
+  correlationId?: string,
 ): Promise<MyobTokenResponse> {
-  const response = await fetch(MYOB_TOKEN_URL, {
-    method: "POST",
+  const response = await myobRequest({
+    actor,
+    body,
+    correlationId,
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
+    method: "POST",
+    purpose,
+    url: MYOB_TOKEN_URL,
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`MYOB token endpoint ${response.status}: ${text}`);
+    throw new Error(`MYOB token endpoint ${response.status}: ${response.text}`);
   }
-  return (await response.json()) as MyobTokenResponse;
+  return response.json<MyobTokenResponse>();
 }
 
 export async function exchangeCodeForTokens(opts: {
-  code: string;
+  actor: MyobActor;
   authorizedBy: string | null;
+  code: string;
+  correlationId?: string;
   sqlToken: string | null;
 }): Promise<MyobAuthStatus> {
   const clientId = process.env.MYOB_CLIENT_ID;
@@ -169,13 +180,17 @@ export async function exchangeCodeForTokens(opts: {
     grant_type: "authorization_code",
   });
   if (scope) tokenBody.set("scope", scope);
-  const tokens = await postTokenRequest(tokenBody);
+  const tokens = await postTokenRequest(tokenBody, opts.actor, "oauth-token-exchange", opts.correlationId);
 
   await persistTokens(tokens, opts.authorizedBy, opts.sqlToken);
   return getMyobAuthStatus(opts.sqlToken);
 }
 
-async function refreshTokens(refreshToken: string): Promise<MyobTokenResponse> {
+async function refreshTokens(
+  refreshToken: string,
+  actor: MyobActor,
+  correlationId?: string,
+): Promise<MyobTokenResponse> {
   const clientId = process.env.MYOB_CLIENT_ID;
   const clientSecret = process.env.MYOB_CLIENT_SECRET;
   if (!clientId || !clientSecret) {
@@ -188,6 +203,9 @@ async function refreshTokens(refreshToken: string): Promise<MyobTokenResponse> {
       refresh_token: refreshToken,
       grant_type: "refresh_token",
     }),
+    actor,
+    "oauth-token-refresh",
+    correlationId,
   );
 }
 
@@ -285,11 +303,14 @@ export async function getMyobAuthStatus(
  * REFRESH_SKEW_MS of expiry. Throws MyobNotLinkedError if no row exists.
  *
  * Pass the caller's SQL token so the DB read/write hits the user connection;
- * pass null only from background paths (timers, webhooks) where no user is
- * present and the service principal has SQL access.
+ * pass null only from background paths (timers) where no user is present and
+ * the service principal has SQL access. `actor` is who the (possible) refresh
+ * call is on behalf of, for the MYOB audit log.
  */
 export async function getValidMyobAccessToken(
   sqlToken: string | null,
+  actor: MyobActor,
+  correlationId?: string,
 ): Promise<string> {
   const row = await loadRow(sqlToken);
   if (!row) throw new MyobNotLinkedError();
@@ -298,7 +319,7 @@ export async function getValidMyobAccessToken(
     return row.AccessToken;
   }
 
-  const refreshed = await refreshTokens(row.RefreshToken);
+  const refreshed = await refreshTokens(row.RefreshToken, actor, correlationId);
   await persistTokens(refreshed, null, sqlToken);
   return refreshed.access_token;
 }

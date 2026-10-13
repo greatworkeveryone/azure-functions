@@ -1,22 +1,15 @@
-// Payments — record partial payments against an approved quote, with two-way
-// MYOB sync. Each payment starts as 'pending' and moves to 'paid' when
-// confirmed in MYOB (via "Mark as paid" in the app, or the MYOB webhook).
+// Payments — record partial payments against an approved incoming invoice, with
+// MYOB sync. Each payment starts as 'pending' and moves to 'paid' via "Mark as
+// paid" in the app.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
-import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, createRequestConnection, createServiceRequestConnection, executeQuery, rollbackTransaction } from "../db";
+import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { requiresDirectorApproval, type ApprovalLimit } from "./invoices";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
-import {
-  applyMyobPayment,
-  buildMyobBillUrl,
-  createMyobBill,
-  MYOB_PAYMENT_APPLIED_EVENT,
-  MYOB_WEBHOOK_KEY,
-  validateMyobWebhookSignature,
-  type MyobWebhookPayload,
-} from "../myob-client";
+import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { MyobWritesDisabledError, userActor } from "../myob-api-log";
+import { applyMyobPayment, createMyobBill } from "../myob-client";
 
 const PAYMENT_COLUMNS = `
   PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Variance,
@@ -85,6 +78,12 @@ interface UpsertPaymentBody {
 // Payments.Amount is DECIMAL(18,2). tedious declares Decimal params at scale 0
 // unless told otherwise, which rounds cents away before the value reaches SQL.
 const MONEY_OPTIONS = { precision: 18, scale: 2 };
+
+// Non-fatal: the payment is committed locally either way.
+const MYOB_WRITES_OFF_ON_CREATE =
+  "MYOB sync is switched off, so this payment was saved in Floorplan only — no bill was created in MYOB.";
+const MYOB_WRITES_OFF_ON_PAID =
+  "MYOB sync is switched off, so this payment was marked paid in Floorplan only — nothing was sent to MYOB.";
 
 const toCents = (amount: number): number => Math.round(amount * 100);
 const formatMoney = (cents: number): string =>
@@ -209,6 +208,7 @@ async function upsertPayment(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  const actor = userActor(identity, await rolesForRequest(request).catch(() => []));
 
   let connection;
   try {
@@ -307,8 +307,10 @@ async function upsertPayment(
       }
 
       // ── Create MYOB Purchase Bill (fire-and-forget on error) ────────────
+      let myobWarning: string | undefined;
       try {
         const myob = await createMyobBill({
+          actor,
           amount: create.amount,
           contractorName: contractorName ?? undefined,
           jobId: create.jobId,
@@ -332,6 +334,7 @@ async function upsertPayment(
       } catch (myobErr: any) {
         // MYOB failure must not block the payment — log and continue.
         context.warn(`MYOB bill creation failed for payment ${newId}: ${myobErr.message}`);
+        if (myobErr instanceof MyobWritesDisabledError) myobWarning = MYOB_WRITES_OFF_ON_CREATE;
       }
 
       const stored = await executeQuery(
@@ -339,7 +342,7 @@ async function upsertPayment(
         `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: newId }],
       );
-      return { status: 200, jsonBody: { payment: stored[0] } };
+      return { status: 200, jsonBody: { payment: stored[0], ...(myobWarning ? { myobWarning } : {}) } };
     }
 
     // ── Update ───────────────────────────────────────────────────────────────
@@ -458,6 +461,7 @@ async function markPaymentPaid(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  const actor = userActor(identity, await rolesForRequest(request).catch(() => []));
 
   let connection;
   try {
@@ -484,9 +488,11 @@ async function markPaymentPaid(
 
     // ── Apply payment in MYOB if we have a bill UID ─────────────────────────
     const myobId = payment.MyobID as string | null;
+    let myobWarning: string | undefined;
     if (myobId) {
       try {
         await applyMyobPayment({
+          actor,
           amount: payment.Amount as number,
           billUid: myobId,
           sqlToken: token,
@@ -494,6 +500,7 @@ async function markPaymentPaid(
         context.log(`MYOB payment applied: bill ${myobId}, payment ${PaymentID}`);
       } catch (myobErr: any) {
         context.warn(`MYOB payment apply failed for payment ${PaymentID}: ${myobErr.message}`);
+        if (myobErr instanceof MyobWritesDisabledError) myobWarning = MYOB_WRITES_OFF_ON_PAID;
         // Continue — mark paid locally regardless.
       }
     } else {
@@ -517,7 +524,7 @@ async function markPaymentPaid(
       `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PaymentID }],
     );
-    return { status: 200, jsonBody: { payment: updated[0] } };
+    return { status: 200, jsonBody: { payment: updated[0], ...(myobWarning ? { myobWarning } : {}) } };
   } catch (error: any) {
     context.error("markPaymentPaid failed:", error.message);
     return errorResponse("Mark payment paid failed", error.message);
@@ -526,96 +533,10 @@ async function markPaymentPaid(
   }
 }
 
-// ── POST /api/myobWebhook ─────────────────────────────────────────────────────
-// Receives MYOB webhook events. MYOB fires this when a PaymentPurchase is
-// applied to a bill, letting us mark the matching Payment as 'paid'
-// without any manual action in the app.
-//
-// Authentication: MYOB signs the raw body with HMAC-SHA256 using the shared
-// webhook secret (MYOB_WEBHOOK_KEY). The signature is in the
-// `x-myob-hmac-sha256` header as a base64 string.
-//
-// Register this URL in the MYOB developer portal:
-//   https://developer.myob.com/api/myob-business-api/setup/webhooks/
-
-async function myobWebhook(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  try {
-    const rawBody = await request.text();
-    const signature = request.headers.get("x-myob-hmac-sha256") ?? "";
-
-    if (!MYOB_WEBHOOK_KEY) {
-      context.error("myobWebhook: MYOB_WEBHOOK_KEY is not configured");
-      return { status: 500, jsonBody: { error: "Webhook not configured" } };
-    }
-    if (!validateMyobWebhookSignature(rawBody, signature)) {
-      context.warn("myobWebhook: invalid HMAC signature — rejected");
-      return { status: 401, jsonBody: { error: "Invalid signature" } };
-    }
-
-    const payload: MyobWebhookPayload = JSON.parse(rawBody);
-
-    // We only care about PaymentPurchase.Created events — that means someone
-    // applied a payment to one of our bills in MYOB.
-    const paymentEvents = payload.Events?.filter(
-      (e) => e.EventType === MYOB_PAYMENT_APPLIED_EVENT,
-    ) ?? [];
-
-    if (paymentEvents.length === 0) {
-      return { status: 200, jsonBody: { processed: 0 } };
-    }
-
-    // The webhook entity is the PaymentPurchase record, not the Bill.
-    // We need to look up our Payment row by the Bill's MyobID.
-    // MYOB doesn't directly tell us which bill was paid in the webhook payload —
-    // we'd need to call GET /Purchase/PaymentPurchase/{entityUID} to find the
-    // applied bills. For now we use the entity UID to find matching Payments.
-    // (A full implementation would fetch the PaymentPurchase from MYOB and
-    //  extract the bill UIDs from the Bills array.)
-
-    let connection;
-    let processed = 0;
-    try {
-      // Webhook has no caller identity — use the app's own service principal.
-      // A fresh connection, not the createServiceConnection() singleton: this
-      // handler is internet-reachable and holds the connection across an
-      // unbounded loop, the worst possible consumer of a shared connection.
-      connection = await createServiceRequestConnection();
-      for (const event of paymentEvents) {
-        // Match payment by MyobID (the bill UID stored when we created the bill).
-        // In a full implementation you'd call GET /Purchase/PaymentPurchase/{event.EntityUID}
-        // to find which bill UID was paid, then match on MyobID.
-        const rows = await executeQuery(
-          connection,
-          "SELECT PaymentID FROM Payments WHERE MyobID = @MyobID AND Status = 'pending'",
-          [{ name: "MyobID", type: TYPES.NVarChar, value: event.EntityUID }],
-        );
-        for (const row of rows) {
-          await executeQuery(
-            connection,
-            `UPDATE Payments
-             SET Status = 'paid', MyobSyncedAt = SYSUTCDATETIME()
-             WHERE PaymentID = @Id`,
-            [{ name: "Id", type: TYPES.Int, value: row.PaymentID }],
-          );
-          context.log(`myobWebhook: payment ${row.PaymentID} marked paid via webhook`);
-          processed++;
-        }
-      }
-    } finally {
-      if (connection) closeConnection(connection);
-    }
-
-    return { status: 200, jsonBody: { processed } };
-  } catch (error: any) {
-    context.error("myobWebhook failed:", error.message);
-    return errorResponse("Webhook processing failed", error.message);
-  }
-}
+// MYOB's Business API has no webhooks, so nothing pushes "paid" to us. Paid
+// status will come from a polling reconciler of GET /Purchase/SupplierPayment
+// (Lines[].Purchase.UID = the bill UID), tracked in launch plan WP55.
 
 app.http("getPayments",      { methods: ["GET"],  authLevel: "anonymous", handler: getPayments });
 app.http("upsertPayment",    { methods: ["POST"], authLevel: "anonymous", handler: upsertPayment });
 app.http("markPaymentPaid",  { methods: ["POST"], authLevel: "anonymous", handler: markPaymentPaid });
-app.http("myobWebhook",      { methods: ["POST"], authLevel: "anonymous", handler: myobWebhook });
