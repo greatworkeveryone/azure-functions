@@ -1,3 +1,5 @@
+import { findReferencePoNumbers } from "./po-ref";
+
 // Deterministic email → job matcher. The model never sets MatchedJobID — this
 // is the only source. Shared by ingestEmail, the Graph sync and the parse
 // worker so all three agree on what "references a job" means.
@@ -77,4 +79,18 @@ export function jobIdFromText(
   body: string | null | undefined,
 ): number | null {
   return firstJobId(subject, SUBJECT_PATTERNS) ?? firstJobId(body ? stripQuotedHistory(body) : null, BODY_PATTERNS);
+}
+
+/**
+ * PO numbers in Johanne's format quoted in the email, subject first, quoted
+ * history stripped from the body. Unlike the legacy document numbers they
+ * carry no job id, so the caller has to look them up (see job-match.ts).
+ */
+export function poNumbersFromText(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+): string[] {
+  const fromSubject = findReferencePoNumbers(subject);
+  const fromBody = findReferencePoNumbers(body ? stripQuotedHistory(body) : null);
+  return [...new Set([...fromSubject, ...fromBody])];
 }

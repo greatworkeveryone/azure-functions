@@ -9,6 +9,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decideApprovalAmountEdit } from "../edit-effects";
+import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 
 // ── Approval limit helpers ────────────────────────────────────────────────────
 
@@ -79,6 +80,8 @@ interface UpsertJobInvoiceBody {
   SourceEmailID?: number;
   ReceivedAt?: string;
   CreatedBy?: string;
+  /** The supplier's own invoice number, verbatim (trimmed), at most 255 characters. */
+  SupplierInvoiceNumber?: string | null;
 }
 interface ApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
 interface DirectorApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
@@ -270,7 +273,7 @@ app.http("getInvoices", { methods: ["GET"], authLevel: "anonymous", handler: get
 // ─────────────────────────────────────────────────────────────────────────────
 
 const JOB_INVOICE_COLUMNS = `
-  JobInvoiceID, JobID, InvoiceNumber, Seq, ContractorName,
+  JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName,
   Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy,
@@ -311,9 +314,10 @@ async function getJobInvoices(
 
 // ── POST /api/upsertJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID?, JobID (required on create), ContractorName?, Amount?,
-//         Currency?, Notes?, InvoicePDFBlobName?, SourceEmailID?, ReceivedAt?, CreatedBy? }
+//         Currency?, Notes?, InvoicePDFBlobName?, SourceEmailID?, ReceivedAt?, CreatedBy?,
+//         SupplierInvoiceNumber? }
 
-async function upsertJobInvoice(
+export async function upsertJobInvoice(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -343,7 +347,11 @@ async function upsertJobInvoice(
       SourceEmailID,
       ReceivedAt,
       CreatedBy,
+      SupplierInvoiceNumber,
     } = body ?? {};
+
+    const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber);
+    if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
 
     connection = await createRequestConnection(token);
 
@@ -373,11 +381,13 @@ async function upsertJobInvoice(
           connection,
           `INSERT INTO JobInvoices
              (JobID, InvoiceNumber, Seq, ContractorName, Amount, Currency, Direction,
-              Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy)
+              Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy,
+              SupplierInvoiceNumber)
            OUTPUT INSERTED.JobInvoiceID
            VALUES
              (@JobID, @InvoiceNumber, @Seq, @ContractorName, @Amount, @Currency, @Direction,
-              @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy);`,
+              @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy,
+              @SupplierInvoiceNumber);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
             { name: "InvoiceNumber", type: TYPES.NVarChar, value: invoiceNumber },
@@ -391,6 +401,7 @@ async function upsertJobInvoice(
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
           ],
         );
         const newId = inserted[0].JobInvoiceID as number;
@@ -448,8 +459,18 @@ async function upsertJobInvoice(
         InvoicePDFBlobName: TYPES.NVarChar,
         Notes: TYPES.NVarChar,
         ReceivedAt: TYPES.DateTime2,
+        SupplierInvoiceNumber: TYPES.NVarChar,
       },
-      { Amount, ContractorName, Currency, Direction, InvoicePDFBlobName, Notes, ReceivedAt },
+      {
+        Amount,
+        ContractorName,
+        Currency,
+        Direction,
+        InvoicePDFBlobName,
+        Notes,
+        ReceivedAt,
+        SupplierInvoiceNumber: supplierNumber.value,
+      },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };

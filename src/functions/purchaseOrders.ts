@@ -30,6 +30,7 @@ import {
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
 import { formatDocNumber } from "../doc-number";
+import { resolvePoNumber } from "../po-reference-db";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
@@ -108,9 +109,12 @@ async function getPurchaseOrders(
 // Body: {
 //   PurchaseOrderID?, JobID (required for create),
 //   ContractorID?, ContractorName?, Scope?, EstimatedCost?, CostNotToExceed?,
-//   CostJustification?, EmailSubject?, EmailBody?, CreatedBy?
+//   CostJustification?, EmailSubject?, EmailBody?, CreatedBy?, ChargeCode?
 // }
-// On create, PONumber = `{YYMMDD}-PO-{JobID}-{ACR}-{Seq}`.
+// On create, PONumber = `{BuildingRef}{ChargeCode}{YYMMDD}` (e.g. 66Sm261013),
+// with a b..z suffix on a same-day collision; see po-reference-db.ts. Optional
+// body ChargeCode overrides the code derived from the job. A building with no
+// ReferenceCode falls back to `{YYMMDD}-PO-{JobID}-{ACR}-{Seq}`.
 //   ACR is the contractor's 3-letter acronym (lazy-populated on first use),
 //       or "INT" for internal jobs with no contractor.
 //   Seq is per-contractor (total POs to this contractor ever + 1),
@@ -118,7 +122,7 @@ async function getPurchaseOrders(
 // Wrapped in a transaction with UPDLOCK/HOLDLOCK on the MAX(Seq) read so
 // concurrent creates can't collide on the same seq number.
 
-async function upsertPurchaseOrder(
+export async function upsertPurchaseOrder(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -145,6 +149,7 @@ async function upsertPurchaseOrder(
       EmailSubject,
       EmailBody,
       CreatedBy,
+      ChargeCode,
     } = body ?? {};
 
     connection = await createRequestConnection(token);
@@ -206,24 +211,27 @@ async function upsertPurchaseOrder(
         const seqRows = await executeQuery(connection, seqSql, seqParams);
         const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
 
-        const poNumber = formatDocNumber({
-          prefix: "PO",
+        // Johanne's MYOB format (building + charge code + date); the legacy
+        // number is only the fallback for a building with no ReferenceCode.
+        const po = await resolvePoNumber(connection, {
           jobId: JobID,
-          acronym,
-          seq: nextSeq,
+          requestedChargeCode: ChargeCode,
+          fallbackPoNumber: formatDocNumber({ prefix: "PO", jobId: JobID, acronym, seq: nextSeq }),
         });
+        if (po.warning) context.warn(po.warning);
+        const poNumber = po.poNumber;
 
         const inserted = await executeQuery(
           connection,
           `INSERT INTO PurchaseOrders
              (JobID, PONumber, Seq, ContractorID, ContractorName, Scope,
               EstimatedCost, CostNotToExceed, CostJustification,
-              EmailSubject, EmailBody, CreatedBy)
+              EmailSubject, EmailBody, CreatedBy, ChargeCode)
            OUTPUT INSERTED.PurchaseOrderID
            VALUES
              (@JobID, @PONumber, @Seq, @ContractorID, @ContractorName, @Scope,
               @EstimatedCost, @CostNotToExceed, @CostJustification,
-              @EmailSubject, @EmailBody, @CreatedBy);`,
+              @EmailSubject, @EmailBody, @CreatedBy, @ChargeCode);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
             { name: "PONumber", type: TYPES.NVarChar, value: poNumber },
@@ -237,6 +245,7 @@ async function upsertPurchaseOrder(
             { name: "EmailSubject", type: TYPES.NVarChar, value: EmailSubject ?? null },
             { name: "EmailBody", type: TYPES.NVarChar, value: EmailBody ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "ChargeCode", type: TYPES.NVarChar, value: po.chargeCode },
           ],
         );
         const newId = inserted[0].PurchaseOrderID as number;
