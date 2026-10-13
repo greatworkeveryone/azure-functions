@@ -270,6 +270,33 @@ describe("getEscalations", () => {
     );
   });
 
+  it("filters by an exact policy key, as it always has", async () => {
+    await list({ policyKey: "finance.myob_write_failed" });
+
+    const filter = st.listEscalations.mock.calls[0][1];
+    expect(filter.policyKey).toBe("finance.myob_write_failed");
+    expect(filter.policyKeyPrefix).toBeUndefined();
+  });
+
+  it.each([["finance."], ["rent_review."], ["finance.variance."], [" finance. "]])(
+    "filters a whole domain by a policy-key prefix ending in a dot: %j",
+    async (policyKey) => {
+      await list({ policyKey });
+
+      const filter = st.listEscalations.mock.calls[0][1];
+      expect(filter.policyKeyPrefix).toBe(policyKey.trim());
+      expect(filter.policyKey).toBeUndefined();
+    },
+  );
+
+  it("takes a trailing % as part of an exact key, not as a wildcard", async () => {
+    await list({ policyKey: "finance.%" });
+
+    const filter = st.listEscalations.mock.calls[0][1];
+    expect(filter.policyKey).toBe("finance.%");
+    expect(filter.policyKeyPrefix).toBeUndefined();
+  });
+
   it.each([
     [{ view: "everything" }],
     [{ status: "old" }],
@@ -278,6 +305,14 @@ describe("getEscalations", () => {
     [{ urgent: "maybe" }],
     [{ subjectId: "12" }],
     [{ policyKey: "x".repeat(65) }],
+    [{ policyKey: `${"x".repeat(64)}.` }],
+    [{ policyKey: "." }],
+    [{ policyKey: "finance.." }],
+    [{ policyKey: "Finance." }],
+    [{ policyKey: "fin%ance." }],
+    [{ policyKey: "fin[a-z]ance." }],
+    [{ policyKey: "fin ance." }],
+    [{ policyKey: ".finance." }],
     [{ subjectId: "x".repeat(65), subjectType: "job" }],
   ])("refuses a bad filter %j with a 400", async (query) => {
     const res = await list(query);

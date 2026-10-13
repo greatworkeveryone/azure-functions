@@ -4,6 +4,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, executeQuery, type SqlParam, type SqlRow } from "../db";
+import { escapeLike } from "../ledger/filters";
 import { paginationSqlSuffix, type PaginationParams } from "../pagination";
 import { EscalationError } from "./errors";
 import { normaliseRole, teamRolesOfAll } from "./roles";
@@ -349,7 +350,10 @@ export type ListStatus = "active" | "open" | "closed" | "all";
 
 export interface ListFilter {
   kind?: EscalationKind;
+  /** One policy, by its exact key (job.manual). */
   policyKey?: string;
+  /** A whole domain of policies: a prefix ending in "." (finance.). */
+  policyKeyPrefix?: string;
   status: ListStatus;
   subjectId?: string;
   subjectType?: string;
@@ -439,6 +443,13 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
   if (filter.policyKey) {
     parts.push("e.PolicyKey = @PolicyKey");
     params.push({ name: "PolicyKey", type: TYPES.NVarChar, value: filter.policyKey });
+  }
+  if (filter.policyKeyPrefix) {
+    // As the decision log does for an action prefix: policy keys are full of
+    // underscores, which LIKE would read as "any one character", so the prefix
+    // is escaped and the pattern is bound, never written into the SQL.
+    parts.push("e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'");
+    params.push({ name: "PolicyKeyPrefix", type: TYPES.NVarChar, value: `${escapeLike(filter.policyKeyPrefix)}%` });
   }
   if (filter.kind) {
     parts.push("e.Kind = @Kind");
