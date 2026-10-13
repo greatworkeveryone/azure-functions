@@ -20,6 +20,7 @@ import { generateReadSasUrl } from "../blob-storage";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { matchJobId } from "../email/job-match";
+import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
@@ -632,10 +633,10 @@ async function promoteEmailToJob(
 }
 
 // ── POST /api/promoteEmailToInvoice ─────────────────────────────────────────
-// Body: { EmailID, JobID, Amount?, Description?, CreatedBy? }
+// Body: { EmailID, JobID, Amount?, Description?, CreatedBy?, InvoiceNumber?, SupplierInvoiceNumber? }
 // Creates an Invoice row linked to the job, marks the email as 'promoted'.
 
-async function promoteEmailToInvoice(
+export async function promoteEmailToInvoice(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -661,13 +662,17 @@ async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
         jsonBody: { error: "EmailID and JobID (numbers) are required" },
       };
     }
+    // InvoiceNumber here is what the AI extracted from the supplier's invoice
+    // (or the operator corrected it to), so it is also the supplier's number.
+    const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber ?? InvoiceNumber);
+    if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -676,14 +681,15 @@ async function promoteEmailToInvoice(
     const inserted = await executeQuery(
       connection,
       `INSERT INTO JobInvoices
-         (JobID, Amount, ContractorName, InvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+         (JobID, Amount, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
        OUTPUT INSERTED.JobInvoiceID
-       VALUES (@JobID, @Amount, @ContractorName, @InvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
+       VALUES (@JobID, @Amount, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
         { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
         { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
+        { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
         { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
         { name: "EmailID", type: TYPES.Int, value: EmailID },
         { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
