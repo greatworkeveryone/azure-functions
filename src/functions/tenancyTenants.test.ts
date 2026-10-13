@@ -718,6 +718,25 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     expect(params.find((entry) => entry.name === "NextReviewDate")?.value).toBe("2027-03-01");
   });
 
+  it("reads the next review for today: a keyed past step has settled, a keyed future step is upcoming", async () => {
+    const keyed = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2020-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2021-07-01", id: "dddddddd-dddd-dddd-dddd-dddddddddddd", methodKind: "fixed", ratePercent: 3 },
+      { effectiveFrom: "2099-07-01", id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      // The stored date still points at the 2021 step.
+      .mockResolvedValueOnce(
+        storedRow({ NextReviewDate: new Date("2021-07-01T00:00:00Z"), ScheduledRateSteps: keyed }),
+      );
+    const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+    const { tenant } = res.jsonBody as { tenant: { nextReviewDate: string; reviewState: string } };
+    expect(tenant.nextReviewDate).toBe("2099-07-01");
+    expect(tenant.reviewState).toBe("green");
+  });
+
   it("applies the CPI cap to the headline rent", async () => {
     const steps = JSON.stringify([
       { baseRentPerAnnum: 100000, effectiveFrom: "2024-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },

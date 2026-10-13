@@ -400,6 +400,21 @@ describe("getReviewsDue", () => {
     expect(params[0].value).toBe(9);
   });
 
+  it("leaves out a tenancy whose keyed review has since passed and moved on", async () => {
+    const keyed = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2020-07-01", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2021-07-01", id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "fixed", ratePercent: 3 },
+      { effectiveFrom: "2099-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    db.executeQuery.mockResolvedValueOnce([
+      { TenantId: 1, BuildingId: 5, LegalName: "Keyed Ahead", Status: "current", NextReviewDate: new Date("2021-07-01"), ScheduledRateSteps: keyed },
+      { TenantId: 2, BuildingId: 5, LegalName: "Overdue", Status: "current", NextReviewDate: new Date("2021-07-01") },
+    ]);
+    const res = await handlers.getReviewsDue(makeRequest(undefined), ctx);
+    const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+    expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue"]);
+  });
+
   it("returns an empty list when no tenants are due", async () => {
     db.executeQuery.mockResolvedValueOnce([]);
     const res = await handlers.getReviewsDue(makeRequest(null), ctx);

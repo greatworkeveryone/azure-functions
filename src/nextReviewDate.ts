@@ -1,6 +1,7 @@
-// NextReviewDate is derived, never hand-maintained (PLAN D1, WP23b). Every
-// schedule write and every review-affecting tenant write re-derives it, and
-// the admin one-off recomputeNextReviewDates brings existing rows into line.
+// NextReviewDate is derived, never hand-maintained (PLAN D1, WP23b). Reads
+// derive it for "today" (Darwin); every schedule write and every
+// review-affecting tenant write stores it, and the admin one-off
+// recomputeNextReviewDates brings existing rows into line.
 //
 // The next review is the earliest review row (not commencement) after
 // LastReviewDate that nothing has settled; failing that, the next lease
@@ -11,10 +12,10 @@
 //
 // What settles a review depends on REVIEW_WORKFLOW_LIVE_FROM
 // (reviewWorkflowLiveFrom). A row whose value is still unknown (CPI index,
-// market or other rate) is never settled by it, so an unkeyed review past its
+// market or other rate) never settles by itself, so an unkeyed review past its
 // date reads overdue either way.
 
-import { addMonthsClamped, isIsoDate } from "./darwinDate";
+import { addMonthsClamped, isIsoDate, todayInDarwin } from "./darwinDate";
 import { type ScheduledRateStep, sortSteps, stepPendingReason } from "./scheduledRateStepLogic";
 
 let warnedSetting: string | null = null;
@@ -22,8 +23,9 @@ let warnedSetting: string | null = null;
 /**
  * REVIEW_WORKFLOW_LIVE_FROM (app setting, YYYY-MM-DD): the day the rent-review
  * workflow (WP25/WP26) went live, set at gate B.
- *  • Unset: reviews are done in Excel and their values keyed by hand, so any
- *    known value on a row settles that review.
+ *  • Unset: reviews are done in Excel and their values keyed by hand, so a
+ *    keyed row settles its review once its date has come (Darwin). A row keyed
+ *    ahead — a pre-filled fixed step — stays the upcoming review until then.
  *  • Set: a review dated on or after it is settled only by a resolution on its
  *    row, a completed or waived RentReviews row for its date, or
  *    LastReviewDate; earlier rows still settle by their known value.
@@ -56,6 +58,8 @@ export interface NextReviewInput {
   steps: ScheduledRateStep[];
   /** Tenants.NextReviewDate as stored. */
   storedNextReviewDate: string | null;
+  /** The Darwin date the derivation is for. */
+  today: string;
   /** reviewWorkflowLiveFrom(): null while reviews are keyed by hand. */
   workflowLiveFrom: string | null;
 }
@@ -63,8 +67,12 @@ export interface NextReviewInput {
 function isSettled(step: ScheduledRateStep, input: NextReviewInput): boolean {
   if (step.resolution) return true;
   if (input.resolvedReviewDates.has(step.effectiveFrom)) return true;
-  const keyedByHand = input.workflowLiveFrom === null || step.effectiveFrom < input.workflowLiveFrom;
-  return keyedByHand && stepPendingReason(step) === null;
+  if (stepPendingReason(step) !== null) return false;
+  // Keyed by hand: while the workflow isn't live, once the row's date has come;
+  // after it is, only rows dated before it.
+  return input.workflowLiveFrom === null
+    ? step.effectiveFrom <= input.today
+    : step.effectiveFrom < input.workflowLiveFrom;
 }
 
 function latest(dates: Iterable<string | null>): string | null {
@@ -144,8 +152,13 @@ export function sqlDateToIso(value: unknown): string | null {
 
 /** NextReviewInput from a Tenants row selected with Commencement,
  *  LastReviewDate, ReviewIntervalMonths, NextReviewDate and
- *  RESOLVED_REVIEW_DATES_SQL, under the current REVIEW_WORKFLOW_LIVE_FROM. */
-export function nextReviewInputFromRow(row: Record<string, unknown>, steps: ScheduledRateStep[]): NextReviewInput {
+ *  RESOLVED_REVIEW_DATES_SQL, for `today` (Darwin) under the current
+ *  REVIEW_WORKFLOW_LIVE_FROM. */
+export function nextReviewInputFromRow(
+  row: Record<string, unknown>,
+  steps: ScheduledRateStep[],
+  today: string = todayInDarwin(),
+): NextReviewInput {
   const interval = row.ReviewIntervalMonths == null ? Number.NaN : Number(row.ReviewIntervalMonths);
   return {
     commencement: sqlDateToIso(row.Commencement),
@@ -154,6 +167,7 @@ export function nextReviewInputFromRow(row: Record<string, unknown>, steps: Sche
     reviewIntervalMonths: Number.isFinite(interval) ? interval : null,
     steps,
     storedNextReviewDate: sqlDateToIso(row.NextReviewDate),
+    today,
     workflowLiveFrom: reviewWorkflowLiveFrom(),
   };
 }

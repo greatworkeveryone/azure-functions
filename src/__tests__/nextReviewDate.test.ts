@@ -44,6 +44,7 @@ function input(over: Partial<NextReviewInput>): NextReviewInput {
     reviewIntervalMonths: 12,
     steps: [],
     storedNextReviewDate: null,
+    today: TODAY,
     workflowLiveFrom: null,
     ...over,
   };
@@ -84,9 +85,42 @@ describe("REVIEW_WORKFLOW_LIVE_FROM", () => {
 });
 
 describe("deriveNextReviewDate — unset: reviews keyed by hand", () => {
-  it("counts any known value as a settled review, past or future", () => {
-    const steps = [comm("2020-07-01"), fixed("2025-07-01"), fixed("2027-07-01"), fixed("2028-07-01")];
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2029-07-01");
+  // A lease with five 3% steps keyed in at signing.
+  const fiveYearFixed = [
+    comm("2024-07-01"),
+    fixed("2025-07-01"),
+    fixed("2026-07-01"),
+    fixed("2027-07-01"),
+    fixed("2028-07-01"),
+    fixed("2029-07-01"),
+  ];
+
+  it.each([
+    ["2025-06-30", "2025-07-01"],
+    ["2025-07-01", "2026-07-01"],
+    ["2026-06-30", "2026-07-01"],
+    ["2026-07-01", "2027-07-01"],
+    ["2027-07-01", "2028-07-01"],
+    ["2028-07-01", "2029-07-01"],
+    ["2029-07-01", "2030-07-01"],
+  ])("a pre-filled fixed schedule walks step by step: on %s the next review is %s", (today, next) => {
+    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2024-07-01", steps: fiveYearFixed, today })), next);
+  });
+
+  it("settles a keyed row once its date has come — it never reads overdue", () => {
+    const steps = [comm("2020-07-01"), fixed("2026-07-01")];
+    const next = deriveNextReviewDate(input({ commencement: "2020-07-01", steps }));
+    assert.strictEqual(next, "2027-07-01");
+    assert.strictEqual(computeReviewState(next ?? undefined, "current", TODAY), "green");
+  });
+
+  it("keeps a row keyed ahead of its date as the upcoming review", () => {
+    const steps = [comm("2020-07-01"), fixed("2026-07-01"), fixed("2027-07-01")];
+    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2027-07-01");
+    assert.strictEqual(
+      deriveNextReviewDate(input({ commencement: "2020-07-01", steps, today: "2026-06-30" })),
+      "2026-07-01",
+    );
   });
 
   it("is the earliest review still waiting on its value", () => {
@@ -255,6 +289,7 @@ describe("row helpers", () => {
         ReviewIntervalMonths: 12,
       },
       steps,
+      TODAY,
     );
     assert.deepStrictEqual(built, {
       commencement: "2020-07-01",
@@ -263,6 +298,7 @@ describe("row helpers", () => {
       reviewIntervalMonths: 12,
       steps,
       storedNextReviewDate: "2021-07-01",
+      today: TODAY,
       workflowLiveFrom: null,
     });
     assert.strictEqual(nextReviewInputFromRow({ ReviewIntervalMonths: null }, []).reviewIntervalMonths, null);

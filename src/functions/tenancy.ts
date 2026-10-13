@@ -487,6 +487,10 @@ function tenantRowToApi(
     (row.Status as RegisterTenantApi["status"]) ?? "current",
     daysToExpiry,
   );
+  // Derived for today, so a keyed review whose date has passed has already
+  // moved on; a tenancy with nothing to derive from shows its stored date.
+  const nextReviewDate =
+    deriveNextReviewDate(nextReviewInputFromRow(row, steps, today)) ?? toIsoDate(row.NextReviewDate);
 
   return {
     abn: asStr(row.Abn),
@@ -530,7 +534,7 @@ function tenantRowToApi(
     lot: asStr(row.Lot),
     monthlyRental,
     myobId: asStr(row.MyobId),
-    nextReviewDate: toIsoDate(row.NextReviewDate),
+    nextReviewDate,
     noteCountByAnchor,
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
@@ -545,7 +549,7 @@ function tenantRowToApi(
     rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
     reviewRatchet,
-    reviewState: computeReviewState(toIsoDate(row.NextReviewDate), status, today),
+    reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
@@ -655,7 +659,8 @@ const TENANT_COLUMNS = `
   InfoSheetSections,
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
-  RowVersion, ScheduleVersion
+  RowVersion, ScheduleVersion,
+  ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 const OCCUPANCY_COLUMNS = `
@@ -704,7 +709,7 @@ async function getRegisterTenants(
 
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE BuildingId = @BuildingId
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
        ORDER BY LegalName`,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
@@ -814,7 +819,7 @@ async function getRegisterTenant(
     connection = await createRequestConnection(token);
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (tenantRows.length === 0) {
@@ -1048,7 +1053,7 @@ async function upsertRegisterTenant(
 
     const stored = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @Id`,
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
@@ -2273,7 +2278,7 @@ async function getReviewsDue(
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     const rows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
        ${where} ${where ? "AND" : "WHERE"} NextReviewDate IS NOT NULL
         AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE))
         AND Status <> 'vacated'
@@ -2281,7 +2286,11 @@ async function getReviewsDue(
       params,
     );
     /* eslint-enable local/no-sql-interpolation */
-    const tenants = rows.map((row) => tenantRowToApi(row, [], {}));
+    // The SQL reads the stored date; a keyed review whose date has since passed
+    // has moved on, so keep only what is still due or overdue today.
+    const tenants = rows
+      .map((row) => tenantRowToApi(row, [], {}))
+      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red");
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {
     context.error("getReviewsDue failed:", error.message);
@@ -2384,7 +2393,7 @@ async function reloadFullTenant(
   // detail-query response for those and only patches the tenant row.
   const tenantRows = await executeQuery(
     connection,
-    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
+    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
