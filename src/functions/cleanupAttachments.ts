@@ -1,8 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// cleanupAttachments — daily timer that deletes blobs for attachments that
-// were uploaded to myBuildings more than N hours ago and which we still hold
-// in our blob container. Upload to myBuildings returned 2xx, so after the
-// grace window we assume the file has been ingested on their side.
+// cleanupAttachments — daily timer that deletes our blob copy of attachments
+// pushed to myBuildings (work-request rows only) more than N hours ago. Off
+// unless ATTACHMENT_CLEANUP_ENABLED=true; the rules live in attachmentCleanup.ts.
 //
 // We keep the SQL row (for audit + UI display) and stamp MyBuildingsConfirmedAt
 // when we delete the blob. The frontend treats rows with a non-null
@@ -12,6 +11,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { CLEANUP_SELECT, cleanupEnabled } from "../attachmentCleanup";
 import { deleteBlob } from "../blob-storage";
 
 // Hours an attachment must age before we consider it safely ingested upstream.
@@ -20,17 +20,9 @@ const GRACE_HOURS = Number(process.env.ATTACHMENT_DELETE_GRACE_HOURS ?? "48");
 async function runCleanup(context: InvocationContext): Promise<{ scanned: number; deleted: number; failed: number }> {
   const connection = await createServiceConnection();
   try {
-    // Inspection-origin blobs are excluded: raiseJobsFromInspection copies only
-    // the dbo.Attachments catalogue row and SHARES the blob with
-    // dbo.InspectionAttachments (preserving the original UploadedAt), so
-    // reaping them here would destroy photos the inspection still displays.
     const rows = await executeQuery(
       connection,
-      `SELECT Id, BlobName, OriginalName, UploadedAt
-       FROM Attachments
-       WHERE MyBuildingsConfirmedAt IS NULL
-         AND UploadedAt < DATEADD(HOUR, -@GraceHours, SYSUTCDATETIME())
-         AND BlobName NOT LIKE 'inspections/%'`,
+      CLEANUP_SELECT,
       [{ name: "GraceHours", type: TYPES.Int, value: GRACE_HOURS }],
     );
 
@@ -59,6 +51,10 @@ async function runCleanup(context: InvocationContext): Promise<{ scanned: number
 }
 
 async function cleanupAttachmentsTimer(timer: Timer, context: InvocationContext): Promise<void> {
+  if (!cleanupEnabled()) {
+    context.log("cleanupAttachments disabled (ATTACHMENT_CLEANUP_ENABLED is not \"true\") — nothing deleted");
+    return;
+  }
   if (timer.isPastDue) {
     context.warn("cleanupAttachments timer is past due — running now");
   }
