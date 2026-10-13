@@ -5,7 +5,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { buildUpdateSet, createRequestConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import {
   applyMyobPayment,
   buildMyobBillUrl,
@@ -57,10 +57,24 @@ async function getPayments(
 }
 
 // ── POST /api/upsertPayment ──────────────────────────────────────────────────
+// The actor (CreatedBy / PaidBy) is the verified caller, never the body.
 // Creates or updates a payment. On create: computes variance from the linked
 // PO, inserts the row as 'pending', then asynchronously creates a Purchase
 // Bill in MYOB and stores the returned UID + URL. MYOB failure is logged but
 // does NOT fail the payment — the record is always committed locally first.
+
+interface UpsertPaymentBody {
+  PaymentID?: number;
+  JobID?: number;
+  QuoteID?: number;
+  PurchaseOrderID?: number;
+  Amount?: number;
+  Notes?: string;
+  /** @deprecated ignored — identity comes from the token */
+  PaidBy?: string;
+  /** @deprecated ignored — identity comes from the token */
+  CreatedBy?: string;
+}
 
 async function upsertPayment(
   request: HttpRequest,
@@ -72,18 +86,19 @@ async function upsertPayment(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpsertPaymentBody;
     const {
       PaymentID,
       JobID,
       QuoteID,
       PurchaseOrderID,
       Amount,
-      PaidBy,
       Notes,
-      CreatedBy,
     } = body ?? {};
 
     if (PaymentID === undefined && (typeof JobID !== "number" || typeof Amount !== "number")) {
@@ -123,9 +138,9 @@ async function upsertPayment(
           { name: "PurchaseOrderID", type: TYPES.Int,     value: PurchaseOrderID ?? null },
           { name: "Amount",          type: TYPES.Decimal, value: Amount },
           { name: "Variance",        type: TYPES.Decimal, value: variance },
-          { name: "PaidBy",          type: TYPES.NVarChar, value: PaidBy ?? null },
+          { name: "PaidBy",          type: TYPES.NVarChar, value: identity.name },
           { name: "Notes",           type: TYPES.NVarChar, value: Notes ?? null },
-          { name: "CreatedBy",       type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy",       type: TYPES.NVarChar, value: identity.name },
         ],
       );
       const newId = inserted[0].PaymentID as number;
@@ -152,9 +167,9 @@ async function upsertPayment(
       // ── Create MYOB Purchase Bill (fire-and-forget on error) ────────────
       try {
         const myob = await createMyobBill({
-          amount: Amount,
+          amount: Amount as number,
           contractorName: contractorName ?? undefined,
-          jobId: JobID,
+          jobId: JobID as number,
           jobTitle,
           notes: Notes ?? undefined,
           referenceNumber: `PAY-${JobID}-${newId}`,
@@ -193,10 +208,9 @@ async function upsertPayment(
       {
         Amount: TYPES.Decimal,
         Notes: TYPES.NVarChar,
-        PaidBy: TYPES.NVarChar,
         Variance: TYPES.Decimal,
       },
-      { Amount, Notes, PaidBy, Variance: variance ?? undefined },
+      { Amount, Notes, Variance: variance ?? undefined },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
@@ -224,10 +238,16 @@ async function upsertPayment(
 }
 
 // ── POST /api/markPaymentPaid ─────────────────────────────────────────────────
-// Body: { PaymentID, MarkedPaidBy? }
+// Body: { PaymentID } — PaidBy is the verified caller, never the body.
 // Sets Status='paid' in our DB and applies the payment against the MYOB bill.
 // If MYOB has no bill for this payment (MyobID is null), logs a warning
 // but still marks the local record as paid.
+
+interface MarkPaymentPaidBody {
+  PaymentID?: number;
+  /** @deprecated ignored — identity comes from the token */
+  MarkedPaidBy?: string;
+}
 
 async function markPaymentPaid(
   request: HttpRequest,
@@ -239,10 +259,13 @@ async function markPaymentPaid(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { PaymentID, MarkedPaidBy } = body ?? {};
+    const body = (await request.json()) as MarkPaymentPaidBody;
+    const { PaymentID } = body ?? {};
     if (typeof PaymentID !== "number") {
       return { status: 400, jsonBody: { error: "PaymentID (number) required" } };
     }
@@ -284,11 +307,11 @@ async function markPaymentPaid(
       connection,
       `UPDATE Payments
        SET Status = 'paid', MyobSyncedAt = SYSUTCDATETIME(),
-           PaidBy = COALESCE(@MarkedPaidBy, PaidBy)
+           PaidBy = @MarkedPaidBy
        WHERE PaymentID = @Id`,
       [
         { name: "Id",           type: TYPES.Int,     value: PaymentID },
-        { name: "MarkedPaidBy", type: TYPES.NVarChar, value: MarkedPaidBy ?? null },
+        { name: "MarkedPaidBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
 

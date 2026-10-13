@@ -14,7 +14,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
@@ -109,8 +109,9 @@ async function getPurchaseOrders(
 // Body: {
 //   PurchaseOrderID?, JobID (required for create),
 //   ContractorID?, ContractorName?, Scope?, EstimatedCost?, CostNotToExceed?,
-//   CostJustification?, EmailSubject?, EmailBody?, CreatedBy?, ChargeCode?
+//   CostJustification?, EmailSubject?, EmailBody?, ChargeCode?
 // }
+// The actor is the verified caller, never the body.
 // On create, PONumber = `{BuildingRef}{ChargeCode}{YYMMDD}` (e.g. 66Sm261013),
 // with a b..z suffix on a same-day collision; see po-reference-db.ts. Optional
 // body ChargeCode overrides the code derived from the job. A building with no
@@ -121,6 +122,22 @@ async function getPurchaseOrders(
 //       or per-job for internal (no-contractor) jobs.
 // Wrapped in a transaction with UPDLOCK/HOLDLOCK on the MAX(Seq) read so
 // concurrent creates can't collide on the same seq number.
+
+interface UpsertPurchaseOrderBody {
+  PurchaseOrderID?: number;
+  JobID?: number;
+  ContractorID?: number;
+  ContractorName?: string;
+  Scope?: string;
+  EstimatedCost?: number;
+  CostNotToExceed?: number;
+  CostJustification?: string;
+  EmailSubject?: string;
+  EmailBody?: string;
+  ChargeCode?: string;
+  /** @deprecated ignored — identity comes from the token */
+  CreatedBy?: string;
+}
 
 export async function upsertPurchaseOrder(
   request: HttpRequest,
@@ -134,9 +151,12 @@ export async function upsertPurchaseOrder(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
+    const body = (await request.json()) as UpsertPurchaseOrderBody;
     const {
       PurchaseOrderID,
       JobID,
@@ -148,7 +168,6 @@ export async function upsertPurchaseOrder(
       CostJustification,
       EmailSubject,
       EmailBody,
-      CreatedBy,
       ChargeCode,
     } = body ?? {};
 
@@ -244,7 +263,7 @@ export async function upsertPurchaseOrder(
             { name: "CostJustification", type: TYPES.NVarChar, value: CostJustification ?? null },
             { name: "EmailSubject", type: TYPES.NVarChar, value: EmailSubject ?? null },
             { name: "EmailBody", type: TYPES.NVarChar, value: EmailBody ?? null },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "ChargeCode", type: TYPES.NVarChar, value: po.chargeCode },
           ],
         );
@@ -253,7 +272,7 @@ export async function upsertPurchaseOrder(
         // First PO insert advances (Awaiting Approval, facilities) → (Work, facilities).
         // No-op if already past that state (subsequent POs, manual moves, etc).
         await advanceJobStatus(connection, JobID, JobEvent.PO_CREATED, {
-          actor: CreatedBy ?? null,
+          actor: identity.name,
           purchaseOrderId: newId,
           note: `PO ${poNumber} created — work in progress.`,
         });
@@ -356,7 +375,7 @@ export async function upsertPurchaseOrder(
          VALUES (@JobID, @CreatedBy, @Text, 'po_edited', @POID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           {
             name: "Text",
             type: TYPES.NVarChar,
@@ -393,7 +412,7 @@ export async function upsertPurchaseOrder(
            VALUES (@JobID, @CreatedBy, @Text, 'po_markers_cleared', @POID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
@@ -582,10 +601,19 @@ async function previewPurchaseOrder(
 }
 
 // ── POST /api/sendPurchaseOrder ──────────────────────────────────────────────
-// Body: { PurchaseOrderID, SentBy }
+// Body: { PurchaseOrderID } — the sender (SentBy, and the CC copy) is the
+// verified caller, never the body.
 // Requires PDFBlobName to be set — caller must hit previewPurchaseOrder first.
 // Flips SentAt/SentBy. Actual Microsoft Graph sendMail call is follow-on work
 // — resolveRecipient + the generated PDF are ready for that wiring.
+
+interface SendPurchaseOrderBody {
+  PurchaseOrderID?: number;
+  /** @deprecated ignored — identity comes from the token */
+  SentBy?: string;
+  /** @deprecated ignored — the CC address is the token's email */
+  SentByEmail?: string;
+}
 
 async function sendPurchaseOrder(
   request: HttpRequest,
@@ -597,10 +625,13 @@ async function sendPurchaseOrder(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { PurchaseOrderID, SentBy, SentByEmail } = body ?? {};
+    const body = (await request.json()) as SendPurchaseOrderBody;
+    const { PurchaseOrderID } = body ?? {};
     if (typeof PurchaseOrderID !== "number") {
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
@@ -641,7 +672,9 @@ async function sendPurchaseOrder(
     );
 
     const pdfBuffer = await downloadBlob(pdfBlobName);
-    const ccAddresses = typeof SentByEmail === "string" && SentByEmail ? [SentByEmail] : undefined;
+    // A body-supplied CC would let any caller have the company mailbox copy an
+    // arbitrary outside address.
+    const ccAddresses = [identity.email];
     await graphSendMail(
       recipient.address,
       emailSubject,
@@ -663,7 +696,7 @@ async function sendPurchaseOrder(
        WHERE PurchaseOrderID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-        { name: "SentBy", type: TYPES.NVarChar, value: SentBy ?? null },
+        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     const stored = await executeQuery(
@@ -756,9 +789,16 @@ async function deletePurchaseOrder(
 }
 
 // ── POST /api/markPurchaseOrderMyobCreated ───────────────────────────────────
-// Body: { id, jobId, createdBy }
+// Body: { id, jobId } — the actor is the verified caller, never the body.
 // Records that this PO has been entered into MYOB. Cannot be undone once
 // CompletedAt is set.
+
+interface MarkPurchaseOrderMyobCreatedBody {
+  id?: number;
+  jobId?: number;
+  /** @deprecated ignored — identity comes from the token */
+  createdBy?: string;
+}
 
 async function markPurchaseOrderMyobCreated(
   request: HttpRequest,
@@ -770,10 +810,13 @@ async function markPurchaseOrderMyobCreated(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { id, jobId, createdBy } = body ?? {};
+    const body = (await request.json()) as MarkPurchaseOrderMyobCreatedBody;
+    const { id, jobId } = body ?? {};
     if (typeof id !== "number") {
       return { status: 400, jsonBody: { error: "id (number) required" } };
     }
@@ -804,7 +847,7 @@ async function markPurchaseOrderMyobCreated(
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     await executeQuery(
@@ -813,7 +856,7 @@ async function markPurchaseOrderMyobCreated(
        VALUES (@JobID, @CreatedBy, @Text, 'po_myob_created', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: createdBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} as created in MYOB` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
@@ -926,9 +969,16 @@ async function unmarkPurchaseOrderMyobCreated(
 }
 
 // ── POST /api/markPurchaseOrderComplete ──────────────────────────────────────
-// Body: { id, jobId, completedBy }
+// Body: { id, jobId } — the actor is the verified caller, never the body.
 // Requires MyobCreatedAt to be set first. Transitions the job to
 // status='Awaiting Approval', awaitingRole='accounts'.
+
+interface MarkPurchaseOrderCompleteBody {
+  id?: number;
+  jobId?: number;
+  /** @deprecated ignored — identity comes from the token */
+  completedBy?: string;
+}
 
 async function markPurchaseOrderComplete(
   request: HttpRequest,
@@ -940,10 +990,13 @@ async function markPurchaseOrderComplete(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { id, jobId, completedBy } = body ?? {};
+    const body = (await request.json()) as MarkPurchaseOrderCompleteBody;
+    const { id, jobId } = body ?? {};
     if (typeof id !== "number") {
       return { status: 400, jsonBody: { error: "id (number) required" } };
     }
@@ -980,7 +1033,7 @@ async function markPurchaseOrderComplete(
       [
         { name: "Id", type: TYPES.Int, value: id },
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CompletedBy", type: TYPES.NVarChar, value: completedBy ?? null },
+        { name: "CompletedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
 
@@ -991,7 +1044,7 @@ async function markPurchaseOrderComplete(
        VALUES (@JobID, @CreatedBy, @Text, 'po_completed', @PurchaseOrderID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: completedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} complete` },
         { name: "PurchaseOrderID", type: TYPES.Int, value: id },
       ],
@@ -1003,7 +1056,7 @@ async function markPurchaseOrderComplete(
     // the prior state — that's the silent-demotion bug. The helper refuses
     // backward moves, so completing a PO can no longer undo a manual status.
     await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
-      actor: completedBy ?? null,
+      actor: identity.name,
       purchaseOrderId: id,
       note: `${poLabel} complete — awaiting accounts approval.`,
     });

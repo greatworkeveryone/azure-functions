@@ -18,8 +18,9 @@ export const QUOTE_COLUMNS = `
 
 export interface DirectorQuoteApprovalInput {
   quoteId: number;
-  /** Stamped on Quotes.DirectorApprovedBy, Jobs.ApprovedBy and the event. */
-  approvedBy: string | null;
+  /** Stamped on Quotes.DirectorApprovedBy, Jobs.ApprovedBy and the event.
+   *  Required and non-null so a decision can't be recorded without an actor. */
+  approvedBy: string;
   /** Set when the decision was recorded from an inbound email. */
   sourceEmailId?: number;
   /** Director's conditions; appended to the event text. */
@@ -28,7 +29,7 @@ export interface DirectorQuoteApprovalInput {
 
 export interface QuoteRejectionInput {
   quoteId: number;
-  rejectedBy: string | null;
+  rejectedBy: string;
   /** Statuses the caller allows a reject from; anything else is a 409. */
   expectedStatuses: readonly string[];
   note?: string | null;
