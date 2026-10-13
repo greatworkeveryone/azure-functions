@@ -23,6 +23,7 @@ jest.mock("../auth", () => {
     errorResponse: jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
     extractToken: jest.fn().mockReturnValue("mock-token"),
     requireRole: jest.fn().mockResolvedValue(null),
+    rolesForRequest: jest.fn().mockResolvedValue(["accounts_manager"]),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     verifiedIdentityFromRequest: jest.fn().mockResolvedValue({
       email: "johanne@randazzo.properties",
@@ -188,7 +189,7 @@ describe("sendPurchaseOrder", () => {
 describe("markPurchaseOrderMyobCreated", () => {
   it("records the token's name, ignoring createdBy in the body", async () => {
     routeSql([
-      [/SELECT PurchaseOrderID, PONumber FROM PurchaseOrders/, [{ PONumber: "PO-9-1", PurchaseOrderID: 3 }]],
+      [/FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id AND JobID/, [{ PONumber: "PO-9-1", PurchaseOrderID: 3 }]],
       storedPo,
     ]);
 
@@ -213,7 +214,7 @@ describe("markPurchaseOrderMyobCreated", () => {
 describe("markPurchaseOrderComplete", () => {
   it("records the token's name as CompletedBy, event actor and status actor, ignoring completedBy", async () => {
     routeSql([
-      [/SELECT MyobCreatedAt, CompletedAt, PONumber/, [{ MyobCreatedAt: new Date(), PONumber: "PO-9-1" }]],
+      [/FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id AND JobID/, [{ MyobCreatedAt: new Date(), PONumber: "PO-9-1" }]],
       storedPo,
     ]);
 

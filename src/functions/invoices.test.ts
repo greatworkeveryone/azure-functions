@@ -120,7 +120,7 @@ beforeEach(() => {
 
 describe("approveJobInvoice", () => {
   const invoiceRow: SqlRoute = [
-    /SELECT JobID, InvoiceNumber, Amount, Direction FROM JobInvoices/,
+    /SELECT JobID, InvoiceNumber, Amount, Direction/,
     [{ Amount: 500, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9 }],
   ];
 
@@ -138,7 +138,7 @@ describe("approveJobInvoice", () => {
   it("stamps the director email trigger and SentBy with the token's name", async () => {
     auth.rolesForRequest.mockResolvedValue(["accounts_manager"]);
     routeSql([
-      [/SELECT JobID, InvoiceNumber, Amount, Direction FROM JobInvoices/, [{ Amount: 5000, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9 }]],
+      [/SELECT JobID, InvoiceNumber, Amount, Direction/, [{ Amount: 5000, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9 }]],
       storedInvoice,
     ]);
 
@@ -165,7 +165,7 @@ describe("approveJobInvoice", () => {
 describe("directorApproveJobInvoice", () => {
   it("records the token's name and ignores ApprovedBy in the body", async () => {
     routeSql([
-      [/SELECT JobID, InvoiceNumber, Status FROM JobInvoices/, [{ InvoiceNumber: "IV-9-1", JobID: 9, Status: "approved" }]],
+      [/SELECT JobID, InvoiceNumber, Status/, [{ InvoiceNumber: "IV-9-1", JobID: 9, Status: "approved" }]],
       storedInvoice,
     ]);
 
@@ -190,7 +190,7 @@ describe("directorApproveJobInvoice", () => {
 describe("rejectJobInvoice", () => {
   it("records the token's name and ignores RejectedBy in the body", async () => {
     routeSql([
-      [/SELECT JobID, InvoiceNumber FROM JobInvoices/, [{ InvoiceNumber: "IV-9-1", JobID: 9 }]],
+      [/SELECT JobID, InvoiceNumber, Status/, [{ InvoiceNumber: "IV-9-1", JobID: 9 }]],
       storedInvoice,
     ]);
 
@@ -214,7 +214,7 @@ describe("rejectJobInvoice", () => {
 describe("markJobInvoiceMyobCreated", () => {
   it("records the token's name and ignores CreatedBy in the body", async () => {
     routeSql([
-      [/SELECT JobID, InvoiceNumber, Status, Amount FROM JobInvoices/, [{ Amount: 500, InvoiceNumber: "IV-9-1", JobID: 9, Status: "approved" }]],
+      [/SELECT JobID, InvoiceNumber, Status, Amount/, [{ Amount: 500, InvoiceNumber: "IV-9-1", JobID: 9, Status: "approved" }]],
       storedInvoice,
     ]);
 

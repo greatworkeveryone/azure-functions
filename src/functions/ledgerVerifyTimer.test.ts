@@ -26,6 +26,7 @@ const registration = app.timer.mock.calls.find((c: unknown[]) => c[0] === "ledge
 const run = (registration?.[1] as { handler: (t: Timer, c: InvocationContext) => Promise<void> }).handler;
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
+const LEDGER_TABLES = [{ LedgerType: "APPEND_ONLY_LEDGER_TABLE", name: "MyobApiLog" }];
 const LOCATIONS = '[{"path":"https://digests.blob.core.windows.net/sqldbledgerdigests","last_digest_block_id":3,"is_current":true}]';
 
 beforeEach(() => {
@@ -41,7 +42,7 @@ describe("ledgerVerifyTimer schedule", () => {
 
 describe("ledgerVerifyTimer", () => {
   it("warns, tells Sentry, and verifies nothing when no digest storage is configured", async () => {
-    db.executeQuery.mockResolvedValueOnce([{ Locations: null }]);
+    db.executeQuery.mockResolvedValueOnce(LEDGER_TABLES).mockResolvedValueOnce([{ Locations: null }]);
 
     await run({} as Timer, ctx);
 
@@ -50,16 +51,16 @@ describe("ledgerVerifyTimer", () => {
       "Ledger digest storage not configured — verification skipped",
       "warning",
     );
-    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+    expect(db.executeQuery).toHaveBeenCalledTimes(2);
   });
 
   it("runs the documented verify procedure with the locations JSON", async () => {
-    db.executeQuery.mockResolvedValueOnce([{ Locations: LOCATIONS }]).mockResolvedValueOnce([]);
+    db.executeQuery.mockResolvedValueOnce(LEDGER_TABLES).mockResolvedValueOnce([{ Locations: LOCATIONS }]).mockResolvedValueOnce([]);
 
     await run({} as Timer, ctx);
 
-    expect(db.executeQuery).toHaveBeenCalledTimes(2);
-    const [, sql, params] = db.executeQuery.mock.calls[1];
+    expect(db.executeQuery).toHaveBeenCalledTimes(3);
+    const [, sql, params] = db.executeQuery.mock.calls[2];
     expect(sql).toBe("EXEC sys.sp_verify_database_ledger_from_digest_storage @Locations");
     expect(params).toEqual([expect.objectContaining({ name: "Locations", value: LOCATIONS })]);
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
@@ -68,23 +69,52 @@ describe("ledgerVerifyTimer", () => {
   });
 
   it("reads the locations from sys.database_ledger_digest_locations as JSON", async () => {
-    db.executeQuery.mockResolvedValueOnce([{ Locations: null }]);
+    db.executeQuery.mockResolvedValueOnce(LEDGER_TABLES).mockResolvedValueOnce([{ Locations: null }]);
 
     await run({} as Timer, ctx);
 
-    const sql = String(db.executeQuery.mock.calls[0][1]);
+    const sql = String(db.executeQuery.mock.calls[1][1]);
     expect(sql).toMatch(/FROM sys\.database_ledger_digest_locations/);
     expect(sql).toMatch(/FOR JSON AUTO, INCLUDE_NULL_VALUES/);
   });
 
   it("sends a failed verification to Sentry and fails the run", async () => {
     const tampered = new Error("Ledger verification failed");
-    db.executeQuery.mockResolvedValueOnce([{ Locations: LOCATIONS }]).mockRejectedValueOnce(tampered);
+    db.executeQuery.mockResolvedValueOnce(LEDGER_TABLES).mockResolvedValueOnce([{ Locations: LOCATIONS }]).mockRejectedValueOnce(tampered);
 
     await expect(run({} as Timer, ctx)).rejects.toBe(tampered);
 
     expect(Sentry.captureException).toHaveBeenCalledWith(tampered, expect.anything());
     expect(db.closeConnection).toHaveBeenCalled();
+  });
+
+  it("skips without an alarm when every table is the trigger-protected fallback", async () => {
+    db.executeQuery.mockResolvedValueOnce([
+      { LedgerType: "NON_LEDGER_TABLE", name: "DecisionLedger" },
+      { LedgerType: "NON_LEDGER_TABLE", name: "MyobApiLog" },
+    ]);
+
+    await run({} as Timer, ctx);
+
+    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+    expect(ctx.log).toHaveBeenCalledWith(expect.stringContaining("MyobApiLog is the trigger-protected fallback"));
+    expect(ctx.log).toHaveBeenCalledWith(expect.stringContaining("verification skipped"));
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it("verifies when one ledger table is real even if the other fell back", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        { LedgerType: "NON_LEDGER_TABLE", name: "DecisionLedger" },
+        { LedgerType: "APPEND_ONLY_LEDGER_TABLE", name: "MyobApiLog" },
+      ])
+      .mockResolvedValueOnce([{ Locations: LOCATIONS }])
+      .mockResolvedValueOnce([]);
+
+    await run({} as Timer, ctx);
+
+    expect(String(db.executeQuery.mock.calls[2][1])).toMatch(/sp_verify_database_ledger_from_digest_storage/);
   });
 
   it("sends a failure to read the locations to Sentry too", async () => {

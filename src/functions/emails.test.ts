@@ -22,6 +22,7 @@ jest.mock("../auth", () => {
     errorResponse: jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
     extractToken: jest.fn().mockReturnValue("mock-token"),
     requireRole: jest.fn().mockResolvedValue(null),
+    rolesForRequest: jest.fn().mockResolvedValue(["accounts_manager"]),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     verifiedIdentityFromRequest: jest.fn().mockResolvedValue({
       email: "ops@co.com",
@@ -91,6 +92,17 @@ function makeRequest(body: unknown): HttpRequest {
     json: jest.fn().mockResolvedValue(body),
     query: new URLSearchParams(),
   } as unknown as HttpRequest;
+}
+
+// A reply that can't stand as a director's decision writes one `denied` ledger
+// row, in a transaction of its own, and nothing else (WP19b).
+function expectOnlyRefusalRow(code: string): void {
+  const rows = sqlCalls().filter((c) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].params).toMatchObject({ Action: "denied", RuleApplied: code, SubjectId: "7", SubjectType: "quote" });
+  expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+  expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  expect(db.rollbackTransaction).not.toHaveBeenCalled();
 }
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
@@ -406,11 +418,11 @@ describe("recordEmailQuoteDecision", () => {
     "The sender of this email couldn't be authenticated (DMARC/internal check failed) — ask the director to approve in-app";
 
   it.each([
-    ["ingest", "ingest", true, NOT_MAILBOX],
-    ["unknown (NULL) source", null, true, NOT_MAILBOX],
-    ["unauthenticated graph", "graph", false, NOT_AUTHENTICATED],
-    ["graph with NULL SenderAuthenticated", "graph", null, NOT_AUTHENTICATED],
-  ])("422 for an %s email, before any director check", async (_label, source, authenticated, message) => {
+    ["ingest", "ingest", true, NOT_MAILBOX, "email_not_from_mailbox"],
+    ["unknown (NULL) source", null, true, NOT_MAILBOX, "email_not_from_mailbox"],
+    ["unauthenticated graph", "graph", false, NOT_AUTHENTICATED, "sender_not_authenticated"],
+    ["graph with NULL SenderAuthenticated", "graph", null, NOT_AUTHENTICATED, "sender_not_authenticated"],
+  ])("422 for an %s email, before any director check", async (_label, source, authenticated, message, code) => {
     routeSql([
       emailWith({ SenderAuthenticated: authenticated, Source: source }),
       quote("awaiting_director"),
@@ -424,7 +436,7 @@ describe("recordEmailQuoteDecision", () => {
     expect((res.jsonBody as { error: string }).error).toBe(message);
     expect(sqlCalls().some((c) => /FROM AppUsers/.test(c.sql))).toBe(false);
     expect(sqlCalls().some((c) => /FROM Quotes/.test(c.sql))).toBe(false);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow(code);
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -453,7 +465,7 @@ describe("recordEmailQuoteDecision", () => {
 
     expect(res.status).toBe(422);
     expect((res.jsonBody as { error: string }).error).toBe("Sender was not a recipient of the director approval email");
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("sender_not_recipient");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -464,7 +476,7 @@ describe("recordEmailQuoteDecision", () => {
 
     expect(res.status).toBe(422);
     expect((res.jsonBody as { error: string }).error).toBe("Sender is not an active director");
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("sender_not_director");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -602,7 +614,7 @@ describe("recordEmailQuoteDecision", () => {
     const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
 
     expect(res.status).toBe(422);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("email_not_matched");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -612,7 +624,7 @@ describe("recordEmailQuoteDecision", () => {
     const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
 
     expect(res.status).toBe(422);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("email_not_matched");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -627,7 +639,7 @@ describe("recordEmailQuoteDecision", () => {
     const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
 
     expect(res.status).toBe(422);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("reply_predates_request");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 
@@ -637,7 +649,7 @@ describe("recordEmailQuoteDecision", () => {
     const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
 
     expect(res.status).toBe(422);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("no_director_request");
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
   });
 

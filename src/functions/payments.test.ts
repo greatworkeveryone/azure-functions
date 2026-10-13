@@ -73,20 +73,22 @@ const registered = (name: string): Handler => {
 const registeredNames: string[] = app.http.mock.calls.map((c: unknown[]) => c[0] as string);
 const upsertPayment = registered("upsertPayment");
 const markPaymentPaid = registered("markPaymentPaid");
-const { paymentInvoiceError } = require("./payments") as {
-  paymentInvoiceError: (input: {
-    amount: number;
-    invoice: {
-      amount: number | null;
-      directorApprovedAt: Date | null;
-      direction: string;
-      jobId: number;
-      paidSoFar: number;
-      status: string;
-    };
+interface RefusalInput {
+  amount: number;
+  invoice: {
+    amount: number | null;
+    directorApprovedAt: Date | null;
+    direction: string;
     jobId: number;
-    limits: { MaxApprovalAmount: number | null; RoleName: string }[];
-  }) => string | null;
+    paidSoFar: number;
+    status: string;
+  };
+  jobId: number;
+  limits: { MaxApprovalAmount: number | null; RoleName: string }[];
+}
+const { paymentInvoiceError, paymentInvoiceRefusal } = require("./payments") as {
+  paymentInvoiceError: (input: RefusalInput) => string | null;
+  paymentInvoiceRefusal: (input: RefusalInput) => { code: string; message: string } | null;
 };
 
 type SqlRoute = [RegExp, Record<string, unknown>[]];
@@ -194,6 +196,25 @@ describe("paymentInvoiceError", () => {
   });
 });
 
+describe("paymentInvoiceRefusal", () => {
+  const refusal = (over: Partial<typeof INVOICE> = {}, amount = 100) =>
+    paymentInvoiceRefusal({ amount, invoice: { ...INVOICE, ...over }, jobId: 9, limits: LIMITS });
+
+  it("gives each refusal a short code, and the same words as paymentInvoiceError", () => {
+    expect(refusal()).toBeNull();
+    expect(refusal({ jobId: 10 })).toMatchObject({ code: "different_job" });
+    expect(refusal({ direction: "outgoing" })).toMatchObject({ code: "not_incoming" });
+    expect(refusal({ status: "pending" })).toMatchObject({ code: "invoice_not_approved" });
+    expect(refusal({ amount: null })).toMatchObject({ code: "no_invoice_amount" });
+    expect(refusal({ amount: 6000 })).toMatchObject({ code: "director_approval_required" });
+    expect(refusal({}, 0)).toMatchObject({ code: "invalid_amount" });
+    expect(refusal({ paidSoFar: 950 }, 100)).toMatchObject({ code: "exceeds_unpaid_balance" });
+    for (const over of [{ jobId: 10 }, { status: "pending" }, { amount: 6000 }, { paidSoFar: 950 }]) {
+      expect(check(over)).toBe(refusal(over)?.message);
+    }
+  });
+});
+
 describe("upsertPayment create", () => {
   const invoiceRoute = (over: Record<string, unknown> = {}): SqlRoute => [
     /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/,
@@ -267,13 +288,15 @@ describe("upsertPayment create", () => {
     expect(callMatching(/INSERT INTO Payments/)).toBeUndefined();
   });
 
+  // The refusals that are controls on paying money are also ledgered as refused
+  // attempts (WP19b), in a transaction of their own; bad input is not.
   it.each([
-    ["belongs to another job", { JobID: 10 }, /different job/],
-    ["is outgoing", { Direction: "outgoing" }, /incoming/],
-    ["is still pending", { Status: "pending" }, /approved before/],
-    ["needs director approval it hasn't got", { Amount: 6000 }, /director approval/],
-    ["has too little left", { PaidSoFar: 950 }, /more than the \$50\.00 still unpaid/],
-  ])("422s, rolls back and writes nothing when the invoice %s", async (_label, over, message) => {
+    ["belongs to another job", { JobID: 10 }, /different job/, null],
+    ["is outgoing", { Direction: "outgoing" }, /incoming/, null],
+    ["is still pending", { Status: "pending" }, /approved before/, "invoice_not_approved"],
+    ["needs director approval it hasn't got", { Amount: 6000 }, /director approval/, "director_approval_required"],
+    ["has too little left", { PaidSoFar: 950 }, /more than the \$50\.00 still unpaid/, "exceeds_unpaid_balance"],
+  ])("422s, rolls back and writes nothing when the invoice %s", async (_label, over, message, recordedAs) => {
     routeSql([invoiceRoute(over)]);
 
     const res = await upsertPayment(makeRequest(valid), ctx);
@@ -281,9 +304,17 @@ describe("upsertPayment create", () => {
     expect(res.status).toBe(422);
     expect((res.jsonBody as { error: string }).error).toMatch(message);
     expect(db.rollbackTransaction).toHaveBeenCalled();
-    expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(callMatching(/INSERT INTO Payments/)).toBeUndefined();
     expect(myob.createMyobBill).not.toHaveBeenCalled();
+    const refused = sqlCalls().filter((c) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql));
+    if (recordedAs === null) {
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(refused).toHaveLength(0);
+    } else {
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+      expect(refused).toHaveLength(1);
+      expect(refused[0].params).toMatchObject({ Action: "denied", RuleApplied: recordedAs });
+    }
   });
 
   it("401s without touching the database when the token has no verified identity", async () => {

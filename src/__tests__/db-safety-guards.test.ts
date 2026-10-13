@@ -56,6 +56,8 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   "src/functions/quotes.ts": { deleteFrom: 1 },
   "src/functions/tenancy.ts": { deleteFrom: 4 },
   "src/functions/tenants.ts": { deleteFrom: 1 },
+  // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
+  "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
   "src/functions/vacancies.ts": { deleteFrom: 1 },
   "src/functions/workRequests.ts": { deleteFrom: 1 },
 };
