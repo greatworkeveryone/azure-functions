@@ -263,7 +263,7 @@ describe("getAsset", () => {
       { match: CHILDREN, rows: [{ ArchivedAt: null, AssetId: 20, AssetTag: null, Category: "HVAC / mechanical", Name: "Pump A", Status: "out_of_service" }] },
       {
         match: JOBS,
-        rows: [{ IsArchived: false, JobID: 7, Kind: "maintenance", LinkedAt: at("2026-10-10"), LinkedBy: "Connor", Status: "Work", Title: "Annual service" }],
+        rows: [{ IsArchived: false, JobCode: "WR-1042", JobID: 7, Kind: "maintenance", LinkedAt: at("2026-10-10"), LinkedBy: "Connor", Status: "Work", Title: "Annual service" }],
       },
       {
         match: FILES,
@@ -280,7 +280,7 @@ describe("getAsset", () => {
     expect(detail).toMatchObject({
       assetId: 12,
       children: [{ assetId: 20, isArchived: false, name: "Pump A", status: "out_of_service" }],
-      linkedJobs: [{ isArchived: false, jobId: 7, kind: "maintenance", status: "Work", title: "Annual service" }],
+      linkedJobs: [{ isArchived: false, jobCode: "WR-1042", jobId: 7, kind: "maintenance", linkedBy: "Connor", status: "Work", title: "Annual service" }],
       parent: { assetId: 3, assetTag: "AHU-1", name: "AHU 1" },
       specs: { kw: 410 },
       verifiedBy: "Sam",

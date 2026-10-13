@@ -13,6 +13,7 @@ import {
   locationChainToApi,
   locationRowToApi,
   normaliseAssetCategory,
+  parseArchiveInput,
   parseAssetIdInput,
   parseAssetInput,
   parseAssetTypeInput,
@@ -253,6 +254,17 @@ describe("id bodies", () => {
     expect(errorOf(parseAssetIdInput({ assetId: "5" }))).toContain("assetId must be an integer");
   });
 
+  it("parseArchiveInput archives unless told otherwise, and only a real boolean restores", () => {
+    expect(valueOf(parseArchiveInput({ assetId: 5 }))).toEqual({ archived: true, assetId: 5 });
+    expect(valueOf(parseArchiveInput({ archived: true, assetId: 5 }))).toEqual({ archived: true, assetId: 5 });
+    expect(valueOf(parseArchiveInput({ archived: false, assetId: 5 }))).toEqual({ archived: false, assetId: 5 });
+    expect(errorOf(parseArchiveInput({ archived: false }))).toBe("assetId is required");
+    expect(errorOf(parseArchiveInput({ assetId: "5" }))).toContain("assetId must be an integer");
+    for (const archived of ["false", 0, null, "restore"]) {
+      expect(errorOf(parseArchiveInput({ archived, assetId: 5 }))).toBe("archived must be true or false");
+    }
+  });
+
   it("parseJobAssetInput requires both ids", () => {
     expect(valueOf(parseJobAssetInput({ assetId: 5, jobId: 9 }))).toEqual({ assetId: 5, jobId: 9 });
     expect(errorOf(parseJobAssetInput({ assetId: 5 }))).toBe("jobId is required");
@@ -458,8 +470,11 @@ describe("row -> API transforms", () => {
       sortOrder: 2,
     });
     expect(
-      linkedJobRowToApi({ IsArchived: false, JobID: 7, Kind: "maintenance", LinkedAt: new Date("2026-10-13T00:00:00.000Z"), LinkedBy: "Connor R", Status: "Work", Title: "Annual service" }),
-    ).toEqual({ isArchived: false, jobId: 7, kind: "maintenance", linkedAt: "2026-10-13T00:00:00.000Z", linkedBy: "Connor R", status: "Work", title: "Annual service" });
+      linkedJobRowToApi({ IsArchived: false, JobCode: "WR-1042", JobID: 7, Kind: "maintenance", LinkedAt: new Date("2026-10-13T00:00:00.000Z"), LinkedBy: "Connor R", Status: "Work", Title: "Annual service" }),
+    ).toEqual({ isArchived: false, jobCode: "WR-1042", jobId: 7, kind: "maintenance", linkedAt: "2026-10-13T00:00:00.000Z", linkedBy: "Connor R", status: "Work", title: "Annual service" });
+    // Jobs raised by hand never had a work-request code.
+    expect(linkedJobRowToApi({ IsArchived: true, JobCode: null, JobID: 8, Status: "Done", Title: "Replace filter" }).jobCode).toBeNull();
+    expect(linkedJobRowToApi({ IsArchived: false, JobID: 9, Status: "New", Title: "Inspect" }).jobCode).toBeNull();
   });
 
   it("builds a location path root-first with a label", () => {

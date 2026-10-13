@@ -5,7 +5,7 @@
 //   location     the location and its ancestors (path, pathLabel), or null
 //   parent       the parent asset, or null
 //   children     live (non-archived) component assets
-//   linkedJobs   jobs linked to the asset - jobId, title, status, kind, isArchived
+//   linkedJobs   jobs linked to the asset - jobId, jobCode, title, status, kind, isArchived
 //   attachments  files with a short-lived sasUrl
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
@@ -87,7 +87,7 @@ export async function getAsset(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title, j.Status, j.Kind, j.IsArchived, ja.LinkedAt, ja.LinkedBy
+      `SELECT j.JobID, j.JobCode, j.Title, j.Status, j.Kind, j.IsArchived, ja.LinkedAt, ja.LinkedBy
          FROM dbo.JobAssets ja
          JOIN dbo.Jobs j ON j.JobID = ja.JobId
         WHERE ja.AssetId = @AssetId

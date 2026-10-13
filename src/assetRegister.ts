@@ -12,7 +12,7 @@
 //                              &unclassified&includeArchived&page&pageSize   view
 //   GET  getAsset              ?id                               view
 //   POST upsertAsset           AssetInput                        edit
-//   POST archiveAsset          { assetId }                       archive
+//   POST archiveAsset          { assetId, archived? }            archive (archived: false restores)
 //   POST verifyAsset           { assetId }                       edit
 //   POST linkJobAsset          { jobId, assetId }                edit
 //   POST unlinkJobAsset        { jobId, assetId }                edit
@@ -215,6 +215,8 @@ export interface AssetRefApi {
 
 export interface LinkedJobApi {
   isArchived: boolean;
+  /** Jobs.JobCode (the work-request reference); null for jobs that never had one. */
+  jobCode: string | null;
   jobId: number;
   kind: string | null;
   linkedAt: string | null;
@@ -477,7 +479,7 @@ export function parseAssetInput(body: Body): Parsed<AssetInput> {
   });
 }
 
-/** Body of archiveAsset / verifyAsset: { assetId }. */
+/** Body of verifyAsset: { assetId }. */
 export function parseAssetIdInput(body: Body): Parsed<{ assetId: number }> {
   const parsed = readFields<{ assetId?: number }>(body, {
     assetId: (b) => readId(b, "assetId", false),
@@ -485,6 +487,21 @@ export function parseAssetIdInput(body: Body): Parsed<{ assetId: number }> {
   if (!parsed.ok) return parsed;
   if (parsed.value.assetId === undefined) return fail("assetId is required");
   return ok({ assetId: parsed.value.assetId });
+}
+
+/**
+ * Body of archiveAsset: { assetId, archived? }. `archived` defaults to true;
+ * `archived: false` restores. A non-boolean is rejected rather than read as
+ * "archive", so a malformed restore can never archive.
+ */
+export function parseArchiveInput(body: Body): Parsed<{ archived: boolean; assetId: number }> {
+  const parsed = readFields<{ archived?: boolean; assetId?: number }>(body, {
+    archived: (b) => readBoolean(b, "archived"),
+    assetId: (b) => readId(b, "assetId", false),
+  });
+  if (!parsed.ok) return parsed;
+  if (parsed.value.assetId === undefined) return fail("assetId is required");
+  return ok({ archived: parsed.value.archived ?? true, assetId: parsed.value.assetId });
 }
 
 /** Body of linkJobAsset / unlinkJobAsset: { jobId, assetId }. */
@@ -731,6 +748,7 @@ export function assetRefRowToApi(row: SqlRow): AssetRefApi {
 export function linkedJobRowToApi(row: SqlRow): LinkedJobApi {
   return {
     isArchived: Boolean(row.IsArchived),
+    jobCode: textOrNull(row.JobCode),
     jobId: Number(row.JobID),
     kind: textOrNull(row.Kind),
     linkedAt: toIso(row.LinkedAt),

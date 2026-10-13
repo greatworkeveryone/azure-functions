@@ -125,7 +125,9 @@ const BY_EXTERNAL = /SELECT AssetId FROM dbo\.Assets WITH \(UPDLOCK, ROWLOCK\)\s
 const INSERT = /INSERT INTO dbo\.Assets/;
 const UPDATE = /UPDATE dbo\.Assets SET/;
 const COMPONENTS = /SELECT COUNT\(\*\) AS Total FROM dbo\.Assets WHERE ParentAssetId/;
-const ARCHIVE = /UPDATE dbo\.Assets\s+SET ArchivedAt/;
+const ARCHIVE = /UPDATE dbo\.Assets\s+SET ArchivedAt = SYSUTCDATETIME\(\)/;
+const RESTORE = /UPDATE dbo\.Assets\s+SET ArchivedAt = NULL/;
+const PARENT_STATE = /SELECT Name, ArchivedAt FROM dbo\.Assets WHERE AssetId = @ParentAssetId/;
 const VERIFY = /UPDATE dbo\.Assets\s+SET VerifiedAt/;
 
 const location = (overrides: Row = {}): Row => ({
@@ -667,6 +669,165 @@ describe("archiveAsset", () => {
     expect(response.jsonBody).toMatchObject({ asset: { isArchived: true } });
     expect(queries(ARCHIVE)).toHaveLength(0);
     expect(queries(COMPONENTS)).toHaveLength(0);
+  });
+
+  it("treats archived: true like the default", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: inOrder(asset(), archivedRow) },
+      { match: COMPONENTS, rows: [{ Total: 0 }] },
+    ]);
+    const response = await archiveAsset(post({ archived: true, assetId: 12 }), context);
+    expect(response.status).toBe(200);
+    expect(queries(ARCHIVE)).toHaveLength(1);
+    expect(queries(RESTORE)).toHaveLength(0);
+  });
+
+  it.each([["false"], ["no"], [0], [null]])("rejects archived: %j instead of reading it as archive", async (archived) => {
+    const response = await archiveAsset(post({ archived, assetId: 12 }), context);
+    expect(response.status).toBe(400);
+    expect(errorOf(response)).toContain("archived must be true or false");
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("archiveAsset: restore (archived: false)", () => {
+  const archivedRow = (overrides: Row = {}) =>
+    asset({ ArchivedAt: at("2026-10-13"), ArchivedBy: "Sam", ...overrides });
+  const restored = asset({ UpdatedBy: "Connor" });
+  const restore = (assetId = 12) => archiveAsset(post({ archived: false, assetId }), context);
+
+  it("404s for an unknown asset", async () => {
+    const response = await restore(99);
+    expect(response.status).toBe(404);
+    expect(queries(RESTORE)).toHaveLength(0);
+  });
+
+  it("clears the archive stamp, records who restored it, and returns the live asset", async () => {
+    route([{ match: ASSET_BY_ID, rows: inOrder(archivedRow(), restored) }]);
+    const response = await restore();
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({
+      asset: { archivedAt: null, archivedBy: null, assetId: 12, isArchived: false, updatedBy: "Connor" },
+    });
+    const [update] = queries(RESTORE);
+    expect(update[1]).toContain("ArchivedAt = NULL, ArchivedBy = NULL");
+    expect(update[1]).toContain("UpdatedBy = @Caller");
+    expect(paramsOf(update)).toEqual({ AssetId: 12, Caller: "Connor" });
+    expect(queries(ARCHIVE)).toHaveLength(0);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the trail of who archived it, since the row no longer says", async () => {
+    const log = jest.spyOn(context, "log").mockImplementation(() => undefined);
+    route([{ match: ASSET_BY_ID, rows: inOrder(archivedRow(), restored) }]);
+    await restore();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("restored by Connor"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("by Sam"));
+    log.mockRestore();
+  });
+
+  it("is idempotent for an asset that is already live", async () => {
+    route([{ match: ASSET_BY_ID, rows: [asset()] }]);
+    const response = await restore();
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({ asset: { isArchived: false } });
+    expect(queries(RESTORE)).toHaveLength(0);
+    expect(queries(PARENT_STATE)).toHaveLength(0);
+    expect(queries(TAG_CLASH)).toHaveLength(0);
+  });
+
+  it("restores a component whose parent is live", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: inOrder(archivedRow({ ParentAssetId: 3 }), restored) },
+      { match: PARENT_STATE, rows: [{ ArchivedAt: null, Name: "AHU 1" }] },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(200);
+    expect(queries(RESTORE)).toHaveLength(1);
+    expect(paramsOf(queries(PARENT_STATE)[0])).toEqual({ ParentAssetId: 3 });
+  });
+
+  it("refuses while the parent is still archived, so no live component sits under an archived parent", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: [archivedRow({ ParentAssetId: 3 })] },
+      { match: PARENT_STATE, rows: [{ ArchivedAt: at("2026-10-01"), Name: "AHU 1" }] },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(409);
+    expect(errorOf(response)).toContain('parent "AHU 1" is archived');
+    expect(queries(RESTORE)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("restores into a location that is still active", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: inOrder(archivedRow(), restored) },
+      { match: LOCATION, rows: [location()] },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(200);
+    expect(paramsOf(queries(LOCATION)[0])).toEqual({ LocationId: 9 });
+    expect(queries(RESTORE)).toHaveLength(1);
+  });
+
+  it("refuses while its location has been deactivated, rather than putting a live asset in a retired place", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: [archivedRow()] },
+      { match: LOCATION, rows: [location({ Active: false })] },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(409);
+    expect(errorOf(response)).toContain('location "Plant room" is inactive');
+    expect(queries(RESTORE)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses when another live asset has taken the tag, naming the holder", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: [archivedRow()] },
+      { match: TAG_CLASH, rows: [{ AssetId: 14, Name: "Chiller 2" }] },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(409);
+    expect(errorOf(response)).toContain('Asset tag "CH-01" is now used by "Chiller 2" (asset 14)');
+    expect(paramsOf(queries(TAG_CLASH)[0])).toEqual({ AssetId: 12, AssetTag: "CH-01", BuildingId: 1 });
+    expect(queries(RESTORE)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks nothing it has no reason to when the asset has no tag, parent or location", async () => {
+    const bare = { AssetTag: null, LocationId: null, LocationName: null };
+    route([{ match: ASSET_BY_ID, rows: inOrder(archivedRow(bare), asset(bare)) }]);
+    const response = await restore();
+    expect(response.status).toBe(200);
+    expect(queries(TAG_CLASH)).toHaveLength(0);
+    expect(queries(PARENT_STATE)).toHaveLength(0);
+    expect(queries(LOCATION)).toHaveLength(0);
+    expect(queries(RESTORE)).toHaveLength(1);
+  });
+
+  it("still answers 409 when the tag index catches a race the pre-check missed", async () => {
+    route([
+      { match: ASSET_BY_ID, rows: [archivedRow()] },
+      {
+        match: RESTORE,
+        throws: Object.assign(new Error("Cannot insert duplicate key row in object 'dbo.Assets' with unique index 'UX_Assets_Building_Tag'."), { number: 2601 }),
+      },
+    ]);
+    const response = await restore();
+    expect(response.status).toBe(409);
+    expect(errorOf(response)).toContain("asset tag");
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.closeConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an unexpected failure as a 500 after rolling back", async () => {
+    route([{ match: ASSET_BY_ID, rows: [archivedRow()] }, { match: RESTORE, throws: new Error("deadlock victim") }]);
+    const response = await restore();
+    expect(response.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 });
 
