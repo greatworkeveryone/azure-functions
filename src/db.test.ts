@@ -3,9 +3,12 @@ import {
   clearServiceTokenCache,
   createRequestConnection,
   createServiceConnection,
+  DEFAULT_DECIMAL_OPTIONS,
+  paramOptions,
   requestConnectionToken,
   requestTokenSource,
 } from "./db";
+import { TYPES } from "tedious";
 
 // Mocked so createRequestConnection/createServiceConnection can run through
 // their real connect flow without touching a real socket.
@@ -123,5 +126,24 @@ describe("createRequestConnection", () => {
     expect(requestConnA).not.toBe(singleton);
     expect(requestConnB).not.toBe(singleton);
     expect(requestConnA).not.toBe(requestConnB);
+  });
+});
+
+describe("paramOptions", () => {
+  it("gives a Decimal without a scale 4 dp so cents survive", () => {
+    expect(paramOptions({ name: "Amount", type: TYPES.Decimal, value: 1234.56 })).toEqual(DEFAULT_DECIMAL_OPTIONS);
+  });
+
+  it("keeps a caller's explicit scale", () => {
+    const options = { precision: 20, scale: 10 };
+    expect(paramOptions({ name: "Rent", type: TYPES.Decimal, value: 1, options })).toBe(options);
+  });
+
+  it("fills the scale when only a precision was given", () => {
+    expect(paramOptions({ name: "X", type: TYPES.Numeric, value: 1, options: { precision: 12 } })).toEqual({ precision: 12, scale: 4 });
+  });
+
+  it("leaves other types alone", () => {
+    expect(paramOptions({ name: "Name", type: TYPES.NVarChar, value: "a" })).toBeUndefined();
   });
 });

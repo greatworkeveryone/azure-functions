@@ -1,4 +1,4 @@
-import { Connection, Request } from "tedious";
+import { Connection, Request, TYPES } from "tedious";
 
 export interface SqlRow {
   [key: string]: any;
@@ -12,6 +12,19 @@ export interface SqlParam {
    *  DECIMAL columns. Without this, tedious defaults Decimal to scale 0
    *  and silently truncates fractional values. */
   options?: { precision?: number; scale?: number; length?: number };
+}
+
+// tedious sends a Decimal with scale 0 unless told otherwise, which rounded
+// every quote, invoice, PO and payment amount to whole dollars. Callers that
+// need a specific precision (tenancy's 10-dp rates) still pass their own;
+// everything else gets 4 dp, and the column's own scale decides the rest.
+// 19,4 keeps value * 10^4 inside Number.MAX_SAFE_INTEGER up to ~$900bn.
+export const DEFAULT_DECIMAL_OPTIONS = { precision: 19, scale: 4 } as const;
+
+export function paramOptions(param: SqlParam): SqlParam["options"] {
+  const isDecimal = param.type === TYPES.Decimal || param.type === TYPES.Numeric;
+  if (!isDecimal || param.options?.scale != null) return param.options;
+  return { ...DEFAULT_DECIMAL_OPTIONS, ...param.options };
 }
 
 /**
@@ -308,7 +321,7 @@ export function executeQuery(
 
     if (params) {
       for (const param of params) {
-        request.addParameter(param.name, param.type, param.value, param.options);
+        request.addParameter(param.name, param.type, param.value, paramOptions(param));
       }
     }
 
