@@ -1,6 +1,6 @@
 // Emails — intake + promote actions for the Incoming page. Rows arrive from
 // the email-sync queue (processEmailSync → upsertGraphEmails) or ingestEmail;
-// `jobIdFromText` sets MatchedJobID deterministically. Promote endpoints turn
+// `matchJobId` sets MatchedJobID deterministically. Promote endpoints turn
 // an email into a Job, Quote, Invoice, job-timeline update
 // (promoteEmailToJobUpdate) or a recorded director decision
 // (recordEmailQuoteDecision), then flip it to 'promoted'.
@@ -19,7 +19,7 @@ import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauth
 import { generateReadSasUrl } from "../blob-storage";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
-import { jobIdFromText } from "../email/job-ref";
+import { matchJobId } from "../email/job-match";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
@@ -272,7 +272,8 @@ export async function ingestEmail(
 
     // Deterministic job match — shared with the Graph sync and the parse
     // worker (src/email/job-ref.ts) so MatchedJobID means the same everywhere.
-    const matchedJobId = jobIdFromText(
+    const matchedJobId = await matchJobId(
+      connection,
       typeof Subject === "string" ? Subject : null,
       typeof Body === "string" ? Body : null,
     );
@@ -1164,7 +1165,7 @@ export async function upsertGraphEmails(
   emails: GraphEmail[],
 ): Promise<void> {
   for (const email of emails) {
-    const matchedJobId = jobIdFromText(email.subject, email.bodyContent);
+    const matchedJobId = await matchJobId(connection, email.subject, email.bodyContent);
     const attachmentBlobsJson =
       email.attachmentBlobNames.length > 0
         ? JSON.stringify(email.attachmentBlobNames)

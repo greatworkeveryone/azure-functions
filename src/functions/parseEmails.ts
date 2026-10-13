@@ -36,6 +36,7 @@ import {
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { syncMailbox } from "../email/mail-sync";
+import { findPoNumber } from "../email/po-ref";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
@@ -79,8 +80,6 @@ let budgetWarned = false;
 // even when the LLM misses it. Keep patterns conservative to avoid false
 // positives; the model is the fallback when the regex comes up empty.
 
-const PO_PATTERN =
-  /\b(?:P\.?O\.?|Purchase\s*Order)[\s:#-]*([A-Z0-9][A-Z0-9-]{1,20})\b/i;
 const QUOTE_PATTERN =
   /\b(?:Quote|Q)[\s:#-]+([A-Z0-9][A-Z0-9-]{1,20})\b/i;
 
@@ -94,10 +93,10 @@ export function extractHints(
   body: string | null | undefined,
 ): ExtractedHints {
   const haystack = `${subject ?? ""}\n${body ?? ""}`;
-  const po = haystack.match(PO_PATTERN);
   const quote = haystack.match(QUOTE_PATTERN);
   return {
-    poNumber: po?.[1] ?? null,
+    // Current (66Sm261013) and legacy (260419-PO-42-ACM-7) numbers; src/email/po-ref.ts.
+    poNumber: findPoNumber(haystack),
     quoteNumber: quote?.[1] ?? null,
   };
 }
