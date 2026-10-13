@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ASSET_BLOB_PREFIX,
@@ -11,6 +11,7 @@ import {
   SPACE_TYPES,
   UNIQUE_INDEXES,
 } from "../assetRegister";
+import { CLEANUP_SELECT } from "../attachmentCleanup";
 import { ASSET_DETAIL_COLUMNS, ASSET_TYPE_COLUMNS, LOCATION_COLUMNS } from "../assetRegisterSupport";
 
 // Migration 113 is applied by the startup runner, which refuses to boot the app
@@ -54,6 +55,16 @@ function aliasedColumns(fragment: string, alias: string): string[] {
 
 function sourceOf(relativePath: string): string {
   return readFileSync(join(ROOT, relativePath), "utf8");
+}
+
+/** Every non-test source file under src/, as [relative path, text]. */
+function productionSources(dir = join(ROOT, "src")): Array<[string, string]> {
+  return readdirSync(dir).flatMap((name): Array<[string, string]> => {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) return name === "__tests__" ? [] : productionSources(full);
+    if (!name.endsWith(".ts") || name.endsWith(".test.ts")) return [];
+    return [[full.slice(ROOT.length + 1), readFileSync(full, "utf8")]];
+  });
 }
 
 describe("migration 113: shape of the file", () => {
@@ -188,6 +199,32 @@ describe("migration 113: schema stays in step with the handlers", () => {
     for (const name of Object.values(UNIQUE_INDEXES)) expect(code).toContain(`CREATE UNIQUE INDEX ${name}`);
   });
 
+  it("keeps unlinked job-asset rows: soft-delete columns, a surrogate key, uniqueness among live links only", () => {
+    const columns = columnsOf("JobAssets");
+    for (const column of ["LinkId", "JobId", "AssetId", "LinkedAt", "LinkedBy", "UnlinkedAt", "UnlinkedBy"]) {
+      expect(columns).toContain(column);
+    }
+    const table = tableBlock("JobAssets");
+    expect(table).toMatch(/UnlinkedAt\s+DATETIME2\s+NULL/);
+    expect(table).toMatch(/UnlinkedBy\s+NVARCHAR\(200\)\s+NULL/);
+    // A (JobId, AssetId) primary key would forbid linking a pair a second time.
+    expect(table).toMatch(/CONSTRAINT PK_JobAssets PRIMARY KEY \(LinkId\)/);
+    expect(code).toMatch(/CREATE UNIQUE INDEX UX_JobAssets_Live\s+ON dbo\.JobAssets \(JobId, AssetId\)\s+WHERE UnlinkedAt IS NULL;/);
+  });
+
+  it("filters every statement on dbo.JobAssets to live links, and names only columns that exist", () => {
+    const known = columnsOf("JobAssets");
+    const statements = productionSources().flatMap(([file, text]) =>
+      [...text.matchAll(/`([^`]*dbo\.JobAssets[^`]*)`/g)].map((match): [string, string] => [file, match[1]]),
+    );
+    // getAsset's read, linkJobAsset's insert and existing-link read, unlinkJobAsset's update.
+    expect(statements.length).toBeGreaterThanOrEqual(4);
+    for (const [file, statement] of statements) {
+      expect([file, statement]).toEqual([file, expect.stringContaining("UnlinkedAt IS NULL")]);
+      for (const token of statement.match(/\b(?:Un)?[Ll]inked\w*/g) ?? []) expect(known).toContain(token);
+    }
+  });
+
   it("frees an archived asset's tag but keeps archived imports findable", () => {
     expect(code).toMatch(/UX_Assets_Building_Tag\s+ON dbo\.Assets \(BuildingId, AssetTag\)\s+WHERE AssetTag IS NOT NULL AND ArchivedAt IS NULL;/);
     expect(code).toMatch(/UX_Assets_Source_External\s+ON dbo\.Assets \(Source, ExternalId\)\s+WHERE ExternalId IS NOT NULL;/);
@@ -202,13 +239,16 @@ describe("migration 113: schema stays in step with the handlers", () => {
   });
 });
 
-describe("cleanupAttachments leaves asset files alone", () => {
-  const cleanup = sourceOf("src/functions/cleanupAttachments.ts");
-
-  it("excludes the asset blob prefix (and the other locally-held prefixes) from reaping", () => {
+describe("the attachment cleanup leaves asset files alone", () => {
+  it("reaps work-request rows only, and an asset upload is never one", () => {
     expect(ASSET_BLOB_PREFIX).toBe("asset-");
-    expect(cleanup).toContain(`BlobName NOT LIKE '${ASSET_BLOB_PREFIX}%'`);
-    expect(cleanup).toContain("BlobName NOT LIKE 'tenancy-%'");
-    expect(cleanup).toContain("BlobName NOT LIKE 'inspections/%'");
+    expect(CLEANUP_SELECT).toContain("WorkRequestID IS NOT NULL");
+    const columns = sourceOf("src/functions/uploadAssetAttachment.ts").match(/INSERT INTO dbo\.Attachments\s*\(([^)]*)\)/)?.[1] ?? "";
+    expect(columns).toContain("BlobName");
+    expect(columns).not.toMatch(/WorkRequestID|JobID/);
+  });
+
+  it("is what the timer selects with, rather than a query of its own", () => {
+    expect(sourceOf("src/functions/cleanupAttachments.ts")).toContain("CLEANUP_SELECT");
   });
 });

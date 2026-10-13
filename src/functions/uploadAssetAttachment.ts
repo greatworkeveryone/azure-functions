@@ -4,7 +4,8 @@
 // row - except that both rows are written in one transaction and the blob is
 // removed again if either fails. The asset must exist and be live (checked
 // BEFORE the upload so a rejected request never leaves a blob behind).
-// Blobs are keyed asset-<id>/..., a prefix cleanupAttachments never reaps.
+// Blobs are keyed asset-<id>/...; cleanupAttachments only reaps work-request
+// rows, and these never carry a work request.
 // Response: { attachment } (AssetAttachmentApi, with sasUrl).
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";

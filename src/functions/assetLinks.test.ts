@@ -47,6 +47,8 @@ const db = require("../db") as {
   rollbackTransaction: jest.Mock;
 };
 
+const auth = require("../auth") as { verifiedIdentityFromRequest: jest.Mock };
+
 const context = new InvocationContext();
 
 function route(routes: Route[]): void {
@@ -68,7 +70,7 @@ const JOB = /SELECT JobID, BuildingID FROM dbo\.Jobs WHERE JobID = @JobId/;
 const ASSET = /SELECT AssetId, BuildingId, ArchivedAt FROM dbo\.Assets WHERE AssetId = @AssetId/;
 const LINK = /INSERT INTO dbo\.JobAssets/;
 const EXISTING = /SELECT LinkedAt, LinkedBy FROM dbo\.JobAssets/;
-const UNLINK = /DELETE FROM dbo\.JobAssets/;
+const UNLINK = /UPDATE dbo\.JobAssets/;
 
 const BODY = { assetId: 12, jobId: 7 };
 const linkedAt = new Date("2026-10-13T01:00:00.000Z");
@@ -155,10 +157,11 @@ describe("linkJobAsset", () => {
     const [insert] = queries(LINK);
     expect(paramsOf(insert)).toEqual({ AssetId: 12, Caller: "Connor", JobId: 7 });
     expect(insert[1]).toContain("WHERE NOT EXISTS");
+    expect(insert[1]).toMatch(/NOT EXISTS \([^)]*UnlinkedAt IS NULL\)/);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it("is idempotent: an existing link comes back with created: false", async () => {
+  it("is idempotent: an existing live link comes back with created: false", async () => {
     route([...sameBuilding, { match: LINK, rows: [] }, { match: EXISTING, rows: [{ LinkedAt: linkedAt, LinkedBy: "Sam" }] }]);
     const response = await linkJobAsset(post(BODY), context);
 
@@ -167,17 +170,36 @@ describe("linkJobAsset", () => {
       created: false,
       link: { assetId: 12, jobId: 7, linkedAt: "2026-10-13T01:00:00.000Z", linkedBy: "Sam" },
     });
+    expect(queries(EXISTING)[0][1]).toContain("UnlinkedAt IS NULL");
   });
 
   it("treats losing a create race as 'already linked'", async () => {
     route([
       ...sameBuilding,
-      { match: LINK, throws: Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_JobAssets'. Cannot insert duplicate key in object 'dbo.JobAssets'."), { number: 2627 }) },
+      {
+        match: LINK,
+        throws: Object.assign(
+          new Error("Cannot insert duplicate key row in object 'dbo.JobAssets' with unique index 'UX_JobAssets_Live'. The duplicate key value is (7, 12)."),
+          { number: 2601 },
+        ),
+      },
     ]);
     const response = await linkJobAsset(post(BODY), context);
     expect(response.status).toBe(200);
     expect(response.jsonBody).toMatchObject({ created: false, link: { assetId: 12, jobId: 7 } });
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mistake some other duplicate-key error for 'already linked'", async () => {
+    route([
+      ...sameBuilding,
+      {
+        match: LINK,
+        throws: Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_JobAssets'. Cannot insert duplicate key in object 'dbo.JobAssets'."), { number: 2627 }),
+      },
+    ]);
+    const response = await linkJobAsset(post(BODY), context);
+    expect(response.status).toBe(500);
   });
 
   it("reports an unexpected failure as a 500", async () => {
@@ -196,12 +218,17 @@ describe("unlinkJobAsset", () => {
     expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
-  it("removes the link", async () => {
+  it("ends the link rather than deleting it, stamping who from the token and when", async () => {
     route([{ match: UNLINK, rows: [{ JobId: 7 }] }]);
-    const response = await unlinkJobAsset(post(BODY), context);
+    const response = await unlinkJobAsset(post({ ...BODY, unlinkedBy: "Mallory" }), context);
     expect(response.status).toBe(200);
     expect(response.jsonBody).toEqual({ assetId: 12, jobId: 7, unlinked: true });
-    expect(paramsOf(queries(UNLINK)[0])).toEqual({ AssetId: 12, JobId: 7 });
+
+    const [update] = queries(UNLINK);
+    expect(paramsOf(update)).toEqual({ AssetId: 12, Caller: "Connor", JobId: 7 });
+    expect(update[1]).toContain("SET UnlinkedAt = SYSUTCDATETIME(), UnlinkedBy = @Caller");
+    expect(update[1]).toContain("UnlinkedAt IS NULL");
+    expect((db.executeQuery.mock.calls as SqlCall[]).some(([, sql]) => /\bDELETE\b/i.test(sql))).toBe(false);
   });
 
   it("answers 200 / unlinked: false when there was no link", async () => {
@@ -215,5 +242,114 @@ describe("unlinkJobAsset", () => {
     const response = await unlinkJobAsset(post(BODY), context);
     expect(response.status).toBe(500);
     expect(db.closeConnection).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A small model of dbo.JobAssets behind executeQuery. It applies "UnlinkedAt IS NULL"
+// only to statements that say so, so a filter that goes missing from the SQL shows
+// up here as wrong behaviour, not just as a changed string.
+interface LinkRow {
+  AssetId: number;
+  JobId: number;
+  LinkedAt: Date;
+  LinkedBy: string;
+  UnlinkedAt: Date | null;
+  UnlinkedBy: string | null;
+}
+
+function modelJobAssets(): LinkRow[] {
+  const table: LinkRow[] = [];
+  let clock = Date.UTC(2026, 9, 13, 1, 0, 0);
+  const tick = () => new Date((clock += 60_000));
+  db.executeQuery.mockImplementation(async (_connection: unknown, sql: string, params: Array<{ name: string; value: unknown }> = []) => {
+    const arg = Object.fromEntries(params.map((p) => [p.name, p.value]));
+    const liveOnly = /UnlinkedAt IS NULL/.test(sql);
+    const samePair = (row: LinkRow) =>
+      row.JobId === arg.JobId && row.AssetId === arg.AssetId && (!liveOnly || row.UnlinkedAt === null);
+
+    if (JOB.test(sql)) return [{ BuildingID: 1, JobID: 7 }];
+    if (ASSET.test(sql)) return [{ ArchivedAt: null, AssetId: 12, BuildingId: 1 }];
+    if (LINK.test(sql)) {
+      if (table.some(samePair)) return [];
+      const row: LinkRow = {
+        AssetId: arg.AssetId as number,
+        JobId: arg.JobId as number,
+        LinkedAt: tick(),
+        LinkedBy: arg.Caller as string,
+        UnlinkedAt: null,
+        UnlinkedBy: null,
+      };
+      table.push(row);
+      return [{ LinkedAt: row.LinkedAt, LinkedBy: row.LinkedBy }];
+    }
+    if (EXISTING.test(sql)) return table.filter(samePair).slice(0, 1).map(({ LinkedAt, LinkedBy }) => ({ LinkedAt, LinkedBy }));
+    if (UNLINK.test(sql)) {
+      const hits = table.filter(samePair);
+      for (const row of hits) {
+        row.UnlinkedAt = tick();
+        row.UnlinkedBy = arg.Caller as string;
+      }
+      return hits.map((row) => ({ JobId: row.JobId }));
+    }
+    return [];
+  });
+  return table;
+}
+
+describe("job-asset links over time", () => {
+  const asSam = () => auth.verifiedIdentityFromRequest.mockResolvedValueOnce({ email: "s@rp.com", name: "Sam", oid: "oid-2" });
+
+  it("keeps the row on unlink, says who ended it, and leaves it alone if unlinked again", async () => {
+    const table = modelJobAssets();
+    expect((await linkJobAsset(post(BODY), context)).jsonBody).toMatchObject({ created: true });
+
+    asSam();
+    expect((await unlinkJobAsset(post(BODY), context)).jsonBody).toEqual({ assetId: 12, jobId: 7, unlinked: true });
+    expect(table).toHaveLength(1);
+    expect(table[0]).toMatchObject({ LinkedBy: "Connor", UnlinkedBy: "Sam" });
+    const endedAt = table[0].UnlinkedAt;
+    expect(endedAt).toBeInstanceOf(Date);
+
+    asSam();
+    expect((await unlinkJobAsset(post(BODY), context)).jsonBody).toEqual({ assetId: 12, jobId: 7, unlinked: false });
+    expect(table).toHaveLength(1);
+    expect(table[0].UnlinkedAt).toBe(endedAt);
+    expect(table[0].UnlinkedBy).toBe("Sam");
+  });
+
+  it("lets a pair be linked again after an unlink, as a fresh row beside the old one", async () => {
+    const table = modelJobAssets();
+    await linkJobAsset(post(BODY), context);
+    await unlinkJobAsset(post(BODY), context);
+
+    const relinked = await linkJobAsset(post(BODY), context);
+    expect(relinked.status).toBe(200);
+    expect(relinked.jsonBody).toMatchObject({ created: true, link: { assetId: 12, jobId: 7 } });
+    expect(table.map((row) => row.UnlinkedAt !== null)).toEqual([true, false]);
+
+    // Linking while a live link exists is still a no-op ...
+    expect((await linkJobAsset(post(BODY), context)).jsonBody).toMatchObject({ created: false });
+    expect(table).toHaveLength(2);
+
+    // ... and the second life can be ended and restarted the same way, nothing ever removed.
+    await unlinkJobAsset(post(BODY), context);
+    await linkJobAsset(post(BODY), context);
+    expect(table).toHaveLength(3);
+    expect(table.map((row) => row.UnlinkedAt !== null)).toEqual([true, true, false]);
+  });
+
+  it("unlinks only the live row of a pair, never the history", async () => {
+    const table = modelJobAssets();
+    await linkJobAsset(post(BODY), context);
+    asSam();
+    await unlinkJobAsset(post(BODY), context);
+    const firstEnded = table[0].UnlinkedAt;
+    await linkJobAsset(post(BODY), context);
+
+    await unlinkJobAsset(post(BODY), context);
+
+    expect(table).toHaveLength(2);
+    expect(table[0]).toMatchObject({ UnlinkedAt: firstEnded, UnlinkedBy: "Sam" });
+    expect(table[1]).toMatchObject({ UnlinkedBy: "Connor" });
   });
 });

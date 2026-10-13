@@ -1,7 +1,10 @@
 // POST /api/unlinkJobAsset   Body: { jobId, assetId }
 //
-// Removes a job <-> asset link. Idempotent: unlinking something that is not
-// linked answers 200 with unlinked: false. Allowed on archived assets (clean-up).
+// Ends a job <-> asset link. The row is kept: UnlinkedAt / UnlinkedBy are stamped
+// (the caller comes from the token, never the body) and every read ignores it;
+// linking the same pair again later inserts a fresh row. Idempotent: unlinking
+// something that is not linked answers 200 with unlinked: false and changes
+// nothing. Allowed on archived assets (clean-up).
 // Response: { jobId, assetId, unlinked }.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
@@ -27,17 +30,19 @@ export async function unlinkJobAsset(
   let connection;
   try {
     connection = await createRequestConnection(auth.token);
-    const removed = await executeQuery(
+    const ended = await executeQuery(
       connection,
-      `DELETE FROM dbo.JobAssets
-       OUTPUT DELETED.JobId
-       WHERE JobId = @JobId AND AssetId = @AssetId`,
+      `UPDATE dbo.JobAssets
+          SET UnlinkedAt = SYSUTCDATETIME(), UnlinkedBy = @Caller
+       OUTPUT INSERTED.JobId
+        WHERE JobId = @JobId AND AssetId = @AssetId AND UnlinkedAt IS NULL`,
       [
         { name: "JobId", type: TYPES.Int, value: jobId },
         { name: "AssetId", type: TYPES.Int, value: assetId },
+        { name: "Caller", type: TYPES.NVarChar, value: auth.caller.name },
       ],
     );
-    return { jsonBody: { assetId, jobId, unlinked: removed.length > 0 }, status: 200 };
+    return { jsonBody: { assetId, jobId, unlinked: ended.length > 0 }, status: 200 };
   } catch (error) {
     context.error("unlinkJobAsset failed:", errorMessage(error));
     return errorResponse("Failed to unlink job and asset", error);

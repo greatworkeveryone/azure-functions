@@ -294,6 +294,28 @@ describe("getAsset", () => {
     expect(db.closeConnection).toHaveBeenCalledTimes(1);
   });
 
+  it("lists only live links: an unlinked row stays in the table but out of the drawer", async () => {
+    const link = (overrides: Row) => ({
+      IsArchived: false, JobCode: null, Kind: "maintenance", LinkedBy: "Connor", Status: "Work", UnlinkedAt: null, ...overrides,
+    });
+    const table = [
+      link({ JobCode: "WR-1", JobID: 7, LinkedAt: at("2026-10-01"), Status: "Done", Title: "First visit", UnlinkedAt: at("2026-10-05") }),
+      link({ JobCode: "WR-2", JobID: 8, LinkedAt: at("2026-10-10"), Title: "Annual service" }),
+    ];
+    // Applies the unlinked filter only if the statement asks for it.
+    db.executeQuery.mockImplementation(async (_connection: unknown, sql: string) => {
+      if (ASSET_BY_ID.test(sql)) return [asset()];
+      if (JOBS.test(sql)) return table.filter((row) => !/ja\.UnlinkedAt IS NULL/.test(sql) || row.UnlinkedAt === null);
+      return [];
+    });
+
+    const response = await getAsset(get("id=12"), context);
+
+    const detail = (response.jsonBody as { asset: { linkedJobs: Array<{ jobId: number }> } }).asset;
+    expect(detail.linkedJobs.map((job) => job.jobId)).toEqual([8]);
+    expect(queries(JOBS)[0][1]).toContain("ja.UnlinkedAt IS NULL");
+  });
+
   it("skips the location and parent lookups for a free-standing asset", async () => {
     route([{ match: ASSET_BY_ID, rows: [asset({ LocationId: null, LocationName: null, ParentAssetId: null })] }]);
     const response = await getAsset(get("id=12"), context);

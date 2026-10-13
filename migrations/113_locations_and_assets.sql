@@ -9,7 +9,8 @@
 --   Assets           the register itself. Floorplan owns identity; Source +
 --                    ExternalId record provenance so a myBuildings import
 --                    (WP49c) can upsert idempotently.
---   JobAssets        job <-> asset links (many to many).
+--   JobAssets        job <-> asset links (many to many). Unlinking is soft
+--                    (UnlinkedAt/UnlinkedBy); a relink inserts a new row.
 --   AssetAttachments junction over dbo.Attachments (the TenancyAttachments
 --                    pattern, migration 056).
 --
@@ -206,21 +207,34 @@ GO
 
 -- ── JobAssets ───────────────────────────────────────────────────────────────
 -- Same-building linking is enforced by linkJobAsset (a CHECK cannot span tables).
+-- Unlinking is a soft delete: unlinkJobAsset stamps UnlinkedAt/UnlinkedBy and the
+-- row stays as history. Linking the same pair again inserts a fresh row, so a pair
+-- can appear several times over the years but at most once live (UX_JobAssets_Live).
+-- Every read of this table filters UnlinkedAt IS NULL.
 
 IF OBJECT_ID('dbo.JobAssets', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.JobAssets (
-        JobId     INT            NOT NULL,
-        AssetId   INT            NOT NULL,
-        LinkedAt  DATETIME2      NOT NULL CONSTRAINT DF_JobAssets_LinkedAt DEFAULT SYSUTCDATETIME(),
-        LinkedBy  NVARCHAR(200)  NULL,
-        CONSTRAINT PK_JobAssets PRIMARY KEY (JobId, AssetId),
+        LinkId      INT            IDENTITY(1,1) NOT NULL,
+        JobId       INT            NOT NULL,
+        AssetId     INT            NOT NULL,
+        LinkedAt    DATETIME2      NOT NULL CONSTRAINT DF_JobAssets_LinkedAt DEFAULT SYSUTCDATETIME(),
+        LinkedBy    NVARCHAR(200)  NULL,
+        UnlinkedAt  DATETIME2      NULL,
+        UnlinkedBy  NVARCHAR(200)  NULL,
+        CONSTRAINT PK_JobAssets PRIMARY KEY (LinkId),
         CONSTRAINT FK_JobAssets_Jobs FOREIGN KEY (JobId)
             REFERENCES dbo.Jobs(JobID) ON DELETE CASCADE,
         CONSTRAINT FK_JobAssets_Assets FOREIGN KEY (AssetId)
             REFERENCES dbo.Assets(AssetId) ON DELETE CASCADE
     );
 END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_JobAssets_Live' AND object_id = OBJECT_ID('dbo.JobAssets'))
+    CREATE UNIQUE INDEX UX_JobAssets_Live
+        ON dbo.JobAssets (JobId, AssetId)
+        WHERE UnlinkedAt IS NULL;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_JobAssets_AssetId' AND object_id = OBJECT_ID('dbo.JobAssets'))

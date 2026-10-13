@@ -3,6 +3,7 @@ import {
   ASSET_CATEGORIES,
   AssetIdentity,
   Parsed,
+  UNIQUE_INDEXES,
   assetIdentityFromRow,
   assetRowToApi,
   assetTypeRowToApi,
@@ -368,8 +369,16 @@ describe("uniqueViolationName", () => {
   });
 
   it("extracts the constraint from a unique-constraint error", () => {
-    const error = Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_JobAssets'. Cannot insert duplicate key in object 'dbo.JobAssets'."), { number: 2627 });
-    expect(uniqueViolationName(error)).toBe("PK_JobAssets");
+    const error = Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_AssetAttachments'. Cannot insert duplicate key in object 'dbo.AssetAttachments'."), { number: 2627 });
+    expect(uniqueViolationName(error)).toBe("PK_AssetAttachments");
+  });
+
+  it("names the live-link index when a second live link for a pair is attempted", () => {
+    const error = Object.assign(
+      new Error("Cannot insert duplicate key row in object 'dbo.JobAssets' with unique index 'UX_JobAssets_Live'. The duplicate key value is (7, 12)."),
+      { number: 2601 },
+    );
+    expect(uniqueViolationName(error)).toBe(UNIQUE_INDEXES.jobAssetLive);
   });
 
   it("recognises a duplicate by message alone, and returns '' when the name is missing", () => {

@@ -15,7 +15,7 @@
 //   POST archiveAsset          { assetId, archived? }            archive (archived: false restores)
 //   POST verifyAsset           { assetId }                       edit
 //   POST linkJobAsset          { jobId, assetId }                edit
-//   POST unlinkJobAsset        { jobId, assetId }                edit
+//   POST unlinkJobAsset        { jobId, assetId }                edit (soft: the row is kept)
 //   GET  getAssetAttachments   ?assetId                          view
 //   POST uploadAssetAttachment multipart: file, assetId          edit
 //   GET  getAssetTypes         ?category&includeInactive         view
@@ -115,7 +115,7 @@ export type AssetStatus = (typeof ASSET_STATUSES)[number];
 export type AssetCriticality = (typeof ASSET_CRITICALITIES)[number];
 export type AssetSource = (typeof ASSET_SOURCES)[number];
 
-/** Blob key prefix for asset files. cleanupAttachments must never reap it. */
+/** Blob key prefix for asset files. cleanupAttachments only reaps work-request rows, which asset files never are. */
 export const ASSET_BLOB_PREFIX = "asset-";
 
 /** Unique index names the handlers translate into 409s. Must match migration 113. */
@@ -123,6 +123,7 @@ export const UNIQUE_INDEXES = {
   assetExternal: "UX_Assets_Source_External",
   assetTag: "UX_Assets_Building_Tag",
   assetTypeName: "UX_AssetTypes_Category_Name",
+  jobAssetLive: "UX_JobAssets_Live",
   locationChild: "UX_Locations_Child_Name",
   locationRoot: "UX_Locations_Root_Name",
 } as const;

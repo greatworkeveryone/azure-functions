@@ -1,7 +1,9 @@
 // POST /api/linkJobAsset   Body: { jobId, assetId }
 //
 // Links a job to an asset (many to many). The asset must be live and in the
-// job's building. Idempotent: an existing link is returned with created: false.
+// job's building. Idempotent: an existing live link is returned with created:
+// false. A pair that was unlinked earlier gets a fresh row (the old one stays as
+// history), so only links with UnlinkedAt IS NULL count as existing.
 // Response: { link: { jobId, assetId, linkedAt, linkedBy }, created }.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
@@ -9,7 +11,7 @@ import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { errorResponse } from "../auth";
-import { EDIT_ASSETS_ROLES, parseJobAssetInput, uniqueViolationName } from "../assetRegister";
+import { EDIT_ASSETS_ROLES, UNIQUE_INDEXES, parseJobAssetInput, uniqueViolationName } from "../assetRegister";
 import {
   authorizeWrite,
   badRequest,
@@ -67,7 +69,9 @@ export async function linkJobAsset(
         `INSERT INTO dbo.JobAssets (JobId, AssetId, LinkedBy)
          OUTPUT INSERTED.LinkedAt, INSERTED.LinkedBy
          SELECT @JobId, @AssetId, @Caller
-          WHERE NOT EXISTS (SELECT 1 FROM dbo.JobAssets WHERE JobId = @JobId AND AssetId = @AssetId)`,
+          WHERE NOT EXISTS (
+                SELECT 1 FROM dbo.JobAssets
+                 WHERE JobId = @JobId AND AssetId = @AssetId AND UnlinkedAt IS NULL)`,
         [...ids, { name: "Caller", type: TYPES.NVarChar, value: auth.caller.name }],
       );
       const link =
@@ -75,7 +79,8 @@ export async function linkJobAsset(
         (
           await executeQuery(
             conn,
-            `SELECT LinkedAt, LinkedBy FROM dbo.JobAssets WHERE JobId = @JobId AND AssetId = @AssetId`,
+            `SELECT LinkedAt, LinkedBy FROM dbo.JobAssets
+              WHERE JobId = @JobId AND AssetId = @AssetId AND UnlinkedAt IS NULL`,
             ids,
           )
         )[0];
@@ -92,9 +97,9 @@ export async function linkJobAsset(
     if (!outcome.ok) return outcome.response;
     return { jsonBody: outcome.value, status: 200 };
   } catch (error) {
-    // Two requests racing to create the same link: the loser's PK violation is
-    // still "linked".
-    if (uniqueViolationName(error) !== null) {
+    // Two requests racing to create the same link: the loser's violation of the
+    // live-link index is still "linked".
+    if (uniqueViolationName(error) === UNIQUE_INDEXES.jobAssetLive) {
       return { jsonBody: { created: false, link: { assetId, jobId, linkedAt: null, linkedBy: null } }, status: 200 };
     }
     context.error("linkJobAsset failed:", errorMessage(error));
