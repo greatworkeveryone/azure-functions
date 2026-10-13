@@ -591,6 +591,153 @@ describe("upsertRegisterTenant — write integrity", () => {
   });
 });
 
+// ── upsertRegisterTenant: review terms and next review (PLAN WP23b) ─────────
+
+describe("upsertRegisterTenant — review terms and next review", () => {
+  const STEP = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const schedule = JSON.stringify([
+    { baseRentPerAnnum: 100000, effectiveFrom: "2024-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },
+    { effectiveFrom: "2027-07-01", id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "cpi", ratePercent: 0 },
+  ]);
+  const storedRow = (over: Record<string, unknown> = {}) => [
+    { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
+  ];
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+  const param = (name: string) => updateCall()?.[2].find((entry) => entry.name === name)?.value;
+  const actions = () => ledger.record.mock.calls.map(([, entry]) => entry.action);
+
+  it("ledgers the ratchet as a schedule term and bumps ScheduleVersion", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ ReviewRatchet: false })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ ReviewRatchet: true }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ ReviewRatchet: true, TenantId: 7 }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/ReviewRatchet = @ReviewRatchet/);
+    expect(updateCall()?.[1]).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.terms_edit",
+      after: { reviewRatchet: true },
+      before: { reviewRatchet: false },
+    });
+    expect((res.jsonBody as { tenant: { reviewRatchet: boolean } }).tenant.reviewRatchet).toBe(true);
+  });
+
+  it("refuses a ratchet that isn't a boolean, before touching the database", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ ReviewRatchet: "yes", TenantId: 7 }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("refuses a CPI floor above the cap (checked against the stored cap) and writes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedRow({ CpiCapPercent: 4, CpiFloorPercent: 1 })]);
+    const res = await handlers.upsertRegisterTenant(makeRequest({ CpiFloorPercent: 5, TenantId: 7 }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toMatch(/floor \(5%\) can't be above the CPI cap \(4%\)/);
+    expect(updateCall()).toBeUndefined();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("refuses a CPI cap outside 0–100", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ CpiCapPercent: -1, TenantId: 7 }), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("re-derives NextReviewDate when a review date field changes, ledgered with the write", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        lockedRow({ NextReviewDate: new Date("2025-07-01T00:00:00Z"), ScheduledRateSteps: schedule }),
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ Commencement: "2024-07-01", TenantId: 7 }), ctx);
+    expect(param("NextReviewDate")).toBe("2027-07-01");
+    expect(actions()).toEqual(["schedule.recompute_next_review"]);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      after: { nextReviewDate: "2027-07-01" },
+      before: { nextReviewDate: "2025-07-01" },
+      ruleApplied: "derived_on_write",
+      subject: { id: 7, type: "tenancy" },
+    });
+  });
+
+  it("ignores a typed NextReviewDate on a tenancy with a schedule — the schedule decides", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        lockedRow({ NextReviewDate: new Date("2027-07-01T00:00:00Z"), ScheduledRateSteps: schedule }),
+      ])
+      .mockResolvedValueOnce(storedRow());
+    const res = await handlers.upsertRegisterTenant(makeRequest({ NextReviewDate: "2030-01-01", TenantId: 7 }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()).toBeUndefined();
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("stores a typed NextReviewDate on a tenancy without a schedule, unledgered", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        lockedRow({ Commencement: new Date("2018-03-01T00:00:00Z"), NextReviewDate: new Date("2026-03-01T00:00:00Z") }),
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ NextReviewDate: "2027-03-01", TenantId: 7 }), ctx);
+    expect(param("NextReviewDate")).toBe("2027-03-01");
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("shares one correlation between a terms edit and the review date it moves", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        lockedRow({ NextReviewDate: new Date("2025-07-01T00:00:00Z"), ReviewIntervalMonths: 12, ScheduledRateSteps: schedule }),
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    const ledgerModule = require("../ledger") as { newCorrelationId: jest.Mock };
+    ledgerModule.newCorrelationId.mockReturnValueOnce("corr-1");
+    await handlers.upsertRegisterTenant(makeRequest({ ReviewIntervalMonths: 24, TenantId: 7 }), ctx);
+    expect(actions()).toEqual(["schedule.terms_edit", "schedule.recompute_next_review"]);
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.correlationId)).toEqual(["corr-1", "corr-1"]);
+  });
+
+  it("derives a new tenancy's first review from its commencement when none is sent", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ TenantId: 42 }]).mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(
+      makeRequest({ BuildingId: 3, Commencement: "2026-12-01", LegalName: "New Co", ReviewRatchet: true }),
+      ctx,
+    );
+    const [, sql, params] = db.executeQuery.mock.calls[0] as [unknown, string, Array<{ name: string; value: unknown }>];
+    expect(sql).toMatch(/INSERT INTO dbo\.Tenants/);
+    expect(params.find((entry) => entry.name === "NextReviewDate")?.value).toBe("2027-12-01");
+    expect(params.find((entry) => entry.name === "ReviewRatchet")?.value).toBe(true);
+  });
+
+  it("keeps a new tenancy's sent review date", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ TenantId: 42 }]).mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(
+      makeRequest({ BuildingId: 3, Commencement: "2018-03-01", LegalName: "Old Co", NextReviewDate: "2027-03-01" }),
+      ctx,
+    );
+    const params = db.executeQuery.mock.calls[0][2] as Array<{ name: string; value: unknown }>;
+    expect(params.find((entry) => entry.name === "NextReviewDate")?.value).toBe("2027-03-01");
+  });
+
+  it("applies the CPI cap to the headline rent", async () => {
+    const steps = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2024-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },
+      { cpiValue: 105, cpiValuePrev: 100, effectiveFrom: "2025-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "cpi", ratePercent: 5 },
+    ]);
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ CpiCapPercent: 3, ReviewRatchet: false, ScheduledRateSteps: steps }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+    expect((res.jsonBody as { tenant: { effectiveRentPerAnnum: number } }).tenant.effectiveRentPerAnnum).toBe(103000);
+  });
+});
+
 // ── deleteRegisterTenant ────────────────────────────────────────────────────
 
 describe("deleteRegisterTenant", () => {

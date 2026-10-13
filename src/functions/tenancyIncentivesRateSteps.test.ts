@@ -539,7 +539,7 @@ describe("schedule writes — versioned, transactional, ledgered", () => {
       .mockResolvedValueOnce([]);
     const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ ScheduleVersion: 3 })), ctx);
     expect(res.status).toBe(200);
-    expect(sqlCalls()[0]).toMatch(/FROM dbo\.Tenants WITH \(UPDLOCK, ROWLOCK\)/);
+    expect(sqlCalls()[0]).toMatch(/FROM dbo\.Tenants t WITH \(UPDLOCK, ROWLOCK\)/);
     expect(sqlCalls()[1]).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
     expect(res.jsonBody).toMatchObject({ rowVersion: "00000000000000aa", scheduleVersion: 4 });
     expect(db.beginTransaction).toHaveBeenCalledTimes(1);
@@ -567,7 +567,8 @@ describe("schedule writes — versioned, transactional, ledgered", () => {
   it("ledgers the step as schedule.manual_edit with before and after, inside the transaction", async () => {
     const existing = [{ effectiveFrom: "2026-01-01", effectiveTo: "2026-07-01", id: STEP_ID, ratePercent: 2 }];
     db.executeQuery
-      .mockResolvedValueOnce([locked({ ScheduledRateSteps: JSON.stringify(existing) })])
+      // NextReviewDate already where the edit leaves it, so only the step is ledgered.
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2027-07-01T00:00:00Z"), ScheduledRateSteps: JSON.stringify(existing) })])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
     await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
@@ -589,7 +590,7 @@ describe("schedule writes — versioned, transactional, ledgered", () => {
   it("adding a row closes the open-ended row before it, and ledgers that too", async () => {
     const existing = [{ effectiveFrom: "2025-07-01", id: PREV_ID, methodKind: "commencement", ratePercent: 0, baseRentPerAnnum: 100000 }];
     db.executeQuery
-      .mockResolvedValueOnce([locked({ ScheduledRateSteps: JSON.stringify(existing) })])
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2027-07-01T00:00:00Z"), ScheduledRateSteps: JSON.stringify(existing) })])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
@@ -662,5 +663,122 @@ describe("schedule writes — versioned, transactional, ledgered", () => {
       ctx,
     );
     expect(res.status).toBe(409);
+  });
+});
+
+// ── NextReviewDate follows every schedule write (PLAN WP23b, D1) ────────────
+
+describe("schedule writes — next review date", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const COMMENCEMENT_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const commencementRow = {
+    baseRentPerAnnum: 100000,
+    effectiveFrom: "2024-07-01",
+    id: COMMENCEMENT_ID,
+    methodKind: "commencement",
+    ratePercent: 0,
+  };
+  const locked = (over: Record<string, unknown> = {}) => ({
+    BuildingId: 5,
+    Commencement: new Date("2024-07-01T00:00:00Z"),
+    NextReviewDate: new Date("2025-07-01T00:00:00Z"),
+    ReviewIntervalMonths: 12,
+    ScheduleVersion: 3,
+    ScheduledRateSteps: JSON.stringify([commencementRow]),
+    TenantId: 1,
+    ...over,
+  });
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+
+  it("derives NextReviewDate from the schedule in the same UPDATE and ledgers the move under the write's correlation", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.upsertScheduledRateStep(
+      makeRequest({
+        BuildingId: 5,
+        step: { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 },
+        TenantId: 1,
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const [, sql, params] = updateCall()!;
+    expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
+    // The earliest review row nothing has settled is next: the CPI row waiting on its index.
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2027-07-01");
+    const recompute = ledger.record.mock.calls.find(([, entry]) => entry.action === "schedule.recompute_next_review");
+    expect(recompute?.[1]).toMatchObject({
+      after: { nextReviewDate: "2027-07-01" },
+      before: { nextReviewDate: "2025-07-01" },
+      subject: { id: 1, type: "tenancy" },
+      tenantId: 1,
+    });
+    const correlations = new Set(ledger.record.mock.calls.map(([, entry]) => entry.correlationId));
+    expect(correlations.size).toBe(1);
+  });
+
+  it("re-derives on a car park, misc fee or incentive write too", async () => {
+    db.executeQuery
+      // A hand-kept date the schedule doesn't support: only a commencement row,
+      // so the first anniversary is the next review.
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2031-01-01T00:00:00Z") })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ TenantId: 1, BuildingId: 5, LegalName: "Acme", Status: "current" }])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertTenantIncentive(makeRequest(validIncentiveEnvelope()), ctx);
+    const [, sql, params] = updateCall()!;
+    expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2025-07-01");
+  });
+
+  it("leaves NextReviewDate alone, and ledgers nothing about it, when it doesn't move", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([locked()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertScheduledRateStep(
+      makeRequest({ BuildingId: 5, step: { ...commencementRow, note: "checked" }, TenantId: 1 }),
+      ctx,
+    );
+    expect(updateCall()![1]).not.toMatch(/NextReviewDate/);
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual(["schedule.manual_edit"]);
+  });
+
+  it("a waived review settles its row; the next review is the following anniversary", async () => {
+    const review = { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 };
+    db.executeQuery
+      .mockResolvedValueOnce([
+        locked({
+          LastReviewDate: new Date("2027-07-01T00:00:00Z"),
+          NextReviewDate: new Date("2027-07-01T00:00:00Z"),
+          ScheduledRateSteps: JSON.stringify([commencementRow, review]),
+        }),
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertScheduledRateStep(
+      makeRequest({ BuildingId: 5, step: { ...review, resolution: "waived" }, TenantId: 1 }),
+      ctx,
+    );
+    const params = updateCall()![2];
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2028-07-01");
+  });
+
+  it("rolls back the derived date with the write when the ledger fails", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    ledger.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.upsertScheduledRateStep(
+      makeRequest({
+        BuildingId: 5,
+        step: { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 },
+        TenantId: 1,
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,10 @@ export type RentScheduleMethodKind =
   | "market"
   | "other";
 
+/** How a rent review settled a step: "applied" = its values stand (a market
+ *  review agreed at 0% included); "waived" = no change to the rent. */
+export type StepResolution = "applied" | "waived";
+
 export interface ScheduledRateStep {
   id: string;
   /** Starting AHAC ph annual amount, set on commencement rows. Reviews at the same rate as rent. */
@@ -27,6 +31,10 @@ export interface ScheduledRateStep {
   ratePercent: number;
   note?: string;
   flagComment?: string;
+  /** The RentReviews row that settled this step (RentReviews.ReviewId). */
+  reviewId?: string;
+  /** Set when a review settled the step; review rows only. */
+  resolution?: StepResolution;
 }
 
 export interface StepValidationOk {
@@ -47,6 +55,9 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NOTE_MAX_LEN = 300;
 const RATE_MIN = -100;
 const RATE_MAX = 100;
+/** RentReviews.ReviewId is NVARCHAR(40). */
+const REVIEW_ID_MAX_LEN = 40;
+const RESOLUTIONS: ReadonlySet<string> = new Set(["applied", "waived"]);
 
 const METHOD_KINDS: ReadonlySet<string> = new Set([
   "cpi",
@@ -69,6 +80,8 @@ const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   "ratePercent",
   "note",
   "flagComment",
+  "reviewId",
+  "resolution",
 ]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -90,7 +103,7 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
-  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, cpiValuePrev, ratePercent, note, flagComment } = raw;
+  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, cpiValuePrev, ratePercent, note, flagComment, reviewId, resolution } = raw;
 
   if (id !== undefined && id !== "") {
     if (!isUuidShaped(id)) {
@@ -174,6 +187,21 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
+  if (reviewId !== undefined) {
+    if (typeof reviewId !== "string" || reviewId.trim() === "" || reviewId.length > REVIEW_ID_MAX_LEN) {
+      return { ok: false, error: `reviewId must be a non-empty string of at most ${REVIEW_ID_MAX_LEN} chars` };
+    }
+  }
+
+  if (resolution !== undefined) {
+    if (typeof resolution !== "string" || !RESOLUTIONS.has(resolution)) {
+      return { ok: false, error: "resolution must be one of: applied, waived" };
+    }
+    if (methodKind === "commencement") {
+      return { ok: false, error: "resolution applies to review rows, not commencement rows" };
+    }
+  }
+
   const normalised: ScheduledRateStep = {
     effectiveFrom,
     id: typeof id === "string" && id !== "" ? id : randomUUID(),
@@ -188,6 +216,8 @@ export function validateStep(raw: unknown): StepValidationResult {
   if (cpiValuePrev !== undefined) normalised.cpiValuePrev = cpiValuePrev as number;
   if (note !== undefined) normalised.note = note as string;
   if (flagComment !== undefined) normalised.flagComment = flagComment as string;
+  if (reviewId !== undefined) normalised.reviewId = reviewId as string;
+  if (resolution !== undefined) normalised.resolution = resolution as StepResolution;
   return { ok: true, step: normalised };
 }
 
@@ -227,38 +257,71 @@ export function validateDeleteStepEnvelope(body: unknown):
 // ── Schedule engine — mirror of FE src/helpers/rentScheduleCore.ts ───────────
 //
 // Every rule change lands in both repos; the parity fixtures
-// (src/__tests__/fixtures/rent-schedule-parity.fixtures.json) are identical on
-// both sides and asserted by Jest on both.
+// (src/__tests__/rent-schedule-parity.fixtures.json here,
+// src/__tests__/helpers/rent-schedule-parity.fixtures.json in command-centre)
+// are identical and asserted by Jest on both sides.
 //
 //  • Rent and AHAC compound on the annual amount. An explicit area on a row
 //    rescales from that row on at the prevailing $/m²; a row without one
 //    carries the last explicit area. The tenancy's current area never enters
 //    the rent — it is only the display fallback for $/m².
+//  • A review's factor (PLAN §3.2): the CPI index ratio (or 1 + rate %),
+//    clamped to the lease's CPI floor and cap on CPI rows, then held at ≥ 1 on
+//    any review row when the lease has the ratchet ("no rent decreases on
+//    review"). A waived review has factor 1. Car parks and misc fees that follow
+//    the rent take the same factor.
+//  • A review row whose own value is unknown (CPI index missing, market/other
+//    rate not set) is pending, and so is every row after it until the next
+//    commencement row. A row a review settled (resolution) is never pending on
+//    its own account.
 //  • effectiveTo is the exclusive end of a row (the first day it no longer
 //    applies).
 //  • The current row is the latest non-pending row with effectiveFrom ≤ today
 //    (the Darwin date).
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
+const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
 export type SchedulePendingReason =
   | "cpi_index_missing"
   | "earlier_review_pending"
   | "rate_not_set";
 
+/** The lease terms the schedule computes with (Tenants columns). */
+export interface ScheduleTerms {
+  /** CPI reviews increase by at most this %. */
+  cpiCapPercent?: number | null;
+  /** CPI reviews increase by at least this %. */
+  cpiFloorPercent?: number | null;
+  /** No rent decreases on review: every review's factor is at least 1. */
+  reviewRatchet?: boolean | null;
+}
+
 export interface ScheduleRow {
   ahacAnnual: number | null;
   annual: number;
+  /** Increase % the row applies, after cap, floor and ratchet (4 dp); 0 on a
+   *  waived row; null on commencement and pending rows. */
+  appliedPercent: number | null;
   /** No area to derive $/m² from — rent is still shown, never $0. */
   areaMissing: boolean;
+  /** The lease's CPI cap lowered this row's increase. */
+  capApplied: boolean;
   /** CPI baseline this row ratios against (explicit cpiValuePrev, else the last recorded index). */
   cpiBaseline: number | null;
   /** Multiplier applied to running amounts; null on commencement and pending rows. */
   factor: number | null;
+  /** The lease's CPI floor raised this row's increase. */
+  floorApplied: boolean;
   monthly: number;
   /** Amounts unknown until the review (or an earlier one) is settled. */
   pending: boolean;
   pendingReason: SchedulePendingReason | null;
+  /** The ratchet stopped this review lowering the rent. */
+  ratchetApplied: boolean;
+  /** Increase % before cap, floor and ratchet (4 dp); null on commencement and
+   *  pending rows, and on a waived row whose index or rate was never set. */
+  rawPercent: number | null;
   sqm: number;
   sqmRate: number;
   step: ScheduledRateStep;
@@ -276,13 +339,20 @@ export function sortSteps(steps: ScheduledRateStep[]): ScheduledRateStep[] {
   return [...steps].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
 }
 
-/** Why a review row can't be computed on its own, or null when it can. */
-export function stepPendingReason(step: ScheduledRateStep): SchedulePendingReason | null {
+/** The step's own value is unknown: a CPI row without its index, or a market
+ *  or other row without its rate. */
+function ownValueMissing(step: ScheduledRateStep): SchedulePendingReason | null {
   if (step.methodKind === "cpi" && step.cpiValue == null) return "cpi_index_missing";
   if ((step.methodKind === "market" || step.methodKind === "other") && step.ratePercent === 0) {
     return "rate_not_set";
   }
   return null;
+}
+
+/** Why a review row can't be computed on its own, or null when it can. A row
+ *  a review settled (applied or waived) never waits. */
+export function stepPendingReason(step: ScheduledRateStep): SchedulePendingReason | null {
+  return step.resolution ? null : ownValueMissing(step);
 }
 
 /** CPI uses the exact index ratio when both values are known; the stored
@@ -293,10 +363,53 @@ function reviewFactor(step: ScheduledRateStep, cpiBaseline: number | null): numb
     : 1 + step.ratePercent / 100;
 }
 
+interface ReviewOutcome {
+  capApplied: boolean;
+  factor: number;
+  floorApplied: boolean;
+  ratchetApplied: boolean;
+  rawFactor: number | null;
+}
+
+/** Index ratio → clamp(1 + floor, 1 + cap) on CPI rows → ratchet (§3.2). */
+function reviewOutcome(
+  step: ScheduledRateStep,
+  cpiBaseline: number | null,
+  terms: ScheduleTerms,
+): ReviewOutcome {
+  const settled = { capApplied: false, floorApplied: false, ratchetApplied: false };
+  if (step.resolution === "waived") {
+    const rawFactor = ownValueMissing(step) === null ? reviewFactor(step, cpiBaseline) : null;
+    return { ...settled, factor: 1, rawFactor };
+  }
+  const rawFactor = reviewFactor(step, cpiBaseline);
+  let factor = rawFactor;
+  if (step.methodKind === "cpi") {
+    if (terms.cpiFloorPercent != null && factor < 1 + terms.cpiFloorPercent / 100) {
+      factor = 1 + terms.cpiFloorPercent / 100;
+      settled.floorApplied = true;
+    }
+    if (terms.cpiCapPercent != null && factor > 1 + terms.cpiCapPercent / 100) {
+      factor = 1 + terms.cpiCapPercent / 100;
+      settled.capApplied = true;
+    }
+  }
+  if (terms.reviewRatchet && factor < 1) {
+    factor = 1;
+    settled.ratchetApplied = true;
+  }
+  return { ...settled, factor, rawFactor };
+}
+
+/** A factor as an increase % to 4 dp (1.03 → 3); `|| 0` turns -0 into 0. */
+const percentOf = (factor: number | null) =>
+  factor === null ? null : r4((factor - 1) * 100) || 0;
+
 export function computeScheduleRows(
   steps: ScheduledRateStep[],
   fallbackAnnual: number,
   fallbackSqm: number,
+  terms: ScheduleTerms = {},
 ): ScheduleRow[] {
   const fallbackArea = fallbackSqm > 0 ? fallbackSqm : 0;
   let annual = fallbackAnnual;
@@ -312,19 +425,25 @@ export function computeScheduleRows(
     step: ScheduledRateStep,
     pendingReason: SchedulePendingReason | null,
     shownArea: number,
-    factor: number | null,
     cpiBaseline: number | null,
+    outcome: ReviewOutcome | null,
   ) => {
     const pending = pendingReason !== null;
+    const settled = pending ? null : outcome;
     rows.push({
       ahacAnnual: pending || ahac === null ? null : r2(ahac),
       annual: pending ? 0 : r2(annual),
+      appliedPercent: settled ? percentOf(settled.factor) : null,
       areaMissing: shownArea <= 0,
+      capApplied: settled?.capApplied ?? false,
       cpiBaseline,
-      factor: pending ? null : factor,
+      factor: settled ? settled.factor : null,
+      floorApplied: settled?.floorApplied ?? false,
       monthly: pending ? 0 : r2(annual / 12),
       pending,
       pendingReason,
+      ratchetApplied: settled?.ratchetApplied ?? false,
+      rawPercent: settled ? percentOf(settled.rawFactor) : null,
       sqm: shownArea,
       sqmRate: pending || shownArea <= 0 ? 0 : r2(annual / shownArea),
       step,
@@ -343,18 +462,19 @@ export function computeScheduleRows(
       rate = area !== null ? annual / area : null;
       ahacRate = area !== null && ahac !== null ? ahac / area : null;
       if (step.cpiValue != null) prevCpi = step.cpiValue;
-      emit(step, null, area ?? fallbackArea, null, cpiBaseline);
+      emit(step, null, area ?? fallbackArea, cpiBaseline, null);
       continue;
     }
 
     const ownReason = stepPendingReason(step);
     if (ownReason !== null) pendingCascade = true;
     if (pendingCascade) {
-      emit(step, ownReason ?? "earlier_review_pending", explicitArea ?? area ?? fallbackArea, null, cpiBaseline);
+      emit(step, ownReason ?? "earlier_review_pending", explicitArea ?? area ?? fallbackArea, cpiBaseline, null);
       continue;
     }
 
-    const factor = reviewFactor(step, cpiBaseline);
+    const outcome = reviewOutcome(step, cpiBaseline, terms);
+    const { factor } = outcome;
     if (area !== null && rate !== null) {
       rate *= factor;
       if (explicitArea !== null) area = explicitArea;
@@ -373,7 +493,7 @@ export function computeScheduleRows(
       }
     }
     if (step.cpiValue != null) prevCpi = step.cpiValue;
-    emit(step, null, area ?? fallbackArea, factor, cpiBaseline);
+    emit(step, null, area ?? fallbackArea, cpiBaseline, outcome);
   }
 
   return rows;
@@ -419,9 +539,10 @@ export function resolveScheduleAnnual(
   fallbackAnnual: number,
   sqm: number,
   today: string,
+  terms: ScheduleTerms = {},
 ): ResolvedScheduleAnnual {
   if (steps.length === 0) return { annual: fallbackAnnual, startsOn: null };
-  const current = resolveCurrentRent(computeScheduleRows(steps, fallbackAnnual, sqm), fallbackAnnual, today);
+  const current = resolveCurrentRent(computeScheduleRows(steps, fallbackAnnual, sqm, terms), fallbackAnnual, today);
   if (current.kind === "row") return { annual: current.row.annual, startsOn: null };
   if (current.kind === "base") return { annual: r2(fallbackAnnual), startsOn: null };
   return { annual: 0, startsOn: current.kind === "notStarted" ? current.startsOn : null };
@@ -529,6 +650,8 @@ const DIFF_FIELDS: ReadonlyArray<keyof ScheduledRateStep> = [
   "cpiValuePrev",
   "note",
   "flagComment",
+  "reviewId",
+  "resolution",
 ];
 
 export function diffSteps(

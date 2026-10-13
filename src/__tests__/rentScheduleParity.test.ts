@@ -5,6 +5,7 @@ import {
   resolveCurrentRent,
   resolveScheduleAnnual,
   type ScheduledRateStep,
+  type ScheduleTerms,
 } from "../scheduledRateStepLogic";
 import fixtures from "./rent-schedule-parity.fixtures.json";
 
@@ -14,11 +15,16 @@ import fixtures from "./rent-schedule-parity.fixtures.json";
 interface ExpectedRow {
   ahacAnnual: number | null;
   annual: number;
+  appliedPercent: number | null;
   areaMissing: boolean;
+  capApplied: boolean;
   effectiveFrom: string;
+  floorApplied: boolean;
   monthly: number;
   pending: boolean;
   pendingReason: string | null;
+  ratchetApplied: boolean;
+  rawPercent: number | null;
   sqm: number;
   sqmRate: number;
 }
@@ -34,7 +40,7 @@ interface CurrentCheck {
 
 interface ParityCase {
   expected: { current: CurrentCheck[]; rows: ExpectedRow[] };
-  input: { fallbackAnnual: number; fallbackSqm: number; steps: ScheduledRateStep[] };
+  input: { fallbackAnnual: number; fallbackSqm: number; steps: ScheduledRateStep[]; terms?: ScheduleTerms };
   name: string;
 }
 
@@ -46,18 +52,24 @@ describe("rent schedule parity fixtures (backend engine)", () => {
   });
 
   describe.each(cases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
-    const rows = computeScheduleRows(c.input.steps, c.input.fallbackAnnual, c.input.fallbackSqm);
+    const terms = c.input.terms ?? {};
+    const rows = computeScheduleRows(c.input.steps, c.input.fallbackAnnual, c.input.fallbackSqm, terms);
 
     it("yields the expected rows", () => {
       assert.deepStrictEqual(
         rows.map((row) => ({
           ahacAnnual: row.ahacAnnual,
           annual: row.annual,
+          appliedPercent: row.appliedPercent,
           areaMissing: row.areaMissing,
+          capApplied: row.capApplied,
           effectiveFrom: row.step.effectiveFrom,
+          floorApplied: row.floorApplied,
           monthly: row.monthly,
           pending: row.pending,
           pendingReason: row.pendingReason,
+          ratchetApplied: row.ratchetApplied,
+          rawPercent: row.rawPercent,
           sqm: row.sqm,
           sqmRate: row.sqmRate,
         })),
@@ -77,7 +89,7 @@ describe("rent schedule parity fixtures (backend engine)", () => {
           assert.strictEqual(current.row.annual, check.annual);
         }
         if (current.kind === "notStarted") assert.strictEqual(current.startsOn, check.startsOn);
-        const resolved = resolveScheduleAnnual(c.input.steps, c.input.fallbackAnnual, c.input.fallbackSqm, today);
+        const resolved = resolveScheduleAnnual(c.input.steps, c.input.fallbackAnnual, c.input.fallbackSqm, today, terms);
         assert.strictEqual(resolved.annual, check.annual ?? 0);
         assert.strictEqual(resolved.startsOn, check.startsOn ?? null);
       },

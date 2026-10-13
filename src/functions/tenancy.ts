@@ -80,6 +80,13 @@ import { daysBetweenIso, todayInDarwin } from "../darwinDate";
 import * as ledger from "../ledger";
 import { ledgerActorFor } from "../ledgerActor";
 import {
+  deriveNextReviewDate,
+  nextAnniversary,
+  nextReviewInputFromRow,
+  RESOLVED_REVIEW_DATES_SQL,
+  sqlDateToIso,
+} from "../nextReviewDate";
+import {
   conflictResponse,
   isoTimestamp,
   type LedgerDraft,
@@ -278,6 +285,8 @@ interface RegisterTenantApi {
   /** First schedule date when the schedule hasn't started (no current rent). */
   rentStartsOn?: string;
   reviewIntervalMonths?: number;
+  /** "No rent decreases on review" — the schedule holds every review at ≥ 0%. */
+  reviewRatchet: boolean;
   reviewState: "amber" | "green" | "grey" | "red";
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
@@ -395,23 +404,21 @@ function parseDepositSteps(raw: string | null | undefined): SecurityDepositStep[
   }
 }
 
-/** Compute the traffic-light state from a tenant's NextReviewDate.
- *  Overdue reviews collapse into "amber" along with reviews due within 90
- *  days — the property team treats both the same way (chase action), so
- *  splitting "red" off as a separate alert just adds noise. We keep "red"
- *  in the union for future use (e.g. very-overdue) but never return it. */
+const REVIEW_DUE_SOON_DAYS = 90;
+
+/** The traffic light for a tenant's NextReviewDate (PLAN D11): red once the
+ *  review date has passed (Darwin date), amber within 90 days, green after
+ *  that; grey with no date or once vacated. */
 export function computeReviewState(
   nextReviewDate: string | undefined,
   status: string,
+  today: string = todayInDarwin(),
 ): "amber" | "green" | "grey" | "red" {
   if (status === "vacated") return "grey";
-  if (!nextReviewDate) return "grey";
-  const now = Date.now();
-  const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-  const nextMs = new Date(nextReviewDate + "T00:00:00Z").getTime();
-  if (Number.isNaN(nextMs)) return "grey";
-  if (nextMs - now <= ninetyDaysMs) return "amber";
-  return "green";
+  const next = sqlDateToIso(nextReviewDate);
+  if (!next) return "grey";
+  if (next < today) return "red";
+  return daysBetweenIso(today, next) <= REVIEW_DUE_SOON_DAYS ? "amber" : "green";
 }
 
 /** Whole Darwin days until the lease's last day (0 on the day itself). */
@@ -456,7 +463,12 @@ function tenantRowToApi(
   // schedule row says (Darwin date), or the stored value with no schedule.
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
   const today = todayInDarwin();
-  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today);
+  const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
+  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, {
+    cpiCapPercent: asNum(row.CpiCapPercent) ?? null,
+    cpiFloorPercent: asNum(row.CpiFloorPercent) ?? null,
+    reviewRatchet,
+  });
   const effectiveRentPerAnnum = resolved.annual;
   const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
@@ -530,7 +542,8 @@ function tenantRowToApi(
     rentPerAnnum,
     rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
-    reviewState: computeReviewState(toIsoDate(row.NextReviewDate), status),
+    reviewRatchet,
+    reviewState: computeReviewState(toIsoDate(row.NextReviewDate), status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
@@ -629,7 +642,7 @@ const TENANT_COLUMNS = `
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
-  CpiRegion, CpiCapPercent, CpiFloorPercent,
+  CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
   SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld, SecurityDepositSteps,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
@@ -961,6 +974,9 @@ async function upsertRegisterTenant(
       return { status: 400, jsonBody: { error: "LegalName cannot be empty" } };
     }
 
+    const invalidTerm = invalidTermValue(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
+    if (invalidTerm) return invalidTerm;
+
     connection = await createRequestConnection(token);
 
     const params = buildTenantParams(body, caller);
@@ -979,7 +995,7 @@ async function upsertRegisterTenant(
             RentPerAnnum,
             ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
             LastReviewIncreasePercent, FixedReviewPercent,
-            CpiRegion, CpiCapPercent, CpiFloorPercent,
+            CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
@@ -997,7 +1013,7 @@ async function upsertRegisterTenant(
             @RentPerAnnum,
             @ReviewType, @ReviewIntervalMonths, @NextReviewDate, @LastReviewDate,
             @LastReviewIncreasePercent, @FixedReviewPercent,
-            @CpiRegion, @CpiCapPercent, @CpiFloorPercent,
+            @CpiRegion, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
@@ -1107,6 +1123,7 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
   RenewalLetterIssueBy: TYPES.NVarChar,
   RentPerAnnum: TYPES.Decimal,
   ReviewIntervalMonths: TYPES.Int,
+  ReviewRatchet: TYPES.Bit,
   ReviewType: TYPES.NVarChar,
   SecurityDepositHeld: TYPES.Decimal,
   SecurityDepositMethod: TYPES.NVarChar,
@@ -1128,13 +1145,21 @@ const SCHEDULE_TERM_FIELDS: Record<string, string> = {
   FixedReviewPercent: "fixedReviewPercent",
   RentPerAnnum: "rentPerAnnum",
   ReviewIntervalMonths: "reviewIntervalMonths",
+  ReviewRatchet: "reviewRatchet",
   ReviewType: "reviewType",
 };
+
+// Tenant fields the next review date is derived from (WP23b). A write that
+// sends any of them re-derives NextReviewDate; a sent NextReviewDate is only
+// stored for a tenancy without a schedule (deriveNextReviewDate).
+const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", "ReviewIntervalMonths"] as const;
 
 const LOCKED_TENANT_COLUMNS = `
   TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
   CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
-  ReviewIntervalMonths, ReviewType
+  ReviewIntervalMonths, ReviewType, ReviewRatchet,
+  Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
+  ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 function comparableTerm(value: unknown): number | string | null {
@@ -1144,11 +1169,75 @@ function comparableTerm(value: unknown): number | string | null {
   return Number(value);
 }
 
+/** 400 for a malformed schedule-term value; null when the body is fine. */
+function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
+  if (body.ReviewRatchet !== undefined && typeof body.ReviewRatchet !== "boolean") {
+    return { status: 400, jsonBody: { error: "ReviewRatchet must be true or false" } };
+  }
+  for (const col of ["CpiCapPercent", "CpiFloorPercent"]) {
+    const value = body[col];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+      return { status: 400, jsonBody: { error: `${col} must be a percentage from 0 to 100` } };
+    }
+  }
+  return null;
+}
+
+/** 400 when the CPI floor would sit above the cap once this write applies. */
+function floorAboveCap(fields: Record<string, unknown>, current: SqlRow): HttpResponseInit | null {
+  if (fields.CpiCapPercent === undefined && fields.CpiFloorPercent === undefined) return null;
+  const after = (col: string) =>
+    comparableTerm(fields[col] !== undefined ? normaliseValue(col, fields[col]) : current[col]);
+  const cap = after("CpiCapPercent");
+  const floor = after("CpiFloorPercent");
+  if (typeof cap !== "number" || typeof floor !== "number" || floor <= cap) return null;
+  return {
+    status: 400,
+    jsonBody: { error: `The CPI floor (${floor}%) can't be above the CPI cap (${cap}%).` },
+  };
+}
+
+/**
+ * NextReviewDate as this write leaves it (PLAN D1): re-derived when the write
+ * touches a review date field. Sets or drops fields.NextReviewDate and returns
+ * the change to ledger, or null when it doesn't move.
+ */
+function deriveNextReviewOnWrite(
+  fields: Record<string, unknown>,
+  current: SqlRow,
+): { after: string; before: string | null } | null {
+  if (!REVIEW_DATE_FIELDS.some((col) => fields[col] !== undefined)) return null;
+  const pick = (col: string) => (fields[col] !== undefined ? normaliseValue(col, fields[col]) : current[col]);
+  const derived = deriveNextReviewDate(
+    nextReviewInputFromRow(
+      {
+        Commencement: pick("Commencement"),
+        LastReviewDate: pick("LastReviewDate"),
+        NextReviewDate: pick("NextReviewDate"),
+        ResolvedReviewDates: current.ResolvedReviewDates,
+        ReviewIntervalMonths: pick("ReviewIntervalMonths"),
+      },
+      parseSteps(current.ScheduledRateSteps as string | null | undefined),
+    ),
+  );
+  // Not derivable (no schedule, a date already set): a sent date stands.
+  if (derived === null) return null;
+  const before = sqlDateToIso(current.NextReviewDate);
+  if (derived === before) {
+    delete fields.NextReviewDate;
+    return null;
+  }
+  fields.NextReviewDate = derived;
+  return { after: derived, before };
+}
+
 /**
  * The update half of upsertRegisterTenant, in one transaction. Checks the
  * RowVersion the client read (409 naming who changed it), never stores a
- * re-sent derived Status, and ledgers schedule-term changes. Returns a
- * response when the write is refused, null when it committed.
+ * re-sent derived Status, re-derives NextReviewDate, and ledgers
+ * schedule-term and next-review changes. Returns a response when the write is
+ * refused, null when it committed.
  */
 async function updateRegisterTenantRow(
   connection: Connection,
@@ -1161,7 +1250,7 @@ async function updateRegisterTenantRow(
   try {
     const locked = await executeQuery(
       connection,
-      `SELECT ${LOCKED_TENANT_COLUMNS} FROM dbo.Tenants WITH (UPDLOCK, ROWLOCK) WHERE TenantId = @TenantId`,
+      `SELECT ${LOCKED_TENANT_COLUMNS} FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK) WHERE t.TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (locked.length === 0) {
@@ -1179,6 +1268,11 @@ async function updateRegisterTenantRow(
     }
 
     const fields: Record<string, unknown> = { ...body };
+    const refused = floorAboveCap(fields, current);
+    if (refused) {
+      await rollbackQuietly(connection);
+      return refused;
+    }
     if (Array.isArray(fields.SecurityDepositSteps)) {
       fields.SecurityDepositSteps = JSON.stringify(fields.SecurityDepositSteps);
     }
@@ -1192,6 +1286,7 @@ async function updateRegisterTenantRow(
       );
       if (fields.Status === shown) delete fields.Status;
     }
+    const nextReview = deriveNextReviewOnWrite(fields, current);
 
     const setParts: string[] = [];
     const updateParams: SqlParam[] = [];
@@ -1230,15 +1325,23 @@ async function updateRegisterTenantRow(
       `UPDATE dbo.Tenants SET ${setParts.join(", ")} WHERE TenantId = @TenantId`,
       updateParams,
     );
+    const scope = {
+      actor,
+      buildingId: current.BuildingId as number,
+      correlationId: ledger.newCorrelationId(),
+      subject: { id: tenantId, type: "tenancy" as const },
+      tenantId,
+    };
     if (termsChanged) {
+      await ledger.record(connection, { ...scope, action: "schedule.terms_edit", after: termsAfter, before: termsBefore });
+    }
+    if (nextReview) {
       await ledger.record(connection, {
-        action: "schedule.terms_edit",
-        actor,
-        after: termsAfter,
-        before: termsBefore,
-        buildingId: current.BuildingId as number,
-        subject: { id: tenantId, type: "tenancy" },
-        tenantId,
+        ...scope,
+        action: "schedule.recompute_next_review",
+        after: { nextReviewDate: nextReview.after },
+        before: { nextReviewDate: nextReview.before },
+        ruleApplied: "derived_on_write",
       });
     }
     await commitTransaction(connection);
@@ -1339,7 +1442,24 @@ function buildTenantParams(
       type: TYPES.Int,
       value: v("ReviewIntervalMonths"),
     },
-    { name: "NextReviewDate", type: TYPES.Date, value: v("NextReviewDate") },
+    // A new tenancy has no schedule yet: a sent date stands, else the first
+    // anniversary after commencement (deriveNextReviewDate).
+    {
+      name: "NextReviewDate",
+      type: TYPES.Date,
+      value:
+        deriveNextReviewDate(
+          nextReviewInputFromRow(
+            {
+              Commencement: v("Commencement"),
+              LastReviewDate: v("LastReviewDate"),
+              NextReviewDate: v("NextReviewDate"),
+              ReviewIntervalMonths: v("ReviewIntervalMonths"),
+            },
+            [],
+          ),
+        ) ?? v("NextReviewDate"),
+    },
     { name: "LastReviewDate", type: TYPES.Date, value: v("LastReviewDate") },
     {
       name: "LastReviewIncreasePercent",
@@ -1366,6 +1486,7 @@ function buildTenantParams(
       value: v("CpiFloorPercent"),
       options: DECIMAL_OPTS.CpiFloorPercent,
     },
+    { name: "ReviewRatchet", type: TYPES.Bit, value: body.ReviewRatchet === true },
     {
       name: "SecurityDepositRequired",
       type: TYPES.NVarChar,
@@ -1923,8 +2044,10 @@ async function deleteRegisterTenant(
 
 // ── POST /api/applyRentReview ────────────────────────────────────────────────
 // Atomically: completes the RentReviews row, updates Tenants.RentPerAnnum,
-// LastReviewDate, LastReviewIncreasePercent, advances NextReviewDate by
-// ReviewIntervalMonths.
+// LastReviewDate (the review's own date), LastReviewIncreasePercent and
+// NextReviewDate — derived from the schedule and the lease anniversary, so a
+// review processed late doesn't move the next one (WP23b). Legacy: WP25
+// replaces this with the review workflow.
 
 async function applyRentReview(
   request: HttpRequest,
@@ -1961,7 +2084,8 @@ async function applyRentReview(
     connection = await createRequestConnection(token);
     const reviewRows = await executeQuery(
       connection,
-      `SELECT r.ReviewId, r.TenantId, t.RentPerAnnum, t.ReviewIntervalMonths
+      `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, t.RentPerAnnum, t.ReviewIntervalMonths,
+              t.Commencement, t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
        FROM dbo.RentReviews r
        INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
        WHERE r.ReviewId = @Id`,
@@ -1980,11 +2104,19 @@ async function applyRentReview(
           ? Math.round(((NewRentPerAnnum - oldRent) / oldRent) * 10000) / 100
           : 0;
     const intervalMonths = (r.ReviewIntervalMonths as number | null) ?? 12;
-    const today = new Date();
-    const nextReview = new Date(today);
-    nextReview.setMonth(nextReview.getMonth() + intervalMonths);
-    const nextReviewIso = nextReview.toISOString().slice(0, 10);
-    const todayIso = today.toISOString().slice(0, 10);
+    // The review settles its own date; the next one follows the schedule or
+    // the anniversary after it, however late this one is processed.
+    const reviewDate = sqlDateToIso(r.ScheduledFor) ?? todayInDarwin();
+    const steps = parseSteps(r.ScheduledRateSteps as string | null | undefined);
+    const settled = nextReviewInputFromRow({ ...r, LastReviewDate: reviewDate, NextReviewDate: null }, steps);
+    const nextReviewIso =
+      (steps.length > 0
+        ? deriveNextReviewDate({
+            ...settled,
+            resolvedReviewDates: new Set([...settled.resolvedReviewDates, reviewDate]),
+          })
+        : nextAnniversary(settled.commencement ?? reviewDate, intervalMonths > 0 ? intervalMonths : 12, reviewDate)) ??
+      reviewDate;
 
     await beginTransaction(connection);
     try {
@@ -2054,7 +2186,7 @@ async function applyRentReview(
         connection,
         `UPDATE dbo.Tenants SET
            RentPerAnnum = @NewRent,
-           LastReviewDate = @Today,
+           LastReviewDate = @LastReview,
            LastReviewIncreasePercent = @IncreasePercent,
            NextReviewDate = @NextReview,
            UpdatedAt = SYSUTCDATETIME(),
@@ -2069,7 +2201,7 @@ async function applyRentReview(
             value: NewRentPerAnnum,
             options: DECIMAL_OPTS.NewRentPerAnnum,
           },
-          { name: "Today", type: TYPES.Date, value: todayIso },
+          { name: "LastReview", type: TYPES.Date, value: reviewDate },
           {
             name: "IncreasePercent",
             type: TYPES.Decimal,

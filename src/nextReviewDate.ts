@@ -1,0 +1,138 @@
+// NextReviewDate is derived, never hand-maintained (PLAN D1, WP23b). Every
+// schedule write and every review-affecting tenant write re-derives it, and
+// the admin one-off recomputeNextReviewDates brings existing rows into line.
+//
+// The next review is the earliest review row (not commencement) after
+// LastReviewDate that no review has settled; failing that, the next lease
+// anniversary — the lease's latest commencement (a later commencement row is a
+// renewal or reset) + n × ReviewIntervalMonths, month-end clamped and always
+// counted from that commencement, so a review processed late doesn't move the
+// anniversary.
+
+import { addMonthsClamped, isIsoDate } from "./darwinDate";
+import { type ScheduledRateStep, sortSteps, stepPendingReason } from "./scheduledRateStepLogic";
+
+/**
+ * Schedule rows were entered by hand before Floorplan tracked reviews. A row
+ * dated on or before this day whose value is known (not pending) was settled
+ * outside Floorplan; from the next day on, a review is settled only by a
+ * resolution on its row, a completed or waived RentReviews row for its date,
+ * or LastReviewDate.
+ */
+export const LEGACY_REVIEWS_SETTLED_THROUGH = "2026-10-13";
+
+const DEFAULT_INTERVAL_MONTHS = 12;
+/** 200 years of monthly reviews — the loop below can't run away. */
+const MAX_ANNIVERSARIES = 2400;
+
+export interface NextReviewInput {
+  /** Tenants.Commencement (ISO date). */
+  commencement: string | null;
+  /** Tenants.LastReviewDate (ISO date). */
+  lastReviewDate: string | null;
+  /** ScheduledFor of the tenancy's completed or waived RentReviews rows. */
+  resolvedReviewDates: ReadonlySet<string>;
+  /** Tenants.ReviewIntervalMonths; 12 when unset. */
+  reviewIntervalMonths: number | null;
+  steps: ScheduledRateStep[];
+  /** Tenants.NextReviewDate as stored. */
+  storedNextReviewDate: string | null;
+}
+
+function isSettled(step: ScheduledRateStep, input: NextReviewInput): boolean {
+  if (step.resolution) return true;
+  if (input.resolvedReviewDates.has(step.effectiveFrom)) return true;
+  return step.effectiveFrom <= LEGACY_REVIEWS_SETTLED_THROUGH && stepPendingReason(step) === null;
+}
+
+function latest(dates: Iterable<string | null>): string | null {
+  let max: string | null = null;
+  for (const date of dates) if (date !== null && (max === null || date > max)) max = date;
+  return max;
+}
+
+/** The first anniversary of `anchor` (every `intervalMonths`, month-end
+ *  clamped, counted from the anchor) strictly after `after`. */
+export function nextAnniversary(anchor: string, intervalMonths: number, after: string): string | null {
+  for (let n = 1; n <= MAX_ANNIVERSARIES; n++) {
+    const candidate = addMonthsClamped(anchor, n * intervalMonths);
+    if (candidate > after) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The tenancy's next review date, or null when there is nothing to derive it
+ * from — the caller then keeps the stored value. Without a schedule the
+ * stored date is the only record of where the reviews stand, so it is kept;
+ * one is derived only when none is stored (a new tenancy), and then reviews
+ * before the legacy cutover count as done.
+ */
+export function deriveNextReviewDate(input: NextReviewInput): string | null {
+  const steps = sortSteps(input.steps);
+  const reviews = steps.filter((step) => step.methodKind !== "commencement");
+  const last = input.lastReviewDate;
+
+  const open = reviews.find(
+    (step) => (last === null || step.effectiveFrom > last) && !isSettled(step, input),
+  );
+  if (open) return open.effectiveFrom;
+
+  const anchor =
+    steps.filter((step) => step.methodKind === "commencement").at(-1)?.effectiveFrom ??
+    input.commencement ??
+    steps[0]?.effectiveFrom ??
+    null;
+  if (anchor === null) return null;
+  if (steps.length === 0 && input.storedNextReviewDate !== null) return null;
+
+  const interval =
+    input.reviewIntervalMonths !== null && input.reviewIntervalMonths > 0
+      ? input.reviewIntervalMonths
+      : DEFAULT_INTERVAL_MONTHS;
+  const settledDates = reviews.filter((step) => isSettled(step, input)).map((step) => step.effectiveFrom);
+  const legacy = steps.length === 0 && anchor <= LEGACY_REVIEWS_SETTLED_THROUGH ? LEGACY_REVIEWS_SETTLED_THROUGH : null;
+  const after = latest([anchor, last, legacy, ...settledDates, ...input.resolvedReviewDates]) ?? anchor;
+  return nextAnniversary(anchor, interval, after);
+}
+
+/** Parses the comma-separated ScheduledFor dates RESOLVED_REVIEW_DATES_SQL returns. */
+export function parseResolvedReviewDates(raw: unknown): Set<string> {
+  if (typeof raw !== "string" || raw.trim() === "") return new Set();
+  return new Set(raw.split(",").map((date) => date.trim().slice(0, 10)).filter((date) => date.length === 10));
+}
+
+/**
+ * Select-list column for a query over `dbo.Tenants t`: the ScheduledFor dates
+ * of the tenancy's settled reviews, comma-separated (parseResolvedReviewDates).
+ * 'skipped' is the legacy name for a waived review.
+ */
+export const RESOLVED_REVIEW_DATES_SQL = `(
+    SELECT STRING_AGG(CONVERT(CHAR(10), rr.ScheduledFor, 23), ',')
+    FROM dbo.RentReviews rr
+    WHERE rr.TenantId = t.TenantId AND rr.Status IN ('completed', 'skipped', 'waived')
+  ) AS ResolvedReviewDates`;
+
+/** A DATE column (tedious returns a Date at UTC midnight) or an ISO string as
+ *  "YYYY-MM-DD"; null when absent or not a date. */
+export function sqlDateToIso(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  if (typeof value !== "string") return null;
+  const iso = value.slice(0, 10);
+  return isIsoDate(iso) ? iso : null;
+}
+
+/** NextReviewInput from a Tenants row selected with Commencement,
+ *  LastReviewDate, ReviewIntervalMonths, NextReviewDate and
+ *  RESOLVED_REVIEW_DATES_SQL. */
+export function nextReviewInputFromRow(row: Record<string, unknown>, steps: ScheduledRateStep[]): NextReviewInput {
+  const interval = row.ReviewIntervalMonths == null ? Number.NaN : Number(row.ReviewIntervalMonths);
+  return {
+    commencement: sqlDateToIso(row.Commencement),
+    lastReviewDate: sqlDateToIso(row.LastReviewDate),
+    resolvedReviewDates: parseResolvedReviewDates(row.ResolvedReviewDates),
+    reviewIntervalMonths: Number.isFinite(interval) ? interval : null,
+    steps,
+    storedNextReviewDate: sqlDateToIso(row.NextReviewDate),
+  };
+}

@@ -285,3 +285,111 @@ describe("validateStep — dates", () => {
     assert.strictEqual(validateStep({ id: validId, effectiveFrom: "2026-02-30", ratePercent: 3 }).ok, false);
   });
 });
+
+// ── Review settlement and lease terms (PLAN WP23b) ──────────────────────────
+
+describe("validateStep — review settlement", () => {
+  it("accepts reviewId and an applied or waived resolution on a review row", () => {
+    const r = validateStep({
+      effectiveFrom: "2026-07-01",
+      id: validId,
+      methodKind: "cpi",
+      ratePercent: 0,
+      resolution: "waived",
+      reviewId: "rr-2026-07",
+    });
+    assert.strictEqual(r.ok, true);
+    if (!r.ok) throw new Error();
+    assert.strictEqual(r.step.resolution, "waived");
+    assert.strictEqual(r.step.reviewId, "rr-2026-07");
+    assert.strictEqual(validateStep({ effectiveFrom: "2026-07-01", id: validId, ratePercent: 3, resolution: "applied" }).ok, true);
+  });
+
+  it("rejects any other resolution, a resolution on a commencement row, and a bad reviewId", () => {
+    assert.strictEqual(validateStep({ effectiveFrom: "2026-07-01", id: validId, ratePercent: 3, resolution: "done" }).ok, false);
+    const onCommencement = validateStep({
+      effectiveFrom: "2026-07-01",
+      id: validId,
+      methodKind: "commencement",
+      ratePercent: 0,
+      resolution: "applied",
+    });
+    assert.strictEqual(onCommencement.ok, false);
+    assert.strictEqual(validateStep({ effectiveFrom: "2026-07-01", id: validId, ratePercent: 3, reviewId: "" }).ok, false);
+    assert.strictEqual(
+      validateStep({ effectiveFrom: "2026-07-01", id: validId, ratePercent: 3, reviewId: "x".repeat(41) }).ok,
+      false,
+    );
+  });
+});
+
+describe("computeScheduleRows — lease terms (mirrored in FE scheduleReview tests)", () => {
+  const cpiStep = (id: string, from: string, value: number, prev: number): ScheduledRateStep => ({
+    cpiValue: value,
+    cpiValuePrev: prev,
+    effectiveFrom: from,
+    id,
+    methodKind: "cpi",
+    ratePercent: 0,
+  });
+
+  it("applies the floor, then the cap: when they cross, the cap wins", () => {
+    const [, row] = computeScheduleRows(
+      [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 101, 100)],
+      0,
+      100,
+      { cpiCapPercent: 2, cpiFloorPercent: 3 },
+    );
+    assert.deepStrictEqual(
+      { annual: row.annual, applied: row.appliedPercent, cap: row.capApplied, floor: row.floorApplied, raw: row.rawPercent },
+      { annual: 102000, applied: 2, cap: true, floor: true, raw: 1 },
+    );
+  });
+
+  it("an increase inside the band is untouched; a null term is no bound", () => {
+    const [, row] = computeScheduleRows(
+      [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 102.5, 100)],
+      0,
+      100,
+      { cpiCapPercent: null, cpiFloorPercent: 2 },
+    );
+    assert.strictEqual(row.appliedPercent, 2.5);
+    assert.strictEqual(row.capApplied || row.floorApplied || row.ratchetApplied, false);
+  });
+
+  it("the ratchet applies after the floor and cap, on any review row", () => {
+    const rows = computeScheduleRows(
+      [
+        comm("1", "2023-07-01", 100000, 100),
+        cpiStep("2", "2024-07-01", 97, 100),
+        { effectiveFrom: "2025-07-01", id: "3", methodKind: "fixed", ratePercent: -1 },
+      ],
+      0,
+      100,
+      { cpiFloorPercent: -1, reviewRatchet: true },
+    );
+    assert.deepStrictEqual(
+      rows.slice(1).map((row) => [row.rawPercent, row.appliedPercent, row.floorApplied, row.ratchetApplied]),
+      [
+        [-3, 0, true, true],
+        [-1, 0, false, true],
+      ],
+    );
+    assert.strictEqual(rows[2].annual, 100000);
+  });
+
+  it("never reports -0", () => {
+    const [, row] = computeScheduleRows(
+      [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 99.999999, 100)],
+      0,
+      100,
+    );
+    assert.ok(Object.is(row.rawPercent, 0));
+  });
+
+  it("resolveScheduleAnnual passes the terms through", () => {
+    const steps = [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 110, 100)];
+    assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01").annual, 110000);
+    assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01", { cpiCapPercent: 4 }).annual, 104000);
+  });
+});

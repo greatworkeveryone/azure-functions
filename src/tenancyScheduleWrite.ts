@@ -1,8 +1,9 @@
 // One schedule write (rate steps, car park groups, misc fees or incentives) for
 // one tenancy, as one transaction (PLAN WP23a, F15): update-lock the tenant
 // row, check the ScheduleVersion the caller read, apply the change, bump the
-// version, write the change log and ledger rows, commit — or roll it all back.
-// "No ledger row, no decision": a failed ledger write undoes the edit.
+// version, re-derive NextReviewDate (WP23b), write the change log and ledger
+// rows, commit — or roll it all back. "No ledger row, no decision": a failed
+// ledger write undoes the edit.
 
 import { HttpResponseInit } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
@@ -15,6 +16,8 @@ import {
 } from "./db";
 import * as ledger from "./ledger";
 import type { LedgerActor, LedgerEntryInput } from "./ledger";
+import { deriveNextReviewDate, nextReviewInputFromRow, RESOLVED_REVIEW_DATES_SQL } from "./nextReviewDate";
+import { parseSteps, type ScheduledRateStep } from "./scheduledRateStepLogic";
 
 /** The JSON columns a schedule write may replace. Keys are SQL column names. */
 export const SCHEDULE_JSON_COLUMNS = [
@@ -28,7 +31,8 @@ export type ScheduleJsonColumn = (typeof SCHEDULE_JSON_COLUMNS)[number];
 const LOCKED_COLUMNS = `
   TenantId, BuildingId, ScheduleVersion, RowVersion, UpdatedByName, UpdatedAt,
   Commencement, LastReviewDate, ReviewIntervalMonths, NextReviewDate,
-  ScheduledRateSteps, CarparkScheduleGroups, MiscFees, Incentives
+  ScheduledRateSteps, CarparkScheduleGroups, MiscFees, Incentives,
+  ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 export interface ScheduleConflict {
@@ -145,8 +149,8 @@ export async function runScheduleWrite<T>(
   try {
     const rows = await executeQuery(
       connection,
-      `SELECT ${LOCKED_COLUMNS} FROM dbo.Tenants WITH (UPDLOCK, ROWLOCK)
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+      `SELECT ${LOCKED_COLUMNS} FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK)
+       WHERE t.TenantId = @TenantId AND t.BuildingId = @BuildingId`,
       keyParams,
     );
     if (rows.length === 0) {
@@ -176,7 +180,19 @@ export async function runScheduleWrite<T>(
       throw new Error(`Not a schedule column: ${mutation.column}`);
     }
 
-    const setClause = `${mutation.column} = @Value`;
+    // NextReviewDate follows the schedule as this write leaves it (PLAN D1).
+    const review = nextReviewInputFromRow(
+      locked,
+      mutation.column === "ScheduledRateSteps"
+        ? (mutation.value as ScheduledRateStep[])
+        : parseSteps(locked.ScheduledRateSteps as string | null | undefined),
+    );
+    const derived = deriveNextReviewDate(review);
+    const nextReview = derived !== null && derived !== review.storedNextReviewDate ? derived : null;
+
+    const setClause = nextReview
+      ? `${mutation.column} = @Value, NextReviewDate = @NextReviewDate`
+      : `${mutation.column} = @Value`;
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Tenants SET ${setClause},
@@ -189,6 +205,7 @@ export async function runScheduleWrite<T>(
       [
         ...keyParams,
         { name: "Value", type: TYPES.NVarChar, value: JSON.stringify(mutation.value) },
+        ...(nextReview ? [{ name: "NextReviewDate", type: TYPES.Date, value: nextReview }] : []),
         { name: "UpdatedById", type: TYPES.NVarChar, value: target.updatedById },
         { name: "UpdatedByName", type: TYPES.NVarChar, value: target.actor.name },
       ],
@@ -196,7 +213,19 @@ export async function runScheduleWrite<T>(
     if (mutation.afterUpdate) await mutation.afterUpdate(connection);
 
     const correlationId = ledger.newCorrelationId();
-    for (const entry of mutation.ledgerEntries) {
+    const entries: LedgerDraft[] = nextReview
+      ? [
+          ...mutation.ledgerEntries,
+          {
+            action: "schedule.recompute_next_review",
+            after: { nextReviewDate: nextReview },
+            before: { nextReviewDate: review.storedNextReviewDate },
+            ruleApplied: "derived_on_write",
+            subject: { id: target.tenantId, type: "tenancy" },
+          },
+        ]
+      : mutation.ledgerEntries;
+    for (const entry of entries) {
       await ledger.record(connection, {
         ...entry,
         actor: target.actor,
