@@ -190,9 +190,16 @@ is an index into `structure.attributes.dataSet[i].values`.
 - Store: both regions fetched and validated (and agreeing on the base) before any write; one
   transaction; rows are rewritten with `ReferenceBase`, `SourceKey`, `Dataflow` whenever any of them or
   the value differs (so a rebase restates every row), matching rows are only confirmed; a base
-  different from the stored one is logged and sent to Sentry as a warning; a latest period older than
-  what is stored, or a decimal with more than 3 places (column is `DECIMAL(10,3)`), is refused.
+  different from the stored one is logged and sent to Sentry as a warning, judged from the stored rows
+  inside the fetched range only (an older row a fetch cannot refresh is reported as not refreshed, not
+  as a rebase on every run); a latest period older than what is stored, or a decimal with more than 3
+  places (column is `DECIMAL(10,3)`), is refused.
 - Pass scale explicitly to tedious (`precision 10, scale 3`).
+- Opt-in: a rebase rewrites existing rows, so the timer does nothing unless `CPI_SYNC_ENABLED` is
+  exactly `true`. `CPI_SYNC_DRY_RUN` exactly `true` fetches, reads the table and logs each region's
+  plan (insert / update / restate, base change yes or no, latest period) without writing, whether or
+  not the sync is enabled. Run the dry run before the first real one. Both are Function App settings
+  (and `local.settings.json` for a local run); nothing else ever sets them.
 
 ## Where this differs from the PLAN text
 

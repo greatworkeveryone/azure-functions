@@ -8,6 +8,12 @@
 // on are in docs/lease-ops/wp22-step0-abs-structure.md; fetch/parse/validate is
 // src/cpiAbs.ts and the database side is src/cpiIndexSync.ts.
 //
+// Off by default. A rebase rewrites every stored row, so this timer overwrites
+// data and is opt-in (database-safety rule 2): it does nothing unless
+// CPI_SYNC_ENABLED is exactly "true". CPI_SYNC_DRY_RUN exactly "true" fetches,
+// reads the table and logs each region's plan, writing nothing, whether or not
+// the sync is enabled; use it to preview a first run or a rebase.
+//
 // Fetch and validate first, open the database second: if ABS is down or sends
 // something unexpected, the database is never touched and the existing rows
 // stand. The failure goes to Sentry and the invocation fails visibly.
@@ -17,9 +23,14 @@
 
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { AbsCpiError, CpiSeries, fetchAllCpiSeries } from "../cpiAbs";
-import { syncCpiIndex } from "../cpiIndexSync";
+import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
+
+// Exactly "true": "TRUE", "1" and "yes" do not switch anything on.
+function flagOn(name: string): boolean {
+  return process.env[name] === "true";
+}
 
 function fail(context: InvocationContext, stage: string, error: unknown): never {
   const message = error instanceof Error ? error.message : String(error);
@@ -38,10 +49,20 @@ export async function tenancyCpiSyncTimer(
   timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
+  const dryRun = flagOn("CPI_SYNC_DRY_RUN");
+  if (!dryRun && !flagOn("CPI_SYNC_ENABLED")) {
+    context.log('tenancyCpiSyncTimer disabled (CPI_SYNC_ENABLED is not "true")');
+    return;
+  }
+
   if (timer.isPastDue) {
     context.warn("tenancyCpiSyncTimer: running past due");
   }
-  context.log("tenancyCpiSyncTimer: starting ABS CPI sync");
+  context.log(
+    dryRun
+      ? "tenancyCpiSyncTimer: starting ABS CPI dry run (nothing will be written)"
+      : "tenancyCpiSyncTimer: starting ABS CPI sync",
+  );
 
   let connection;
   try {
@@ -57,9 +78,10 @@ export async function tenancyCpiSyncTimer(
       // sync holds a transaction open across ~100 statements and auth.ts role
       // lookups share that singleton.
       connection = await createServiceRequestConnection();
-      await syncCpiIndex(connection, series, context);
+      if (dryRun) await planCpiSync(connection, series, context);
+      else await syncCpiIndex(connection, series, context);
     } catch (error) {
-      return fail(context, "database sync", error);
+      return fail(context, dryRun ? "database dry run" : "database sync", error);
     }
   } finally {
     if (connection) closeConnection(connection);

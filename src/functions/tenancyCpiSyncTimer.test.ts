@@ -11,7 +11,7 @@ jest.mock("../cpiAbs", () => ({
   ...jest.requireActual("../cpiAbs"),
   fetchAllCpiSeries: jest.fn(),
 }));
-jest.mock("../cpiIndexSync", () => ({ syncCpiIndex: jest.fn() }));
+jest.mock("../cpiIndexSync", () => ({ planCpiSync: jest.fn(), syncCpiIndex: jest.fn() }));
 jest.mock("../db", () => ({
   beginTransaction: jest.fn(),
   closeConnection: jest.fn(),
@@ -28,7 +28,7 @@ const { app } = require("@azure/functions") as { app: { timer: jest.Mock } };
 const registrations = [...app.timer.mock.calls];
 
 const abs = require("../cpiAbs") as { fetchAllCpiSeries: jest.Mock };
-const sync = require("../cpiIndexSync") as { syncCpiIndex: jest.Mock };
+const sync = require("../cpiIndexSync") as { planCpiSync: jest.Mock; syncCpiIndex: jest.Mock };
 const db = require("../db") as {
   beginTransaction: jest.Mock;
   closeConnection: jest.Mock;
@@ -51,13 +51,35 @@ const databaseTouched = (): boolean =>
   db.executeQuery.mock.calls.length > 0 ||
   db.beginTransaction.mock.calls.length > 0 ||
   db.commitTransaction.mock.calls.length > 0 ||
-  sync.syncCpiIndex.mock.calls.length > 0;
+  sync.syncCpiIndex.mock.calls.length > 0 ||
+  sync.planCpiSync.mock.calls.length > 0;
+
+const FLAGS = ["CPI_SYNC_ENABLED", "CPI_SYNC_DRY_RUN"] as const;
+const originalFlags = Object.fromEntries(FLAGS.map((name) => [name, process.env[name]]));
+
+function setFlags(flags: { enabled?: string; dryRun?: string }): void {
+  const values = { CPI_SYNC_ENABLED: flags.enabled, CPI_SYNC_DRY_RUN: flags.dryRun };
+  for (const name of FLAGS) {
+    if (values[name] === undefined) delete process.env[name];
+    else process.env[name] = values[name];
+  }
+}
+
+afterAll(() => {
+  for (const name of FLAGS) {
+    const value = originalFlags[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
+  setFlags({ enabled: "true" });
   abs.fetchAllCpiSeries.mockResolvedValue(series);
   db.createServiceRequestConnection.mockResolvedValue(connection);
   sync.syncCpiIndex.mockResolvedValue({ regions: [] });
+  sync.planCpiSync.mockResolvedValue({ regions: [] });
   Sentry.flush.mockResolvedValue(true);
 });
 
@@ -87,6 +109,7 @@ describe("tenancyCpiSyncTimer", () => {
       db.createServiceRequestConnection.mock.invocationCallOrder[0],
     );
     expect(sync.syncCpiIndex).toHaveBeenCalledWith(connection, series, context);
+    expect(sync.planCpiSync).not.toHaveBeenCalled();
     expect(db.closeConnection).toHaveBeenCalledWith(connection);
     expect(Sentry.captureException).not.toHaveBeenCalled();
     expect(Sentry.flush).toHaveBeenCalled();
@@ -162,5 +185,112 @@ describe("tenancyCpiSyncTimer", () => {
         extra: expect.objectContaining({ context: "tenancyCpiSyncTimer database sync" }),
       }),
     );
+  });
+});
+
+// Database-safety rule 2: a timer that overwrites is off by default and only a
+// flag that is exactly the string "true" turns anything on.
+describe("tenancyCpiSyncTimer — CPI_SYNC_ENABLED", () => {
+  const OFF = 'tenancyCpiSyncTimer disabled (CPI_SYNC_ENABLED is not "true")';
+
+  it.each([undefined, "", "false", "0", "1", "yes", "on", "TRUE", "True", " true", "true "])(
+    "does nothing when CPI_SYNC_ENABLED is %j",
+    async (enabled) => {
+      setFlags({ enabled });
+
+      await tenancyCpiSyncTimer(timer, ctx);
+
+      expect(context.log).toHaveBeenCalledTimes(1);
+      expect(context.log).toHaveBeenCalledWith(OFF);
+      expect(abs.fetchAllCpiSeries).not.toHaveBeenCalled();
+      expect(databaseTouched()).toBe(false);
+      expect(db.closeConnection).not.toHaveBeenCalled();
+      expect(context.warn).not.toHaveBeenCalled();
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    },
+  );
+
+  it('syncs when CPI_SYNC_ENABLED is exactly "true"', async () => {
+    setFlags({ enabled: "true" });
+
+    await tenancyCpiSyncTimer(timer, ctx);
+
+    expect(context.log).not.toHaveBeenCalledWith(OFF);
+    expect(sync.syncCpiIndex).toHaveBeenCalledWith(connection, series, context);
+    expect(sync.planCpiSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("tenancyCpiSyncTimer — CPI_SYNC_DRY_RUN", () => {
+  it.each([undefined, "true"])(
+    'plans and writes nothing when CPI_SYNC_DRY_RUN is "true" (CPI_SYNC_ENABLED %j)',
+    async (enabled) => {
+      setFlags({ enabled, dryRun: "true" });
+
+      await tenancyCpiSyncTimer(timer, ctx);
+
+      expect(abs.fetchAllCpiSeries).toHaveBeenCalledTimes(1);
+      expect(sync.planCpiSync).toHaveBeenCalledWith(connection, series, context);
+      expect(sync.syncCpiIndex).not.toHaveBeenCalled();
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.executeQuery).not.toHaveBeenCalled();
+      expect(db.closeConnection).toHaveBeenCalledWith(connection);
+      expect(context.log).toHaveBeenCalledWith(expect.stringMatching(/dry run \(nothing will be written\)/));
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["", "false", "0", "1", "yes", "TRUE", "True", " true", "true "])(
+    "is not a dry run when CPI_SYNC_DRY_RUN is %j: with the sync off, nothing runs",
+    async (dryRun) => {
+      setFlags({ dryRun });
+
+      await tenancyCpiSyncTimer(timer, ctx);
+
+      expect(abs.fetchAllCpiSeries).not.toHaveBeenCalled();
+      expect(databaseTouched()).toBe(false);
+      expect(context.log).toHaveBeenCalledWith(
+        'tenancyCpiSyncTimer disabled (CPI_SYNC_ENABLED is not "true")',
+      );
+    },
+  );
+
+  it('ignores a CPI_SYNC_DRY_RUN that is not exactly "true", so an enabled sync still runs', async () => {
+    setFlags({ enabled: "true", dryRun: "1" });
+
+    await tenancyCpiSyncTimer(timer, ctx);
+
+    expect(sync.syncCpiIndex).toHaveBeenCalledTimes(1);
+    expect(sync.planCpiSync).not.toHaveBeenCalled();
+  });
+
+  it("still fails visibly when ABS cannot be fetched, without touching the database", async () => {
+    setFlags({ dryRun: "true" });
+    const failure = new AbsCpiError("http", "AUS: ABS responded 503", { status: 503, retryable: true });
+    abs.fetchAllCpiSeries.mockRejectedValue(failure);
+
+    await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toBe(failure);
+
+    expect(databaseTouched()).toBe(false);
+    expect(Sentry.captureException).toHaveBeenCalledWith(
+      failure,
+      expect.objectContaining({
+        extra: expect.objectContaining({ context: "tenancyCpiSyncTimer ABS fetch" }),
+      }),
+    );
+  });
+
+  it("reports a failed dry run under its own stage and still closes the connection", async () => {
+    setFlags({ dryRun: "true" });
+    const failure = new Error("refusing to write a regression");
+    sync.planCpiSync.mockRejectedValue(failure);
+
+    await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toBe(failure);
+
+    expect(db.closeConnection).toHaveBeenCalledWith(connection);
+    expect(Sentry.captureException).toHaveBeenCalledWith(failure, {
+      extra: { context: "tenancyCpiSyncTimer database dry run", kind: undefined, status: undefined },
+    });
   });
 });

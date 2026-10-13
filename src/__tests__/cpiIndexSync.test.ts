@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Connection, TYPES } from "tedious";
 import { CpiRegion, CpiSeries, parseCpiResponse } from "../cpiAbs";
-import { syncCpiIndex } from "../cpiIndexSync";
+import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
 
 jest.mock("../db", () => ({
   beginTransaction: jest.fn(),
@@ -124,6 +124,7 @@ describe("syncCpiIndex — first fill", () => {
       previousBases: [],
       fetched: 106,
       inserted: 106,
+      updated: 0,
       restated: 0,
       unchanged: 0,
       newPeriods: [],
@@ -207,18 +208,36 @@ describe("syncCpiIndex — steady state and new quarters", () => {
     const result = await syncCpiIndex(connection, [AUS, DARWIN], logger);
 
     expect(merges().map((c) => valuesOf(c).Period)).toEqual(["2010-Q1"]);
-    expect(result.regions[0]).toMatchObject({ restated: 1, unchanged: 105, baseChanged: false });
+    expect(result.regions[0]).toMatchObject({
+      updated: 1,
+      restated: 0,
+      unchanged: 105,
+      baseChanged: false,
+    });
     expect(logger.warn).not.toHaveBeenCalled();
   });
 });
 
-describe("syncCpiIndex — rebase", () => {
-  const OLD_BASE = "Dec 2011 = 100.0";
-  const oldBaseRows = (series: CpiSeries, keep: number): Stored[] =>
-    matching(series)
-      .slice(0, keep)
-      .map((r) => ({ ...r, IndexValue: Math.round(r.IndexValue * 1.4 * 100) / 100, ReferenceBase: OLD_BASE, Dataflow: "CPI 1.0.0" }));
+const OLD_BASE = "Dec 2011 = 100.0";
+const oldBaseRows = (series: CpiSeries, keep: number): Stored[] =>
+  matching(series)
+    .slice(0, keep)
+    .map((r) => ({
+      ...r,
+      IndexValue: Math.round(r.IndexValue * 1.4 * 100) / 100,
+      ReferenceBase: OLD_BASE,
+      Dataflow: "CPI 1.0.0",
+    }));
+// A row from before the 2000-Q1 start period: a fetch never rewrites it.
+const preRangeRow = (base: string): Stored => ({
+  Period: "1999-Q4",
+  IndexValue: 47.2,
+  ReferenceBase: base,
+  SourceKey: "1.10001.10.50.Q",
+  Dataflow: "CPI 1.0.0",
+});
 
+describe("syncCpiIndex — rebase", () => {
   it("restates every existing row on the new base, not just the new quarter", async () => {
     installDb({ AUS: oldBaseRows(AUS, 105), DARWIN: oldBaseRows(DARWIN, 105) });
     const result = await syncCpiIndex(connection, [AUS, DARWIN], logger);
@@ -267,26 +286,68 @@ describe("syncCpiIndex — rebase", () => {
     const result = await syncCpiIndex(connection, [AUS, DARWIN], logger);
 
     expect(merges()).toHaveLength(212);
-    expect(result.regions[0]).toMatchObject({ baseChanged: false, previousBases: [], restated: 106 });
+    expect(result.regions[0]).toMatchObject({
+      baseChanged: false,
+      previousBases: [],
+      updated: 106,
+      restated: 0,
+    });
     expect(logger.warn).not.toHaveBeenCalled();
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
+});
 
-  it("warns about stored rows older than the fetched range, which a rebase cannot refresh", async () => {
-    const stale: Stored = {
-      Period: "1999-Q4",
-      IndexValue: 47.2,
-      ReferenceBase: OLD_BASE,
-      SourceKey: "1.10001.10.50.Q",
-      Dataflow: "CPI 1.0.0",
-    };
-    installDb({ AUS: [stale, ...matching(AUS)], DARWIN: matching(DARWIN) });
+// After a rebase the first run restates 2000-Q1 onwards, but a row from before
+// the start period keeps the old base for good. It has to be reported, and it
+// must not make every later run look like a fresh rebase (a Sentry warning a
+// night, forever).
+describe("syncCpiIndex — rows older than the fetched range", () => {
+  it("a pre-range row left on the old base is not a rebase, on this run or any later one", async () => {
+    installDb({ AUS: [preRangeRow(OLD_BASE), ...matching(AUS)], DARWIN: matching(DARWIN) });
+    const result = await syncCpiIndex(connection, [AUS, DARWIN], logger);
+
+    expect(result.regions[0]).toMatchObject({
+      baseChanged: false,
+      previousBases: [NEW_BASE],
+      updated: 0,
+      restated: 0,
+      unchanged: 106,
+    });
+    expect(merges()).toHaveLength(0);
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/reference base changed/));
+  });
+
+  it("still warns that the row was not refreshed, and leaves it out of the confirmed range", async () => {
+    installDb({ AUS: [preRangeRow(OLD_BASE), ...matching(AUS)], DARWIN: matching(DARWIN) });
     await syncCpiIndex(connection, [AUS, DARWIN], logger);
 
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(/AUS: 1 stored row\(s\) older than the fetched range/),
+      expect.stringMatching(
+        /AUS: 1 stored row\(s\) older than the fetched range were not refreshed \(1999-Q4 to 1999-Q4\)/,
+      ),
     );
     expect(confirms().map((c) => valuesOf(c).FirstPeriod)).toEqual(["2000-Q1", "2000-Q1"]);
+  });
+
+  it("still reports a real rebase of the fetched range, from the in-range bases only", async () => {
+    installDb({
+      AUS: [preRangeRow("Dec 2005 = 100.0"), ...oldBaseRows(AUS, 106)],
+      DARWIN: matching(DARWIN),
+    });
+    const result = await syncCpiIndex(connection, [AUS, DARWIN], logger);
+
+    expect(result.regions[0]).toMatchObject({
+      baseChanged: true,
+      previousBases: [OLD_BASE],
+      restated: 106,
+    });
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /AUS: ABS reference base changed from "Dec 2011 = 100\.0" to "Sep 2025 = 100\.0"/,
+      ),
+    );
   });
 });
 
@@ -345,5 +406,119 @@ describe("syncCpiIndex — refusals leave the table untouched", () => {
     await expect(syncCpiIndex(connection, [AUS, DARWIN], logger)).rejects.toThrow("commit failed");
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(logger.log).not.toHaveBeenCalled();
+  });
+});
+
+describe("planCpiSync — dry run", () => {
+  const rebaseState = () => ({
+    AUS: oldBaseRows(AUS, 105),
+    DARWIN: oldBaseRows(DARWIN, 105),
+  });
+  const planLine = (region: string, counts: string, change: string) =>
+    `cpi sync dry run ${region}: base "${NEW_BASE}", ${counts}, base change ${change}, latest 2026-Q2`;
+
+  it("only reads: no transaction, no MERGE, no UPDATE, nothing sent to Sentry", async () => {
+    installDb(rebaseState());
+    await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => /^\s*SELECT/i.test(c.sql))).toBe(true);
+    expect(merges()).toHaveLength(0);
+    expect(confirms()).toHaveLength(0);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("logs each region's plan: insert / update / restate, base change and latest period", async () => {
+    installDb(rebaseState());
+    const result = await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    const counts = "would insert 1, update 0, restate 105, leave 0 unchanged";
+    const change = 'yes (from "Dec 2011 = 100.0")';
+    expect(logger.log).toHaveBeenCalledWith(planLine("AUS", counts, change));
+    expect(logger.log).toHaveBeenCalledWith(planLine("DARWIN", counts, change));
+    expect(logger.log).toHaveBeenCalledWith("cpi sync dry run: nothing was written");
+    expect(result.regions.map((r) => [r.inserted, r.updated, r.restated, r.baseChanged])).toEqual([
+      [1, 0, 105, true],
+      [1, 0, 105, true],
+    ]);
+  });
+
+  it("says base change no when nothing is new", async () => {
+    installDb({ AUS: matching(AUS), DARWIN: matching(DARWIN) });
+    await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    expect(logger.log).toHaveBeenCalledWith(
+      planLine("AUS", "would insert 0, update 0, restate 0, leave 106 unchanged", "no"),
+    );
+  });
+
+  it("tells an ABS revision (update) from a new quarter (insert) and from a rebase (restate)", async () => {
+    const revised = matching(AUS)
+      .slice(0, 105)
+      .map((r) => (r.Period === "2010-Q1" ? { ...r, IndexValue: r.IndexValue + 0.5 } : r));
+    installDb({ AUS: revised, DARWIN: matching(DARWIN) });
+    const result = await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    expect(result.regions[0]).toMatchObject({
+      inserted: 1,
+      updated: 1,
+      restated: 0,
+      unchanged: 104,
+      baseChanged: false,
+      newPeriods: ["2026-Q2"],
+    });
+    expect(logger.log).toHaveBeenCalledWith(
+      planLine("AUS", "would insert 1, update 1, restate 0, leave 104 unchanged", "no"),
+    );
+    expect(logger.log).toHaveBeenCalledWith("cpi sync dry run AUS: new period(s) 2026-Q2");
+  });
+
+  it("does not take a pre-range row on an old base for a base change, but still reports it", async () => {
+    installDb({ AUS: [preRangeRow(OLD_BASE), ...matching(AUS)], DARWIN: matching(DARWIN) });
+    await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    expect(logger.log).toHaveBeenCalledWith(
+      planLine("AUS", "would insert 0, update 0, restate 0, leave 106 unchanged", "no"),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/AUS: 1 stored row\(s\) older than the fetched range/),
+    );
+  });
+
+  it("returns the plan a real run then carries out", async () => {
+    installDb(rebaseState());
+    const planned = await planCpiSync(connection, [AUS, DARWIN], logger);
+
+    jest.clearAllMocks();
+    installDb(rebaseState());
+    const synced = await syncCpiIndex(connection, [AUS, DARWIN], logger);
+
+    expect(planned).toEqual(synced);
+    expect(merges()).toHaveLength(212);
+  });
+
+  it("refuses what a real run refuses, and still writes nothing", async () => {
+    const ahead = { ...matching(AUS)[105], Period: "2026-Q3" };
+    installDb({ AUS: [...matching(AUS), ahead], DARWIN: matching(DARWIN) });
+    await expect(planCpiSync(connection, [AUS, DARWIN], logger)).rejects.toThrow(
+      /refusing to write a regression/,
+    );
+    expect(merges()).toHaveLength(0);
+
+    jest.clearAllMocks();
+    installDb({});
+    const unrepresentable: CpiSeries = {
+      ...AUS,
+      observations: AUS.observations.map((o, i) => (i === 10 ? { ...o, value: 100.1234 } : o)),
+    };
+    await expect(planCpiSync(connection, [unrepresentable, DARWIN], logger)).rejects.toThrow(
+      /does not fit dbo\.CpiIndex\.IndexValue DECIMAL\(10,3\)/,
+    );
+    expect(db.executeQuery).not.toHaveBeenCalled();
+    expect(db.beginTransaction).not.toHaveBeenCalled();
   });
 });

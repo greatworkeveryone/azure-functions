@@ -9,7 +9,11 @@
 //   - A reference base that differs from the stored one is a rebase: ABS has
 //     restated every historical value, so every row of that region is rewritten
 //     (not just the new quarter), and the change is logged and sent to Sentry.
+//     Only stored rows inside the fetched range count towards that. An older row
+//     keeps whatever base it had (it is reported as not refreshed); counting it
+//     would flag a rebase on every run for as long as it exists.
 //   - Rows that already match are not rewritten, only confirmed (FetchedAt).
+//   - planCpiSync is the dry run: the same reads and the same plan, no writes.
 
 import { Connection, TYPES } from "tedious";
 import {
@@ -35,12 +39,14 @@ export interface SyncLogger {
 export interface CpiSyncRegionResult {
   region: CpiRegion;
   referenceBase: string;
-  /** Distinct non-null bases found in the table before this run. */
+  /** Distinct non-null bases among the stored rows inside the fetched range, before this run. */
   previousBases: string[];
   baseChanged: boolean;
   fetched: number;
   inserted: number;
-  /** Existing rows whose value, base or source changed (all of them on a rebase). */
+  /** Existing rows on the same base whose value or source changed: an ABS revision, or a row written before the base was recorded. */
+  updated: number;
+  /** Existing rows stored on a different base: all of them after a rebase. */
   restated: number;
   unchanged: number;
   /** Periods newer than anything stored before; empty on the very first fill. */
@@ -87,6 +93,10 @@ const CONFIRM_SQL = `UPDATE dbo.CpiIndex
 
 function scaled(value: number): number {
   return Math.round(value * INDEX_VALUE_SCALE);
+}
+
+function quoted(bases: readonly string[]): string {
+  return bases.map((base) => `"${base}"`).join(" and ");
 }
 
 function assertRepresentable(series: CpiSeries): void {
@@ -139,14 +149,16 @@ function planRegion(series: CpiSeries, stored: Map<string, StoredRow>): RegionPl
 
   const previousBases = [
     ...new Set(
-      [...stored.values()]
-        .map((row) => row.referenceBase)
+      [...stored.entries()]
+        .filter(([period]) => period >= first && period <= last)
+        .map(([, row]) => row.referenceBase)
         .filter((base): base is string => base !== null),
     ),
   ].sort();
   const baseChanged = previousBases.some((base) => base !== series.referenceBase);
 
   const inserted: string[] = [];
+  let updated = 0;
   let restated = 0;
   let unchanged = 0;
   const toWrite: CpiObservation[] = [];
@@ -163,7 +175,8 @@ function planRegion(series: CpiSeries, stored: Map<string, StoredRow>): RegionPl
     ) {
       unchanged++;
     } else {
-      restated++;
+      if (row.referenceBase !== null && row.referenceBase !== series.referenceBase) restated++;
+      else updated++;
       toWrite.push(observation);
     }
   }
@@ -179,12 +192,26 @@ function planRegion(series: CpiSeries, stored: Map<string, StoredRow>): RegionPl
       baseChanged,
       fetched: series.observations.length,
       inserted: inserted.length,
+      updated,
       restated,
       unchanged,
       newPeriods: storedLatest === null ? [] : inserted.filter((p) => p > storedLatest),
       latestPeriod: last,
     },
   };
+}
+
+async function buildPlans(
+  connection: Connection,
+  seriesList: readonly CpiSeries[],
+): Promise<RegionPlan[]> {
+  for (const series of seriesList) assertRepresentable(series);
+
+  const plans: RegionPlan[] = [];
+  for (const series of seriesList) {
+    plans.push(planRegion(series, await readStored(connection, series.region)));
+  }
+  return plans;
 }
 
 async function writePlans(connection: Connection, plans: RegionPlan[]): Promise<void> {
@@ -216,21 +243,32 @@ async function writePlans(connection: Connection, plans: RegionPlan[]): Promise<
   }
 }
 
-function reportOutcome(plans: RegionPlan[], logger: SyncLogger): void {
+function reportOrphans(plans: RegionPlan[], logger: SyncLogger): void {
   for (const { result, orphanedPeriods } of plans) {
+    if (orphanedPeriods.length > 0) {
+      logger.warn(
+        `cpi sync ${result.region}: ${orphanedPeriods.length} stored row(s) older than the fetched ` +
+          `range were not refreshed (${orphanedPeriods[0]} to ${orphanedPeriods[orphanedPeriods.length - 1]})`,
+      );
+    }
+  }
+}
+
+function reportOutcome(plans: RegionPlan[], logger: SyncLogger): void {
+  for (const { result } of plans) {
     logger.log(
       `cpi sync ${result.region}: base "${result.referenceBase}", fetched ${result.fetched}, ` +
-        `inserted ${result.inserted}, restated ${result.restated}, unchanged ${result.unchanged}, ` +
-        `latest ${result.latestPeriod}`,
+        `inserted ${result.inserted}, updated ${result.updated}, restated ${result.restated}, ` +
+        `unchanged ${result.unchanged}, latest ${result.latestPeriod}`,
     );
     if (result.newPeriods.length > 0) {
       logger.log(`cpi sync ${result.region}: new period(s) ${result.newPeriods.join(", ")}`);
     }
     if (result.baseChanged) {
+      const previous = result.previousBases.filter((base) => base !== result.referenceBase);
       const message =
-        `cpi sync ${result.region}: ABS reference base changed from ` +
-        `${result.previousBases.map((b) => `"${b}"`).join(" and ")} to "${result.referenceBase}"; ` +
-        `restated ${result.restated} existing row(s)`;
+        `cpi sync ${result.region}: ABS reference base changed from ${quoted(previous)} ` +
+        `to "${result.referenceBase}"; restated ${result.restated} existing row(s)`;
       logger.warn(message);
       Sentry.captureMessage(message, {
         level: "warning",
@@ -242,13 +280,26 @@ function reportOutcome(plans: RegionPlan[], logger: SyncLogger): void {
         },
       });
     }
-    if (orphanedPeriods.length > 0) {
-      logger.warn(
-        `cpi sync ${result.region}: ${orphanedPeriods.length} stored row(s) older than the fetched ` +
-          `range were not refreshed (${orphanedPeriods[0]} to ${orphanedPeriods[orphanedPeriods.length - 1]})`,
-      );
+  }
+  reportOrphans(plans, logger);
+}
+
+function reportDryRun(plans: RegionPlan[], logger: SyncLogger): void {
+  for (const { result } of plans) {
+    const previous = result.previousBases.filter((base) => base !== result.referenceBase);
+    logger.log(
+      `cpi sync dry run ${result.region}: base "${result.referenceBase}", ` +
+        `would insert ${result.inserted}, update ${result.updated}, restate ${result.restated}, ` +
+        `leave ${result.unchanged} unchanged, ` +
+        `base change ${result.baseChanged ? `yes (from ${quoted(previous)})` : "no"}, ` +
+        `latest ${result.latestPeriod}`,
+    );
+    if (result.newPeriods.length > 0) {
+      logger.log(`cpi sync dry run ${result.region}: new period(s) ${result.newPeriods.join(", ")}`);
     }
   }
+  reportOrphans(plans, logger);
+  logger.log("cpi sync dry run: nothing was written");
 }
 
 /**
@@ -260,12 +311,7 @@ export async function syncCpiIndex(
   seriesList: readonly CpiSeries[],
   logger: SyncLogger,
 ): Promise<CpiSyncResult> {
-  for (const series of seriesList) assertRepresentable(series);
-
-  const plans: RegionPlan[] = [];
-  for (const series of seriesList) {
-    plans.push(planRegion(series, await readStored(connection, series.region)));
-  }
+  const plans = await buildPlans(connection, seriesList);
 
   await beginTransaction(connection);
   try {
@@ -283,5 +329,20 @@ export async function syncCpiIndex(
   }
 
   reportOutcome(plans, logger);
+  return { regions: plans.map((plan) => plan.result) };
+}
+
+/**
+ * Dry run: the same pre-flight, reads and plan as syncCpiIndex, logged per
+ * region, with no transaction and no write statement. Refuses what a real run
+ * would refuse, so a clean dry run means the real run will not be turned away.
+ */
+export async function planCpiSync(
+  connection: Connection,
+  seriesList: readonly CpiSeries[],
+  logger: SyncLogger,
+): Promise<CpiSyncResult> {
+  const plans = await buildPlans(connection, seriesList);
+  reportDryRun(plans, logger);
   return { regions: plans.map((plan) => plan.result) };
 }
