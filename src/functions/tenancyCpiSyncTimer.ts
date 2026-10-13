@@ -1,137 +1,96 @@
-// tenancyCpiSyncTimer — pulls Australian CPI index values from the ABS Data
-// API and upserts them into dbo.CpiIndex. The "Apply CPI review" flow reads
-// from this table to compute a tenant's percentage increase between their
-// last review period and the current one.
+// tenancyCpiSyncTimer — daily sync of Australian CPI from the ABS Data API into
+// dbo.CpiIndex: All groups, Original, Quarterly, for AUS (weighted average of
+// the eight capitals) and Darwin, full history from 2000-Q1.
 //
-// IMPORTANT — endpoint URL needs verification before going to prod. The ABS
-// Data API has occasionally moved between subdomains. Run a manual `curl`
-// against the URL below from the function-app environment first; if it
-// 404s, the up-to-date base URL is documented at
-// https://www.abs.gov.au/about/data-services/application-programming-interfaces-apis/data-api-user-guide
+// Replaces the earlier monthly timer, which used a 4-value key (HTTP 422), read
+// the SDMX-JSON 1 shape the API no longer serves, asked for the seasonally
+// adjusted series, and bound its decimals at scale 0. The API facts this relies
+// on are in docs/lease-ops/wp22-step0-abs-structure.md; fetch/parse/validate is
+// src/cpiAbs.ts and the database side is src/cpiIndexSync.ts.
 //
-// SDMX-JSON dataflow IDs:
-//   • All groups CPI, weighted average of 8 capital cities → "CPI"
-//     dimensions: MEASURE.INDEX_NUMBER, INDEX.10001, TSEST.20, REGION.50
-//   • Darwin all-groups CPI → REGION.7
+// Off by default. A rebase rewrites every stored row, so this timer overwrites
+// data and is opt-in (database-safety rule 2): it does nothing unless
+// CPI_SYNC_ENABLED is exactly "true". CPI_SYNC_DRY_RUN exactly "true" fetches,
+// reads the table and logs each region's plan, writing nothing, whether or not
+// the sync is enabled; use it to preview a first run or a rebase.
+//
+// Fetch and validate first, open the database second: if ABS is down or sends
+// something unexpected, the database is never touched and the existing rows
+// stand. The failure goes to Sentry and the invocation fails visibly.
+//
+// Daily rather than monthly because the daily run is a no-op unless ABS has
+// published a new quarter or rebased, and a new quarter then lands within a day.
 
 import { app, InvocationContext, Timer } from "@azure/functions";
-import { TYPES } from "tedious";
-import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { AbsCpiError, CpiSeries, fetchAllCpiSeries } from "../cpiAbs";
+import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
+import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
 
-const ABS_BASE = "https://data.api.abs.gov.au/rest/data/CPI";
-
-interface CpiObservation {
-  indexValue: number;
-  period: string;
-  region: "AUS" | "DARWIN";
+// Exactly "true": "TRUE", "1" and "yes" do not switch anything on.
+function flagOn(name: string): boolean {
+  return process.env[name] === "true";
 }
 
-async function fetchAbsCpi(
-  context: InvocationContext,
-): Promise<CpiObservation[]> {
-  const out: CpiObservation[] = [];
-  // SDMX-JSON key: MEASURE.INDEX.TSEST.REGION ; query the latest 8 quarters.
-  const queries: { key: string; region: "AUS" | "DARWIN" }[] = [
-    { key: "1.10001.20.50", region: "AUS" }, // weighted 8-cap
-    { key: "1.10001.20.7",  region: "DARWIN" },
-  ];
-  for (const q of queries) {
-    const url = `${ABS_BASE}/${q.key}/all?startPeriod=${new Date().getFullYear() - 2}&format=jsondata`;
-    try {
-      const resp = await fetch(url, { headers: { Accept: "application/vnd.sdmx.data+json" } });
-      if (!resp.ok) {
-        context.error(`ABS CPI fetch failed for ${q.region}: ${resp.status} ${resp.statusText}`);
-        continue;
-      }
-      const json = (await resp.json()) as any;
-      // SDMX-JSON: dataSets[0].series → keyed by dimension index path; observations
-      // are { "0": [value, ...], "1": [value, ...] } where each array index maps
-      // to a period in dimensions.observation[0].values.
-      const periods: { id: string }[] =
-        json?.structure?.dimensions?.observation?.[0]?.values ?? [];
-      const series = json?.dataSets?.[0]?.series ?? {};
-      for (const seriesKey of Object.keys(series)) {
-        const obs = series[seriesKey].observations ?? {};
-        for (const periodIdx of Object.keys(obs)) {
-          const value = obs[periodIdx]?.[0];
-          const period = periods[Number(periodIdx)]?.id;
-          if (period && typeof value === "number") {
-            out.push({ indexValue: value, period, region: q.region });
-          }
-        }
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      context.error(`ABS CPI fetch threw for ${q.region}:`, message);
-      Sentry.captureException(err, {
-        extra: { context: `tenancyCpiSyncTimer ABS fetch region=${q.region}` },
-      });
-    }
-  }
-  return out;
+function fail(context: InvocationContext, stage: string, error: unknown): never {
+  const message = error instanceof Error ? error.message : String(error);
+  context.error(`tenancyCpiSyncTimer: ${stage} failed: ${message}`);
+  Sentry.captureException(error, {
+    extra: {
+      context: `tenancyCpiSyncTimer ${stage}`,
+      kind: error instanceof AbsCpiError ? error.kind : undefined,
+      status: error instanceof AbsCpiError ? error.status : undefined,
+    },
+  });
+  throw error;
 }
 
-async function tenancyCpiSyncTimer(
-  _timer: Timer,
+export async function tenancyCpiSyncTimer(
+  timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
-  context.log("tenancyCpiSyncTimer: starting ABS CPI sync");
-  const observations = await fetchAbsCpi(context);
-  if (observations.length === 0) {
-    context.log("tenancyCpiSyncTimer: no observations parsed — skipping write");
+  const dryRun = flagOn("CPI_SYNC_DRY_RUN");
+  if (!dryRun && !flagOn("CPI_SYNC_ENABLED")) {
+    context.log('tenancyCpiSyncTimer disabled (CPI_SYNC_ENABLED is not "true")');
     return;
   }
 
+  if (timer.isPastDue) {
+    context.warn("tenancyCpiSyncTimer: running past due");
+  }
+  context.log(
+    dryRun
+      ? "tenancyCpiSyncTimer: starting ABS CPI dry run (nothing will be written)"
+      : "tenancyCpiSyncTimer: starting ABS CPI sync",
+  );
+
   let connection;
   try {
-    connection = await createServiceConnection();
-    let upserts = 0;
-    for (const o of observations) {
-      try {
-        await executeQuery(
-          connection,
-          `MERGE dbo.CpiIndex AS target
-           USING (SELECT @Region AS Region, @Period AS Period) AS src
-             ON target.Region = src.Region AND target.Period = src.Period
-           WHEN MATCHED THEN
-             UPDATE SET IndexValue = @IndexValue, FetchedAt = SYSUTCDATETIME()
-           WHEN NOT MATCHED THEN
-             INSERT (Region, Period, IndexValue) VALUES (@Region, @Period, @IndexValue);`,
-          [
-            { name: "Region", type: TYPES.NVarChar, value: o.region },
-            { name: "Period", type: TYPES.NVarChar, value: o.period },
-            { name: "IndexValue", type: TYPES.Decimal, value: o.indexValue },
-          ],
-        );
-        upserts++;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        context.error(
-          `tenancyCpiSyncTimer upsert failed (${o.region} ${o.period}):`,
-          message,
-        );
-        Sentry.captureException(err, {
-          extra: { context: `tenancyCpiSyncTimer upsert region=${o.region} period=${o.period}` },
-        });
-      }
+    let series: CpiSeries[];
+    try {
+      series = await fetchAllCpiSeries({ onRetry: (message) => context.warn(message) });
+    } catch (error) {
+      return fail(context, "ABS fetch", error);
     }
-    context.log(`tenancyCpiSyncTimer: ${upserts} CpiIndex rows upserted`);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    context.error("tenancyCpiSyncTimer: fatal:", message);
-    Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer fatal" } });
-    throw error;
+
+    try {
+      // A fresh connection, not the createServiceConnection() singleton: the
+      // sync holds a transaction open across ~100 statements and auth.ts role
+      // lookups share that singleton.
+      connection = await createServiceRequestConnection();
+      if (dryRun) await planCpiSync(connection, series, context);
+      else await syncCpiIndex(connection, series, context);
+    } catch (error) {
+      return fail(context, dryRun ? "database dry run" : "database sync", error);
+    }
   } finally {
     if (connection) closeConnection(connection);
     await Sentry.flush(2000);
   }
 }
 
-// Runs at 03:00 UTC on the 15th of each month — gives ABS time to publish
-// the latest quarter (typically released late in the month following the
-// reference quarter) and avoids contention with other midnight timers.
+// 03:00 UTC every day.
 app.timer("tenancyCpiSyncTimer", {
-  schedule: "0 0 3 15 * *",
+  schedule: "0 0 3 * * *",
   handler: tenancyCpiSyncTimer,
 });
