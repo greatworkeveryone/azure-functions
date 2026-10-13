@@ -24,13 +24,18 @@ async function runCleanup(context: InvocationContext): Promise<{ scanned: number
     // the dbo.Attachments catalogue row and SHARES the blob with
     // dbo.InspectionAttachments (preserving the original UploadedAt), so
     // reaping them here would destroy photos the inspection still displays.
+    // Asset files (asset-<id>/...) and tenancy documents (tenancy-<id>/...) are
+    // excluded for the same reason: they were never sent to myBuildings, so
+    // "ingested upstream" is false for them and deleting the blob loses the file.
     const rows = await executeQuery(
       connection,
       `SELECT Id, BlobName, OriginalName, UploadedAt
        FROM Attachments
        WHERE MyBuildingsConfirmedAt IS NULL
          AND UploadedAt < DATEADD(HOUR, -@GraceHours, SYSUTCDATETIME())
-         AND BlobName NOT LIKE 'inspections/%'`,
+         AND BlobName NOT LIKE 'inspections/%'
+         AND BlobName NOT LIKE 'asset-%'
+         AND BlobName NOT LIKE 'tenancy-%'`,
       [{ name: "GraceHours", type: TYPES.Int, value: GRACE_HOURS }],
     );
 
