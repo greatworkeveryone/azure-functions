@@ -12,7 +12,7 @@ import { MyobWritesDisabledError, userActor } from "../myob-api-log";
 import { applyMyobPayment, createMyobBill } from "../myob-client";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { jobScope, paymentEdit, paymentFacts } from "../ledger/moneyDecisions";
+import { contractorFacts, jobScope, paymentEdit, paymentFacts, withContractorId } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 
@@ -169,15 +169,16 @@ const RECORDED_PAYMENT_REFUSALS: ReadonlySet<string> = new Set([
   "invoice_not_approved",
 ]);
 
-// Who the money goes to is on the invoice being paid, not on the payment.
+// Who the money goes to is on the invoice being paid, not on the payment, and
+// so is the amount its approval covered.
 async function loadPaidInvoice(connection: Connection, jobInvoiceId: number | null | undefined) {
   if (jobInvoiceId === null || jobInvoiceId === undefined) return undefined;
   const rows = await executeQuery(
     connection,
-    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices WHERE JobInvoiceID = @Id",
     [{ name: "Id", type: TYPES.Int, value: jobInvoiceId }],
   );
-  return rows[0];
+  return rows[0] ? withContractorId(connection, rows[0]) : undefined;
 }
 
 // Locks the invoice row for the surrounding transaction so two concurrent
@@ -518,7 +519,13 @@ async function upsertPayment(
       // What a refused attempt shows: the payment as it stood (its MYOB bill,
       // if it has one, included) and the amount that was asked for.
       const refusedState = amountChanges
-        ? { ...paymentEdit(existing, Amount as number).before, requestedAmount: Amount }
+        ? {
+            amount: Number(existing.Amount),
+            jobInvoiceId: existingInvoiceId,
+            myobBillUid: typeof existing.MyobID === "string" ? existing.MyobID : null,
+            requestedAmount: Amount,
+            status: String(existing.Status),
+          }
         : {};
 
       // Once MYOB has the bill, or the payment has left 'pending', what it pays
@@ -701,11 +708,12 @@ async function markPaymentPaid(
       );
 
       const scope = await jobScope(connection, payment.JobID as number | null | undefined);
+      const invoice = await loadPaidInvoice(connection, payment.JobInvoiceID);
       await record(connection, {
         action: "payment.myob_applied",
         actor: ledgerActor,
-        after: { status: "paid", ...paymentFacts(payment, await loadPaidInvoice(connection, payment.JobInvoiceID)) },
-        before: { status: (payment.Status as string | null) ?? null },
+        after: { status: "paid", ...paymentFacts(payment, invoice) },
+        before: { status: (payment.Status as string | null) ?? null, ...contractorFacts(invoice ?? {}) },
         buildingId: scope.buildingId,
         correlationId,
         jobId: scope.jobId,

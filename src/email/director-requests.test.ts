@@ -4,6 +4,7 @@
 // what is asserted is the INSERT record() really sends.
 import type { Connection } from "tedious";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 import type { LedgerActor } from "../ledger/types";
 import { _resetRateLimitForTests } from "../rateLimit";
 import { sendDirectorRequest, type DirectorRequest } from "./director-requests";
@@ -53,12 +54,16 @@ const callsTo = (re: RegExp): unknown[][] => db.executeQuery.mock.calls.filter((
 const paramsOf = (call: unknown[]): Record<string, unknown> =>
   Object.fromEntries((call[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]));
 
+// What a quote or invoice is, as its handler hands it over.
+const FACTS = { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", quoteNumber: "QT-9-1" };
+
 const request = (over: Partial<DirectorRequest> = {}): DirectorRequest => ({
   actor: casey,
   amount: 5000,
   connection,
   correlationId: CORRELATION,
   currency: "AUD",
+  facts: FACTS,
   jobId: 9,
   resend: false,
   stage: "quote",
@@ -81,6 +86,8 @@ beforeEach(() => {
   mockSql([JOB, NAMES]);
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("sendDirectorRequest: when the mail goes", () => {
@@ -115,8 +122,11 @@ describe("sendDirectorRequest: when the mail goes", () => {
         actorUserId: 21,
         after: {
           amount: 5000,
+          contractorId: 3,
+          contractorName: "Acme",
           currency: "AUD",
           packet: PACKET,
+          quoteNumber: "QT-9-1",
           recipients: ["Bo Boss", "Dana Director"],
           resend: true,
           unnamedRecipients: 0,
@@ -138,6 +148,26 @@ describe("sendDirectorRequest: when the mail goes", () => {
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.director_request_sent", subjectId: "5", subjectType: "invoice" });
     expect(orderOf(STAMP_INVOICE)).toBeGreaterThan(-1);
     expect(orderOf(STAMP_QUOTE)).toBe(-1);
+  });
+
+  it("leads the row with what the record is, in the keys every money row carries: who it is for and its number", async () => {
+    await sendDirectorRequest(
+      request({ facts: { amount: 5000, contractorId: 8, contractorName: "Beta Pty", direction: "incoming", invoiceNumber: "IV-9-1" }, stage: "invoice" }),
+    );
+
+    expect(ledgerInserts(db.executeQuery)[0].after).toMatchObject({
+      amount: 5000,
+      contractorId: 8,
+      contractorName: "Beta Pty",
+      direction: "incoming",
+      invoiceNumber: "IV-9-1",
+    });
+  });
+
+  it("records the amount that was emailed, whatever the facts say", async () => {
+    await sendDirectorRequest(request({ amount: 5100, facts: { ...FACTS, amount: 4900 } }));
+
+    expect(ledgerInserts(db.executeQuery)[0].after).toMatchObject({ amount: 5100 });
   });
 
   it("gives the row a correlation id of its own when the caller has none to share", async () => {
@@ -295,7 +325,7 @@ describe("sendDirectorRequest: when the mail does not go", () => {
         action: "quote.director_request_failed",
         actorName: "Casey Controller",
         actorRole: "accounts_manager",
-        after: { amount: 5000, currency: "AUD", resend: true },
+        after: { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", quoteNumber: "QT-9-1", resend: true },
         buildingId: 5,
         correlationId: CORRELATION,
         isException: true,

@@ -52,6 +52,9 @@ export interface DirectorRequest {
   /** Shared with the decision that triggered the request, when there is one. */
   correlationId?: string;
   currency: string;
+  /** What the quote or invoice is, in the keys every money row carries: its
+   *  amount, who it is for, its number. */
+  facts: Record<string, unknown>;
   jobId: number;
   resend: boolean;
   stage: Stage;
@@ -94,7 +97,7 @@ async function recipientNames(
  * threw, after recording the failure; the caller keeps its own handling.
  */
 export async function sendDirectorRequest(request: DirectorRequest): Promise<SendDirectorApprovalResult> {
-  const { actor, amount, connection, correlationId, currency, jobId, resend, stage, subjectId, triggeredBy } = request;
+  const { actor, amount, connection, correlationId, currency, facts, jobId, resend, stage, subjectId, triggeredBy } = request;
   const subject = { id: subjectId, type: stage } as const;
   // Loaded here, not at the top of the file: it pulls in the PDF and Graph code.
   const { sendDirectorApprovalEmail } = await import("./director-emails");
@@ -114,7 +117,7 @@ export async function sendDirectorRequest(request: DirectorRequest): Promise<Sen
           action: ACTIONS[stage].failed,
           actor,
           // The error's own text is for the logs: it can carry addresses.
-          after: { amount, currency, resend },
+          after: { ...facts, amount, currency, resend },
           buildingId: scope.buildingId,
           correlationId,
           jobId: scope.jobId,
@@ -142,6 +145,7 @@ export async function sendDirectorRequest(request: DirectorRequest): Promise<Sen
       action: ACTIONS[stage].sent,
       actor,
       after: {
+        ...facts,
         amount,
         currency,
         packet: result.packet ?? null,

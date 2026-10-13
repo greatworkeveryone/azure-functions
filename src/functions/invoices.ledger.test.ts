@@ -5,6 +5,7 @@
 // is asserted is the INSERT record() really sends.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -80,10 +81,13 @@ const deleteJobInvoice = registered("deleteJobInvoice");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
+// An invoice keeps the contractor's name and no id; the ledger looks the id up.
+const CONTRACTOR: Route = { match: /FROM dbo\.Contractors WHERE ContractorName/, rows: [{ ContractorID: 3 }] };
+
 /** Answers each statement by shape; the first matching route wins, anything else returns no rows. */
 function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    const hit = routes.find((r) => r.match.test(sql));
+    const hit = [...routes, CONTRACTOR].find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
     return hit?.rows ?? [];
   });
@@ -125,6 +129,7 @@ const FIRST_SELECT = /FROM JobInvoices WITH \(UPDLOCK, HOLDLOCK\) WHERE JobInvoi
 const invoiceRow = (over: Record<string, unknown> = {}): Route => ({ match: FIRST_SELECT, rows: [invoice(over)] });
 const FACTS = {
   amount: 500,
+  contractorId: 3,
   contractorName: "Acme",
   direction: "incoming",
   invoiceNumber: "IV-9-1",
@@ -151,6 +156,8 @@ beforeEach(() => {
   mockSql([APP_USER, JOB_BUILDING, STORED]);
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("approveJobInvoice", () => {
@@ -671,6 +678,21 @@ describe("invoice reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, and what the approvals being undone covered", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Amount: 5000, Status: "director_approved" }), STORED]);
+
+      await undo();
+
+      expect(calls()[0].after).toMatchObject({
+        amount: 5000,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 5000,
+        originalApprovedAmount: 5000,
+        previousAmount: 5000,
+      });
+    });
+
     it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, row({ Status: "director_approved" }), STORED]);
 
@@ -771,6 +793,21 @@ describe("invoice reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, measured against the invoice's approval", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
+
+      await unmark();
+
+      expect(calls()[0].after).toMatchObject({
+        amount: 500,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 500,
+        originalApprovedAmount: 500,
+        previousAmount: 500,
+      });
+    });
+
     it("clears the marking and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
 
@@ -828,7 +865,17 @@ describe("invoice reversals and deletions", () => {
         actorName: "Casey Controller",
         actorRole: "accounts_manager",
         actorUserId: 21,
-        after: null,
+        after: {
+          amount: 0,
+          contractorId: 3,
+          contractorName: "Acme",
+          deleted: true,
+          delta: -750,
+          deltaPercent: -100,
+          newAmount: 0,
+          originalApprovedAmount: 750,
+          previousAmount: 750,
+        },
         before: { ...SNAPSHOT, amount: 750, status: "rejected" },
         buildingId: 5,
         isException: true,
@@ -972,11 +1019,49 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
       amount: 500,
       approvedAt: "2026-10-01T02:03:04.000Z",
       approvedBy: "Pat Approver",
+      contractorId: 3,
+      contractorName: "Acme",
       directorApprovedAt: "2026-10-02T05:06:07.000Z",
       directorApprovedBy: "Dana Director",
       status: "approved",
     });
-    expect(row.after).toEqual({ ...FACTS, amount: 9000, status: "pending" });
+    expect(row.after).toEqual({
+      ...FACTS,
+      amount: 9000,
+      delta: 8500,
+      deltaPercent: 1700,
+      newAmount: 9000,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
+      status: "pending",
+    });
+  });
+
+  it("says how far an edit moved the amount, down as well as up, measured against what was approved", async () => {
+    await edit({ Amount: 380 });
+
+    expect(resets()[0].after).toMatchObject({
+      amount: 380,
+      delta: -120,
+      deltaPercent: -24,
+      newAmount: 380,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
+    });
+  });
+
+  it("a contractor swapped in the same edit: `before` names the one the approval was for, `after` looks up the new one", async () => {
+    // Each name leads to its own contractor.
+    const routes = [APP_USER, JOB_BUILDING, approved(), reloaded];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
+      if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 3 }];
+      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+    });
+
+    await edit({ ContractorName: "Beta Pty" });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
   });
 
   it("shows the edit as a whole in `after`: the new supplier number and direction come with the new amount", async () => {
@@ -1081,6 +1166,75 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
   });
 });
 
+describe("the contractor id on invoice rows: an invoice keeps the contractor's name and no id", () => {
+  const approve = () => approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+  const lookups = () => db.executeQuery.mock.calls.filter((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  it("looks the id up from the name, as the one contractor holding it, binding the name", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(1);
+    expect(String(lookups()[0][1])).toBe("SELECT TOP 2 ContractorID FROM dbo.Contractors WHERE ContractorName = @Name");
+    expect(lookups()[0][2]).toEqual([expect.objectContaining({ name: "Name", value: "Acme" })]);
+    expect(rows()[0].after).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(rows()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+  });
+
+  it("looks it up inside the decision's transaction, before the row is written", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED]);
+
+    await approve();
+
+    const lookedUp = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.indexOf(lookups()[0])];
+    expect(lookedUp).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+    expect(lookedUp).toBeLessThan(rows()[0].order);
+  });
+
+  it("leaves the id null, rather than guessing, when no contractor has that name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, rows: [] }]);
+
+    await approve();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme" });
+  });
+
+  it("leaves the id null, rather than guessing, when several contractors have that name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, rows: [{ ContractorID: 3 }, { ContractorID: 8 }] }]);
+
+    await approve();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme" });
+  });
+
+  it("asks nothing, and records null, for an invoice with no contractor name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorName: null }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(0);
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: null });
+  });
+
+  it("does not lose the approval when the lookup fails: the id is left null and the decision goes on", async () => {
+    moneyShape.recordHasNo("contractor");
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, reject: new Error("permission denied") }]);
+
+    const res = await approve();
+
+    expect(res.status).toBe(200);
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme", status: "approved" });
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+});
+
 describe("the director request that follows an invoice approval", () => {
   const SENT_AT = new Date("2026-10-13T00:00:00Z");
   const PACKET = { attachments: 1, sections: ["job summary", "quote QT-9-1", "invoice IV-9-1"], separateFiles: 0 };
@@ -1123,10 +1277,15 @@ describe("the director request that follows an invoice approval", () => {
     });
     expect(row.after).toEqual({
       amount: 5000,
+      contractorId: 3,
+      contractorName: "Acme",
       currency: "AUD",
+      direction: "incoming",
+      invoiceNumber: "IV-9-1",
       packet: PACKET,
       recipients: ["Bo Boss", "Dana Director"],
       resend: false,
+      supplierInvoiceNumber: "INV-0042",
       unnamedRecipients: 0,
     });
   });
@@ -1203,7 +1362,7 @@ describe("the director request that follows an invoice approval", () => {
 
   it("rolls the stamp back when the row for the send can't be written: never a stamp without its record", async () => {
     let inserts = 0;
-    const routes = [APP_USER, JOB_BUILDING, overEveryLimit, STORED, NAMES];
+    const routes = [APP_USER, JOB_BUILDING, overEveryLimit, STORED, NAMES, CONTRACTOR];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (/INSERT INTO dbo\.DecisionLedger/.test(sql) && ++inserts >= 2) throw new Error("ledger unavailable");
       return routes.find((r) => r.match.test(sql))?.rows ?? [];
@@ -1232,8 +1391,19 @@ describe("the director request that follows an invoice approval", () => {
 describe("resendDirectorInvoiceEmail", () => {
   const SENT_AT = new Date("2026-10-13T00:00:00Z");
   const awaiting = (over: Record<string, unknown> = {}): Route => ({
-    match: /SELECT JobID, Amount, Status FROM JobInvoices WHERE JobInvoiceID/,
-    rows: [{ Amount: 5000, JobID: 9, Status: "approved", ...over }],
+    match: /SELECT JobID, Amount, Status, InvoiceNumber/,
+    rows: [
+      {
+        Amount: 5000,
+        ContractorName: "Acme",
+        Direction: "incoming",
+        InvoiceNumber: "IV-9-1",
+        JobID: 9,
+        Status: "approved",
+        SupplierInvoiceNumber: "INV-0042",
+        ...over,
+      },
+    ],
   });
   const NAMES: Route = { match: /SELECT DisplayName FROM dbo\.AppUsers WHERE Email IN/, rows: [{ DisplayName: "Dana Director" }] };
   const STAMP = /UPDATE JobInvoices\s+SET DirectorEmailSentAt/;
@@ -1261,10 +1431,15 @@ describe("resendDirectorInvoiceEmail", () => {
       actorRole: "facilities",
       after: {
         amount: 5000,
+        contractorId: 3,
+        contractorName: "Acme",
         currency: "AUD",
+        direction: "incoming",
+        invoiceNumber: "IV-9-1",
         packet: { attachments: 0, sections: ["job summary", "invoice IV-9-1"], separateFiles: 0 },
         recipients: ["Dana Director"],
         resend: true,
+        supplierInvoiceNumber: "INV-0042",
         unnamedRecipients: 0,
       },
       buildingId: 5,
@@ -1297,7 +1472,7 @@ describe("resendDirectorInvoiceEmail", () => {
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({
       action: "invoice.director_request_failed",
-      after: { amount: 5000, currency: "AUD", resend: true },
+      after: { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", invoiceNumber: "IV-9-1", resend: true },
       isException: true,
       ruleApplied: "send_failed",
       subjectId: "5",
@@ -1379,4 +1554,8 @@ describe("resendDirectorInvoiceEmail", () => {
     ]);
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
   });
+});
+
+it("wrote every invoice money code in this file, each checked against the shape trend reports read", () => {
+  moneyShape.expectEveryCodeWritten("invoice.");
 });

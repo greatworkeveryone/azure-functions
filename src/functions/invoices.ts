@@ -12,7 +12,20 @@ import { decideApprovalAmountEdit } from "../edit-effects";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { approvalRule, approvalSnapshot, invoiceFacts, invoiceSnapshot, jobScope } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvalRule,
+  approvalSnapshot,
+  approvedAmount,
+  contractorFacts,
+  contractorIdForName,
+  deletionAfter,
+  invoiceFacts,
+  invoiceSnapshot,
+  jobScope,
+  withContractorId,
+} from "../ledger/moneyDecisions";
 import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
@@ -600,21 +613,26 @@ export async function upsertJobInvoice(
         // up who is editing above.
         if (!actor) throw new Error("An approval was reset without a ledger actor");
         const scope = await jobScope(connection, jobId);
+        const known = await withContractorId(connection, before);
+        const editedName = ContractorName !== undefined ? ContractorName : before.ContractorName;
+        const edited = {
+          ...before,
+          Amount: Amount !== undefined ? Amount : before.Amount,
+          ContractorID:
+            editedName === before.ContractorName ? known.ContractorID : await contractorIdForName(connection, editedName),
+          ContractorName: editedName,
+          Direction: Direction !== undefined ? Direction : before.Direction,
+          SupplierInvoiceNumber: supplierNumber.value !== undefined ? supplierNumber.value : before.SupplierInvoiceNumber,
+        };
         await record(connection, {
           action: "invoice.approval_reset",
           actor,
           after: {
-            ...invoiceFacts({
-              ...before,
-              Amount: Amount !== undefined ? Amount : before.Amount,
-              ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
-              Direction: Direction !== undefined ? Direction : before.Direction,
-              SupplierInvoiceNumber:
-                supplierNumber.value !== undefined ? supplierNumber.value : before.SupplierInvoiceNumber,
-            }),
+            ...invoiceFacts(edited),
+            ...amountChange({ approved: before.Amount, next: edited.Amount, previous: before.Amount }),
             status: "pending",
           },
-          before: approvalSnapshot(before),
+          before: approvalSnapshot(known),
           buildingId: scope.buildingId,
           jobId: scope.jobId,
           subject: { id: JobInvoiceID, type: "invoice" },
@@ -660,6 +678,8 @@ const APPROVE_INVOICE_TARGET: RefusalTarget = {
 interface InvoiceApproval {
   amount: number;
   directorGateEngaged: boolean;
+  /** The invoice's ledger facts, for the director request that may follow. */
+  facts: Record<string, unknown>;
   jobId: number;
   newStatus: "approved" | "awaiting_approval";
   routesToAwaitingApproval: boolean;
@@ -747,11 +767,13 @@ async function approveInvoiceInTransaction(
     );
 
     const scope = await jobScope(connection, jobId);
+    const known = await withContractorId(connection, invoice);
+    const facts = invoiceFacts(known);
     await record(connection, {
       action: "invoice.approve",
       actor,
-      after: { status: newStatus, ...invoiceFacts(invoice) },
-      before: { status: (invoice.Status as string | null) ?? null },
+      after: { status: newStatus, ...facts },
+      before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
       buildingId: scope.buildingId,
       correlationId,
       jobId: scope.jobId,
@@ -760,7 +782,7 @@ async function approveInvoiceInTransaction(
     });
 
     await commitTransaction(connection);
-    return { ok: true, approval: { amount, directorGateEngaged, jobId, newStatus, routesToAwaitingApproval } };
+    return { ok: true, approval: { amount, directorGateEngaged, facts, jobId, newStatus, routesToAwaitingApproval } };
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
     throw err;
@@ -805,7 +827,7 @@ async function approveJobInvoice(
       userRoles: await rolesForRequest(request),
     });
     if (!outcome.ok) return outcome.response;
-    const { amount, directorGateEngaged, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
+    const { amount, directorGateEngaged, facts, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
 
     // Director email + job→Done transition both gated on a successful approve
     // landing at status='approved'. If we routed to awaiting_approval, nothing
@@ -829,6 +851,7 @@ async function approveJobInvoice(
             connection: bgConnection,
             correlationId,
             currency: "AUD",
+            facts,
             jobId,
             resend: false,
             stage: "invoice",
@@ -988,11 +1011,12 @@ async function directorApproveJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.director_approve",
         actor,
-        after: { status: "director_approved", ...invoiceFacts(invoice) },
-        before: { status },
+        after: { status: "director_approved", ...invoiceFacts(known) },
+        before: { status, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1143,11 +1167,12 @@ async function undoDirectorApproveJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.undo_director_approve",
         actor,
-        after: { status: "approved", ...invoiceFacts(invoice) },
-        before: invoiceSnapshot(invoice),
+        after: { status: "approved", ...invoiceFacts(known), ...amountUnchanged(known.Amount, approvedAmount(known)) },
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1285,11 +1310,12 @@ async function rejectJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.reject",
         actor,
-        after: { status: "rejected", ...invoiceFacts(invoice) },
-        before: { status: (invoice.Status as string | null) ?? null },
+        after: { status: "rejected", ...invoiceFacts(known) },
+        before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1436,12 +1462,13 @@ async function markJobInvoiceMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.myob_created",
         actor,
-        after: { myobCreated: true, status, ...invoiceFacts(invoice) },
+        after: { myobCreated: true, status, ...invoiceFacts(known) },
         // Marking again just re-stamps; the earlier marking shows here.
-        before: { myobCreated: invoice.MyobCreatedAt != null },
+        before: { myobCreated: invoice.MyobCreatedAt != null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1545,11 +1572,17 @@ async function unmarkJobInvoiceMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.unmark_myob_created",
         actor,
-        after: { myobCreated: false, status: (invoice.Status as string | null) ?? null, ...invoiceFacts(invoice) },
-        before: invoiceSnapshot(invoice),
+        after: {
+          myobCreated: false,
+          status: (invoice.Status as string | null) ?? null,
+          ...invoiceFacts(known),
+          ...amountUnchanged(known.Amount, approvedAmount(known)),
+        },
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1647,10 +1680,12 @@ async function deleteJobInvoice(
       );
 
       const scope = await jobScope(connection, invoice.JobID as number);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.delete",
         actor,
-        before: invoiceSnapshot(invoice),
+        after: deletionAfter(invoiceFacts(known), approvedAmount(known)),
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1722,7 +1757,8 @@ async function resendDirectorInvoiceEmail(
 
     const rows = await executeQuery(
       connection,
-      `SELECT JobID, Amount, Status FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      `SELECT JobID, Amount, Status, InvoiceNumber, ContractorName, SupplierInvoiceNumber, Direction
+         FROM JobInvoices WHERE JobInvoiceID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
@@ -1740,6 +1776,7 @@ async function resendDirectorInvoiceEmail(
       amount,
       connection,
       currency: "AUD",
+      facts: invoiceFacts(await withContractorId(connection, rows[0])),
       jobId,
       resend: true,
       stage: "invoice",

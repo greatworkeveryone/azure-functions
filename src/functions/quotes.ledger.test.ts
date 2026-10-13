@@ -5,6 +5,7 @@
 // asserted is the INSERT record() really sends.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -133,6 +134,8 @@ beforeEach(() => {
   mockSql([APP_USER, JOB_BUILDING]);
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("approveQuote", () => {
@@ -221,7 +224,7 @@ describe("approveQuote", () => {
 
     await approve();
 
-    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ status: "rejected" });
+    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ contractorId: 3, contractorName: "Acme", status: "rejected" });
   });
 
   it("does the approval's writes and the ledger row inside one transaction, then commits", async () => {
@@ -681,6 +684,21 @@ describe("quote reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, and what the approval being undone covered", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+
+      await call(unapproveQuote);
+
+      expect(rows()[0].after).toMatchObject({
+        amount: 500,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 500,
+        originalApprovedAmount: 500,
+        previousAmount: 500,
+      });
+    });
+
     it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
 
@@ -840,6 +858,22 @@ describe("quote reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, measured against the approval the quote had", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ ApprovedAt: new Date("2026-10-01T02:03:04Z"), Status: "completed" }), stored]);
+
+      await call(uncompleteQuote);
+
+      expect(rows()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme", status: "completed" });
+      expect(rows()[0].after).toMatchObject({
+        amount: 500,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 500,
+        originalApprovedAmount: 500,
+        previousAmount: 500,
+      });
+    });
+
     it("is rolled back when the ledger write fails", async () => {
       mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, quote({ Status: "completed" }), stored]);
 
@@ -873,7 +907,17 @@ describe("quote reversals and deletions", () => {
         actorName: "Dana Director",
         actorRole: "accounts_manager",
         actorUserId: 21,
-        after: null,
+        after: {
+          amount: 0,
+          contractorId: 3,
+          contractorName: "Acme",
+          deleted: true,
+          delta: -500,
+          deltaPercent: -100,
+          newAmount: 0,
+          originalApprovedAmount: 500,
+          previousAmount: 500,
+        },
         before: {
           ...FACTS,
           approvedAt: "2026-10-01T02:03:04.000Z",
@@ -887,6 +931,14 @@ describe("quote reversals and deletions", () => {
         subjectId: "7",
         subjectType: "quote",
       });
+    });
+
+    it("a quote nobody approved has no approval to measure the deletion against", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote()]);
+
+      await call(deleteQuote);
+
+      expect(rows()[0].after).toMatchObject({ amount: 0, delta: -500, deltaPercent: -100, originalApprovedAmount: null, previousAmount: 500 });
     });
 
     it("deletes the quote and writes the ledger row inside one transaction that commits", async () => {
@@ -1034,6 +1086,8 @@ describe("upsertQuote: an amount edit that tears down an approval", () => {
       amount: 500,
       approvedAt: "2026-10-01T02:03:04.000Z",
       approvedBy: "Pat Approver",
+      contractorId: 3,
+      contractorName: "Acme",
       directorApprovedAt: "2026-10-02T05:06:07.000Z",
       directorApprovedBy: "Dana Director",
       status: "approved",
@@ -1043,9 +1097,34 @@ describe("upsertQuote: an amount edit that tears down an approval", () => {
       contractorId: 3,
       contractorName: "Acme",
       currency: "AUD",
+      delta: 8500,
+      deltaPercent: 1700,
+      newAmount: 9000,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
       quoteNumber: "QT-9-1",
       status: "pending",
     });
+  });
+
+  it("says how far an edit moved the amount, down as well as up, measured against what was approved", async () => {
+    await edit({ Amount: 380 });
+
+    expect(resets()[0].after).toMatchObject({
+      amount: 380,
+      delta: -120,
+      deltaPercent: -24,
+      newAmount: 380,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
+    });
+  });
+
+  it("a contractor swapped in the same edit: `before` names the one the approval was for, `after` the new one", async () => {
+    await edit({ ContractorID: 8, ContractorName: "Beta Pty" });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
   });
 
   it("a quote that was waiting for the director shows that status, and no director stamps", async () => {
@@ -1200,8 +1279,11 @@ describe("the director request that follows a quote approval", () => {
     });
     expect(row.after).toEqual({
       amount: 5000,
+      contractorId: 3,
+      contractorName: "Acme",
       currency: "AUD",
       packet: PACKET,
+      quoteNumber: "QT-9-1",
       recipients: ["Bo Boss", "Dana Director"],
       resend: false,
       unnamedRecipients: 0,
@@ -1279,7 +1361,7 @@ describe("the director request that follows a quote approval", () => {
     expect(row).toMatchObject({
       actorName: "Dana Director",
       actorRole: "accounts_manager",
-      after: { amount: 5000, currency: "AUD", resend: false },
+      after: { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", quoteNumber: "QT-9-1", resend: false },
       buildingId: 5,
       isException: true,
       jobId: 9,
@@ -1337,8 +1419,19 @@ describe("the director request that follows a quote approval", () => {
 describe("resendDirectorQuoteEmail", () => {
   const SENT_AT = new Date("2026-10-13T00:00:00Z");
   const awaiting = (over: Record<string, unknown> = {}): Route => ({
-    match: /SELECT JobID, Amount, ISNULL\(Currency, 'AUD'\) AS Currency, Status FROM Quotes/,
-    rows: [{ Amount: 5000, Currency: "AUD", JobID: 9, Status: "awaiting_director", ...over }],
+    match: /SELECT JobID, Amount, ISNULL\(Currency, 'AUD'\) AS Currency, Status, QuoteNumber/,
+    rows: [
+      {
+        Amount: 5000,
+        ContractorID: 3,
+        ContractorName: "Acme",
+        Currency: "AUD",
+        JobID: 9,
+        QuoteNumber: "QT-9-1",
+        Status: "awaiting_director",
+        ...over,
+      },
+    ],
   });
   const stored: Route = { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] };
   const NAMES: Route = { match: /SELECT DisplayName FROM dbo\.AppUsers WHERE Email IN/, rows: [{ DisplayName: "Dana Director" }] };
@@ -1367,8 +1460,11 @@ describe("resendDirectorQuoteEmail", () => {
       actorRole: "facilities",
       after: {
         amount: 5000,
+        contractorId: 3,
+        contractorName: "Acme",
         currency: "AUD",
         packet: { attachments: 0, sections: ["job summary", "quote QT-9-1"], separateFiles: 0 },
+        quoteNumber: "QT-9-1",
         recipients: ["Dana Director"],
         resend: true,
         unnamedRecipients: 0,
@@ -1403,7 +1499,7 @@ describe("resendDirectorQuoteEmail", () => {
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({
       action: "quote.director_request_failed",
-      after: { amount: 5000, currency: "AUD", resend: true },
+      after: { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", resend: true },
       isException: true,
       ruleApplied: "send_failed",
       subjectId: "7",
@@ -1485,4 +1581,8 @@ describe("resendDirectorQuoteEmail", () => {
     ]);
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
   });
+});
+
+it("wrote every quote money code in this file, each checked against the shape trend reports read", () => {
+  moneyShape.expectEveryCodeWritten("quote.");
 });

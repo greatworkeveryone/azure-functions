@@ -29,7 +29,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
 import { record } from "../ledger";
 import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
-import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
+import { contractorFacts, jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
 
@@ -1147,7 +1147,7 @@ export async function recordEmailQuoteDecision(
         status: Decision === "approved" ? "approved" : "rejected",
         ...quoteFacts(outcome.quote),
       },
-      before: { status: "awaiting_director" },
+      before: { status: "awaiting_director", ...contractorFacts(outcome.quote) },
       buildingId: scope.buildingId,
       jobId: scope.jobId,
       reason: ledgerReason(Note),

@@ -4,6 +4,7 @@
 // (WP19b, PLAN §3.12, D17). The DB layer is mocked and the real ledger runs.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -65,10 +66,13 @@ const upsertPayment = registered("upsertPayment");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
+// An invoice keeps the contractor's name and no id; the ledger looks the id up.
+const CONTRACTOR: Route = { match: /FROM dbo\.Contractors WHERE ContractorName/, rows: [{ ContractorID: 3 }] };
+
 /** Answers each statement by shape; the first matching route wins, anything else returns no rows. */
 function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    const hit = routes.find((r) => r.match.test(sql));
+    const hit = [...routes, CONTRACTOR].find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
     return hit?.rows ?? [];
   });
@@ -106,8 +110,8 @@ const paymentRoutes = (over: Record<string, unknown> = {}): Route[] => [
   APP_USER,
   JOB_BUILDING,
   {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
-    rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   },
   { match: FIRST_SELECT, rows: [payment(over)] },
   { match: /SELECT\s+PaymentID, JobID/, rows: [payment({ Status: "paid" })] },
@@ -132,6 +136,8 @@ beforeEach(() => {
   mockSql(paymentRoutes());
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("markPaymentPaid", () => {
@@ -149,6 +155,7 @@ describe("markPaymentPaid", () => {
       actorUserId: 21,
       after: {
         amount: 100,
+        contractorId: 3,
         contractorName: "Acme",
         invoiceNumber: "IV-9-1",
         jobInvoiceId: 5,
@@ -158,7 +165,7 @@ describe("markPaymentPaid", () => {
         status: "paid",
         supplierInvoiceNumber: "INV-0042",
       },
-      before: { status: "pending" },
+      before: { contractorId: 3, contractorName: "Acme", status: "pending" },
       buildingId: 5,
       isException: false,
       jobId: 9,
@@ -244,12 +251,14 @@ describe("markPaymentPaid", () => {
   });
 
   it("a payment recorded before invoices were linked is ledgered with no contractor, and asks nothing about an invoice", async () => {
+    moneyShape.recordHasNo("contractor");
     mockSql(paymentRoutes({ JobInvoiceID: null }));
 
     const res = await markPaid();
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)[0].after).toMatchObject({
+      contractorId: null,
       contractorName: null,
       jobInvoiceId: null,
       supplierInvoiceNumber: null,
@@ -360,8 +369,8 @@ describe("upsertPayment: recording a payment", () => {
     rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
   });
   const invoiceRefs: Route = {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
-    rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   };
   const insertPayment: Route = { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] };
   const storedPayment: Route = { match: /SELECT\s+PaymentID, JobID/, rows: [{ PaymentID: 11 }] };
@@ -414,6 +423,14 @@ describe("upsertPayment: recording a payment", () => {
       subjectId: "11",
       subjectType: "payment",
     });
+  });
+
+  it("carries the contractor of the invoice it pays: the id looked up from the invoice's name, and the name", async () => {
+    await create();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    const lookup = db.executeQuery.mock.calls.find((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
+    expect(lookup?.[2]).toEqual([expect.objectContaining({ name: "Name", value: "Acme" })]);
   });
 
   describe("MYOB correlation", () => {
@@ -655,8 +672,8 @@ describe("upsertPayment: changing the amount of a payment", () => {
     rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
   });
   const invoiceRefs: Route = {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
-    rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   };
   const existing = (over: Record<string, unknown> = {}): Route => ({
     match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments/,
@@ -695,14 +712,40 @@ describe("upsertPayment: changing the amount of a payment", () => {
       subjectId: "11",
       subjectType: "payment",
     });
-    expect(rows()[0].before).toEqual({ amount: 100, jobInvoiceId: 5, myobBillUid: null, status: "pending" });
+    expect(rows()[0].before).toEqual({
+      amount: 100,
+      contractorId: 3,
+      contractorName: "Acme",
+      jobInvoiceId: 5,
+      myobBillUid: null,
+      status: "pending",
+    });
     expect(rows()[0].after).toEqual({
       amount: 150,
+      contractorId: 3,
       contractorName: "Acme",
+      delta: 50,
+      deltaPercent: 50,
       invoiceNumber: "IV-9-1",
       jobInvoiceId: 5,
+      newAmount: 150,
+      originalApprovedAmount: 1000,
+      previousAmount: 100,
       status: "pending",
       supplierInvoiceNumber: "INV-0042",
+    });
+  });
+
+  it("says how far a cut moved the amount, below zero, measured against what the invoice was approved for", async () => {
+    await edit({ Amount: 40 });
+
+    expect(rows()[0].after).toMatchObject({
+      amount: 40,
+      delta: -60,
+      deltaPercent: -60,
+      newAmount: 40,
+      originalApprovedAmount: 1000,
+      previousAmount: 100,
     });
   });
 
@@ -954,4 +997,8 @@ describe("upsertPayment: changing the amount of a payment", () => {
       });
     });
   });
+});
+
+it("wrote every payment money code in this file, each checked against the shape trend reports read", () => {
+  moneyShape.expectEveryCodeWritten("payment.");
 });

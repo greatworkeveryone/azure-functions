@@ -36,7 +36,17 @@ import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { jobScope, purchaseOrderFacts, purchaseOrderMarkers, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvedQuoteAmount,
+  contractorFacts,
+  deletionAfter,
+  jobScope,
+  purchaseOrderFacts,
+  purchaseOrderMarkers,
+  purchaseOrderSnapshot,
+} from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 
@@ -490,17 +500,21 @@ export async function upsertPurchaseOrder(
         if (!actor) throw new Error("PO markers were reset without a ledger actor");
         const cleared = { myob: effects.clearMyobMarker, sent: effects.clearSentMarker };
         const scope = await jobScope(connection, jobId);
+        const edited = {
+          ...before,
+          ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
+          ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
+          CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
+          EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
+        };
+        // An order is measured against the quote approved for its job.
+        const approvedQuote = await approvedQuoteAmount(connection, jobId);
         await record(connection, {
           action: "po.markers_reset",
           actor,
           after: {
-            ...purchaseOrderFacts({
-              ...before,
-              ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
-              ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
-              CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
-              EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
-            }),
+            ...purchaseOrderFacts(edited),
+            ...amountChange({ approved: approvedQuote, next: edited.EstimatedCost, previous: before.EstimatedCost }),
             myobMarkerCleared: cleared.myob,
             sentMarkerCleared: cleared.sent,
           },
@@ -811,7 +825,7 @@ async function sendPurchaseOrder(
         actor,
         after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
         // A re-send shows the earlier send here.
-        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null },
+        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null, ...contractorFacts(contractorRows[0]) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: PurchaseOrderID, type: "purchase_order" },
@@ -926,9 +940,11 @@ async function deletePurchaseOrder(
       );
 
       const scope = await jobScope(connection, po.JobID as number);
+      const approvedQuote = await approvedQuoteAmount(connection, po.JobID as number);
       await record(connection, {
         action: "po.delete",
         actor,
+        after: deletionAfter(purchaseOrderFacts(po), approvedQuote),
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1060,7 +1076,7 @@ async function markPurchaseOrderMyobCreated(
         actor,
         after: { myobCreated: true, ...purchaseOrderFacts(po) },
         // Marking again just re-stamps; the earlier marking shows here.
-        before: { myobCreated: po.MyobCreatedAt != null },
+        before: { myobCreated: po.MyobCreatedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1185,10 +1201,11 @@ async function unmarkPurchaseOrderMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.unmark_myob_created",
         actor,
-        after: { myobCreated: false, ...purchaseOrderFacts(po) },
+        after: { myobCreated: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1338,7 +1355,7 @@ async function markPurchaseOrderComplete(
         actor,
         after: { completed: true, ...purchaseOrderFacts(po) },
         // Completing again just re-stamps; the earlier completion shows here.
-        before: { completed: po.CompletedAt != null },
+        before: { completed: po.CompletedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1462,10 +1479,11 @@ async function unmarkPurchaseOrderComplete(
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.uncomplete",
         actor,
-        after: { completed: false, ...purchaseOrderFacts(po) },
+        after: { completed: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
