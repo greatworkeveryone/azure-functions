@@ -5,8 +5,8 @@
 // derived on read and only an explicit status edit stores it. This lists the
 // rows still stuck: stored "holdover" although the expiry (Darwin date) is
 // today or later. Resetting them to "current" is the one-off the plan calls
-// for; it waits on a registered ledger action for status corrections, so this
-// endpoint only reports what that reset would change.
+// for: the admin picks rows from this list and applyHoldoverReset re-checks and
+// resets exactly those, ledgered as tenancy.holdover_reset.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";

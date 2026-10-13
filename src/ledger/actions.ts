@@ -43,6 +43,9 @@ export const LEDGER_ACTIONS = {
   "schedule.recompute_next_review": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.terms_edit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // Stored-holdover reset, run once after deploy (WP23a)
+  "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+
   // Schedule sign-off (WP24)
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.sign_off_cleared": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
