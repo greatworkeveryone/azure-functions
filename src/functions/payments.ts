@@ -13,7 +13,7 @@ import { applyMyobPayment, createMyobBill } from "../myob-client";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope, paymentFacts } from "../ledger/moneyDecisions";
-import { recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 
 const PAYMENT_COLUMNS = `
   PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Variance,
@@ -103,6 +103,12 @@ export interface PaymentInvoiceFacts {
   status: string;
 }
 
+export interface PaymentRefusal {
+  /** Short reason code, recorded in the ledger when the refusal is a control on paying money. */
+  code: string;
+  message: string;
+}
+
 /**
  * Why a payment of `amount` against this invoice must be refused, or null.
  *
@@ -110,34 +116,67 @@ export interface PaymentInvoiceFacts {
  * invoice off 'approved' (it never holds 'approved' and a DirectorApprovedAt
  * together), so an over-limit invoice could otherwise never be paid.
  */
-export function paymentInvoiceError(input: {
+export function paymentInvoiceRefusal(input: {
   amount: number;
   invoice: PaymentInvoiceFacts;
   jobId: number;
   limits: ApprovalLimit[];
-}): string | null {
+}): PaymentRefusal | null {
   const { amount, invoice, jobId, limits } = input;
-  if (invoice.jobId !== jobId) return "That invoice belongs to a different job.";
+  if (invoice.jobId !== jobId) return { code: "different_job", message: "That invoice belongs to a different job." };
   if (invoice.direction !== "incoming") {
-    return "Payments can only be recorded against incoming (contractor) invoices.";
+    return { code: "not_incoming", message: "Payments can only be recorded against incoming (contractor) invoices." };
   }
   if (invoice.status !== "approved" && invoice.status !== "director_approved") {
-    return `The invoice has to be approved before it can be paid (it is currently ${invoice.status}).`;
+    return {
+      code: "invoice_not_approved",
+      message: `The invoice has to be approved before it can be paid (it is currently ${invoice.status}).`,
+    };
   }
   if (invoice.amount == null || invoice.amount <= 0) {
-    return "The invoice has no amount recorded, so it can't be paid.";
+    return { code: "no_invoice_amount", message: "The invoice has no amount recorded, so it can't be paid." };
   }
   if (requiresDirectorApproval(invoice.amount, limits) && !invoice.directorApprovedAt) {
-    return "This invoice is over the approval limit and needs director approval before it can be paid.";
+    return {
+      code: "director_approval_required",
+      message: "This invoice is over the approval limit and needs director approval before it can be paid.",
+    };
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    return "The payment amount must be greater than zero.";
+    return { code: "invalid_amount", message: "The payment amount must be greater than zero." };
   }
   const remainingCents = toCents(invoice.amount) - toCents(invoice.paidSoFar);
   if (toCents(amount) > remainingCents) {
-    return `A payment of ${formatMoney(toCents(amount))} is more than the ${formatMoney(Math.max(remainingCents, 0))} still unpaid on this invoice.`;
+    return {
+      code: "exceeds_unpaid_balance",
+      message: `A payment of ${formatMoney(toCents(amount))} is more than the ${formatMoney(Math.max(remainingCents, 0))} still unpaid on this invoice.`,
+    };
   }
   return null;
+}
+
+export function paymentInvoiceError(input: Parameters<typeof paymentInvoiceRefusal>[0]): string | null {
+  return paymentInvoiceRefusal(input)?.message ?? null;
+}
+
+// The refusals that are controls on paying money: the approval chain and the
+// invoice's balance. These are ledgered as refused attempts; the rest are bad
+// input (the wrong job, a zero amount) and are not.
+const RECORDED_PAYMENT_REFUSALS: ReadonlySet<string> = new Set([
+  "director_approval_required",
+  "exceeds_unpaid_balance",
+  "invoice_not_approved",
+]);
+
+// Who the money goes to is on the invoice being paid, not on the payment.
+async function loadPaidInvoice(connection: Connection, jobInvoiceId: number | null | undefined) {
+  if (jobInvoiceId === null || jobInvoiceId === undefined) return undefined;
+  const rows = await executeQuery(
+    connection,
+    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+    [{ name: "Id", type: TYPES.Int, value: jobInvoiceId }],
+  );
+  return rows[0];
 }
 
 // Locks the invoice row for the surrounding transaction so two concurrent
@@ -200,6 +239,14 @@ function parseCreateInput(
   return { ok: true, value: { amount: Amount, jobId: JobID, jobInvoiceId: JobInvoiceID } };
 }
 
+// Editing a payment isn't a ledgered decision; only an attempt to create one is
+// recorded, against the invoice it would have paid.
+const CREATE_PAYMENT_TARGET: RefusalTarget = {
+  attempted: (body) => (body.PaymentID === undefined ? "payment.create" : null),
+  idField: "JobInvoiceID",
+  subjectType: "invoice",
+};
+
 async function upsertPayment(
   request: HttpRequest,
   context: InvocationContext,
@@ -208,7 +255,10 @@ async function upsertPayment(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, CREATE_PAYMENT_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -244,6 +294,14 @@ async function upsertPayment(
 
     if (create) {
       // ── Create ──────────────────────────────────────────────────────────────
+      // Recording a payment is a decision (PLAN §3.12): the payment and its
+      // ledger row commit together or not at all, and only then is MYOB asked
+      // for the bill (as it always was). One correlation id goes to the ledger
+      // row and to that MYOB call, so MyobApiLog leads back to the decision.
+      const ledgerActor = await resolveLedgerActor(request, connection);
+      if (!ledgerActor) return unauthorizedResponse();
+      const correlationId = newCorrelationId();
+
       let newId: number;
       await beginTransaction(connection);
       try {
@@ -252,7 +310,7 @@ async function upsertPayment(
           await rollbackTransaction(connection).catch(() => {});
           return { status: 404, jsonBody: { error: "Invoice not found." } };
         }
-        const refusal = paymentInvoiceError({
+        const refusal = paymentInvoiceRefusal({
           amount: create.amount,
           invoice,
           jobId: create.jobId,
@@ -260,7 +318,18 @@ async function upsertPayment(
         });
         if (refusal) {
           await rollbackTransaction(connection).catch(() => {});
-          return { status: 422, jsonBody: { error: refusal } };
+          if (RECORDED_PAYMENT_REFUSALS.has(refusal.code)) {
+            // A refused attempt, ledgered in a transaction of its own now that
+            // this one has rolled back.
+            await recordRefusal(
+              connection,
+              ledgerActor,
+              { id: create.jobInvoiceId, type: "invoice" },
+              { attempted: "payment.create", code: refusal.code, message: refusal.message, state: { status: invoice.status } },
+              invoice.jobId,
+            );
+          }
+          return { status: 422, jsonBody: { error: refusal.message } };
         }
 
         const inserted = await executeQuery(
@@ -285,6 +354,29 @@ async function upsertPayment(
           ],
         );
         newId = inserted[0].PaymentID as number;
+
+        const scope = await jobScope(connection, create.jobId);
+        await record(connection, {
+          action: "payment.create",
+          actor: ledgerActor,
+          after: {
+            status: "pending",
+            ...paymentFacts(
+              {
+                Amount: create.amount,
+                JobInvoiceID: create.jobInvoiceId,
+                MyobID: null,
+                PurchaseOrderID: PurchaseOrderID ?? null,
+                QuoteID: QuoteID ?? null,
+              },
+              await loadPaidInvoice(connection, create.jobInvoiceId),
+            ),
+          },
+          buildingId: scope.buildingId,
+          correlationId,
+          jobId: scope.jobId,
+          subject: { id: newId, type: "payment" },
+        });
         await commitTransaction(connection);
       } catch (err) {
         await rollbackTransaction(connection).catch(() => {});
@@ -317,6 +409,7 @@ async function upsertPayment(
           actor,
           amount: create.amount,
           contractorName: contractorName ?? undefined,
+          correlationId,
           jobId: create.jobId,
           jobTitle,
           notes: Notes ?? undefined,
@@ -531,20 +624,11 @@ async function markPaymentPaid(
         ],
       );
 
-      // Who the money goes to is on the invoice being paid, not on the payment.
-      const invoiceRows =
-        payment.JobInvoiceID == null
-          ? []
-          : await executeQuery(
-              connection,
-              "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
-              [{ name: "Id", type: TYPES.Int, value: payment.JobInvoiceID }],
-            );
       const scope = await jobScope(connection, payment.JobID as number | null | undefined);
       await record(connection, {
         action: "payment.myob_applied",
         actor: ledgerActor,
-        after: { status: "paid", ...paymentFacts(payment, invoiceRows[0]) },
+        after: { status: "paid", ...paymentFacts(payment, await loadPaidInvoice(connection, payment.JobInvoiceID)) },
         before: { status: (payment.Status as string | null) ?? null },
         buildingId: scope.buildingId,
         correlationId,

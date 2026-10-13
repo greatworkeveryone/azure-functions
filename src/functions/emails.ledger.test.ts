@@ -170,21 +170,29 @@ describe("a director's emailed approval", () => {
     });
   });
 
-  it("names the operator who put it in as the actor and the director who replied as the one it relies on", async () => {
+  it("names the director who replied as the actor, as Quotes.DirectorApprovedBy does", async () => {
     await decide();
 
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({
       actorKind: "user",
-      actorName: "Ops User",
-      actorRole: "accounts_manager",
-      actorUserId: 21,
-      attributedName: "Dana Director",
-      attributedRole: "director",
-      attributedUserId: 31,
+      actorName: "Dana Director",
+      actorRole: "director",
+      actorUserId: 31,
     });
   });
 
-  it("names nobody as relied on when the director recorded their own reply", async () => {
+  it("puts the signed-in operator who recorded the reply in `after.recordedBy`, and attributes the decision to nobody", async () => {
+    await decide();
+
+    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({
+      after: { recordedBy: { name: "Ops User", userId: 21 }, sourceEmailId: 42 },
+      attributedName: null,
+      attributedRole: null,
+      attributedUserId: null,
+    });
+  });
+
+  it("is the same person twice when the director recorded their own reply", async () => {
     auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "dana@example.com", name: "Dana Director", oid: "director-oid" });
     mockSql([{ match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ UserID: 31 }] }, ...HAPPY]);
 
@@ -192,11 +200,19 @@ describe("a director's emailed approval", () => {
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({
+      actorName: "Dana Director",
       actorUserId: 31,
+      after: { recordedBy: { name: "Dana Director", userId: 31 } },
       attributedName: null,
-      attributedRole: null,
-      attributedUserId: null,
     });
+  });
+
+  it("takes the actor from the sender's AppUsers row, never from the signed-in caller or the body", async () => {
+    await decide({ ActorName: "Mallory", RecordedBy: "Mallory" });
+
+    const [row] = ledgerInserts(db.executeQuery);
+    expect(row.actorName).toBe("Dana Director");
+    expect(JSON.stringify(row)).not.toContain("Mallory");
   });
 
   it("carries the director's note as the reason", async () => {
@@ -218,7 +234,7 @@ describe("a director's emailed approval", () => {
     const res = await decide();
 
     expect(res.status).toBe(200);
-    expect(String(ledgerInserts(db.executeQuery)[0].attributedName)).toHaveLength(200);
+    expect(String(ledgerInserts(db.executeQuery)[0].actorName)).toHaveLength(200);
   });
 
   it("writes the helper's changes, the email flip and the ledger row inside one transaction that commits", async () => {
@@ -286,9 +302,10 @@ describe("a director's emailed rejection", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       action: "quote.director_reject",
-      actorName: "Ops User",
-      after: { sourceEmailId: 42, status: "rejected" },
-      attributedName: "Dana Director",
+      actorName: "Dana Director",
+      actorRole: "director",
+      after: { recordedBy: { name: "Ops User", userId: 21 }, sourceEmailId: 42, status: "rejected" },
+      attributedName: null,
       before: { status: "awaiting_director" },
       jobId: 9,
       reason: "Too expensive",

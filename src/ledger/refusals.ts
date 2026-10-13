@@ -131,8 +131,9 @@ export async function recordRefusal(
 
 export interface RefusalTarget {
   /** The decision that was refused; a function of the body when the endpoint
-   *  takes more than one kind (an email reply approves or rejects). */
-  attempted: LedgerAction | ((body: Record<string, unknown>) => LedgerAction);
+   *  takes more than one kind (an email reply approves or rejects), returning
+   *  null when this request isn't a ledgered decision (an edit, say). */
+  attempted: LedgerAction | ((body: Record<string, unknown>) => LedgerAction | null);
   /** The request body field holding the subject's id, e.g. "QuoteID". */
   idField: string;
   subjectType: RefusalSubjectType;
@@ -157,6 +158,7 @@ export async function recordRefusalForRequest(
     const id = body[target.idField];
     if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) return;
     const attempted = typeof target.attempted === "function" ? target.attempted(body) : target.attempted;
+    if (attempted === null) return;
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);

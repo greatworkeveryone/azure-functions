@@ -28,7 +28,7 @@ import { checkRateLimit } from "../rateLimit";
 import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
 import { record } from "../ledger";
-import { resolveLedgerActor } from "../ledger/actor";
+import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
@@ -918,11 +918,11 @@ export async function promoteEmailToJobUpdate(
 //
 // Ledger (PLAN §3.12): the same quote.director_approve / quote.director_reject
 // as the in-app buttons, ruleApplied "email_reply", the email in `after`. The
-// person who decided is the director who replied; the person who put it in
-// Floorplan is the signed-in operator, so the operator is the ledger's actor
-// and the director is named as the one whose authority it relies on. A reply
-// that can't stand as a director's decision is a refused attempt and is
-// ledgered as one.
+// ledger's actor is the person who decided: the director who replied, as
+// Quotes.DirectorApprovedBy already says. The signed-in operator who put the
+// reply into Floorplan is in `after.recordedBy`. A reply that can't stand as a
+// director's decision is a refused attempt, ledgered as one against the
+// operator who tried to record it.
 
 interface RecordEmailQuoteDecisionBody {
   Decision?: unknown;
@@ -1012,14 +1012,15 @@ export async function recordEmailQuoteDecision(
   try {
     const conn = await createRequestConnection(token);
     connection = conn;
-    const actor = await resolveLedgerActor(request, conn);
-    if (!actor) return unauthorizedResponse();
+    // The signed-in person recording the reply (not who decided it).
+    const operator = await resolveLedgerActor(request, conn);
+    if (!operator) return unauthorizedResponse();
 
     const attempted = Decision === "approved" ? "quote.director_approve" : "quote.director_reject";
     // A reply that can't stand as the director's decision is a refused
     // attempt: ledgered, then answered exactly as it always was.
     const refuse = async (status: number, code: string, error: string, jobId: number | null): Promise<HttpResponseInit> => {
-      await recordRefusal(conn, actor, { id: QuoteID, type: "quote" }, { attempted, code, message: error }, jobId);
+      await recordRefusal(conn, operator, { id: QuoteID, type: "quote" }, { attempted, code, message: error }, jobId);
       return { status, jsonBody: { error } };
     };
 
@@ -1131,22 +1132,21 @@ export async function recordEmailQuoteDecision(
     }
 
     // Both helpers act only on a quote awaiting the director here. The director
-    // who replied is named as the one whose authority this relies on, unless
-    // the director is the person recording it (a ledger entry can't attribute
-    // a decision to its own actor).
+    // who replied decided; the operator is recorded alongside the email.
     const scope = await jobScope(conn, outcome.jobId);
-    const directorIsOperator = directorUserId !== null && actor.kind === "user" && actor.userId === directorUserId;
     await record(conn, {
       action: attempted,
-      actor,
+      actor: ledgerUserActor({
+        name: directorName.slice(0, LEDGER_LIMITS.name),
+        roles: [AppRole.DIRECTOR],
+        userId: directorUserId,
+      }),
       after: {
+        recordedBy: { name: operator.name, userId: operator.kind === "user" ? operator.userId : null },
         sourceEmailId: EmailID,
         status: Decision === "approved" ? "approved" : "rejected",
         ...quoteFacts(outcome.quote),
       },
-      attributedTo: directorIsOperator
-        ? undefined
-        : { name: directorName.slice(0, LEDGER_LIMITS.name), role: AppRole.DIRECTOR, userId: directorUserId },
       before: { status: "awaiting_director" },
       buildingId: scope.buildingId,
       jobId: scope.jobId,

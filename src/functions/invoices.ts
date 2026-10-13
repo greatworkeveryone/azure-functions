@@ -12,7 +12,7 @@ import { decideApprovalAmountEdit } from "../edit-effects";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { approvalRule, invoiceFacts, jobScope } from "../ledger/moneyDecisions";
+import { approvalRule, invoiceFacts, invoiceSnapshot, jobScope } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 
@@ -989,11 +989,26 @@ async function directorApproveJobInvoice(
   }
 }
 
+// What the ledger needs to know about an invoice that is about to change or go.
+const INVOICE_LEDGER_COLUMNS = `JobID, InvoiceNumber, SupplierInvoiceNumber, ContractorName, Amount, Currency,
+  Direction, Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
+  MyobCreatedAt, MyobCreatedBy, InvoicePDFBlobName`;
+
 // ── POST /api/undoDirectorApproveJobInvoice ──────────────────────────────────
 // Body: { JobInvoiceID }
 // Reverses stage 2: Status flips from 'director_approved' back to 'approved'
 // and the audit columns clear. Refuses if the invoice has been marked as
 // created in MYOB. Caller MUST hold the 'director' role.
+//
+// Undoing a director's approval is a decision (PLAN §3.12): the reversal and
+// its ledger row commit together or not at all. The row keeps who approved the
+// invoice and when, because the reversal clears those stamps.
+
+const UNDO_DIRECTOR_APPROVE_INVOICE_TARGET: RefusalTarget = {
+  attempted: "invoice.undo_director_approve",
+  idField: "JobInvoiceID",
+  subjectType: "invoice",
+};
 
 async function undoDirectorApproveJobInvoice(
   request: HttpRequest,
@@ -1003,10 +1018,17 @@ async function undoDirectorApproveJobInvoice(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.DIRECTOR]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, UNDO_DIRECTOR_APPROVE_INVOICE_TARGET);
+    return denied;
+  }
 
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
+    await recordRefusalForRequest(request, token, UNDO_DIRECTOR_APPROVE_INVOICE_TARGET, {
+      code: "director_role_required",
+      message: "Director role required",
+    });
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
@@ -1019,57 +1041,90 @@ async function undoDirectorApproveJobInvoice(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT JobID, InvoiceNumber, Status, MyobCreatedAt
-         FROM JobInvoices WHERE JobInvoiceID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the approval recorded as undone is the one undone.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${INVOICE_LEDGER_COLUMNS} FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Invoice not found" } };
+      }
+      const invoice = rows[0];
 
-    const jobId = rows[0].JobID as number;
-    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
-    const status = (rows[0].Status as string) ?? "pending";
-    const myobCreatedAt = rows[0].MyobCreatedAt as Date | null;
+      const jobId = invoice.JobID as number;
+      const invoiceNumber = (invoice.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+      const status = (invoice.Status as string) ?? "pending";
+      const myobCreatedAt = invoice.MyobCreatedAt as Date | null;
 
-    if (status !== "director_approved") {
-      return {
-        status: 400,
-        jsonBody: { error: "Invoice is not director-approved" },
-      };
+      if (status !== "director_approved") {
+        await rollbackTransaction(connection).catch(() => {});
+        return {
+          status: 400,
+          jsonBody: { error: "Invoice is not director-approved" },
+        };
+      }
+      if (myobCreatedAt != null) {
+        // The books already have it: a refused attempt, ledgered in a
+        // transaction of its own now that this one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        const error = "Invoice has been created in MYOB — unmark MYOB first";
+        await recordRefusal(
+          connection,
+          actor,
+          { id: JobInvoiceID, type: "invoice" },
+          { attempted: "invoice.undo_director_approve", code: "already_in_myob", message: error, state: { status } },
+          jobId,
+        );
+        return { status: 400, jsonBody: { error } };
+      }
+
+      await executeQuery(
+        connection,
+        `UPDATE JobInvoices
+           SET Status = 'approved',
+               DirectorApprovedAt = NULL,
+               DirectorApprovedBy = NULL
+         WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+         VALUES (@JobID, NULL, @Text, 'invoice_director_unapproved', @InvoiceID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "Text", type: TYPES.NVarChar, value: `Director-unapproved invoice ${invoiceNumber}` },
+          { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+        ],
+      );
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "invoice.undo_director_approve",
+        actor,
+        after: { status: "approved", ...invoiceFacts(invoice) },
+        before: invoiceSnapshot(invoice),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: JobInvoiceID, type: "invoice" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    if (myobCreatedAt != null) {
-      return {
-        status: 400,
-        jsonBody: { error: "Invoice has been created in MYOB — unmark MYOB first" },
-      };
-    }
-
-    await executeQuery(
-      connection,
-      `UPDATE JobInvoices
-         SET Status = 'approved',
-             DirectorApprovedAt = NULL,
-             DirectorApprovedBy = NULL
-       WHERE JobInvoiceID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
-       VALUES (@JobID, NULL, @Text, 'invoice_director_unapproved', @InvoiceID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Director-unapproved invoice ${invoiceNumber}` },
-        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
-      ],
-    );
-    await executeQuery(
-      connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
 
     const stored = await executeQuery(
       connection,
@@ -1382,7 +1437,15 @@ async function markJobInvoiceMyobCreated(
 // ── POST /api/unmarkJobInvoiceMyobCreated ────────────────────────────────────
 // Body: { JobInvoiceID }
 // Clears the MyobCreatedAt/By fields. No completion gate — invoices don't
-// have a downstream "completed" state distinct from approval.
+// have a downstream "completed" state distinct from approval. The unmarking
+// and its ledger row commit together or not at all; the row keeps who marked
+// the invoice and when, because unmarking clears those.
+
+const UNMARK_INVOICE_MYOB_TARGET: RefusalTarget = {
+  attempted: "invoice.unmark_myob_created",
+  idField: "JobInvoiceID",
+  subjectType: "invoice",
+};
 
 async function unmarkJobInvoiceMyobCreated(
   request: HttpRequest,
@@ -1392,7 +1455,10 @@ async function unmarkJobInvoiceMyobCreated(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, UNMARK_INVOICE_MYOB_TARGET);
+    return denied;
+  }
 
   let connection;
   try {
@@ -1403,39 +1469,64 @@ async function unmarkJobInvoiceMyobCreated(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      "SELECT JobID, InvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the marking recorded as cleared is the one cleared.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${INVOICE_LEDGER_COLUMNS} FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Invoice not found" } };
+      }
+      const invoice = rows[0];
 
-    const jobId = rows[0].JobID as number;
-    const invoiceNumber = (rows[0].InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+      const jobId = invoice.JobID as number;
+      const invoiceNumber = (invoice.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
 
-    await executeQuery(
-      connection,
-      `UPDATE JobInvoices
-         SET MyobCreatedAt = NULL, MyobCreatedBy = NULL
-       WHERE JobInvoiceID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
-       VALUES (@JobID, NULL, @Text, 'invoice_myob_uncreated', @InvoiceID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked invoice ${invoiceNumber} from MYOB created` },
-        { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
-      ],
-    );
-    await executeQuery(
-      connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
+      await executeQuery(
+        connection,
+        `UPDATE JobInvoices
+           SET MyobCreatedAt = NULL, MyobCreatedBy = NULL
+         WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
+         VALUES (@JobID, NULL, @Text, 'invoice_myob_uncreated', @InvoiceID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "Text", type: TYPES.NVarChar, value: `Unmarked invoice ${invoiceNumber} from MYOB created` },
+          { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
+        ],
+      );
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "invoice.unmark_myob_created",
+        actor,
+        after: { myobCreated: false, status: (invoice.Status as string | null) ?? null, ...invoiceFacts(invoice) },
+        before: invoiceSnapshot(invoice),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: JobInvoiceID, type: "invoice" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     const stored = await executeQuery(
       connection,
@@ -1454,6 +1545,15 @@ async function unmarkJobInvoiceMyobCreated(
 // ── POST /api/deleteJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID }
 // Refuses to delete approved invoices.
+//
+// A deletion leaves nothing behind but its ledger row, so the row carries a
+// snapshot of what was deleted, and the two commit together or not at all.
+
+const DELETE_INVOICE_TARGET: RefusalTarget = {
+  attempted: "invoice.delete",
+  idField: "JobInvoiceID",
+  subjectType: "invoice",
+};
 
 async function deleteJobInvoice(
   request: HttpRequest,
@@ -1463,7 +1563,10 @@ async function deleteJobInvoice(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, DELETE_INVOICE_TARGET);
+    return denied;
+  }
 
   let connection;
   try {
@@ -1474,21 +1577,58 @@ async function deleteJobInvoice(
     }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      "SELECT Status FROM JobInvoices WHERE JobInvoiceID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
-    if (rows[0].Status === "approved") {
-      return { status: 400, jsonBody: { error: "Cannot delete an approved invoice. Reject it first." } };
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the snapshot is of the invoice that is deleted.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${INVOICE_LEDGER_COLUMNS} FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Invoice not found" } };
+      }
+      const invoice = rows[0];
+      if (invoice.Status === "approved") {
+        // A refused attempt, ledgered in a transaction of its own now that this
+        // one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        const error = "Cannot delete an approved invoice. Reject it first.";
+        await recordRefusal(
+          connection,
+          actor,
+          { id: JobInvoiceID, type: "invoice" },
+          { attempted: "invoice.delete", code: "approved_invoice_protected", message: error, state: { status: "approved" } },
+          invoice.JobID as number,
+        );
+        return { status: 400, jsonBody: { error } };
+      }
+
+      await executeQuery(
+        connection,
+        "DELETE FROM JobInvoices WHERE JobInvoiceID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+
+      const scope = await jobScope(connection, invoice.JobID as number);
+      await record(connection, {
+        action: "invoice.delete",
+        actor,
+        before: invoiceSnapshot(invoice),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: JobInvoiceID, type: "invoice" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
 
-    await executeQuery(
-      connection,
-      "DELETE FROM JobInvoices WHERE JobInvoiceID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
     return { status: 200, jsonBody: { deleted: true, invoiceId: JobInvoiceID } };
   } catch (error: any) {
     context.error("deleteJobInvoice failed:", error.message);

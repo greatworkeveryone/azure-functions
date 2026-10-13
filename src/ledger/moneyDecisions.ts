@@ -56,6 +56,12 @@ function text(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function iso(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const when = value instanceof Date ? value : new Date(value as string);
+  return Number.isNaN(when.getTime()) ? null : when.toISOString();
+}
+
 // What the decision was about, as stored in a row's `after`: the amount, who
 // the money goes to, and the document's own number. Read from the table's own
 // column names, so one builder serves the row a handler loaded and the row it
@@ -103,5 +109,49 @@ export function paymentFacts(row: SqlRow, invoice?: SqlRow): Record<string, unkn
     purchaseOrderId: (row.PurchaseOrderID as number | null | undefined) ?? null,
     quoteId: (row.QuoteID as number | null | undefined) ?? null,
     supplierInvoiceNumber: text(invoice?.SupplierInvoiceNumber),
+  };
+}
+
+// A record as it stood, for `before` when a decision undoes or removes it:
+// the facts above, the status, and the approvals, markings and file references
+// the decision is about to clear or take with the row.
+
+export function quoteSnapshot(row: SqlRow): Record<string, unknown> {
+  return {
+    ...quoteFacts(row),
+    approvedAt: iso(row.ApprovedAt),
+    approvedBy: text(row.ApprovedBy),
+    directorApprovedAt: iso(row.DirectorApprovedAt),
+    directorApprovedBy: text(row.DirectorApprovedBy),
+    pdfBlobName: text(row.QuotePDFBlobName),
+    status: text(row.Status),
+  };
+}
+
+export function invoiceSnapshot(row: SqlRow): Record<string, unknown> {
+  return {
+    ...invoiceFacts(row),
+    approvedAt: iso(row.ApprovedAt),
+    approvedBy: text(row.ApprovedBy),
+    currency: text(row.Currency),
+    directorApprovedAt: iso(row.DirectorApprovedAt),
+    directorApprovedBy: text(row.DirectorApprovedBy),
+    myobCreatedAt: iso(row.MyobCreatedAt),
+    myobCreatedBy: text(row.MyobCreatedBy),
+    pdfBlobName: text(row.InvoicePDFBlobName),
+    status: text(row.Status),
+  };
+}
+
+export function purchaseOrderSnapshot(row: SqlRow): Record<string, unknown> {
+  return {
+    ...purchaseOrderFacts(row),
+    completedAt: iso(row.CompletedAt),
+    completedBy: text(row.CompletedBy),
+    myobCreatedAt: iso(row.MyobCreatedAt),
+    myobCreatedBy: text(row.MyobCreatedBy),
+    pdfBlobName: text(row.PDFBlobName),
+    sentAt: iso(row.SentAt),
+    sentBy: text(row.SentBy),
   };
 }

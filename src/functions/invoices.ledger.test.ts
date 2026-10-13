@@ -71,6 +71,9 @@ const approveJobInvoice = registered("approveJobInvoice");
 const directorApproveJobInvoice = registered("directorApproveJobInvoice");
 const rejectJobInvoice = registered("rejectJobInvoice");
 const markJobInvoiceMyobCreated = registered("markJobInvoiceMyobCreated");
+const undoDirectorApproveJobInvoice = registered("undoDirectorApproveJobInvoice");
+const unmarkJobInvoiceMyobCreated = registered("unmarkJobInvoiceMyobCreated");
+const deleteJobInvoice = registered("deleteJobInvoice");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
@@ -604,6 +607,314 @@ describe("markJobInvoiceMyobCreated", () => {
       const res = await mark();
 
       expect(res).toEqual({ jsonBody: { error: "Invoice must be approved before MYOB creation" }, status: 400 });
+    });
+  });
+});
+
+// ── Reversals and deletions ─────────────────────────────────────────────────
+
+describe("invoice reversals and deletions", () => {
+  const stamps = {
+    ApprovedAt: new Date("2026-10-01T02:03:04Z"),
+    ApprovedBy: "Pat Approver",
+    DirectorApprovedAt: new Date("2026-10-02T03:04:05Z"),
+    DirectorApprovedBy: "Dana Director",
+    InvoicePDFBlobName: "invoices/5.pdf",
+  };
+  const SNAPSHOT = {
+    ...FACTS,
+    approvedAt: "2026-10-01T02:03:04.000Z",
+    approvedBy: "Pat Approver",
+    currency: "AUD",
+    directorApprovedAt: "2026-10-02T03:04:05.000Z",
+    directorApprovedBy: "Dana Director",
+    myobCreatedAt: null,
+    myobCreatedBy: null,
+    pdfBlobName: "invoices/5.pdf",
+  };
+  const row = (over: Record<string, unknown> = {}): Route => invoiceRow({ Currency: "AUD", ...stamps, ...over });
+  const calls = () => ledgerInserts(db.executeQuery);
+  const gate = { jsonBody: { details: "Required role: accounts_manager. Have: accounts", error: "Forbidden" }, status: 403 };
+  const refuseRole = () => {
+    auth.requireRole.mockResolvedValue(gate);
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    mockSql([APP_USER, INVOICE_SCOPE]);
+  };
+
+  describe("undoDirectorApproveJobInvoice", () => {
+    const undo = () => undoDirectorApproveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+
+    beforeEach(() => auth.rolesForRequest.mockResolvedValue(["director"]));
+
+    it("writes one invoice.undo_director_approve exception row, keeping who approved it and when", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Amount: 5000, Status: "director_approved" }), STORED]);
+
+      const res = await undo();
+
+      expect(res.status).toBe(200);
+      expect(calls()).toHaveLength(1);
+      expect(calls()[0]).toMatchObject({
+        action: "invoice.undo_director_approve",
+        actorName: "Casey Controller",
+        actorRole: "director",
+        actorUserId: 21,
+        after: { ...FACTS, amount: 5000, status: "approved" },
+        before: { ...SNAPSHOT, amount: 5000, status: "director_approved" },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "5",
+        subjectType: "invoice",
+      });
+    });
+
+    it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Status: "director_approved" }), STORED]);
+
+      await undo();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [FIRST_SELECT, /SET Status = 'approved',\s+DirectorApprovedAt = NULL/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("is rolled back when the ledger write fails: the approval is not undone without its record", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, row({ Status: "director_approved" }), STORED]);
+
+      const res = await undo();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(orderOf(/SET Status = 'approved',\s+DirectorApprovedAt = NULL/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("an invoice already created in MYOB: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ MyobCreatedAt: new Date("2026-10-03T00:00:00Z"), Status: "director_approved" }), STORED]);
+
+      const res = await undo();
+
+      expect(res).toEqual({ jsonBody: { error: "Invoice has been created in MYOB — unmark MYOB first" }, status: 400 });
+      expect(calls()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          before: { attempted: "invoice.undo_director_approve", status: "director_approved" },
+          jobId: 9,
+          ruleApplied: "already_in_myob",
+          subjectId: "5",
+        }),
+      ]);
+      expect(ran(/SET Status = 'approved'/)).toBe(false);
+    });
+
+    it("an invoice that isn't director-approved is a 400 with no ledger row", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Status: "approved" }), STORED]);
+
+      const res = await undo();
+
+      expect(res.status).toBe(400);
+      expect(calls()).toHaveLength(0);
+    });
+
+    it("an admin is not a director: still 403 \"Director role required\", recorded as director_role_required", async () => {
+      auth.rolesForRequest.mockResolvedValue(["admin"]);
+      mockSql([APP_USER, INVOICE_SCOPE]);
+
+      const res = await undo();
+
+      expect(res).toEqual({ jsonBody: { error: "Director role required" }, status: 403 });
+      expect(calls()).toEqual([
+        expect.objectContaining({ actorRole: "admin", before: { attempted: "invoice.undo_director_approve" }, ruleApplied: "director_role_required" }),
+      ]);
+    });
+
+    it("the role gate refusing is recorded as role_not_permitted, and answers as before", async () => {
+      refuseRole();
+
+      const res = await undo();
+
+      expect(res).toBe(gate);
+      expect(calls()).toEqual([expect.objectContaining({ ruleApplied: "role_not_permitted" })]);
+    });
+  });
+
+  describe("unmarkJobInvoiceMyobCreated", () => {
+    const unmark = () => unmarkJobInvoiceMyobCreated(makeRequest({ JobInvoiceID: 5 }), ctx);
+    const marked = row({ MyobCreatedAt: new Date("2026-10-03T04:05:06Z"), MyobCreatedBy: "Casey Controller", Status: "approved" });
+
+    it("writes one invoice.unmark_myob_created exception row, keeping who marked it and when", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
+
+      const res = await unmark();
+
+      expect(res.status).toBe(200);
+      expect(calls()).toHaveLength(1);
+      expect(calls()[0]).toMatchObject({
+        action: "invoice.unmark_myob_created",
+        actorName: "Casey Controller",
+        actorRole: "accounts_manager",
+        actorUserId: 21,
+        after: { ...FACTS, myobCreated: false, status: "approved" },
+        before: { ...SNAPSHOT, myobCreatedAt: "2026-10-03T04:05:06.000Z", myobCreatedBy: "Casey Controller", status: "approved" },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "5",
+        subjectType: "invoice",
+      });
+    });
+
+    it("clears the marking and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
+
+      await unmark();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [/SET MyobCreatedAt = NULL/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, marked, STORED]);
+
+      const res = await unmark();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(orderOf(/SET MyobCreatedAt = NULL/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("404s an unknown invoice, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await unmark();
+
+      expect(res.status).toBe(404);
+      expect(calls()).toHaveLength(0);
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await unmark();
+
+      expect(res).toBe(gate);
+      expect(calls()).toEqual([expect.objectContaining({ before: { attempted: "invoice.unmark_myob_created" }, ruleApplied: "role_not_permitted" })]);
+    });
+  });
+
+  describe("deleteJobInvoice", () => {
+    const remove = () => deleteJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+
+    it("writes one invoice.delete exception row whose `before` is a snapshot of what was deleted", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Amount: 750, Status: "rejected" })]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { deleted: true, invoiceId: 5 }, status: 200 });
+      expect(calls()).toHaveLength(1);
+      expect(calls()[0]).toMatchObject({
+        action: "invoice.delete",
+        actorName: "Casey Controller",
+        actorRole: "accounts_manager",
+        actorUserId: 21,
+        after: null,
+        before: { ...SNAPSHOT, amount: 750, status: "rejected" },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "5",
+        subjectType: "invoice",
+      });
+    });
+
+    it("snapshots the supplier's invoice number and contractor, so the invoice can be found again", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Status: "pending" })]);
+
+      await remove();
+
+      expect(calls()[0].before).toMatchObject({ contractorName: "Acme", invoiceNumber: "IV-9-1", supplierInvoiceNumber: "INV-0042" });
+    });
+
+    it("deletes the invoice and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row()]);
+
+      await remove();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      expect(orderOf(FIRST_SELECT)).toBeGreaterThan(begun);
+      expect(orderOf(/DELETE FROM JobInvoices WHERE JobInvoiceID = @Id/)).toBeGreaterThan(orderOf(FIRST_SELECT));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/DELETE FROM JobInvoices/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("is rolled back when the ledger write fails: the invoice is not deleted without its record", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, row()]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      // The DELETE ran inside the transaction that was rolled back.
+      expect(orderOf(/DELETE FROM JobInvoices/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+      expect(orderOf(/DELETE FROM JobInvoices/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("an approved invoice is protected: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Status: "approved" })]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { error: "Cannot delete an approved invoice. Reject it first." }, status: 400 });
+      expect(calls()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          before: { attempted: "invoice.delete", status: "approved" },
+          jobId: 9,
+          ruleApplied: "approved_invoice_protected",
+          subjectId: "5",
+        }),
+      ]);
+      expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
+    });
+
+    it("404s an unknown invoice, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(404);
+      expect(calls()).toHaveLength(0);
+    });
+
+    it("answers 401 and deletes nothing when the ledger can't name who is deleting", async () => {
+      auth.verifiedIdentityFromRequest.mockResolvedValue(null);
+      mockSql([APP_USER, JOB_BUILDING, row()]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(401);
+      expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
+    });
+
+    it("records a refused role as `denied`, deleting nothing", async () => {
+      refuseRole();
+
+      const res = await remove();
+
+      expect(res).toBe(gate);
+      expect(calls()).toEqual([expect.objectContaining({ before: { attempted: "invoice.delete" }, ruleApplied: "role_not_permitted" })]);
+      expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
     });
   });
 });

@@ -66,7 +66,7 @@ const db = require("../db") as {
   rollbackTransaction: jest.Mock;
 };
 const graph = require("../graph") as { graphSendMail: jest.Mock };
-const blobs = require("../blob-storage") as { downloadBlob: jest.Mock };
+const blobs = require("../blob-storage") as { deleteBlob: jest.Mock; downloadBlob: jest.Mock };
 const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
@@ -80,6 +80,11 @@ const registered = (name: string): Handler => {
 };
 const upsertPurchaseOrder = registered("upsertPurchaseOrder");
 const sendPurchaseOrder = registered("sendPurchaseOrder");
+const deletePurchaseOrder = registered("deletePurchaseOrder");
+const markPurchaseOrderMyobCreated = registered("markPurchaseOrderMyobCreated");
+const unmarkPurchaseOrderMyobCreated = registered("unmarkPurchaseOrderMyobCreated");
+const markPurchaseOrderComplete = registered("markPurchaseOrderComplete");
+const unmarkPurchaseOrderComplete = registered("unmarkPurchaseOrderComplete");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
@@ -229,6 +234,43 @@ describe("upsertPurchaseOrder: creating a PO", () => {
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
     expect(ran(/FROM dbo\.AppUsers/)).toBe(false);
+  });
+
+  describe("when the role gate says no", () => {
+    const gate = { jsonBody: { details: "Required role: accounts | facilities_manager. Have: user", error: "Forbidden" }, status: 403 };
+
+    beforeEach(() => {
+      auth.requireRole.mockResolvedValue(gate);
+      auth.rolesForRequest.mockResolvedValue(["user"]);
+      mockSql([APP_USER, { match: /SELECT JobID, BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5, JobID: 42 }] }]);
+    });
+
+    it("an attempt to create a PO is recorded against the job, and answered with the gate's own 403", async () => {
+      const res = await upsertPurchaseOrder(makeRequest(body), ctx);
+
+      expect(res).toBe(gate);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          actorRole: "user",
+          before: { attempted: "po.create" },
+          buildingId: 5,
+          jobId: 42,
+          ruleApplied: "role_not_permitted",
+          subjectId: "42",
+          subjectType: "job",
+        }),
+      ]);
+      expect(ran(/INSERT INTO PurchaseOrders/)).toBe(false);
+    });
+
+    it("an attempt to edit one is not a ledgered decision: nothing is recorded", async () => {
+      const res = await upsertPurchaseOrder(makeRequest({ EstimatedCost: 100, JobID: 42, PurchaseOrderID: 99 }), ctx);
+
+      expect(res).toBe(gate);
+      expect(db.createRequestConnection).not.toHaveBeenCalled();
+      expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    });
   });
 
   describe("a PO that would act as the quote's approval is refused", () => {
@@ -460,5 +502,492 @@ describe("sendPurchaseOrder", () => {
       }),
     ]);
     expect(graph.graphSendMail).not.toHaveBeenCalled();
+  });
+});
+
+// ── Marking, completing and deleting ────────────────────────────────────────
+
+describe("purchase order transitions", () => {
+  const FIRST_SELECT = /FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id/;
+  const stored: Route = { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] };
+  const poScope: Route = { match: /FROM PurchaseOrders s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 42 }] };
+  const po = (over: Record<string, unknown> = {}): Route => ({
+    match: FIRST_SELECT,
+    rows: [
+      {
+        CompletedAt: null,
+        CompletedBy: null,
+        ContractorID: 3,
+        ContractorName: "Acme",
+        CostNotToExceed: 900,
+        EstimatedCost: 800,
+        JobID: 42,
+        MyobCreatedAt: null,
+        MyobCreatedBy: null,
+        PDFBlobName: "po/99.pdf",
+        PONumber: "66Se261013",
+        SentAt: null,
+        SentBy: null,
+        ...over,
+      },
+    ],
+  });
+  const FACTS = { contractorId: 3, contractorName: "Acme", costNotToExceed: 900, estimatedCost: 800, poNumber: "66Se261013" };
+  const SNAPSHOT = {
+    ...FACTS,
+    completedAt: null,
+    completedBy: null,
+    myobCreatedAt: null,
+    myobCreatedBy: null,
+    pdfBlobName: "po/99.pdf",
+    sentAt: null,
+    sentBy: null,
+  };
+  const gate = { jsonBody: { details: "Required role: accounts_manager | facilities_manager. Have: facilities", error: "Forbidden" }, status: 403 };
+  const refuseRole = () => {
+    auth.requireRole.mockResolvedValue(gate);
+    auth.rolesForRequest.mockResolvedValue(["facilities"]);
+    mockSql([APP_USER, poScope]);
+  };
+  const rows = () => ledgerInserts(db.executeQuery);
+  const withIds = { id: 99, jobId: 42 };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetRateLimitForTests();
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    auth.requireRole.mockResolvedValue(null);
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    db.beginTransaction.mockResolvedValue(undefined);
+    db.commitTransaction.mockResolvedValue(undefined);
+    db.rollbackTransaction.mockResolvedValue(undefined);
+    db.createRequestConnection.mockResolvedValue({ id: "connection" });
+    statusHelpers.advanceJobStatus.mockResolvedValue(undefined);
+    blobs.deleteBlob.mockResolvedValue(undefined);
+    mockSql([APP_USER, JOB_BUILDING, po(), stored]);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  describe("deletePurchaseOrder", () => {
+    const remove = () => deletePurchaseOrder(makeRequest({ PurchaseOrderID: 99 }), ctx);
+
+    it("writes one po.delete exception row whose `before` is a snapshot of what was deleted", async () => {
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { deleted: true, purchaseOrderId: 99 }, status: 200 });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "po.delete",
+        actorKind: "user",
+        actorName: "Fred Facilities",
+        actorRole: "facilities_manager",
+        actorUserId: 21,
+        after: null,
+        before: SNAPSHOT,
+        buildingId: 5,
+        isException: true,
+        jobId: 42,
+        subjectId: "99",
+        subjectType: "purchase_order",
+      });
+    });
+
+    it("deletes the PO and writes the ledger row inside one transaction that commits", async () => {
+      await remove();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      expect(orderOf(FIRST_SELECT)).toBeGreaterThan(begun);
+      expect(orderOf(/DELETE FROM PurchaseOrders WHERE PurchaseOrderID = @Id/)).toBeGreaterThan(orderOf(FIRST_SELECT));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/DELETE FROM PurchaseOrders/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("removes the PDF only once the deletion and its record have committed", async () => {
+      await remove();
+
+      expect(blobs.deleteBlob).toHaveBeenCalledWith("po/99.pdf");
+      expect(blobs.deleteBlob.mock.invocationCallOrder[0]).toBeGreaterThan(db.commitTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("is rolled back when the ledger write fails: the PO is not deleted without its record, and keeps its PDF", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, po(), stored]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      // The DELETE ran inside the transaction that was rolled back.
+      expect(orderOf(/DELETE FROM PurchaseOrders/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+      expect(orderOf(/DELETE FROM PurchaseOrders/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("keeps the PDF too when the delete itself fails", async () => {
+      mockSql([{ match: /DELETE FROM PurchaseOrders/, reject: new Error("deadlock") }, APP_USER, JOB_BUILDING, po()]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(500);
+      expect(rows()).toHaveLength(0);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("a PO with no PDF has nothing to remove", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ PDFBlobName: null })]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(200);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+      expect(rows()[0].before).toMatchObject({ pdfBlobName: null });
+    });
+
+    it("a sent PO is protected: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ SentAt: new Date("2026-10-05T00:00:00Z") })]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { error: "Cannot delete a purchase order that has been sent." }, status: 400 });
+      expect(rows()).toEqual([
+        expect.objectContaining({ action: "denied", before: { attempted: "po.delete" }, jobId: 42, ruleApplied: "po_sent", subjectId: "99" }),
+      ]);
+      expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("a completed PO is protected: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ CompletedAt: new Date("2026-10-05T00:00:00Z") })]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { error: "Cannot delete a purchase order that has been marked complete." }, status: 400 });
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "po_completed" })]);
+      expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
+    });
+
+    it("404s an unknown PO, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(404);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("answers 401 and deletes nothing when the ledger can't name who is deleting", async () => {
+      auth.verifiedIdentityFromRequest.mockResolvedValue(null);
+
+      const res = await remove();
+
+      expect(res.status).toBe(401);
+      expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("records a refused role as `denied`, deleting nothing", async () => {
+      refuseRole();
+
+      const res = await remove();
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.delete" }, ruleApplied: "role_not_permitted", subjectId: "99" })]);
+      expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
+    });
+  });
+
+  describe("markPurchaseOrderMyobCreated", () => {
+    const mark = () => markPurchaseOrderMyobCreated(makeRequest(withIds), ctx);
+
+    it("writes one po.myob_created row", async () => {
+      const res = await mark();
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "po.myob_created",
+        actorName: "Fred Facilities",
+        actorRole: "facilities_manager",
+        actorUserId: 21,
+        after: { ...FACTS, myobCreated: true },
+        before: { myobCreated: false },
+        buildingId: 5,
+        isException: false,
+        jobId: 42,
+        subjectId: "99",
+        subjectType: "purchase_order",
+      });
+    });
+
+    it("shows that it was already marked when it is marked again", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ MyobCreatedAt: new Date("2026-10-03T00:00:00Z") }), stored]);
+
+      await mark();
+
+      expect(rows()[0]).toMatchObject({ after: { myobCreated: true }, before: { myobCreated: true } });
+    });
+
+    it("stamps the PO and writes the ledger row inside one transaction that commits", async () => {
+      await mark();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [FIRST_SELECT, /SET MyobCreatedAt = SYSUTCDATETIME\(\)/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, po(), stored]);
+
+      const res = await mark();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(orderOf(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("404s a PO that isn't on that job, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await mark();
+
+      expect(res.status).toBe(404);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await mark();
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.myob_created" }, ruleApplied: "role_not_permitted", subjectId: "99" })]);
+    });
+  });
+
+  describe("unmarkPurchaseOrderMyobCreated", () => {
+    const unmark = () => unmarkPurchaseOrderMyobCreated(makeRequest(withIds), ctx);
+    const marked = po({ MyobCreatedAt: new Date("2026-10-03T04:05:06Z"), MyobCreatedBy: "Fred Facilities" });
+
+    it("writes one po.unmark_myob_created exception row, keeping who marked it and when", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, stored]);
+
+      const res = await unmark();
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "po.unmark_myob_created",
+        actorName: "Fred Facilities",
+        after: { ...FACTS, myobCreated: false },
+        before: { ...SNAPSHOT, myobCreatedAt: "2026-10-03T04:05:06.000Z", myobCreatedBy: "Fred Facilities" },
+        buildingId: 5,
+        isException: true,
+        jobId: 42,
+        subjectId: "99",
+        subjectType: "purchase_order",
+      });
+    });
+
+    it("clears the marking and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, stored]);
+
+      await unmark();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [/SET MyobCreatedAt = NULL/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, marked, stored]);
+
+      const res = await unmark();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(orderOf(/SET MyobCreatedAt = NULL/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("a completed PO can't be unmarked: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ CompletedAt: new Date("2026-10-05T00:00:00Z"), MyobCreatedAt: new Date("2026-10-03T00:00:00Z") })]);
+
+      const res = await unmark();
+
+      expect(res).toEqual({
+        jsonBody: { error: "Cannot undo MYOB entry — this purchase order has already been marked complete." },
+        status: 400,
+      });
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: { attempted: "po.unmark_myob_created" }, ruleApplied: "po_completed" })]);
+      expect(ran(/SET MyobCreatedAt = NULL/)).toBe(false);
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await unmark();
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.unmark_myob_created" }, ruleApplied: "role_not_permitted" })]);
+    });
+  });
+
+  describe("markPurchaseOrderComplete", () => {
+    const complete = () => markPurchaseOrderComplete(makeRequest(withIds), ctx);
+    const inMyob = po({ MyobCreatedAt: new Date("2026-10-03T00:00:00Z") });
+
+    it("writes one po.complete row", async () => {
+      mockSql([APP_USER, JOB_BUILDING, inMyob, stored]);
+
+      const res = await complete();
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "po.complete",
+        actorName: "Fred Facilities",
+        actorUserId: 21,
+        after: { ...FACTS, completed: true },
+        before: { completed: false },
+        buildingId: 5,
+        isException: false,
+        jobId: 42,
+        subjectId: "99",
+        subjectType: "purchase_order",
+      });
+    });
+
+    it("completes the PO, moves the job on and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, inMyob, stored]);
+
+      await complete();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      expect(orderOf(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBeGreaterThan(begun);
+      expect(statusHelpers.advanceJobStatus.mock.invocationCallOrder[0]).toBeGreaterThan(begun);
+      expect(statusHelpers.advanceJobStatus.mock.invocationCallOrder[0]).toBeLessThan(orderOf(/INSERT INTO dbo\.DecisionLedger/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, inMyob, stored]);
+
+      const res = await complete();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(orderOf(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("a PO the books don't have yet can't be completed: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po(), stored]);
+
+      const res = await complete();
+
+      expect(res).toEqual({
+        jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
+        status: 400,
+      });
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: { attempted: "po.complete" }, jobId: 42, ruleApplied: "not_created_in_myob" })]);
+      expect(ran(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBe(false);
+      expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await complete();
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.complete" }, ruleApplied: "role_not_permitted" })]);
+    });
+  });
+
+  describe("unmarkPurchaseOrderComplete", () => {
+    const uncomplete = () => unmarkPurchaseOrderComplete(makeRequest(withIds), ctx);
+    const completed = po({
+      CompletedAt: new Date("2026-10-05T06:07:08Z"),
+      CompletedBy: "Fred Facilities",
+      MyobCreatedAt: new Date("2026-10-03T04:05:06Z"),
+      MyobCreatedBy: "Fred Facilities",
+    });
+
+    it("writes one po.uncomplete exception row, keeping who completed it and when", async () => {
+      mockSql([APP_USER, JOB_BUILDING, completed, stored]);
+
+      const res = await uncomplete();
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "po.uncomplete",
+        actorName: "Fred Facilities",
+        after: { ...FACTS, completed: false },
+        before: {
+          ...SNAPSHOT,
+          completedAt: "2026-10-05T06:07:08.000Z",
+          completedBy: "Fred Facilities",
+          myobCreatedAt: "2026-10-03T04:05:06.000Z",
+          myobCreatedBy: "Fred Facilities",
+        },
+        buildingId: 5,
+        isException: true,
+        jobId: 42,
+        subjectId: "99",
+        subjectType: "purchase_order",
+      });
+    });
+
+    it("clears the completion, rolls the job back and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, completed, stored]);
+
+      await uncomplete();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [/SET CompletedAt = NULL/, /UPDATE Jobs SET Status = 'Work'/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+    });
+
+    it("is rolled back when the ledger write fails: the job is not rolled back without a record of it", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, completed, stored]);
+
+      const res = await uncomplete();
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(orderOf(/UPDATE Jobs SET Status = 'Work'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("404s a PO that isn't on that job, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await uncomplete();
+
+      expect(res.status).toBe(404);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await uncomplete();
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.uncomplete" }, ruleApplied: "role_not_permitted" })]);
+    });
   });
 });

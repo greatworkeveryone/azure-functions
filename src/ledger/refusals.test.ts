@@ -284,6 +284,28 @@ describe("recordRefusalForRequest", () => {
     ]);
   });
 
+  it("does nothing when the endpoint says this request isn't a ledgered decision", async () => {
+    const editsAreNot = {
+      attempted: (body: Record<string, unknown>) => (body.PaymentID === undefined ? "payment.create" : null),
+      idField: "JobInvoiceID",
+      subjectType: "invoice",
+    } as const;
+
+    await recordRefusalForRequest(request({ JobInvoiceID: 5, PaymentID: 11 }), "the-token", editsAreNot, { code: "x" });
+
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+
+    mockSql([
+      { match: "FROM dbo.AppUsers WHERE EntraOid", rows: [{ UserID: 11 }] },
+      { match: "FROM JobInvoices s INNER JOIN Jobs j", rows: [{ BuildingID: 5, JobID: 9 }] },
+    ]);
+    await recordRefusalForRequest(request({ JobInvoiceID: 5 }), "the-token", editsAreNot, { code: "x" });
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ before: { attempted: "payment.create" }, jobId: 9, subjectId: "5", subjectType: "invoice" }),
+    ]);
+  });
+
   it("does nothing when the body can't be read", async () => {
     const unreadable = { json: jest.fn().mockRejectedValue(new Error("Unexpected end of JSON")) } as unknown as HttpRequest;
 

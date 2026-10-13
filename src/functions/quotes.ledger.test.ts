@@ -68,7 +68,16 @@ const { directorApproveQuote, rejectQuote } = require("./quotes") as {
 };
 // approveQuote is registered, not exported. Capture it before clearAllMocks wipes app.http's calls.
 const { app } = require("@azure/functions") as { app: { http: jest.Mock } };
-const approveQuote = (app.http.mock.calls.find((c: unknown[]) => c[0] === "approveQuote")?.[1] as { handler: Handler }).handler;
+const registered = (name: string): Handler => {
+  const hit = app.http.mock.calls.find((c: unknown[]) => c[0] === name);
+  if (!hit) throw new Error(`handler ${name} not registered`);
+  return (hit[1] as { handler: Handler }).handler;
+};
+const approveQuote = registered("approveQuote");
+const unapproveQuote = registered("unapproveQuote");
+const completeQuote = registered("completeQuote");
+const uncompleteQuote = registered("uncompleteQuote");
+const deleteQuote = registered("deleteQuote");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
@@ -595,6 +604,371 @@ describe("directorApproveQuote", () => {
       const res = await approve();
 
       expect(res).toEqual({ jsonBody: { error: "Director role required" }, status: 403 });
+    });
+  });
+});
+
+// ── Reversals and deletions ─────────────────────────────────────────────────
+
+describe("quote reversals and deletions", () => {
+  const FIRST_SELECT = /FROM Quotes WITH \(UPDLOCK, HOLDLOCK\) WHERE QuoteID = @Id/;
+  const quoteScope: Route = { match: /FROM Quotes s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] };
+  const stored: Route = { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] };
+  const noPayments: Route = { match: /SELECT COUNT\(\*\) AS N FROM Payments/, rows: [{ N: 0 }] };
+  const quote = (over: Record<string, unknown> = {}): Route => ({
+    match: FIRST_SELECT,
+    rows: [
+      {
+        Amount: 500,
+        ApprovedAt: null,
+        ApprovedBy: null,
+        ContractorID: 3,
+        ContractorName: "Acme",
+        Currency: "AUD",
+        DirectorApprovedAt: null,
+        DirectorApprovedBy: null,
+        JobID: 9,
+        QuoteNumber: "QT-9-1",
+        QuotePDFBlobName: "quotes/7.pdf",
+        Status: "pending",
+        ...over,
+      },
+    ],
+  });
+  const FACTS = { amount: 500, contractorId: 3, contractorName: "Acme", currency: "AUD", quoteNumber: "QT-9-1" };
+  const gate = { jsonBody: { details: "Required role: accounts_manager. Have: facilities", error: "Forbidden" }, status: 403 };
+  const refuseRole = () => {
+    auth.requireRole.mockResolvedValue(gate);
+    auth.rolesForRequest.mockResolvedValue(["facilities"]);
+    mockSql([APP_USER, quoteScope]);
+  };
+  const call = (handler: Handler) => handler(makeRequest({ QuoteID: 7 }), ctx);
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  describe("unapproveQuote", () => {
+    const approvedOnce = (over: Record<string, unknown> = {}) =>
+      quote({ ApprovedAt: new Date("2026-10-01T02:03:04Z"), ApprovedBy: "Pat Approver", Status: "approved", ...over });
+
+    it("writes one quote.unapprove exception row, keeping who approved it and when", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+
+      const res = await call(unapproveQuote);
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "quote.unapprove",
+        actorKind: "user",
+        actorName: "Dana Director",
+        actorRole: "accounts_manager",
+        actorUserId: 21,
+        after: { ...FACTS, status: "pending" },
+        before: {
+          ...FACTS,
+          approvedAt: "2026-10-01T02:03:04.000Z",
+          approvedBy: "Pat Approver",
+          pdfBlobName: "quotes/7.pdf",
+          status: "approved",
+        },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "7",
+        subjectType: "quote",
+      });
+    });
+
+    it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+
+      await call(unapproveQuote);
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [FIRST_SELECT, /UPDATE Quotes\s+SET Status = 'pending'/, /UPDATE Jobs\s+SET ApprovedQuoteID = NULL/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("is rolled back when the ledger write fails: the approval is not undone without its record", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+
+      const res = await call(unapproveQuote);
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(orderOf(/UPDATE Quotes\s+SET Status = 'pending'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("a payment already recorded: the same 400, recorded as a refused attempt", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), { match: /SELECT COUNT\(\*\) AS N FROM Payments/, rows: [{ N: 2 }] }, stored]);
+
+      const res = await call(unapproveQuote);
+
+      expect(res).toEqual({ jsonBody: { error: "Cannot unapprove — a payment has already been recorded against this quote." }, status: 400 });
+      expect(rows()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          before: { attempted: "quote.unapprove", status: "approved" },
+          buildingId: 5,
+          jobId: 9,
+          ruleApplied: "payment_recorded",
+          subjectId: "7",
+        }),
+      ]);
+      expect(orderOf(/UPDATE Quotes/)).toBe(-1);
+    });
+
+    it("a quote that isn't approved is a 400 with no ledger row", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "pending" }), noPayments]);
+
+      const res = await call(unapproveQuote);
+
+      expect(res.status).toBe(400);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("404s an unknown quote, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await call(unapproveQuote);
+
+      expect(res.status).toBe(404);
+      expect(rows()).toHaveLength(0);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("records a refused role as `denied` and answers with the gate's own 403", async () => {
+      refuseRole();
+
+      const res = await call(unapproveQuote);
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([
+        expect.objectContaining({ action: "denied", before: { attempted: "quote.unapprove" }, ruleApplied: "role_not_permitted", subjectId: "7" }),
+      ]);
+    });
+  });
+
+  describe("completeQuote", () => {
+    it("writes one quote.complete row: approved to completed", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "approved" }), stored]);
+
+      const res = await call(completeQuote);
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "quote.complete",
+        actorName: "Dana Director",
+        actorUserId: 21,
+        after: { ...FACTS, status: "completed" },
+        before: { status: "approved" },
+        buildingId: 5,
+        isException: false,
+        jobId: 9,
+        subjectId: "7",
+        subjectType: "quote",
+      });
+    });
+
+    it("writes the status and the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "approved" }), stored]);
+
+      await call(completeQuote);
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of [/UPDATE Quotes SET Status = 'completed'/, /INSERT INTO JobEvents/, /INSERT INTO dbo\.DecisionLedger/]) {
+        expect(orderOf(write)).toBeGreaterThan(begun);
+        expect(orderOf(write)).toBeLessThan(committed);
+      }
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, quote({ Status: "approved" }), stored]);
+
+      const res = await call(completeQuote);
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(orderOf(/UPDATE Quotes SET Status = 'completed'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("a quote that isn't approved is a 400 with no ledger row", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "pending" })]);
+
+      const res = await call(completeQuote);
+
+      expect(res.status).toBe(400);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("records a refused role as `denied`", async () => {
+      refuseRole();
+
+      const res = await call(completeQuote);
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "quote.complete" }, ruleApplied: "role_not_permitted" })]);
+    });
+  });
+
+  describe("uncompleteQuote", () => {
+    it("writes one quote.uncomplete exception row: completed back to approved", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "completed" }), stored]);
+
+      const res = await call(uncompleteQuote);
+
+      expect(res.status).toBe(200);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "quote.uncomplete",
+        after: { ...FACTS, status: "approved" },
+        before: { status: "completed" },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "7",
+      });
+    });
+
+    it("is rolled back when the ledger write fails", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, quote({ Status: "completed" }), stored]);
+
+      const res = await call(uncompleteQuote);
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(orderOf(/UPDATE Quotes SET Status = 'approved'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("a quote that isn't completed is a 400 with no ledger row", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: "approved" })]);
+
+      const res = await call(uncompleteQuote);
+
+      expect(res.status).toBe(400);
+      expect(rows()).toHaveLength(0);
+    });
+  });
+
+  describe("deleteQuote", () => {
+    it("writes one quote.delete exception row whose `before` is a snapshot of what was deleted", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ ApprovedAt: new Date("2026-10-01T02:03:04Z"), ApprovedBy: "Pat Approver", Status: "awaiting_director" })]);
+
+      const res = await call(deleteQuote);
+
+      expect(res).toEqual({ jsonBody: { deleted: true, quoteId: 7 }, status: 200 });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "quote.delete",
+        actorName: "Dana Director",
+        actorRole: "accounts_manager",
+        actorUserId: 21,
+        after: null,
+        before: {
+          ...FACTS,
+          approvedAt: "2026-10-01T02:03:04.000Z",
+          approvedBy: "Pat Approver",
+          pdfBlobName: "quotes/7.pdf",
+          status: "awaiting_director",
+        },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        subjectId: "7",
+        subjectType: "quote",
+      });
+    });
+
+    it("deletes the quote and writes the ledger row inside one transaction that commits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, quote()]);
+
+      await call(deleteQuote);
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      expect(orderOf(FIRST_SELECT)).toBeGreaterThan(begun);
+      expect(orderOf(/DELETE FROM Quotes WHERE QuoteID = @Id/)).toBeGreaterThan(orderOf(FIRST_SELECT));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/DELETE FROM Quotes/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("is rolled back when the ledger write fails: the quote is not deleted without its record", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, quote()]);
+
+      const res = await call(deleteQuote);
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      // The DELETE ran inside the transaction that was rolled back.
+      expect(orderOf(/DELETE FROM Quotes/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+      expect(orderOf(/DELETE FROM Quotes/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("is rolled back when the delete itself fails (a payment still points at the quote), writing no row", async () => {
+      mockSql([{ match: /DELETE FROM Quotes/, reject: new Error("The DELETE statement conflicted with the REFERENCE constraint") }, APP_USER, JOB_BUILDING, quote()]);
+
+      const res = await call(deleteQuote);
+
+      expect(res.status).toBe(500);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it.each(["approved", "completed"])("a %s quote is protected: the same 400, recorded as a refused attempt", async (status) => {
+      mockSql([APP_USER, JOB_BUILDING, quote({ Status: status })]);
+
+      const res = await call(deleteQuote);
+
+      expect(res).toEqual({ jsonBody: { error: "Cannot delete an approved quote. Reject it first if needed." }, status: 400 });
+      expect(rows()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          before: { attempted: "quote.delete", status },
+          jobId: 9,
+          ruleApplied: "approved_quote_protected",
+          subjectId: "7",
+        }),
+      ]);
+      expect(orderOf(/DELETE FROM Quotes/)).toBe(-1);
+    });
+
+    it("404s an unknown quote, writing nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING]);
+
+      const res = await call(deleteQuote);
+
+      expect(res.status).toBe(404);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("answers 401 and deletes nothing when the ledger can't name who is deleting", async () => {
+      auth.verifiedIdentityFromRequest.mockResolvedValue(null);
+      mockSql([APP_USER, JOB_BUILDING, quote()]);
+
+      const res = await call(deleteQuote);
+
+      expect(res.status).toBe(401);
+      expect(orderOf(/DELETE FROM Quotes/)).toBe(-1);
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+    });
+
+    it("records a refused role as `denied`, deleting nothing", async () => {
+      refuseRole();
+
+      const res = await call(deleteQuote);
+
+      expect(res).toBe(gate);
+      expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "quote.delete" }, ruleApplied: "role_not_permitted" })]);
+      expect(orderOf(/DELETE FROM Quotes/)).toBe(-1);
     });
   });
 });
