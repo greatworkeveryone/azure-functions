@@ -110,7 +110,7 @@ const paymentRoutes = (over: Record<string, unknown> = {}): Route[] => [
   APP_USER,
   JOB_BUILDING,
   {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount, ContractorID FROM JobInvoices/,
     rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   },
   { match: FIRST_SELECT, rows: [payment(over)] },
@@ -138,6 +138,7 @@ beforeEach(() => {
 
 // Every money row any test here writes has the shape trend reports read (see the fixture).
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
+afterEach(() => moneyShape.checkInvoiceReads(db.executeQuery.mock.calls));
 afterEach(() => jest.restoreAllMocks());
 
 describe("markPaymentPaid", () => {
@@ -369,7 +370,7 @@ describe("upsertPayment: recording a payment", () => {
     rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
   });
   const invoiceRefs: Route = {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount, ContractorID FROM JobInvoices/,
     rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   };
   const insertPayment: Route = { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] };
@@ -431,6 +432,15 @@ describe("upsertPayment: recording a payment", () => {
     expect(rows()[0].after).toMatchObject({ contractorId: 3, contractorName: "Acme" });
     const lookup = db.executeQuery.mock.calls.find((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
     expect(lookup?.[2]).toEqual([expect.objectContaining({ name: "Name", value: "Acme" })]);
+  });
+
+  it("follows the invoice it pays: the id the invoice recorded wins, and the name isn't looked up", async () => {
+    mockSql(createRoutes().map((r) => (r === invoiceRefs ? { ...invoiceRefs, rows: [{ ...invoiceRefs.rows![0], ContractorID: 8 }] } : r)));
+
+    await create();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: 8, contractorName: "Acme" });
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])))).toBe(false);
   });
 
   describe("MYOB correlation", () => {
@@ -672,7 +682,7 @@ describe("upsertPayment: changing the amount of a payment", () => {
     rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
   });
   const invoiceRefs: Route = {
-    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices/,
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount, ContractorID FROM JobInvoices/,
     rows: [{ Amount: 1000, ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   };
   const existing = (over: Record<string, unknown> = {}): Route => ({

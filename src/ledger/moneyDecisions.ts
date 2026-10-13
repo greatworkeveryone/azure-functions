@@ -301,11 +301,12 @@ export async function approvedQuoteAmount(connection: Connection, jobId: number 
 }
 
 /**
- * JobInvoices keeps the contractor's name and no id, so the id a ledger row
- * carries is looked up from the name: the one dbo.Contractors row that has it.
- * A name nobody holds, or several do, leaves it null rather than guessed at. A
- * lookup that fails is logged and leaves it null too: the id is worth
- * recording, not worth losing the decision over.
+ * For an invoice that has no contractor id of its own (one made from free text,
+ * or before migration 112), the id a ledger row carries is looked up from the
+ * name: the one dbo.Contractors row that has it. A name nobody holds, or several
+ * do, leaves it null rather than guessed at. A lookup that fails is logged and
+ * leaves it null too: the id is worth recording, not worth losing the decision
+ * over.
  */
 export async function contractorIdForName(connection: Connection, name: unknown): Promise<number | null> {
   const trimmed = typeof name === "string" ? name.trim() : "";
@@ -321,7 +322,13 @@ export async function contractorIdForName(connection: Connection, name: unknown)
   }
 }
 
-/** An invoice row with the contractor id its ledger facts need (see above). */
+/**
+ * An invoice row with the contractor id its ledger facts need: the id the
+ * invoice recorded when it was made (JobInvoices.ContractorID) if it has one,
+ * and only otherwise the one looked up from its name (see above). The row has to
+ * be read with its ContractorID column for the first to apply.
+ */
 export async function withContractorId(connection: Connection, row: SqlRow): Promise<SqlRow> {
+  if (typeof row.ContractorID === "number") return row;
   return { ...row, ContractorID: await contractorIdForName(connection, row.ContractorName) };
 }

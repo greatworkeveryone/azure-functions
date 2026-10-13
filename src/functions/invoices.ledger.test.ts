@@ -158,6 +158,7 @@ beforeEach(() => {
 
 // Every money row any test here writes has the shape trend reports read (see the fixture).
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
+afterEach(() => moneyShape.checkInvoiceReads(db.executeQuery.mock.calls));
 afterEach(() => jest.restoreAllMocks());
 
 describe("approveJobInvoice", () => {
@@ -1050,6 +1051,30 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
     });
   });
 
+  it("a contractor swapped by id: `before` has the id the invoice recorded, `after` the one the edit gave, with no name lookups", async () => {
+    const routes = [APP_USER, JOB_BUILDING, approved({ ContractorID: 3 }), reloaded, { match: /FROM dbo\.Contractors WHERE ContractorID/, rows: [{ ContractorName: "Beta Pty" }] }];
+    mockSql(routes);
+
+    await edit({ ContractorID: 8 });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
+    expect(db.executeQuery.mock.calls.filter((c: unknown[]) => /WHERE ContractorName/.test(String(c[1])))).toHaveLength(0);
+  });
+
+  it("a new name with no id clears the one the invoice had: `after` falls back to looking the new name up", async () => {
+    const routes = [APP_USER, JOB_BUILDING, approved({ ContractorID: 3 }), reloaded];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
+      if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 99 }];
+      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+    });
+
+    await edit({ ContractorName: "Beta Pty" });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
+  });
+
   it("a contractor swapped in the same edit: `before` names the one the approval was for, `after` looks up the new one", async () => {
     // Each name leads to its own contractor.
     const routes = [APP_USER, JOB_BUILDING, approved(), reloaded];
@@ -1191,6 +1216,25 @@ describe("the contractor id on invoice rows: an invoice keeps the contractor's n
     const lookedUp = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.indexOf(lookups()[0])];
     expect(lookedUp).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
     expect(lookedUp).toBeLessThan(rows()[0].order);
+  });
+
+  it("uses the id the invoice recorded when it was made, and doesn't look the name up", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorID: 8 }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(0);
+    expect(rows()[0].after).toMatchObject({ contractorId: 8, contractorName: "Acme" });
+    expect(rows()[0].before).toMatchObject({ contractorId: 8, contractorName: "Acme" });
+  });
+
+  it("looks the name up only when the invoice has no id of its own", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorID: null }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(1);
+    expect(rows()[0].after).toMatchObject({ contractorId: 3 });
   });
 
   it("leaves the id null, rather than guessing, when no contractor has that name", async () => {

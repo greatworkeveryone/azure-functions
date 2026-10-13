@@ -175,7 +175,7 @@ async function loadPaidInvoice(connection: Connection, jobInvoiceId: number | nu
   if (jobInvoiceId === null || jobInvoiceId === undefined) return undefined;
   const rows = await executeQuery(
     connection,
-    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount FROM JobInvoices WHERE JobInvoiceID = @Id",
+    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount, ContractorID FROM JobInvoices WHERE JobInvoiceID = @Id",
     [{ name: "Id", type: TYPES.Int, value: jobInvoiceId }],
   );
   return rows[0] ? withContractorId(connection, rows[0]) : undefined;

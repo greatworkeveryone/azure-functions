@@ -729,6 +729,29 @@ describe("amounts and contractors for trend reports", () => {
   });
 
   describe("withContractorId", () => {
+    it("uses the id the invoice recorded when it was made, and asks nothing", async () => {
+      const row = { Amount: 500, ContractorID: 8, ContractorName: "Acme" };
+
+      await expect(withContractorId(connection, row)).resolves.toBe(row);
+
+      expect(db.executeQuery).not.toHaveBeenCalled();
+    });
+
+    it("looks the id up from the name only when the invoice has none of its own", async () => {
+      db.executeQuery.mockResolvedValue([{ ContractorID: 3 }]);
+
+      await expect(withContractorId(connection, { ContractorID: null, ContractorName: "Acme" })).resolves.toMatchObject({ ContractorID: 3 });
+      await expect(withContractorId(connection, { ContractorName: "Acme" })).resolves.toMatchObject({ ContractorID: 3 });
+
+      expect(db.executeQuery).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not take anything but a number for an id", async () => {
+      db.executeQuery.mockResolvedValue([{ ContractorID: 3 }]);
+
+      await expect(withContractorId(connection, { ContractorID: "8", ContractorName: "Acme" })).resolves.toMatchObject({ ContractorID: 3 });
+    });
+
     it("is the row with the id its name leads to, every other column as it was", async () => {
       db.executeQuery.mockResolvedValue([{ ContractorID: 3 }]);
       const row = { Amount: 500, ContractorName: "Acme", Status: "pending" };

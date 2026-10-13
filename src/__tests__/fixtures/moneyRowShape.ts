@@ -157,6 +157,24 @@ export const moneyShape = {
     }
   },
 
+  /**
+   * Every SELECT of an invoice by its id names ContractorID (migration 112), so
+   * the id the invoice recorded reaches the ledger, which only looks the name
+   * up when it is null. Pass the db mock's calls; call it from an afterEach.
+   */
+  checkInvoiceReads(calls: readonly unknown[][]): void {
+    const byId = /\bFROM\s+JobInvoices\b(?:\s+WITH\s*\([^)]*\))?\s+WHERE\s+JobInvoiceID\s*=\s*@Id\b/i;
+    for (const call of calls) {
+      const sql = String(call[1]);
+      if (!/^\s*SELECT\b/i.test(sql) || !byId.test(sql)) continue;
+      const selected = sql.split(/\bFROM\b/i)[0];
+      expect({ read: sql.replace(/\s+/g, " ").slice(0, 120), namesContractorId: /\bContractorID\b/.test(selected) }).toEqual({
+        namesContractorId: true,
+        read: sql.replace(/\s+/g, " ").slice(0, 120),
+      });
+    }
+  },
+
   /** Every code in the registry that starts with one of the prefixes was
    *  written, and so checked, by some test in the file. */
   expectEveryCodeWritten(...prefixes: string[]): void {

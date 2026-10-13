@@ -10,6 +10,7 @@ import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
+import { resolveInvoiceContractor } from "../invoice-contractor";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import {
@@ -19,7 +20,6 @@ import {
   approvalSnapshot,
   approvedAmount,
   contractorFacts,
-  contractorIdForName,
   deletionAfter,
   invoiceFacts,
   invoiceSnapshot,
@@ -88,6 +88,10 @@ interface SyncInvoicesBody { queryParams: string }
 interface UpsertJobInvoiceBody {
   JobInvoiceID?: number;
   JobID?: number;
+  /** The contractor by id (migration 112), when the request has it: from the
+   *  picker, or from the quote or order the invoice answers. Never worked out
+   *  from the name. */
+  ContractorID?: number | null;
   ContractorName?: string;
   Amount?: number;
   Currency?: string;
@@ -309,7 +313,7 @@ app.http("getInvoices", { methods: ["GET"], authLevel: "anonymous", handler: get
 // ─────────────────────────────────────────────────────────────────────────────
 
 const JOB_INVOICE_COLUMNS = `
-  JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName,
+  JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName, ContractorID,
   Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy,
@@ -349,9 +353,15 @@ async function getJobInvoices(
 }
 
 // ── POST /api/upsertJobInvoice ────────────────────────────────────────────────
-// Body: { JobInvoiceID?, JobID (required on create), ContractorName?, Amount?,
+// Body: { JobInvoiceID?, JobID (required on create), ContractorID?, ContractorName?, Amount?,
 //         Currency?, Notes?, InvoicePDFBlobName?, SourceEmailID?, ReceivedAt?, CreatedBy?,
 //         SupplierInvoiceNumber? }
+//
+// ContractorID (migration 112) is stored when the request gives it: from the
+// picker, or from the quote or order the invoice answers. Without a name it
+// takes the contractor's own. A name on its own is stored as text and never
+// matched to a contractor; on an edit it clears the id the invoice had, which
+// would otherwise point at the wrong one.
 
 export async function upsertJobInvoice(
   request: HttpRequest,
@@ -377,6 +387,7 @@ export async function upsertJobInvoice(
     const {
       JobInvoiceID,
       JobID,
+      ContractorID,
       ContractorName,
       Amount,
       Currency,
@@ -392,6 +403,10 @@ export async function upsertJobInvoice(
     if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
 
     connection = await createRequestConnection(token);
+
+    // The contractor by id, when the request names one; otherwise just the name.
+    const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
+    if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
 
     if (JobInvoiceID === undefined) {
       if (typeof JobID !== "number") {
@@ -409,7 +424,7 @@ export async function upsertJobInvoice(
         const invoiceNumber = formatDocNumber({
           prefix: "IV",
           jobId: JobID,
-          acronym: nameToAcronym(ContractorName ?? ""),
+          acronym: nameToAcronym(contractor.name ?? ""),
           seq: nextSeq,
         });
 
@@ -418,19 +433,20 @@ export async function upsertJobInvoice(
         const inserted = await executeQuery(
           connection,
           `INSERT INTO JobInvoices
-             (JobID, InvoiceNumber, Seq, ContractorName, Amount, Currency, Direction,
+             (JobID, InvoiceNumber, Seq, ContractorID, ContractorName, Amount, Currency, Direction,
               Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy,
               SupplierInvoiceNumber)
            OUTPUT INSERTED.JobInvoiceID
            VALUES
-             (@JobID, @InvoiceNumber, @Seq, @ContractorName, @Amount, @Currency, @Direction,
+             (@JobID, @InvoiceNumber, @Seq, @ContractorID, @ContractorName, @Amount, @Currency, @Direction,
               @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy,
               @SupplierInvoiceNumber);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
             { name: "InvoiceNumber", type: TYPES.NVarChar, value: invoiceNumber },
             { name: "Seq", type: TYPES.Int, value: nextSeq },
-            { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+            { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
+            { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
             { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Direction", type: TYPES.NVarChar, value: direction },
@@ -445,7 +461,7 @@ export async function upsertJobInvoice(
         const newId = inserted[0].JobInvoiceID as number;
 
         const amountLabel = typeof Amount === "number" ? ` · $${Number(Amount).toLocaleString()}` : "";
-        const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
+        const contractorLabel = contractor.name ? ` · ${contractor.name}` : "";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
@@ -491,6 +507,7 @@ export async function upsertJobInvoice(
     const update = buildUpdateSet(
       {
         Amount: TYPES.Decimal,
+        ContractorID: TYPES.Int,
         ContractorName: TYPES.NVarChar,
         Currency: TYPES.NVarChar,
         Direction: TYPES.NVarChar,
@@ -501,7 +518,8 @@ export async function upsertJobInvoice(
       },
       {
         Amount,
-        ContractorName,
+        ContractorID: contractor.id,
+        ContractorName: contractor.name,
         Currency,
         Direction,
         InvoicePDFBlobName,
@@ -531,7 +549,8 @@ export async function upsertJobInvoice(
       const beforeRows = await executeQuery(
         connection,
         `SELECT JobInvoiceID, JobID, InvoiceNumber, Amount, ContractorName, Status, ApprovedAt,
-                ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, SupplierInvoiceNumber, Direction, Currency
+                ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, SupplierInvoiceNumber, Direction, Currency,
+                ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -551,12 +570,21 @@ export async function upsertJobInvoice(
           contractorName: (before.ContractorName as string | null) ?? null,
           status: (before.Status as string | null) ?? null,
         },
-        { amount: Amount, contractorName: ContractorName },
+        { amount: Amount, contractorName: contractor.name },
       );
+
+      // A new name with no id says the invoice is from someone else now, so the
+      // id it had would point at the wrong contractor.
+      const clearsContractorId =
+        contractor.id === undefined &&
+        ContractorName !== undefined &&
+        ContractorName !== before.ContractorName &&
+        before.ContractorID != null;
+      const setClause = clearsContractorId ? `${update.setClause}, ContractorID = NULL` : update.setClause;
 
       await executeQuery(
         connection,
-        `UPDATE JobInvoices SET ${update.setClause} WHERE JobInvoiceID = @Id`,
+        `UPDATE JobInvoices SET ${setClause} WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }, ...update.params],
       );
 
@@ -614,16 +642,20 @@ export async function upsertJobInvoice(
         if (!actor) throw new Error("An approval was reset without a ledger actor");
         const scope = await jobScope(connection, jobId);
         const known = await withContractorId(connection, before);
-        const editedName = ContractorName !== undefined ? ContractorName : before.ContractorName;
-        const edited = {
+        // What the invoice's columns hold once this edit is in: the id the request
+        // gave, or the one it had if the name is unchanged, or none (and then the
+        // ledger looks one up from the new name).
+        const editedName = contractor.name !== undefined ? contractor.name : before.ContractorName;
+        const editedId =
+          contractor.id !== undefined ? contractor.id : editedName !== before.ContractorName ? null : before.ContractorID;
+        const edited = await withContractorId(connection, {
           ...before,
           Amount: Amount !== undefined ? Amount : before.Amount,
-          ContractorID:
-            editedName === before.ContractorName ? known.ContractorID : await contractorIdForName(connection, editedName),
+          ContractorID: editedId,
           ContractorName: editedName,
           Direction: Direction !== undefined ? Direction : before.Direction,
           SupplierInvoiceNumber: supplierNumber.value !== undefined ? supplierNumber.value : before.SupplierInvoiceNumber,
-        };
+        });
         await record(connection, {
           action: "invoice.approval_reset",
           actor,
@@ -698,7 +730,7 @@ async function approveInvoiceInTransaction(
     // status recorded as replaced is the one that was replaced.
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber, ContractorID FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: invoiceId }],
     );
     if (rows.length === 0) {
@@ -944,7 +976,7 @@ async function directorApproveJobInvoice(
       // Locked until commit, so the status recorded as replaced is the one replaced.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1046,7 +1078,7 @@ async function directorApproveJobInvoice(
 }
 
 // What the ledger needs to know about an invoice that is about to change or go.
-const INVOICE_LEDGER_COLUMNS = `JobID, InvoiceNumber, SupplierInvoiceNumber, ContractorName, Amount, Currency,
+const INVOICE_LEDGER_COLUMNS = `JobID, InvoiceNumber, SupplierInvoiceNumber, ContractorName, ContractorID, Amount, Currency,
   Direction, Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   MyobCreatedAt, MyobCreatedBy, InvoicePDFBlobName`;
 
@@ -1274,7 +1306,7 @@ async function rejectJobInvoice(
       // Locked until commit, so the status recorded as replaced is the one replaced.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1390,7 +1422,7 @@ async function markJobInvoiceMyobCreated(
       // Locked until commit, so the approval we check is the one we act on.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1757,7 +1789,7 @@ async function resendDirectorInvoiceEmail(
 
     const rows = await executeQuery(
       connection,
-      `SELECT JobID, Amount, Status, InvoiceNumber, ContractorName, SupplierInvoiceNumber, Direction
+      `SELECT JobID, Amount, Status, InvoiceNumber, ContractorName, SupplierInvoiceNumber, Direction, ContractorID
          FROM JobInvoices WHERE JobInvoiceID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
