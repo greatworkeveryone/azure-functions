@@ -179,15 +179,19 @@ is an index into `structure.attributes.dataSet[i].values`.
 
 ## What this fixes in the build
 
-- Fetch: one request per region, `Accept` pinned to 2.0.0, `startPeriod=2000-Q1`, timeout and retry
-  on network errors, 5xx, 408 and 429 only (404/406/422 are deterministic).
+- Fetch: one request per region, `Accept` pinned to 2.0.0, `startPeriod=2000-Q1`, 30 s timeout, 3
+  attempts with doubling backoff for network errors, timeouts, a non-JSON 200, and HTTP 408, 425, 429
+  and 5xx only (404/406/422 are deterministic and fail at once).
 - Parse: SDMX-JSON 2.0 only; map observation index through `TIME_PERIOD.values`; read `BASE_PERIOD`
   per response (fail if absent); assert the series is MEASURE 1 / INDEX 10001 / TSEST 10 /
   REGION as requested / FREQ Q; reject `errors`, a missing dataset, non-numeric values, duplicate
-  periods, and any series that is not contiguous from the requested start.
-- Store: both regions fetched and validated before any write; one transaction; every row rewritten
-  with `ReferenceBase`, `SourceKey`, `Dataflow`; a base different from what is stored is logged as a
-  restatement; a decimal with more than 3 places is refused (column is `DECIMAL(10,3)`).
+  periods, a missing value, any series that is not contiguous from the requested start, and one whose
+  latest quarter is more than four quarters behind the clock.
+- Store: both regions fetched and validated (and agreeing on the base) before any write; one
+  transaction; rows are rewritten with `ReferenceBase`, `SourceKey`, `Dataflow` whenever any of them or
+  the value differs (so a rebase restates every row), matching rows are only confirmed; a base
+  different from the stored one is logged and sent to Sentry as a warning; a latest period older than
+  what is stored, or a decimal with more than 3 places (column is `DECIMAL(10,3)`), is refused.
 - Pass scale explicitly to tedious (`precision 10, scale 3`).
 
 ## Where this differs from the PLAN text
