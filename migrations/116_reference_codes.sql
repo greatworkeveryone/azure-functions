@@ -9,7 +9,8 @@
 -- altered. The migration runner (src/migrate.ts) splits on the GO lines and
 -- runs each batch on its own, so a column is added in one batch and used in
 -- the next. A migration that throws stops the whole API at startup, so the
--- one step that could fail (the unique index) skips itself instead.
+-- two steps that could fail (the unique index and the building seed) skip
+-- themselves with a PRINT instead.
 --
 -- ReferenceCode is deliberately generic: the asset register reuses it for
 -- asset tags. The myBuildings building sync (syncBuildings) updates an
@@ -80,8 +81,11 @@ GO
 -- Left out on purpose:
 --   HB   Lot C - Hingston Beach: the handwriting on the sheet is unclear.
 --        Confirm with Johanne, then map by hand.
+--   2P   2 Palmerston Circuit: no building is known to match. The mock data's
+--        "Palmerston Plus" (code 2PALM) might be it, but that is a guess.
 
 DECLARE @map TABLE (RefCode NVARCHAR(4) NOT NULL, Pattern NVARCHAR(255) NOT NULL);
+DECLARE @hits TABLE (RefCode NVARCHAR(4) NOT NULL, BuildingID INT NOT NULL);
 
 INSERT INTO @map (RefCode, Pattern) VALUES
   (N'10G', N'10 Georgina%'),
@@ -96,7 +100,6 @@ INSERT INTO @map (RefCode, Pattern) VALUES
   (N'26G', N'26GS'),            -- inferred
   (N'2P',  N'2 Palmerston%'),
   (N'2P',  N'2PC'),             -- inferred
-  (N'2P',  N'2PALM'),           -- seen on "Palmerston Plus" in the mock data; verify
   (N'30D', N'30 Daly%'),
   (N'30D', N'30DS'),
   (N'45S', N'45 Stuart%'),
@@ -134,29 +137,31 @@ INSERT INTO @map (RefCode, Pattern) VALUES
   (N'RCK', N'16-18 Katherine%'),
   (N'RCK', N'1618KT');
 
-WITH hits AS (
-  SELECT DISTINCT m.RefCode, b.BuildingID
-    FROM @map m
-    JOIN dbo.Buildings b
-      ON b.Active = 1
-     AND (b.BuildingName LIKE m.Pattern
-          OR b.BuildingAddress LIKE m.Pattern
-          OR b.BuildingCode LIKE m.Pattern)
-),
-single_code AS (
-  SELECT RefCode FROM hits GROUP BY RefCode HAVING COUNT(*) = 1
-),
-single_building AS (
-  SELECT BuildingID FROM hits GROUP BY BuildingID HAVING COUNT(*) = 1
-)
-UPDATE b
-   SET b.ReferenceCode = h.RefCode
-  FROM dbo.Buildings b
-  JOIN hits h ON h.BuildingID = b.BuildingID
- WHERE b.ReferenceCode IS NULL
-   AND h.RefCode IN (SELECT RefCode FROM single_code)
-   AND h.BuildingID IN (SELECT BuildingID FROM single_building)
-   AND NOT EXISTS (SELECT 1 FROM dbo.Buildings b2 WHERE b2.ReferenceCode = h.RefCode);
+INSERT INTO @hits (RefCode, BuildingID)
+SELECT DISTINCT m.RefCode, b.BuildingID
+  FROM @map m
+  JOIN dbo.Buildings b
+    ON b.Active = 1
+   AND (b.BuildingName LIKE m.Pattern
+        OR b.BuildingAddress LIKE m.Pattern
+        OR b.BuildingCode LIKE m.Pattern);
+
+-- The seed is a convenience, not a requirement (a building without a code
+-- just gets the legacy PO number format), so a failure here must not throw
+-- and stop the API at startup.
+BEGIN TRY
+  UPDATE b
+     SET b.ReferenceCode = h.RefCode
+    FROM dbo.Buildings b
+    JOIN @hits h ON h.BuildingID = b.BuildingID
+   WHERE b.ReferenceCode IS NULL
+     AND h.RefCode IN (SELECT RefCode FROM @hits GROUP BY RefCode HAVING COUNT(*) = 1)
+     AND h.BuildingID IN (SELECT BuildingID FROM @hits GROUP BY BuildingID HAVING COUNT(*) = 1)
+     AND NOT EXISTS (SELECT 1 FROM dbo.Buildings b2 WHERE b2.ReferenceCode = h.RefCode);
+END TRY
+BEGIN CATCH
+  PRINT '116: Buildings.ReferenceCode seed skipped: ' + ERROR_MESSAGE();
+END CATCH;
 
 -- Active buildings that still have no code. Map these by hand, e.g.
 --   UPDATE dbo.Buildings SET ReferenceCode = N'HB'

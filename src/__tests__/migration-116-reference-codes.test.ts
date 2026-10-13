@@ -99,6 +99,14 @@ describe("migration 116 seed", () => {
     expect(SQL).not.toMatch(/N'HB'/);
   });
 
+  it("does not guess 2P from the mock data's Palmerston Plus", () => {
+    expect(SQL).not.toMatch(/2PALM/);
+  });
+
+  it("wraps the seed in TRY/CATCH so a failure cannot stop the API at startup", () => {
+    expect(SQL).toMatch(/BEGIN TRY[\s\S]*\bUPDATE\b[\s\S]*END TRY\s+BEGIN CATCH[\s\S]*END CATCH/);
+  });
+
   it("seeds only codes that exist on the sheet", () => {
     const seeded = new Set((SQL.match(/\(N'([^']+)',\s*N'/g) ?? []).map((m) => m.match(/N'([^']+)'/)![1]));
     expect(seeded.size).toBeGreaterThan(15);
