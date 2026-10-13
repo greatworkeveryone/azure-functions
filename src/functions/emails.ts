@@ -27,6 +27,11 @@ import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../
 import { checkRateLimit } from "../rateLimit";
 import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
+import { record } from "../ledger";
+import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
+import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
+import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
+import { LEDGER_LIMITS } from "../ledger/validate";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -907,9 +912,17 @@ export async function promoteEmailToJobUpdate(
 // ingestEmail takes FromAddress from the caller) with an authenticated sender
 // (SenderAuthenticated = 1, see src/email/sender-auth.ts) — From is spoofable.
 // The actor stamped on the quote is that director's DisplayName, never the
-// body. Helpers + email flip are one transaction.
+// body. Helpers + email flip + ledger row are one transaction.
 // EMAIL_REPLY_DECISIONS_ENABLED=false switches the whole path off (403, nothing
 // recorded); the default is on.
+//
+// Ledger (PLAN §3.12): the same quote.director_approve / quote.director_reject
+// as the in-app buttons, ruleApplied "email_reply", the email in `after`. The
+// ledger's actor is the person who decided: the director who replied, as
+// Quotes.DirectorApprovedBy already says. The signed-in operator who put the
+// reply into Floorplan is in `after.recordedBy`. A reply that can't stand as a
+// director's decision is a refused attempt, ledgered as one against the
+// operator who tried to record it.
 
 interface RecordEmailQuoteDecisionBody {
   Decision?: unknown;
@@ -942,7 +955,14 @@ export async function recordEmailQuoteDecision(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, PROMOTE_EMAIL_ROLES);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, {
+      attempted: (body) => (body.Decision === "rejected" ? "quote.director_reject" : "quote.director_approve"),
+      idField: "QuoteID",
+      subjectType: "quote",
+    });
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -990,10 +1010,22 @@ export async function recordEmailQuoteDecision(
   let connection: Connection | undefined;
   let inTransaction = false;
   try {
-    connection = await createRequestConnection(token);
+    const conn = await createRequestConnection(token);
+    connection = conn;
+    // The signed-in person recording the reply (not who decided it).
+    const operator = await resolveLedgerActor(request, conn);
+    if (!operator) return unauthorizedResponse();
+
+    const attempted = Decision === "approved" ? "quote.director_approve" : "quote.director_reject";
+    // A reply that can't stand as the director's decision is a refused
+    // attempt: ledgered, then answered exactly as it always was.
+    const refuse = async (status: number, code: string, error: string, jobId: number | null): Promise<HttpResponseInit> => {
+      await recordRefusal(conn, operator, { id: QuoteID, type: "quote" }, { attempted, code, message: error }, jobId);
+      return { status, jsonBody: { error } };
+    };
 
     const emailRows = await executeQuery(
-      connection,
+      conn,
       "SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id",
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
@@ -1001,23 +1033,23 @@ export async function recordEmailQuoteDecision(
     const sender = ((emailRows[0].FromAddress as string | null) ?? "").trim().toLowerCase();
     const handled = alreadyHandledResponse(emailRows[0].Status as string | null);
     if (handled) return handled;
+    const matchedJobId = (emailRows[0].MatchedJobID as number | null | undefined) ?? null;
     if (emailRows[0].Source !== "graph") {
-      return { status: 422, jsonBody: { error: "Only emails received through the mailbox can record a director decision" } };
+      return refuse(422, "email_not_from_mailbox", "Only emails received through the mailbox can record a director decision", matchedJobId);
     }
     const senderAuthenticated = emailRows[0].SenderAuthenticated;
     if (senderAuthenticated !== true && senderAuthenticated !== 1) {
-      return {
-        status: 422,
-        jsonBody: {
-          error:
-            "The sender of this email couldn't be authenticated (DMARC/internal check failed) — ask the director to approve in-app",
-        },
-      };
+      return refuse(
+        422,
+        "sender_not_authenticated",
+        "The sender of this email couldn't be authenticated (DMARC/internal check failed) — ask the director to approve in-app",
+        matchedJobId,
+      );
     }
     if (!sender) return { status: 422, jsonBody: { error: "Email has no sender address" } };
 
     const quoteRows = await executeQuery(
-      connection,
+      conn,
       "SELECT Status, JobID, DirectorEmailSentTo, DirectorEmailSentAt FROM Quotes WHERE QuoteID = @Id",
       [{ name: "Id", type: TYPES.Int, value: QuoteID }],
     );
@@ -1027,49 +1059,51 @@ export async function recordEmailQuoteDecision(
     }
 
     // Bind the email to this quote: same job, and received after the packet went out.
+    const quoteJobId = (quoteRows[0].JobID as number | null | undefined) ?? null;
     if (emailRows[0].MatchedJobID == null || emailRows[0].MatchedJobID !== quoteRows[0].JobID) {
-      return { status: 422, jsonBody: { error: "Email is not matched to this quote's job" } };
+      return refuse(422, "email_not_matched", "Email is not matched to this quote's job", quoteJobId);
     }
     const sentAt = quoteRows[0].DirectorEmailSentAt as Date | null;
     const receivedAt = emailRows[0].ReceivedAt as Date | null;
     if (!sentAt) {
-      return { status: 422, jsonBody: { error: "No director approval email has been sent for this quote" } };
+      return refuse(422, "no_director_request", "No director approval email has been sent for this quote", quoteJobId);
     }
     if (!receivedAt || new Date(receivedAt).getTime() < new Date(sentAt).getTime()) {
-      return { status: 422, jsonBody: { error: "Email was received before the director approval email was sent" } };
+      return refuse(422, "reply_predates_request", "Email was received before the director approval email was sent", quoteJobId);
     }
 
     // Check 1: the reply came from someone the packet was sent to.
     const recipients = parseRecipientList(quoteRows[0].DirectorEmailSentTo as string | null);
     if (!recipients.includes(sender)) {
-      return { status: 422, jsonBody: { error: "Sender was not a recipient of the director approval email" } };
+      return refuse(422, "sender_not_recipient", "Sender was not a recipient of the director approval email", quoteJobId);
     }
 
     // Check 2: that address is a registered, active director (AppUsers.Email is stored lowercased).
     const directorRows = await executeQuery(
-      connection,
-      `SELECT DisplayName FROM AppUsers
+      conn,
+      `SELECT UserID, DisplayName FROM AppUsers
         WHERE Email = @Email AND Role = 'director' AND IsActive = 1`,
       [{ name: "Email", type: TYPES.NVarChar, value: sender }],
     );
     if (directorRows.length === 0) {
-      return { status: 422, jsonBody: { error: "Sender is not an active director" } };
+      return refuse(422, "sender_not_director", "Sender is not an active director", quoteJobId);
     }
     const directorName = ((directorRows[0].DisplayName as string | null) ?? "").trim() || sender;
+    const directorUserId = (directorRows[0].UserID as number | null | undefined) ?? null;
 
-    await beginTransaction(connection);
+    await beginTransaction(conn);
     inTransaction = true;
 
     const outcome =
       Decision === "approved"
-        ? await approveDirectorQuote(connection, {
+        ? await approveDirectorQuote(conn, {
             approvedBy: directorName,
             note: Note ?? null,
             quoteId: QuoteID,
             sourceEmailAddress: sender,
             sourceEmailId: EmailID,
           })
-        : await rejectQuote(connection, {
+        : await rejectQuote(conn, {
             expectedStatuses: ["awaiting_director"],
             note: Note ?? null,
             quoteId: QuoteID,
@@ -1078,26 +1112,50 @@ export async function recordEmailQuoteDecision(
             sourceEmailId: EmailID,
           });
     if (!outcome.ok) {
-      await rollbackTransaction(connection);
+      await rollbackTransaction(conn);
       inTransaction = false;
       return { status: outcome.status, jsonBody: { error: outcome.error } };
     }
 
     // Conditional flip: a concurrent decision leaves 0 rows → rollback + 409.
     const flipped = await executeQuery(
-      connection,
+      conn,
       `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
        OUTPUT inserted.EmailID
        WHERE EmailID = @Id AND Status NOT IN ('promoted', 'archived')`,
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     if (flipped.length === 0) {
-      await rollbackTransaction(connection);
+      await rollbackTransaction(conn);
       inTransaction = false;
       return { status: 409, jsonBody: { error: "Email was handled concurrently — reload and try again" } };
     }
 
-    await commitTransaction(connection);
+    // Both helpers act only on a quote awaiting the director here. The director
+    // who replied decided; the operator is recorded alongside the email.
+    const scope = await jobScope(conn, outcome.jobId);
+    await record(conn, {
+      action: attempted,
+      actor: ledgerUserActor({
+        name: directorName.slice(0, LEDGER_LIMITS.name),
+        roles: [AppRole.DIRECTOR],
+        userId: directorUserId,
+      }),
+      after: {
+        recordedBy: { name: operator.name, userId: operator.kind === "user" ? operator.userId : null },
+        sourceEmailId: EmailID,
+        status: Decision === "approved" ? "approved" : "rejected",
+        ...quoteFacts(outcome.quote),
+      },
+      before: { status: "awaiting_director" },
+      buildingId: scope.buildingId,
+      jobId: scope.jobId,
+      reason: ledgerReason(Note),
+      ruleApplied: "email_reply",
+      subject: { id: QuoteID, type: "quote" },
+    });
+
+    await commitTransaction(conn);
     inTransaction = false;
 
     // Approve, or reject out of awaiting_director, closes the director's Planner task. Best-effort.

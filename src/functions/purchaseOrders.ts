@@ -34,6 +34,10 @@ import { resolvePoNumber } from "../po-reference-db";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { jobScope, purchaseOrderFacts, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
+import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 
 /**
  * Quote-approval guard for PO creation (WP8). Returns an error string if
@@ -121,7 +125,9 @@ async function getPurchaseOrders(
 //   Seq is per-contractor (total POs to this contractor ever + 1),
 //       or per-job for internal (no-contractor) jobs.
 // Wrapped in a transaction with UPDLOCK/HOLDLOCK on the MAX(Seq) read so
-// concurrent creates can't collide on the same seq number.
+// concurrent creates can't collide on the same seq number. Creating a PO is a
+// decision (PLAN §3.12): the same transaction carries its ledger row, so the PO
+// and the row commit together or not at all.
 
 interface UpsertPurchaseOrderBody {
   PurchaseOrderID?: number;
@@ -139,6 +145,14 @@ interface UpsertPurchaseOrderBody {
   CreatedBy?: string;
 }
 
+// Editing a PO isn't a ledgered decision; only an attempt to create one is
+// recorded, against the job it would have been raised for.
+const CREATE_PO_TARGET: RefusalTarget = {
+  attempted: (body) => (body.PurchaseOrderID === undefined ? "po.create" : null),
+  idField: "JobID",
+  subjectType: "job",
+};
+
 export async function upsertPurchaseOrder(
   request: HttpRequest,
   context: InvocationContext,
@@ -149,7 +163,10 @@ export async function upsertPurchaseOrder(
   // Plain accounts staff create / edit POs alongside facilities managers —
   // approval/send-to-contractor is the gated step, drafting is not.
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, CREATE_PO_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -180,6 +197,9 @@ export async function upsertPurchaseOrder(
         return { status: 400, jsonBody: { error: "JobID (number) required to create a PO" } };
       }
 
+      const actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+
       await beginTransaction(connection);
       try {
         // Quote-approval gate: refuse a PO that would leapfrog an unapproved
@@ -203,7 +223,21 @@ export async function upsertPurchaseOrder(
           approvedQuoteId: (jobStateRows[0].ApprovedQuoteID as number | null) ?? null,
         });
         if (approvalError) {
+          // A PO that would act as the quote's approval is a refused attempt,
+          // ledgered in a transaction of its own now that this one has rolled back.
           await rollbackTransaction(connection).catch(() => {});
+          await recordRefusal(
+            connection,
+            actor,
+            { id: JobID, type: "job" },
+            {
+              attempted: "po.create",
+              code: "quote_not_approved",
+              message: approvalError,
+              state: { jobStatus: String(jobStateRows[0].Status) },
+            },
+            JobID,
+          );
           return { status: 422, jsonBody: { error: approvalError } };
         }
 
@@ -275,6 +309,22 @@ export async function upsertPurchaseOrder(
           actor: identity.name,
           purchaseOrderId: newId,
           note: `PO ${poNumber} created — work in progress.`,
+        });
+
+        const scope = await jobScope(connection, JobID);
+        await record(connection, {
+          action: "po.create",
+          actor,
+          after: purchaseOrderFacts({
+            ContractorID: ContractorID ?? null,
+            ContractorName: ContractorName ?? null,
+            CostNotToExceed: CostNotToExceed ?? null,
+            EstimatedCost: EstimatedCost ?? null,
+            PONumber: poNumber,
+          }),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: newId, type: "purchase_order" },
         });
 
         await commitTransaction(connection);
@@ -606,6 +656,10 @@ async function previewPurchaseOrder(
 // Requires PDFBlobName to be set — caller must hit previewPurchaseOrder first.
 // Flips SentAt/SentBy. Actual Microsoft Graph sendMail call is follow-on work
 // — resolveRecipient + the generated PDF are ready for that wiring.
+//
+// Sending is a decision and an external send (PLAN §3.12). The mail can't be
+// recalled, so the ledger actor and job scope are found before it goes; then
+// SentAt/SentBy and the ledger row commit together or not at all.
 
 interface SendPurchaseOrderBody {
   PurchaseOrderID?: number;
@@ -623,7 +677,14 @@ async function sendPurchaseOrder(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, {
+      attempted: "po.send",
+      idField: "PurchaseOrderID",
+      subjectType: "purchase_order",
+    });
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -637,11 +698,15 @@ async function sendPurchaseOrder(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
     const contractorRows = await executeQuery(
       connection,
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
-              po.EmailSubject, po.EmailBody
+              po.EmailSubject, po.EmailBody,
+              po.JobID, po.ContractorID, po.ContractorName,
+              po.EstimatedCost, po.CostNotToExceed, po.SentAt
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
         WHERE po.PurchaseOrderID = @Id`,
@@ -664,6 +729,8 @@ async function sendPurchaseOrder(
     const poNumber = contractorRows[0].PONumber as string | null;
     const emailSubject = (contractorRows[0].EmailSubject as string | null) ?? poNumber ?? "Purchase Order";
     const emailBody = (contractorRows[0].EmailBody as string | null) ?? "";
+    const scope = await jobScope(connection, contractorRows[0].JobID as number | null | undefined);
+    const previousSentAt = contractorRows[0].SentAt as Date | null | undefined;
 
     context.log(
       `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
@@ -689,16 +756,33 @@ async function sendPurchaseOrder(
       ccAddresses,
     );
 
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-       SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+         SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+          { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+      await record(connection, {
+        action: "po.send",
+        actor,
+        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
+        // A re-send shows the earlier send here.
+        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: PurchaseOrderID, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
     const stored = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
@@ -720,10 +804,25 @@ async function sendPurchaseOrder(
   }
 }
 
+// What the ledger needs to know about a purchase order that is about to change or go.
+const PO_LEDGER_COLUMNS = `JobID, PONumber, ContractorID, ContractorName, EstimatedCost, CostNotToExceed,
+  PDFBlobName, SentAt, SentBy, MyobCreatedAt, MyobCreatedBy, CompletedAt, CompletedBy`;
+
 // ── POST /api/deletePurchaseOrder ────────────────────────────────────────────
 // Body: { PurchaseOrderID }
 // Refuses to delete if SentAt is set — a sent PO is a real-world obligation
 // and should not vanish silently. Best-effort blob cleanup on success.
+//
+// A deletion leaves nothing behind but its ledger row, so the row carries a
+// snapshot of what was deleted, and the two commit together or not at all. The
+// PDF goes only after that commit: had the ledger write failed, the PO would
+// still be there and must keep its file.
+
+const DELETE_PO_TARGET: RefusalTarget = {
+  attempted: "po.delete",
+  idField: "PurchaseOrderID",
+  subjectType: "purchase_order",
+};
 
 async function deletePurchaseOrder(
   request: HttpRequest,
@@ -733,7 +832,10 @@ async function deletePurchaseOrder(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, DELETE_PO_TARGET);
+    return denied;
+  }
 
   let connection;
   try {
@@ -744,34 +846,63 @@ async function deletePurchaseOrder(
     }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT SentAt, CompletedAt, PDFBlobName FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
-    }
-    if (rows[0].SentAt) {
-      return {
-        status: 400,
-        jsonBody: { error: "Cannot delete a purchase order that has been sent." },
-      };
-    }
-    if (rows[0].CompletedAt) {
-      return {
-        status: 400,
-        jsonBody: { error: "Cannot delete a purchase order that has been marked complete." },
-      };
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    let pdfBlobName: string | null;
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the snapshot is of the PO that is deleted.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const po = rows[0];
+      if (po.SentAt || po.CompletedAt) {
+        // A refused attempt, ledgered in a transaction of its own now that this
+        // one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        const sent = Boolean(po.SentAt);
+        const error = sent
+          ? "Cannot delete a purchase order that has been sent."
+          : "Cannot delete a purchase order that has been marked complete.";
+        await recordRefusal(
+          connection,
+          actor,
+          { id: PurchaseOrderID, type: "purchase_order" },
+          { attempted: "po.delete", code: sent ? "po_sent" : "po_completed", message: error },
+          po.JobID as number,
+        );
+        return { status: 400, jsonBody: { error } };
+      }
+
+      await executeQuery(
+        connection,
+        `DELETE FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+      );
+
+      const scope = await jobScope(connection, po.JobID as number);
+      await record(connection, {
+        action: "po.delete",
+        actor,
+        before: purchaseOrderSnapshot(po),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: PurchaseOrderID, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+      pdfBlobName = po.PDFBlobName as string | null;
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
 
-    await executeQuery(
-      connection,
-      `DELETE FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
-    );
-
-    const pdfBlobName = rows[0].PDFBlobName as string | null;
     if (pdfBlobName) {
       // Best-effort — if blob cleanup fails we don't want to resurrect the row.
       deleteBlob(pdfBlobName).catch((err) =>
@@ -791,7 +922,9 @@ async function deletePurchaseOrder(
 // ── POST /api/markPurchaseOrderMyobCreated ───────────────────────────────────
 // Body: { id, jobId } — the actor is the verified caller, never the body.
 // Records that this PO has been entered into MYOB. Cannot be undone once
-// CompletedAt is set.
+// CompletedAt is set. The marking and its ledger row commit together or not at
+// all. Floorplan makes no MYOB call here: someone has entered the PO in MYOB by
+// hand and this stamps that it was done.
 
 interface MarkPurchaseOrderMyobCreatedBody {
   id?: number;
@@ -799,6 +932,12 @@ interface MarkPurchaseOrderMyobCreatedBody {
   /** @deprecated ignored — identity comes from the token */
   createdBy?: string;
 }
+
+const MARK_PO_MYOB_TARGET: RefusalTarget = {
+  attempted: "po.myob_created",
+  idField: "id",
+  subjectType: "purchase_order",
+};
 
 async function markPurchaseOrderMyobCreated(
   request: HttpRequest,
@@ -808,7 +947,10 @@ async function markPurchaseOrderMyobCreated(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, MARK_PO_MYOB_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -825,47 +967,71 @@ async function markPurchaseOrderMyobCreated(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the marking recorded as replaced is the one replaced.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const po = rows[0];
+      const poLabel = po.PONumber ?? `PO #${id}`;
+
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+           SET MyobCreatedAt = SYSUTCDATETIME(), MyobCreatedBy = @CreatedBy, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, @CreatedBy, @Text, 'po_myob_created', @PurchaseOrderID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+          { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} as created in MYOB` },
+          { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+        ],
+      );
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "po.myob_created",
+        actor,
+        after: { myobCreated: true, ...purchaseOrderFacts(po) },
+        // Marking again just re-stamps; the earlier marking shows here.
+        before: { myobCreated: po.MyobCreatedAt != null },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    const poLabel = rows[0].PONumber ?? `PO #${id}`;
-
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-         SET MyobCreatedAt = SYSUTCDATETIME(), MyobCreatedBy = @CreatedBy, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-       VALUES (@JobID, @CreatedBy, @Text, 'po_myob_created', @PurchaseOrderID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} as created in MYOB` },
-        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
-      ],
-    );
-    await executeQuery(
-      connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
 
     const stored = await executeQuery(
       connection,
@@ -884,7 +1050,15 @@ async function markPurchaseOrderMyobCreated(
 // ── POST /api/unmarkPurchaseOrderMyobCreated ─────────────────────────────────
 // Body: { id, jobId }
 // Clears the MyobCreatedAt/By fields. Refused if CompletedAt is already set —
-// cannot undo MYOB entry after the PO has been completed.
+// cannot undo MYOB entry after the PO has been completed. The unmarking and its
+// ledger row commit together or not at all; the row keeps who marked the PO and
+// when, because unmarking clears those.
+
+const UNMARK_PO_MYOB_TARGET: RefusalTarget = {
+  attempted: "po.unmark_myob_created",
+  idField: "id",
+  subjectType: "purchase_order",
+};
 
 async function unmarkPurchaseOrderMyobCreated(
   request: HttpRequest,
@@ -894,7 +1068,10 @@ async function unmarkPurchaseOrderMyobCreated(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
+    return denied;
+  }
 
   let connection;
   try {
@@ -908,51 +1085,82 @@ async function unmarkPurchaseOrderMyobCreated(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
-    }
-    if (rows[0].CompletedAt) {
-      return {
-        status: 400,
-        jsonBody: { error: "Cannot undo MYOB entry — this purchase order has already been marked complete." },
-      };
-    }
-    const poLabel = rows[0].PONumber ?? `PO #${id}`;
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the marking recorded as cleared is the one cleared.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const po = rows[0];
+      if (po.CompletedAt) {
+        // A refused attempt, ledgered in a transaction of its own now that this
+        // one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        const error = "Cannot undo MYOB entry — this purchase order has already been marked complete.";
+        await recordRefusal(
+          connection,
+          actor,
+          { id, type: "purchase_order" },
+          { attempted: "po.unmark_myob_created", code: "po_completed", message: error },
+          po.JobID as number,
+        );
+        return { status: 400, jsonBody: { error } };
+      }
+      const poLabel = po.PONumber ?? `PO #${id}`;
 
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-         SET MyobCreatedAt = NULL, MyobCreatedBy = NULL, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-       VALUES (@JobID, NULL, @Text, 'po_myob_uncreated', @PurchaseOrderID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} from MYOB created` },
-        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
-      ],
-    );
-    await executeQuery(
-      connection,
-      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+           SET MyobCreatedAt = NULL, MyobCreatedBy = NULL, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, NULL, @Text, 'po_myob_uncreated', @PurchaseOrderID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} from MYOB created` },
+          { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+        ],
+      );
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "po.unmark_myob_created",
+        actor,
+        after: { myobCreated: false, ...purchaseOrderFacts(po) },
+        before: purchaseOrderSnapshot(po),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     const stored = await executeQuery(
       connection,
@@ -971,7 +1179,8 @@ async function unmarkPurchaseOrderMyobCreated(
 // ── POST /api/markPurchaseOrderComplete ──────────────────────────────────────
 // Body: { id, jobId } — the actor is the verified caller, never the body.
 // Requires MyobCreatedAt to be set first. Transitions the job to
-// status='Awaiting Approval', awaitingRole='accounts'.
+// status='Awaiting Approval', awaitingRole='accounts'. The completion, the job
+// move and the ledger row commit together or not at all.
 
 interface MarkPurchaseOrderCompleteBody {
   id?: number;
@@ -979,6 +1188,12 @@ interface MarkPurchaseOrderCompleteBody {
   /** @deprecated ignored — identity comes from the token */
   completedBy?: string;
 }
+
+const COMPLETE_PO_TARGET: RefusalTarget = {
+  attempted: "po.complete",
+  idField: "id",
+  subjectType: "purchase_order",
+};
 
 async function markPurchaseOrderComplete(
   request: HttpRequest,
@@ -988,7 +1203,10 @@ async function markPurchaseOrderComplete(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, COMPLETE_PO_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1005,61 +1223,93 @@ async function markPurchaseOrderComplete(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT MyobCreatedAt, CompletedAt, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the MYOB marking we check is the one we act on.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const po = rows[0];
+      if (!po.MyobCreatedAt) {
+        // Completing a PO the books don't have yet is a refused attempt,
+        // ledgered in a transaction of its own now that this one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        const error = "Cannot mark complete — this purchase order has not been marked as created in MYOB yet.";
+        await recordRefusal(
+          connection,
+          actor,
+          { id, type: "purchase_order" },
+          { attempted: "po.complete", code: "not_created_in_myob", message: error },
+          po.JobID as number,
+        );
+        return { status: 400, jsonBody: { error } };
+      }
+      const poLabel = po.PONumber ?? `PO #${id}`;
+
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+           SET CompletedAt = SYSUTCDATETIME(), CompletedBy = @CompletedBy, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CompletedBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+
+      // Fire PO-completion event (kept separate from the status_change row).
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, @CreatedBy, @Text, 'po_completed', @PurchaseOrderID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+          { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} complete` },
+          { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+        ],
+      );
+
+      // Advance the job through the state machine. From (Work, facilities) this
+      // lands at (Awaiting Approval, accounts). The previous inline UPDATE
+      // unconditionally clobbered Status to 'Awaiting Approval' regardless of
+      // the prior state — that's the silent-demotion bug. The helper refuses
+      // backward moves, so completing a PO can no longer undo a manual status.
+      await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
+        actor: identity.name,
+        purchaseOrderId: id,
+        note: `${poLabel} complete — awaiting accounts approval.`,
+      });
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "po.complete",
+        actor,
+        after: { completed: true, ...purchaseOrderFacts(po) },
+        // Completing again just re-stamps; the earlier completion shows here.
+        before: { completed: po.CompletedAt != null },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    if (!rows[0].MyobCreatedAt) {
-      return {
-        status: 400,
-        jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
-      };
-    }
-    const poLabel = rows[0].PONumber ?? `PO #${id}`;
-
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-         SET CompletedAt = SYSUTCDATETIME(), CompletedBy = @CompletedBy, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CompletedBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
-
-    // Fire PO-completion event (kept separate from the status_change row).
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-       VALUES (@JobID, @CreatedBy, @Text, 'po_completed', @PurchaseOrderID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-        { name: "Text", type: TYPES.NVarChar, value: `Marked ${poLabel} complete` },
-        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
-      ],
-    );
-
-    // Advance the job through the state machine. From (Work, facilities) this
-    // lands at (Awaiting Approval, accounts). The previous inline UPDATE
-    // unconditionally clobbered Status to 'Awaiting Approval' regardless of
-    // the prior state — that's the silent-demotion bug. The helper refuses
-    // backward moves, so completing a PO can no longer undo a manual status.
-    await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
-      actor: identity.name,
-      purchaseOrderId: id,
-      note: `${poLabel} complete — awaiting accounts approval.`,
-    });
 
     const stored = await executeQuery(
       connection,
@@ -1078,6 +1328,14 @@ async function markPurchaseOrderComplete(
 // ── POST /api/unmarkPurchaseOrderComplete ────────────────────────────────────
 // Body: { id, jobId }
 // Clears CompletedAt/By and rolls the job back to status='Work', awaitingRole='facilities'.
+// The reversal, the job move and the ledger row commit together or not at all;
+// the row keeps who completed the PO and when, because the reversal clears those.
+
+const UNCOMPLETE_PO_TARGET: RefusalTarget = {
+  attempted: "po.uncomplete",
+  idField: "id",
+  subjectType: "purchase_order",
+};
 
 async function unmarkPurchaseOrderComplete(
   request: HttpRequest,
@@ -1087,7 +1345,10 @@ async function unmarkPurchaseOrderComplete(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, UNCOMPLETE_PO_TARGET);
+    return denied;
+  }
 
   let connection;
   try {
@@ -1101,59 +1362,82 @@ async function unmarkPurchaseOrderComplete(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT PurchaseOrderID, PONumber FROM PurchaseOrders WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
+    await beginTransaction(connection);
+    try {
+      // Locked until commit, so the completion recorded as cleared is the one cleared.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const po = rows[0];
+      const poLabel = po.PONumber ?? `PO #${id}`;
+
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+           SET CompletedAt = NULL, CompletedBy = NULL, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
+        [
+          { name: "Id", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+
+      // Fire PO event
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
+          { name: "PurchaseOrderID", type: TYPES.Int, value: id },
+        ],
+      );
+
+      // Roll back job status
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
+         VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
+        ],
+      );
+      await executeQuery(
+        connection,
+        `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
+         WHERE JobID = @JobID`,
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+
+      const scope = await jobScope(connection, jobId);
+      await record(connection, {
+        action: "po.uncomplete",
+        actor,
+        after: { completed: false, ...purchaseOrderFacts(po) },
+        before: purchaseOrderSnapshot(po),
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-    const poLabel = rows[0].PONumber ?? `PO #${id}`;
-
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-         SET CompletedAt = NULL, CompletedBy = NULL, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
-      [
-        { name: "Id", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-      ],
-    );
-
-    // Fire PO event
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-       VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
-        { name: "PurchaseOrderID", type: TYPES.Int, value: id },
-      ],
-    );
-
-    // Roll back job status
-    await executeQuery(
-      connection,
-      `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-       VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
-      ],
-    );
-    await executeQuery(
-      connection,
-      `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
-       WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
 
     const stored = await executeQuery(
       connection,
