@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 jest.mock("../rateLimit", () => ({
   checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }),
 }));
@@ -70,9 +76,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
   createRequestConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   getCachedTenantList:         jest.Mock;
@@ -637,5 +646,53 @@ describe("deleteCarparkScheduleGroup", () => {
     db.executeQuery.mockRejectedValueOnce(new Error("network"));
     const res = await handlers.deleteCarparkScheduleGroup(makeRequest(validDeleteBody()), ctx);
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Car park group writes: versioned and ledgered (PLAN WP23a) ──────────────
+
+describe("car park group writes — versioned and ledgered", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+
+  it("ledgers an upsert as schedule.manual_edit on the car park group", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ CarparkScheduleGroups: null, ScheduleVersion: 0 }])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.upsertCarparkScheduleGroup(makeRequest(validGroupBody({ ScheduleVersion: 0 })), ctx);
+    expect(res.status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { id: VALID_GROUP_ID, label: "Lot A" },
+      before: null,
+      buildingId: 5,
+      subject: { id: VALID_GROUP_ID, type: "carpark_group" },
+      tenantId: 1,
+    });
+  });
+
+  it("returns 409 when the group is written against a stale ScheduleVersion", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ CarparkScheduleGroups: null, ScheduleVersion: 4, UpdatedByName: "Kim" }]);
+    const res = await handlers.upsertCarparkScheduleGroup(makeRequest(validGroupBody({ ScheduleVersion: 3 })), ctx);
+    expect(res.status).toBe(409);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a group delete when the ledger write fails", async () => {
+    const stored = JSON.stringify([
+      { baseMonthlyRate: 1000, carparkIds: [VALID_CARPARK_ID], commencedAt: "2026-07-01", id: VALID_GROUP_ID, label: "Lot A" },
+    ]);
+    db.executeQuery
+      .mockResolvedValueOnce([{ CarparkScheduleGroups: stored, ScheduleVersion: 1 }])
+      .mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.deleteCarparkScheduleGroup(
+      makeRequest({ BuildingId: 5, groupId: VALID_GROUP_ID, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 });

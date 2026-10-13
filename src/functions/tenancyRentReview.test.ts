@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 const auth = require("../auth") as {
   extractToken:         jest.Mock;
   requireRole:          jest.Mock;
@@ -228,6 +234,51 @@ describe("applyRentReview", () => {
     expect(cache.invalidateTenant).toHaveBeenCalledWith(7);
   });
 
+  it("keeps the lease anniversary when the review is processed late (no schedule)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        {
+          Commencement: new Date("2020-07-01T00:00:00Z"),
+          RentPerAnnum: 50000,
+          ReviewId: "rev-1",
+          ReviewIntervalMonths: 12,
+          ScheduledFor: new Date("2025-07-01T00:00:00Z"),
+          TenantId: 7,
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.applyRentReview(makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000 }), ctx);
+    expect((res.jsonBody as { nextReviewDate: string }).nextReviewDate).toBe("2026-07-01");
+    const [, sql, params] = db.executeQuery.mock.calls[2] as [unknown, string, Array<{ name: string; value: unknown }>];
+    expect(sql).toMatch(/LastReviewDate = @LastReview/);
+    expect(params.find((p) => p.name === "LastReview")?.value).toBe("2025-07-01");
+    expect(params.find((p) => p.name === "NextReview")?.value).toBe("2026-07-01");
+  });
+
+  it("takes the next review from the schedule when there is one", async () => {
+    const steps = [
+      { baseRentPerAnnum: 50000, effectiveFrom: "2024-07-01", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2027-01-01", id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "market", ratePercent: 0 },
+    ];
+    db.executeQuery
+      .mockResolvedValueOnce([
+        {
+          Commencement: new Date("2024-07-01T00:00:00Z"),
+          RentPerAnnum: 50000,
+          ReviewId: "rev-1",
+          ReviewIntervalMonths: 12,
+          ScheduledFor: new Date("2026-07-01T00:00:00Z"),
+          ScheduledRateSteps: JSON.stringify(steps),
+          TenantId: 7,
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.applyRentReview(makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000 }), ctx);
+    expect((res.jsonBody as { nextReviewDate: string }).nextReviewDate).toBe("2027-01-01");
+  });
+
   it("uses the supplied IncreasePercent when provided", async () => {
     db.executeQuery
       .mockResolvedValueOnce([
@@ -347,6 +398,21 @@ describe("getReviewsDue", () => {
     expect(params).toHaveLength(1);
     expect(params[0].name).toBe("BuildingId");
     expect(params[0].value).toBe(9);
+  });
+
+  it("leaves out a tenancy whose keyed review has since passed and moved on", async () => {
+    const keyed = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2020-07-01", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2021-07-01", id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "fixed", ratePercent: 3 },
+      { effectiveFrom: "2099-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    db.executeQuery.mockResolvedValueOnce([
+      { TenantId: 1, BuildingId: 5, LegalName: "Keyed Ahead", Status: "current", NextReviewDate: new Date("2021-07-01"), ScheduledRateSteps: keyed },
+      { TenantId: 2, BuildingId: 5, LegalName: "Overdue", Status: "current", NextReviewDate: new Date("2021-07-01") },
+    ]);
+    const res = await handlers.getReviewsDue(makeRequest(undefined), ctx);
+    const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+    expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue"]);
   });
 
   it("returns an empty list when no tenants are due", async () => {

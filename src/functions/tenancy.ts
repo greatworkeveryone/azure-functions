@@ -52,11 +52,13 @@ import {
 } from "../incentiveLogic";
 import {
   CarparkScheduleGroup,
+  closeOpenPredecessor,
   deleteGroup,
   deleteMiscFee,
   deleteStep,
   diffSteps,
   MiscFee,
+  normaliseLegacyEnds,
   NOT_FOUND as STEP_NOT_FOUND,
   parseGroups,
   parseMiscFees,
@@ -74,6 +76,28 @@ import {
   validateUpsertGroupEnvelope,
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
+import { daysBetweenIso, todayInDarwin } from "../darwinDate";
+import * as ledger from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import {
+  deriveNextReviewDate,
+  nextAnniversary,
+  nextReviewInputFromRow,
+  RESOLVED_REVIEW_DATES_SQL,
+  sqlDateToIso,
+} from "../nextReviewDate";
+import {
+  conflictResponse,
+  isoTimestamp,
+  type LedgerDraft,
+  ledgerRefusal,
+  parseExpectedVersion,
+  rollbackQuietly,
+  rowVersionHex,
+  runScheduleWrite,
+  scheduleWriteResponse,
+  withNextReviewDate,
+} from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
 import {
   deleteInfoSheetRow,
@@ -260,8 +284,16 @@ interface RegisterTenantApi {
   holdoverTerms?: string;
   renewalLetterIssueBy?: string;
   rentPerAnnum?: number;
+  /** First schedule date when the schedule hasn't started (no current rent). */
+  rentStartsOn?: string;
   reviewIntervalMonths?: number;
+  /** "No rent decreases on review" — the schedule holds every review at ≥ 0%. */
+  reviewRatchet: boolean;
   reviewState: "amber" | "green" | "grey" | "red";
+  /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
+  rowVersion: string;
+  /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
+  scheduleVersion: number;
   // Free-form per m038: e.g. "CPI Darwin (June)", "Fixed 3%", "Market".
   reviewType: string;
   securityDepositHeld?: number;
@@ -374,23 +406,38 @@ function parseDepositSteps(raw: string | null | undefined): SecurityDepositStep[
   }
 }
 
-/** Compute the traffic-light state from a tenant's NextReviewDate.
- *  Overdue reviews collapse into "amber" along with reviews due within 90
- *  days — the property team treats both the same way (chase action), so
- *  splitting "red" off as a separate alert just adds noise. We keep "red"
- *  in the union for future use (e.g. very-overdue) but never return it. */
+const REVIEW_DUE_SOON_DAYS = 90;
+
+/** The traffic light for a tenant's NextReviewDate (PLAN D11): red once the
+ *  review date has passed (Darwin date), amber within 90 days, green after
+ *  that; grey with no date or once vacated. */
 export function computeReviewState(
   nextReviewDate: string | undefined,
   status: string,
+  today: string = todayInDarwin(),
 ): "amber" | "green" | "grey" | "red" {
   if (status === "vacated") return "grey";
-  if (!nextReviewDate) return "grey";
-  const now = Date.now();
-  const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-  const nextMs = new Date(nextReviewDate + "T00:00:00Z").getTime();
-  if (Number.isNaN(nextMs)) return "grey";
-  if (nextMs - now <= ninetyDaysMs) return "amber";
-  return "green";
+  const next = sqlDateToIso(nextReviewDate);
+  if (!next) return "grey";
+  if (next < today) return "red";
+  return daysBetweenIso(today, next) <= REVIEW_DUE_SOON_DAYS ? "amber" : "green";
+}
+
+/** Whole Darwin days until the lease's last day (0 on the day itself). */
+export function calcDaysToExpiry(expiryIso: string | undefined, today: string): number | undefined {
+  return expiryIso ? daysBetweenIso(today, expiryIso) : undefined;
+}
+
+/** Holdover is derived, never stored by an ordinary edit: a stored "current"
+ *  lease reads "holdover" once its expiry has passed, and "current" again as
+ *  soon as the expiry is extended. */
+export function deriveTenantStatus(
+  storedStatus: RegisterTenantApi["status"],
+  daysToExpiry: number | undefined,
+): RegisterTenantApi["status"] {
+  return storedStatus === "current" && daysToExpiry !== undefined && daysToExpiry < 0
+    ? "holdover"
+    : storedStatus;
 }
 
 /** Day-pro-rated rent remaining until expiry. Uses 365-day year. */
@@ -414,16 +461,17 @@ function tenantRowToApi(
   const rentPerAnnum = asNum(row.RentPerAnnum);
 
   // Parse steps first so we can derive the schedule-aware effective rent.
-  // rentPerAnnum is the stored base; effectiveRentPerAnnum follows the active
-  // schedule row when one exists, falling back to the stored value.
+  // rentPerAnnum is the stored base; effectiveRentPerAnnum is what today's
+  // schedule row says (Darwin date), or the stored value with no schedule.
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
-  const today = new Date().toISOString().slice(0, 10);
-  const effectiveRentPerAnnum = resolveScheduleAnnual(
-    steps,
-    rentPerAnnum ?? 0,
-    totalSizeSqm,
-    today,
-  );
+  const today = todayInDarwin();
+  const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
+  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, {
+    cpiCapPercent: asNum(row.CpiCapPercent) ?? null,
+    cpiFloorPercent: asNum(row.CpiFloorPercent) ?? null,
+    reviewRatchet,
+  });
+  const effectiveRentPerAnnum = resolved.annual;
   const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
     totalSizeSqm > 0
@@ -431,22 +479,18 @@ function tenantRowToApi(
       : 0;
 
   const expiryIso = toIsoDate(row.Expiry);
-  let daysToExpiry: number | undefined;
-  let dollarsToExpiry: number | undefined;
-  if (expiryIso) {
-    const expiryDate = new Date(expiryIso + "T00:00:00Z");
-    const now = new Date();
-    daysToExpiry = Math.ceil(
-      (expiryDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
-    );
-    dollarsToExpiry = calcDollarsToExpiry(daysToExpiry, effectiveRentPerAnnum);
-  }
+  const daysToExpiry = calcDaysToExpiry(expiryIso, today);
+  const dollarsToExpiry =
+    daysToExpiry === undefined ? undefined : calcDollarsToExpiry(daysToExpiry, effectiveRentPerAnnum);
 
-  const storedStatus = (row.Status as RegisterTenantApi["status"]) ?? "current";
-  const status: RegisterTenantApi["status"] =
-    storedStatus === "current" && daysToExpiry !== undefined && daysToExpiry < 0
-      ? "holdover"
-      : storedStatus;
+  const status = deriveTenantStatus(
+    (row.Status as RegisterTenantApi["status"]) ?? "current",
+    daysToExpiry,
+  );
+  // Derived for today, so a keyed review whose date has passed has already
+  // moved on; a tenancy with nothing to derive from shows its stored date.
+  const nextReviewDate =
+    deriveNextReviewDate(nextReviewInputFromRow(row, steps, today)) ?? toIsoDate(row.NextReviewDate);
 
   return {
     abn: asStr(row.Abn),
@@ -490,7 +534,7 @@ function tenantRowToApi(
     lot: asStr(row.Lot),
     monthlyRental,
     myobId: asStr(row.MyobId),
-    nextReviewDate: toIsoDate(row.NextReviewDate),
+    nextReviewDate,
     noteCountByAnchor,
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
@@ -502,9 +546,13 @@ function tenantRowToApi(
     holdoverTerms: asStr(row.HoldoverTerms),
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
     rentPerAnnum,
+    rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
-    reviewState: computeReviewState(toIsoDate(row.NextReviewDate), status),
+    reviewRatchet,
+    reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
+    rowVersion: rowVersionHex(row.RowVersion),
+    scheduleVersion: Number(row.ScheduleVersion ?? 0),
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),
     securityDepositRequired: asStr(row.SecurityDepositRequired),
@@ -600,7 +648,7 @@ const TENANT_COLUMNS = `
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
-  CpiRegion, CpiCapPercent, CpiFloorPercent,
+  CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
   SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld, SecurityDepositSteps,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
@@ -610,7 +658,9 @@ const TENANT_COLUMNS = `
   MiscFees,
   InfoSheetSections,
   LeaseAdministration,
-  CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName
+  CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
+  RowVersion, ScheduleVersion,
+  ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 const OCCUPANCY_COLUMNS = `
@@ -659,7 +709,7 @@ async function getRegisterTenants(
 
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE BuildingId = @BuildingId
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
        ORDER BY LegalName`,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
@@ -769,7 +819,7 @@ async function getRegisterTenant(
     connection = await createRequestConnection(token);
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (tenantRows.length === 0) {
@@ -931,6 +981,9 @@ async function upsertRegisterTenant(
       return { status: 400, jsonBody: { error: "LegalName cannot be empty" } };
     }
 
+    const invalidTerm = invalidTermValue(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
+    if (invalidTerm) return invalidTerm;
+
     connection = await createRequestConnection(token);
 
     const params = buildTenantParams(body, caller);
@@ -949,7 +1002,7 @@ async function upsertRegisterTenant(
             RentPerAnnum,
             ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
             LastReviewIncreasePercent, FixedReviewPercent,
-            CpiRegion, CpiCapPercent, CpiFloorPercent,
+            CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
@@ -967,7 +1020,7 @@ async function upsertRegisterTenant(
             @RentPerAnnum,
             @ReviewType, @ReviewIntervalMonths, @NextReviewDate, @LastReviewDate,
             @LastReviewIncreasePercent, @FixedReviewPercent,
-            @CpiRegion, @CpiCapPercent, @CpiFloorPercent,
+            @CpiRegion, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
@@ -985,108 +1038,22 @@ async function upsertRegisterTenant(
       );
       resultId = inserted[0].TenantId as number;
     } else {
-      // Update — touch only the columns the caller actually sent. Audit fields
-      // always update. Use the full param set; UPDATE references only the
-      // params we name in the SET clause, so passing extras is harmless.
-      const setParts: string[] = [];
-      const updateParams: SqlParam[] = [];
-      // Whitelist of column → tedious type. Keys are SQL column names (used to
-      // build SET clauses), so an attacker controlling the request body can't
-      // inject a column name they didn't add to this list — the loop ignores
-      // unknown keys.
-      // Serialize JSON array fields to strings before the allowlist loop.
-      if (Array.isArray((body as Record<string, unknown>).SecurityDepositSteps)) {
-        (body as Record<string, unknown>).SecurityDepositSteps = JSON.stringify(
-          (body as Record<string, unknown>).SecurityDepositSteps,
-        );
+      if (
+        body.RowVersion !== undefined &&
+        (typeof body.RowVersion !== "string" || !ROW_VERSION_RE.test(body.RowVersion))
+      ) {
+        return { status: 400, jsonBody: { error: "RowVersion must be the 16-character hex the tenant was read with" } };
       }
-
-      const allowlist: Record<string, any> = {
-        Abn: TYPES.NVarChar,
-        AccountsEmail: TYPES.NVarChar,
-        AccountsPhone: TYPES.NVarChar,
-        Acn: TYPES.NVarChar,
-        BuildingId: TYPES.Int,
-        BusinessTenanciesAct: TYPES.NVarChar,
-        Commencement: TYPES.Date,
-        Comments: TYPES.NVarChar,
-        HoldoverTerms: TYPES.NVarChar,
-        CpiCapPercent: TYPES.Decimal,
-        CpiFloorPercent: TYPES.Decimal,
-        CpiRegion: TYPES.NVarChar,
-        EscalationPercent: TYPES.Decimal,
-        EscalationSchedule: TYPES.NVarChar,
-        Expiry: TYPES.Date,
-        FixedReviewPercent: TYPES.Decimal,
-        IdNo: TYPES.NVarChar,
-        InformationSheetAsAt: TYPES.NVarChar,
-        InformationSheetReference: TYPES.NVarChar,
-        LastReviewDate: TYPES.Date,
-        LastReviewIncreasePercent: TYPES.Decimal,
-        LegalName: TYPES.NVarChar,
-        Lot: TYPES.NVarChar,
-        MyobId: TYPES.NVarChar,
-        NextReviewDate: TYPES.Date,
-        OptionNoticeMonths: TYPES.Int,
-        OptionPeriods: TYPES.NVarChar,
-        PostalAddress: TYPES.NVarChar,
-        PrimaryContactEmail: TYPES.NVarChar,
-        PrimaryContactName: TYPES.NVarChar,
-        PrimaryContactPhone: TYPES.NVarChar,
-        RenewalLetterIssueBy: TYPES.NVarChar,
-        RentPerAnnum: TYPES.Decimal,
-        ReviewIntervalMonths: TYPES.Int,
-        ReviewType: TYPES.NVarChar,
-        SecurityDepositHeld: TYPES.Decimal,
-        SecurityDepositMethod: TYPES.NVarChar,
-        SecurityDepositRequired: TYPES.NVarChar,
-        SecurityDepositSteps: TYPES.NVarChar,
-        Status: TYPES.NVarChar,
-        StreetAddress: TYPES.NVarChar,
-        TermMonths: TYPES.Int,
-        TradingName: TYPES.NVarChar,
-      };
-      for (const col of Object.keys(allowlist)) {
-        if (!Object.prototype.hasOwnProperty.call(body, col)) continue;
-        const value = (body as any)[col];
-        if (value === undefined) continue;
-        setParts.push(`${col} = @${col}`);
-        updateParams.push({
-          name: col,
-          type: allowlist[col],
-          value: normaliseValue(col, value),
-          options: (
-            DECIMAL_OPTS as Record<string, { precision: number; scale: number }>
-          )[col],
-        });
-      }
-      // Always bump audit fields on update.
-      setParts.push("UpdatedAt = SYSUTCDATETIME()");
-      setParts.push("UpdatedById = @UpdatedById");
-      setParts.push("UpdatedByName = @UpdatedByName");
-      updateParams.push({
-        name: "UpdatedById",
-        type: TYPES.NVarChar,
-        value: caller.id,
-      });
-      updateParams.push({
-        name: "UpdatedByName",
-        type: TYPES.NVarChar,
-        value: caller.name,
-      });
-      updateParams.push({ name: "TenantId", type: TYPES.Int, value: tenantId });
-
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Tenants SET ${setParts.join(", ")} WHERE TenantId = @TenantId`,
-        updateParams,
-      );
+      const actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId);
+      if (refused) return refused;
       resultId = tenantId;
     }
 
     const stored = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @Id`,
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
@@ -1113,6 +1080,8 @@ async function upsertRegisterTenant(
       jsonBody: { tenant: tenantRowToApi(stored[0], [], {}) },
     };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertRegisterTenant failed", {
       error: formatted,
@@ -1122,6 +1091,269 @@ async function upsertRegisterTenant(
     return errorResponse("Upsert register tenant failed", formatted);
   } finally {
     if (connection) closeConnection(connection);
+  }
+}
+
+const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
+
+// Columns a tenant update may set → tedious type. Keys are SQL column names
+// (they build the SET clause), so a body key that isn't listed here is ignored.
+const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
+  Abn: TYPES.NVarChar,
+  AccountsEmail: TYPES.NVarChar,
+  AccountsPhone: TYPES.NVarChar,
+  Acn: TYPES.NVarChar,
+  BuildingId: TYPES.Int,
+  BusinessTenanciesAct: TYPES.NVarChar,
+  Commencement: TYPES.Date,
+  Comments: TYPES.NVarChar,
+  HoldoverTerms: TYPES.NVarChar,
+  CpiCapPercent: TYPES.Decimal,
+  CpiFloorPercent: TYPES.Decimal,
+  CpiRegion: TYPES.NVarChar,
+  EscalationPercent: TYPES.Decimal,
+  EscalationSchedule: TYPES.NVarChar,
+  Expiry: TYPES.Date,
+  FixedReviewPercent: TYPES.Decimal,
+  IdNo: TYPES.NVarChar,
+  InformationSheetAsAt: TYPES.NVarChar,
+  InformationSheetReference: TYPES.NVarChar,
+  LastReviewDate: TYPES.Date,
+  LastReviewIncreasePercent: TYPES.Decimal,
+  LegalName: TYPES.NVarChar,
+  Lot: TYPES.NVarChar,
+  MyobId: TYPES.NVarChar,
+  NextReviewDate: TYPES.Date,
+  OptionNoticeMonths: TYPES.Int,
+  OptionPeriods: TYPES.NVarChar,
+  PostalAddress: TYPES.NVarChar,
+  PrimaryContactEmail: TYPES.NVarChar,
+  PrimaryContactName: TYPES.NVarChar,
+  PrimaryContactPhone: TYPES.NVarChar,
+  RenewalLetterIssueBy: TYPES.NVarChar,
+  RentPerAnnum: TYPES.Decimal,
+  ReviewIntervalMonths: TYPES.Int,
+  ReviewRatchet: TYPES.Bit,
+  ReviewType: TYPES.NVarChar,
+  SecurityDepositHeld: TYPES.Decimal,
+  SecurityDepositMethod: TYPES.NVarChar,
+  SecurityDepositRequired: TYPES.NVarChar,
+  SecurityDepositSteps: TYPES.NVarChar,
+  Status: TYPES.NVarChar,
+  StreetAddress: TYPES.NVarChar,
+  TermMonths: TYPES.Int,
+  TradingName: TYPES.NVarChar,
+};
+
+// Tenant fields the schedule computes from (PLAN WP23a). A change is ledgered
+// as schedule.terms_edit and bumps ScheduleVersion, so a review calculated
+// before the change can't be applied after it. RentPerAnnum is the schedule's
+// starting rent when no commencement row carries one, so it counts too.
+const SCHEDULE_TERM_FIELDS: Record<string, string> = {
+  CpiCapPercent: "cpiCapPercent",
+  CpiFloorPercent: "cpiFloorPercent",
+  FixedReviewPercent: "fixedReviewPercent",
+  RentPerAnnum: "rentPerAnnum",
+  ReviewIntervalMonths: "reviewIntervalMonths",
+  ReviewRatchet: "reviewRatchet",
+  ReviewType: "reviewType",
+};
+
+// Tenant fields the next review date is derived from (WP23b). A write that
+// sends any of them re-derives NextReviewDate; a sent NextReviewDate is only
+// stored for a tenancy without a schedule (deriveNextReviewDate).
+const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", "ReviewIntervalMonths"] as const;
+
+const LOCKED_TENANT_COLUMNS = `
+  TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
+  CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
+  ReviewIntervalMonths, ReviewType, ReviewRatchet,
+  Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
+  ${RESOLVED_REVIEW_DATES_SQL}
+`;
+
+function comparableTerm(value: unknown): number | string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") return value;
+  if (typeof value === "string") return value.trim();
+  return Number(value);
+}
+
+/** 400 for a malformed schedule-term value; null when the body is fine. */
+function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
+  if (body.ReviewRatchet !== undefined && typeof body.ReviewRatchet !== "boolean") {
+    return { status: 400, jsonBody: { error: "ReviewRatchet must be true or false" } };
+  }
+  for (const col of ["CpiCapPercent", "CpiFloorPercent"]) {
+    const value = body[col];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+      return { status: 400, jsonBody: { error: `${col} must be a percentage from 0 to 100` } };
+    }
+  }
+  return null;
+}
+
+/** 400 when the CPI floor would sit above the cap once this write applies. */
+function floorAboveCap(fields: Record<string, unknown>, current: SqlRow): HttpResponseInit | null {
+  if (fields.CpiCapPercent === undefined && fields.CpiFloorPercent === undefined) return null;
+  const after = (col: string) =>
+    comparableTerm(fields[col] !== undefined ? normaliseValue(col, fields[col]) : current[col]);
+  const cap = after("CpiCapPercent");
+  const floor = after("CpiFloorPercent");
+  if (typeof cap !== "number" || typeof floor !== "number" || floor <= cap) return null;
+  return {
+    status: 400,
+    jsonBody: { error: `The CPI floor (${floor}%) can't be above the CPI cap (${cap}%).` },
+  };
+}
+
+/**
+ * NextReviewDate as this write leaves it (PLAN D1): re-derived when the write
+ * touches a review date field. Sets or drops fields.NextReviewDate and returns
+ * the move (it rides in the write's terms_edit entry, if there is one), or
+ * null when it doesn't move.
+ */
+function deriveNextReviewOnWrite(
+  fields: Record<string, unknown>,
+  current: SqlRow,
+): { after: string; before: string | null } | null {
+  if (!REVIEW_DATE_FIELDS.some((col) => fields[col] !== undefined)) return null;
+  const pick = (col: string) => (fields[col] !== undefined ? normaliseValue(col, fields[col]) : current[col]);
+  const derived = deriveNextReviewDate(
+    nextReviewInputFromRow(
+      {
+        Commencement: pick("Commencement"),
+        LastReviewDate: pick("LastReviewDate"),
+        NextReviewDate: pick("NextReviewDate"),
+        ResolvedReviewDates: current.ResolvedReviewDates,
+        ReviewIntervalMonths: pick("ReviewIntervalMonths"),
+      },
+      parseSteps(current.ScheduledRateSteps as string | null | undefined),
+    ),
+  );
+  // Not derivable (no schedule, a date already set): a sent date stands.
+  if (derived === null) return null;
+  const before = sqlDateToIso(current.NextReviewDate);
+  if (derived === before) {
+    delete fields.NextReviewDate;
+    return null;
+  }
+  fields.NextReviewDate = derived;
+  return { after: derived, before };
+}
+
+/**
+ * The update half of upsertRegisterTenant, in one transaction. Checks the
+ * RowVersion the client read (409 naming who changed it), never stores a
+ * re-sent derived Status, re-derives NextReviewDate, and ledgers
+ * schedule-term and next-review changes. Returns a response when the write is
+ * refused, null when it committed.
+ */
+async function updateRegisterTenantRow(
+  connection: Connection,
+  body: Record<string, any>,
+  caller: UserRef,
+  actor: ledger.LedgerActor,
+  tenantId: number,
+): Promise<HttpResponseInit | null> {
+  await beginTransaction(connection);
+  try {
+    const locked = await executeQuery(
+      connection,
+      `SELECT ${LOCKED_TENANT_COLUMNS} FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK) WHERE t.TenantId = @TenantId`,
+      [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
+    );
+    if (locked.length === 0) {
+      await rollbackQuietly(connection);
+      return { status: 404, jsonBody: { error: "Tenant not found" } };
+    }
+    const current = locked[0];
+    const currentVersion = rowVersionHex(current.RowVersion);
+    if (typeof body.RowVersion === "string" && body.RowVersion.toLowerCase() !== currentVersion) {
+      await rollbackQuietly(connection);
+      return conflictResponse(
+        { changedAt: isoTimestamp(current.UpdatedAt), changedBy: (current.UpdatedByName as string | null) ?? null },
+        { rowVersion: currentVersion },
+      );
+    }
+
+    const fields: Record<string, unknown> = { ...body };
+    const refused = floorAboveCap(fields, current);
+    if (refused) {
+      await rollbackQuietly(connection);
+      return refused;
+    }
+    if (Array.isArray(fields.SecurityDepositSteps)) {
+      fields.SecurityDepositSteps = JSON.stringify(fields.SecurityDepositSteps);
+    }
+    // A Status equal to what the client was shown (holdover is derived from a
+    // stored "current") is a re-send, not an edit — storing it would make
+    // holdover stick after the expiry is extended.
+    if (fields.Status !== undefined) {
+      const shown = deriveTenantStatus(
+        (current.Status as RegisterTenantApi["status"]) ?? "current",
+        calcDaysToExpiry(toIsoDate(current.Expiry), todayInDarwin()),
+      );
+      if (fields.Status === shown) delete fields.Status;
+    }
+    const nextReview = deriveNextReviewOnWrite(fields, current);
+
+    const setParts: string[] = [];
+    const updateParams: SqlParam[] = [];
+    const termsBefore: Record<string, unknown> = {};
+    const termsAfter: Record<string, unknown> = {};
+    for (const col of Object.keys(TENANT_UPDATE_COLUMNS)) {
+      if (!Object.prototype.hasOwnProperty.call(fields, col) || fields[col] === undefined) continue;
+      const value = normaliseValue(col, fields[col]);
+      setParts.push(`${col} = @${col}`);
+      updateParams.push({
+        name: col,
+        options: (DECIMAL_OPTS as Record<string, { precision: number; scale: number }>)[col],
+        type: TENANT_UPDATE_COLUMNS[col],
+        value,
+      });
+      const termKey = SCHEDULE_TERM_FIELDS[col];
+      if (termKey && comparableTerm(current[col]) !== comparableTerm(value)) {
+        termsBefore[termKey] = current[col] ?? null;
+        termsAfter[termKey] = value ?? null;
+      }
+    }
+    if (setParts.length === 0) {
+      await commitTransaction(connection);
+      return null;
+    }
+    const termsChanged = Object.keys(termsAfter).length > 0;
+    if (termsChanged) setParts.push("ScheduleVersion = ScheduleVersion + 1");
+    setParts.push("UpdatedAt = SYSUTCDATETIME()", "UpdatedById = @UpdatedById", "UpdatedByName = @UpdatedByName");
+    updateParams.push(
+      { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+      { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+      { name: "TenantId", type: TYPES.Int, value: tenantId },
+    );
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Tenants SET ${setParts.join(", ")} WHERE TenantId = @TenantId`,
+      updateParams,
+    );
+    const scope = {
+      actor,
+      buildingId: current.BuildingId as number,
+      correlationId: ledger.newCorrelationId(),
+      subject: { id: tenantId, type: "tenancy" as const },
+      tenantId,
+    };
+    if (termsChanged) {
+      const [terms] = nextReview
+        ? withNextReviewDate([{ after: termsAfter, before: termsBefore }], nextReview.before, nextReview.after)
+        : [{ after: termsAfter, before: termsBefore }];
+      await ledger.record(connection, { ...scope, action: "schedule.terms_edit", ...terms });
+    }
+    await commitTransaction(connection);
+    return null;
+  } catch (err) {
+    await rollbackQuietly(connection);
+    throw err;
   }
 }
 
@@ -1215,7 +1447,24 @@ function buildTenantParams(
       type: TYPES.Int,
       value: v("ReviewIntervalMonths"),
     },
-    { name: "NextReviewDate", type: TYPES.Date, value: v("NextReviewDate") },
+    // A new tenancy has no schedule yet: a sent date stands, else the first
+    // anniversary after commencement (deriveNextReviewDate).
+    {
+      name: "NextReviewDate",
+      type: TYPES.Date,
+      value:
+        deriveNextReviewDate(
+          nextReviewInputFromRow(
+            {
+              Commencement: v("Commencement"),
+              LastReviewDate: v("LastReviewDate"),
+              NextReviewDate: v("NextReviewDate"),
+              ReviewIntervalMonths: v("ReviewIntervalMonths"),
+            },
+            [],
+          ),
+        ) ?? v("NextReviewDate"),
+    },
     { name: "LastReviewDate", type: TYPES.Date, value: v("LastReviewDate") },
     {
       name: "LastReviewIncreasePercent",
@@ -1242,6 +1491,7 @@ function buildTenantParams(
       value: v("CpiFloorPercent"),
       options: DECIMAL_OPTS.CpiFloorPercent,
     },
+    { name: "ReviewRatchet", type: TYPES.Bit, value: body.ReviewRatchet === true },
     {
       name: "SecurityDepositRequired",
       type: TYPES.NVarChar,
@@ -1281,6 +1531,38 @@ function buildTenantParams(
     { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
     { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
   ];
+}
+
+function tenantDisplayName(row: SqlRow): string {
+  return (row.TradingName as string | null) || (row.LegalName as string | null) || `Tenancy ${row.TenantId}`;
+}
+
+/** 409 naming the tenancy that holds a cell (PLAN WP23a, F22d). */
+function occupancyHeldResponse(holder: SqlRow, level: string, area: string): HttpResponseInit {
+  const name = tenantDisplayName(holder);
+  return {
+    status: 409,
+    jsonBody: {
+      error: `${level} · ${area} is held by ${name}. Move it from ${name}, with a reason, to reassign it.`,
+      heldBy: {
+        name,
+        occupancyId: holder.OccupancyId as string,
+        tenantId: holder.TenantId as number,
+      },
+    },
+  };
+}
+
+const REASON_MAX_CHARS = 2000;
+
+/** undefined = no reassign requested; null = malformed. */
+function parseReassign(raw: unknown): { fromTenantId: number; reason: string } | null | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const { FromTenantId, Reason } = raw as Record<string, unknown>;
+  if (typeof FromTenantId !== "number" || !Number.isInteger(FromTenantId) || FromTenantId <= 0) return null;
+  if (typeof Reason !== "string" || !Reason.trim() || Reason.length > REASON_MAX_CHARS) return null;
+  return { fromTenantId: FromTenantId, reason: Reason.trim() };
 }
 
 // ── POST /api/upsertOccupancy ────────────────────────────────────────────────
@@ -1324,8 +1606,17 @@ async function upsertOccupancy(
     if (typeof SizeSqm !== "number" || !Number.isFinite(SizeSqm)) {
       return { status: 400, jsonBody: { error: "SizeSqm (number) required" } };
     }
+    const reassign = parseReassign(body.Reassign);
+    if (reassign === null) {
+      return {
+        status: 400,
+        jsonBody: { error: "Reassign needs FromTenantId and a Reason for moving the area" },
+      };
+    }
 
     connection = await createRequestConnection(token);
+    const actor = reassign ? await resolveLedgerActor(request, connection) : null;
+    if (reassign && !actor) return unauthorizedResponse();
 
     // Fetch tenant rent fields up-front so the history snapshot is consistent.
     const tenantRows = await executeQuery(
@@ -1343,6 +1634,7 @@ async function upsertOccupancy(
     // client-provided id for the insert path.
     let effectiveOccupancyId = OccupancyId;
 
+    let movedFrom: SqlRow | null = null;
     await beginTransaction(connection);
     try {
       // Look up by either the client OccupancyId OR the cell key
@@ -1352,11 +1644,11 @@ async function upsertOccupancy(
       // than fail with a duplicate-key error.
       const existing = await executeQuery(
         connection,
-        `SELECT TOP 1 OccupancyId, TenantId
-         FROM dbo.TenantOccupancies
-         WHERE OccupancyId = @Id
-            OR (BuildingId = @BuildingId AND Level = @Level AND Area = @Area)
-         ORDER BY CASE WHEN OccupancyId = @Id THEN 0 ELSE 1 END`,
+        `SELECT o.OccupancyId, o.TenantId, t.LegalName, t.TradingName
+         FROM dbo.TenantOccupancies o WITH (UPDLOCK, ROWLOCK)
+         LEFT JOIN dbo.Tenants t ON t.TenantId = o.TenantId
+         WHERE o.OccupancyId = @Id
+            OR (o.BuildingId = @BuildingId AND o.Level = @Level AND o.Area = @Area)`,
         [
           { name: "Id", type: TYPES.NVarChar, value: OccupancyId },
           { name: "BuildingId", type: TYPES.Int, value: BuildingId },
@@ -1364,11 +1656,28 @@ async function upsertOccupancy(
           { name: "Area", type: TYPES.NVarChar, value: Area },
         ],
       );
-      if (existing.length > 0) {
-        effectiveOccupancyId = existing[0].OccupancyId as string;
+      const byId = existing.find((r) => r.OccupancyId === OccupancyId) ?? null;
+      const atCell = existing.find((r) => r.OccupancyId !== OccupancyId) ?? null;
+      // Moving this area onto a cell another row already holds.
+      if (byId && atCell) {
+        await rollbackQuietly(connection);
+        return occupancyHeldResponse(atCell, Level, Area);
+      }
+      const target = byId ?? atCell;
+      // A cell held by another tenancy only moves on an explicit
+      // "Move from {tenant}" with a reason (ledgered as occupancy.reassign).
+      if (target && (target.TenantId as number) !== TenantId) {
+        if (!reassign || reassign.fromTenantId !== (target.TenantId as number)) {
+          await rollbackQuietly(connection);
+          return occupancyHeldResponse(target, Level, Area);
+        }
+        movedFrom = target;
+      }
+      if (target) {
+        effectiveOccupancyId = target.OccupancyId as string;
       }
 
-      if (existing.length === 0) {
+      if (!target) {
         await executeQuery(
           connection,
           `INSERT INTO dbo.TenantOccupancies (
@@ -1391,8 +1700,8 @@ async function upsertOccupancy(
           ],
         );
       } else {
-        // Reassign-or-update. TenantId is included so a re-import can move a
-        // cell from one (orphan) tenant to another.
+        // Update in place; TenantId changes only on an explicit reassign
+        // (checked above).
         await executeQuery(
           connection,
           `UPDATE dbo.TenantOccupancies SET
@@ -1464,9 +1773,25 @@ async function upsertOccupancy(
         ],
       );
 
+      if (movedFrom && actor && reassign) {
+        await ledger.record(connection, {
+          action: "occupancy.reassign",
+          actor,
+          after: { tenantId: TenantId },
+          before: {
+            tenantId: movedFrom.TenantId as number,
+            tenantName: tenantDisplayName(movedFrom),
+          },
+          buildingId: BuildingId,
+          reason: reassign.reason,
+          subject: { id: effectiveOccupancyId, type: "occupancy" },
+          tenantId: TenantId,
+        });
+      }
+
       await commitTransaction(connection);
     } catch (err) {
-      await rollbackTransaction(connection);
+      await rollbackQuietly(connection);
       throw err;
     }
 
@@ -1477,11 +1802,14 @@ async function upsertOccupancy(
       [{ name: "Id", type: TYPES.NVarChar, value: effectiveOccupancyId }],
     );
     invalidateTenantAndBuilding(TenantId, BuildingId);
+    if (movedFrom) invalidateTenantAndBuilding(movedFrom.TenantId as number, BuildingId);
     return {
       status: 200,
       jsonBody: { occupancy: occupancyRowToApi(stored[0]) },
     };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertOccupancy failed", {
       error: formatted,
@@ -1722,8 +2050,10 @@ async function deleteRegisterTenant(
 
 // ── POST /api/applyRentReview ────────────────────────────────────────────────
 // Atomically: completes the RentReviews row, updates Tenants.RentPerAnnum,
-// LastReviewDate, LastReviewIncreasePercent, advances NextReviewDate by
-// ReviewIntervalMonths.
+// LastReviewDate (the review's own date), LastReviewIncreasePercent and
+// NextReviewDate — derived from the schedule and the lease anniversary, so a
+// review processed late doesn't move the next one (WP23b). Legacy: WP25
+// replaces this with the review workflow.
 
 async function applyRentReview(
   request: HttpRequest,
@@ -1760,7 +2090,8 @@ async function applyRentReview(
     connection = await createRequestConnection(token);
     const reviewRows = await executeQuery(
       connection,
-      `SELECT r.ReviewId, r.TenantId, t.RentPerAnnum, t.ReviewIntervalMonths
+      `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, t.RentPerAnnum, t.ReviewIntervalMonths,
+              t.Commencement, t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
        FROM dbo.RentReviews r
        INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
        WHERE r.ReviewId = @Id`,
@@ -1779,11 +2110,19 @@ async function applyRentReview(
           ? Math.round(((NewRentPerAnnum - oldRent) / oldRent) * 10000) / 100
           : 0;
     const intervalMonths = (r.ReviewIntervalMonths as number | null) ?? 12;
-    const today = new Date();
-    const nextReview = new Date(today);
-    nextReview.setMonth(nextReview.getMonth() + intervalMonths);
-    const nextReviewIso = nextReview.toISOString().slice(0, 10);
-    const todayIso = today.toISOString().slice(0, 10);
+    // The review settles its own date; the next one follows the schedule or
+    // the anniversary after it, however late this one is processed.
+    const reviewDate = sqlDateToIso(r.ScheduledFor) ?? todayInDarwin();
+    const steps = parseSteps(r.ScheduledRateSteps as string | null | undefined);
+    const settled = nextReviewInputFromRow({ ...r, LastReviewDate: reviewDate, NextReviewDate: null }, steps);
+    const nextReviewIso =
+      (steps.length > 0
+        ? deriveNextReviewDate({
+            ...settled,
+            resolvedReviewDates: new Set([...settled.resolvedReviewDates, reviewDate]),
+          })
+        : nextAnniversary(settled.commencement ?? reviewDate, intervalMonths > 0 ? intervalMonths : 12, reviewDate)) ??
+      reviewDate;
 
     await beginTransaction(connection);
     try {
@@ -1853,7 +2192,7 @@ async function applyRentReview(
         connection,
         `UPDATE dbo.Tenants SET
            RentPerAnnum = @NewRent,
-           LastReviewDate = @Today,
+           LastReviewDate = @LastReview,
            LastReviewIncreasePercent = @IncreasePercent,
            NextReviewDate = @NextReview,
            UpdatedAt = SYSUTCDATETIME(),
@@ -1868,7 +2207,7 @@ async function applyRentReview(
             value: NewRentPerAnnum,
             options: DECIMAL_OPTS.NewRentPerAnnum,
           },
-          { name: "Today", type: TYPES.Date, value: todayIso },
+          { name: "LastReview", type: TYPES.Date, value: reviewDate },
           {
             name: "IncreasePercent",
             type: TYPES.Decimal,
@@ -1939,7 +2278,7 @@ async function getReviewsDue(
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     const rows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants
+      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
        ${where} ${where ? "AND" : "WHERE"} NextReviewDate IS NOT NULL
         AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE))
         AND Status <> 'vacated'
@@ -1947,7 +2286,11 @@ async function getReviewsDue(
       params,
     );
     /* eslint-enable local/no-sql-interpolation */
-    const tenants = rows.map((row) => tenantRowToApi(row, [], {}));
+    // The SQL reads the stored date; a keyed review whose date has since passed
+    // has moved on, so keep only what is still due or overdue today.
+    const tenants = rows
+      .map((row) => tenantRowToApi(row, [], {}))
+      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red");
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {
     context.error("getReviewsDue failed:", error.message);
@@ -2040,33 +2383,6 @@ async function getPortfolioOccupancy(
 
 const INCENTIVE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
-async function loadTenantIncentives(
-  connection: Connection,
-  tenantId: number,
-  buildingId: number,
-): Promise<{ found: false } | { found: true; incentives: TenancyIncentive[] }> {
-  // BuildingId is part of the lookup so a caller can't drift a tenant onto
-  // the wrong building by mistake — the path key the frontend uses always
-  // pairs both, and a mismatch is a bug worth surfacing as 404 rather than
-  // silently writing to the unintended row.
-  const rows = await executeQuery(
-    connection,
-    `SELECT Incentives FROM dbo.Tenants
-     WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-    [
-      { name: "TenantId", type: TYPES.Int, value: tenantId },
-      { name: "BuildingId", type: TYPES.Int, value: buildingId },
-    ],
-  );
-  if (rows.length === 0) return { found: false };
-  return {
-    found: true,
-    incentives: parseIncentives(
-      rows[0].Incentives as string | null | undefined,
-    ),
-  };
-}
-
 async function reloadFullTenant(
   connection: Connection,
   tenantId: number,
@@ -2077,7 +2393,7 @@ async function reloadFullTenant(
   // detail-query response for those and only patches the tenant row.
   const tenantRows = await executeQuery(
     connection,
-    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants WHERE TenantId = @TenantId`,
+    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
@@ -2118,48 +2434,32 @@ async function upsertTenantIncentive(
     if (!parsed.ok) {
       return { status: 400, jsonBody: { error: parsed.error } };
     }
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, incentive } = parsed;
 
     connection = await createRequestConnection(token);
-
-    const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
-    if (!loaded.found) {
-      return {
-        status: 404,
-        jsonBody: { error: "Tenant not found for the given BuildingId" },
-      };
-    }
-    const next = upsertIncentive(loaded.incentives, incentive);
-    const nextJson = JSON.stringify(next);
-
-    await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `UPDATE dbo.Tenants SET
-         Incentives = @Incentives,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "Incentives", type: TYPES.NVarChar, value: nextJson },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseIncentives(locked.Incentives as string | null | undefined);
+        const before = existing.find((i) => i.id === incentive.id) ?? null;
+        const next = upsertIncentive(existing, incentive);
+        return {
+          column: "Incentives",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: incentive, before, subject: { id: incentive.id, type: "incentive" } },
+          ],
+          result: null,
+          value: next,
+        };
+      },
     );
-
-    context.log("upsertTenantIncentive", {
-      action: "upsertTenantIncentive",
-      actor: caller,
-      incentiveId: incentive.id,
-      noteSummary: incentive.note
-        ? incentive.note.length > 80
-          ? `${incentive.note.slice(0, 77)}…`
-          : incentive.note
-        : undefined,
-      tenantId: TenantId,
-    });
+    if (outcome.kind !== "ok") return scheduleWriteResponse(outcome, () => ({}));
 
     const tenant = await reloadFullTenant(connection, TenantId);
     if (!tenant) {
@@ -2171,6 +2471,8 @@ async function upsertTenantIncentive(
     invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertTenantIncentive failed", {
       error: formatted,
@@ -2212,46 +2514,33 @@ async function deleteTenantIncentive(
     if (!parsed.ok) {
       return { status: 400, jsonBody: { error: parsed.error } };
     }
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, incentiveId } = parsed;
 
     connection = await createRequestConnection(token);
-
-    const loaded = await loadTenantIncentives(connection, TenantId, BuildingId);
-    if (!loaded.found) {
-      return {
-        status: 404,
-        jsonBody: { error: "Tenant not found for the given BuildingId" },
-      };
-    }
-    const next = deleteIncentive(loaded.incentives, incentiveId);
-    if (next === NOT_FOUND) {
-      return { status: 404, jsonBody: { error: "Incentive not found" } };
-    }
-    const nextJson = JSON.stringify(next);
-
-    await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `UPDATE dbo.Tenants SET
-         Incentives = @Incentives,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "Incentives", type: TYPES.NVarChar, value: nextJson },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseIncentives(locked.Incentives as string | null | undefined);
+        const before = existing.find((i) => i.id === incentiveId);
+        const next = deleteIncentive(existing, incentiveId);
+        if (next === NOT_FOUND || !before) return { error: "Incentive not found", kind: "reject", status: 404 };
+        return {
+          column: "Incentives",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: null, before, subject: { id: incentiveId, type: "incentive" } },
+          ],
+          result: null,
+          value: next,
+        };
+      },
     );
-
-    context.log("deleteTenantIncentive", {
-      action: "deleteTenantIncentive",
-      actor: caller,
-      incentiveId,
-      tenantId: TenantId,
-    });
+    if (outcome.kind !== "ok") return scheduleWriteResponse(outcome, () => ({}));
 
     const tenant = await reloadFullTenant(connection, TenantId);
     if (!tenant) {
@@ -2263,6 +2552,8 @@ async function deleteTenantIncentive(
     invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("deleteTenantIncentive failed", {
       error: formatted,
@@ -2369,64 +2660,73 @@ async function upsertScheduledRateStep(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateUpsertStepEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, step } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    let changeId = "";
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT ScheduledRateSteps FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseSteps(locked.ScheduledRateSteps as string | null);
+        const oldStep = existing.find((s) => s.id === step.id) ?? null;
+        // Adding a row closes the open-ended row before it (effectiveTo is exclusive).
+        const { closed, steps: withClosed } = closeOpenPredecessor(existing, step);
+        const next = normaliseLegacyEnds(upsertStep(withClosed, step));
+        const saved = next.find((s) => s.id === step.id) ?? step;
+        const ledgerEntries: LedgerDraft[] = [
+          { action: "schedule.manual_edit", after: saved, before: oldStep, subject: { id: step.id, type: "rate_step" } },
+        ];
+        if (closed) {
+          ledgerEntries.push({
+            action: "schedule.manual_edit",
+            after: closed.after,
+            before: closed.before,
+            subject: { id: closed.after.id, type: "rate_step" },
+          });
+        }
+        return {
+          afterUpdate: async (conn) => {
+            changeId = await insertRentScheduleChangeLog(conn, {
+              buildingId: BuildingId,
+              changeKind: oldStep ? "updated" : "added",
+              changedById: caller.id,
+              changedByName: caller.name,
+              diff: oldStep ? diffSteps(oldStep, saved) : null,
+              stepId: step.id,
+              stepSnapshot: saved,
+              tenantId: TenantId,
+            });
+            if (closed) {
+              await insertRentScheduleChangeLog(conn, {
+                buildingId: BuildingId,
+                changeKind: "updated",
+                changedById: caller.id,
+                changedByName: caller.name,
+                diff: diffSteps(closed.before, closed.after),
+                stepId: closed.after.id,
+                stepSnapshot: closed.after,
+                tenantId: TenantId,
+              });
+            }
+          },
+          column: "ScheduledRateSteps",
+          kind: "write",
+          ledgerEntries,
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0) {
-      return {
-        status: 404,
-        jsonBody: { error: "Tenant not found for the given BuildingId" },
-      };
-    }
-    const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
-    const oldStep = existing.find((s) => s.id === step.id) ?? null;
-    const changeKind = oldStep ? "updated" : "added";
-    const next = upsertStep(existing, step);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         ScheduledRateSteps = @ScheduledRateSteps,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        {
-          name: "ScheduledRateSteps",
-          type: TYPES.NVarChar,
-          value: JSON.stringify(next),
-        },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    const changeId = await insertRentScheduleChangeLog(connection, {
-      tenantId: TenantId,
-      buildingId: BuildingId,
-      stepId: step.id,
-      changeKind,
-      changedById: caller.id,
-      changedByName: caller.name,
-      stepSnapshot: step,
-      diff: oldStep ? diffSteps(oldStep, step) : null,
-    });
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { steps: next, changeId } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertScheduledRateStep failed:", error.message);
     return errorResponse("Failed to upsert scheduled rate step", error.message);
   } finally {
@@ -2460,66 +2760,50 @@ async function deleteScheduledRateStep(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateDeleteStepEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, stepId } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    let changeId = "";
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT ScheduledRateSteps FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseSteps(locked.ScheduledRateSteps as string | null);
+        const deletedStep = existing.find((s) => s.id === stepId);
+        const next = deleteStep(existing, stepId);
+        if (next === STEP_NOT_FOUND || !deletedStep) return { error: "Step not found", kind: "reject", status: 404 };
+        return {
+          afterUpdate: async (conn) => {
+            changeId = await insertRentScheduleChangeLog(conn, {
+              buildingId: BuildingId,
+              changeKind: "deleted",
+              changedById: caller.id,
+              changedByName: caller.name,
+              diff: null,
+              stepId,
+              stepSnapshot: deletedStep,
+              tenantId: TenantId,
+            });
+          },
+          column: "ScheduledRateSteps",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: null, before: deletedStep, subject: { id: stepId, type: "rate_step" } },
+          ],
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Tenant not found" } };
-    }
-    const existing = parseSteps(rows[0].ScheduledRateSteps as string | null);
-    const deletedStep = existing.find((s) => s.id === stepId) ?? null;
-    const next = deleteStep(existing, stepId);
-    if (next === STEP_NOT_FOUND) {
-      return { status: 404, jsonBody: { error: "Step not found" } };
-    }
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         ScheduledRateSteps = @ScheduledRateSteps,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        {
-          name: "ScheduledRateSteps",
-          type: TYPES.NVarChar,
-          value: JSON.stringify(next),
-        },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    let changeId: string | undefined;
-    if (deletedStep) {
-      changeId = await insertRentScheduleChangeLog(connection, {
-        tenantId: TenantId,
-        buildingId: BuildingId,
-        stepId,
-        changeKind: "deleted",
-        changedById: caller.id,
-        changedByName: caller.name,
-        stepSnapshot: deletedStep,
-        diff: null,
-      });
-    }
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { steps: next, changeId } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteScheduledRateStep failed:", error.message);
     return errorResponse("Failed to delete scheduled rate step", error.message);
   } finally {
@@ -2966,50 +3250,36 @@ async function upsertCarparkScheduleGroup(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateUpsertGroupEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, group } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT CarparkScheduleGroups FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
+        const before = existing.find((g) => g.id === group.id) ?? null;
+        const next = upsertGroup(existing, group);
+        return {
+          column: "CarparkScheduleGroups",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: group, before, subject: { id: group.id, type: "carpark_group" } },
+          ],
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0)
-      return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseGroups(
-      rows[0].CarparkScheduleGroups as string | null,
-    );
-    const next = upsertGroup(existing, group);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         CarparkScheduleGroups = @CarparkScheduleGroups,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        {
-          name: "CarparkScheduleGroups",
-          type: TYPES.NVarChar,
-          value: JSON.stringify(next),
-        },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { groups: next } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (groups) => ({ groups }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertCarparkScheduleGroup failed:", error.message);
     return errorResponse(
       "Failed to upsert carpark schedule group",
@@ -3046,52 +3316,37 @@ async function deleteCarparkScheduleGroup(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateDeleteGroupEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, groupId } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT CarparkScheduleGroups FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
+        const before = existing.find((g) => g.id === groupId);
+        const next = deleteGroup(existing, groupId);
+        if (next === STEP_NOT_FOUND || !before) return { error: "Group not found", kind: "reject", status: 404 };
+        return {
+          column: "CarparkScheduleGroups",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: null, before, subject: { id: groupId, type: "carpark_group" } },
+          ],
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0)
-      return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseGroups(
-      rows[0].CarparkScheduleGroups as string | null,
-    );
-    const next = deleteGroup(existing, groupId);
-    if (next === STEP_NOT_FOUND)
-      return { status: 404, jsonBody: { error: "Group not found" } };
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         CarparkScheduleGroups = @CarparkScheduleGroups,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        {
-          name: "CarparkScheduleGroups",
-          type: TYPES.NVarChar,
-          value: JSON.stringify(next),
-        },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { groups: next } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (groups) => ({ groups }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteCarparkScheduleGroup failed:", error.message);
     return errorResponse(
       "Failed to delete carpark schedule group",
@@ -3495,44 +3750,36 @@ async function upsertMiscFeeHandler(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateUpsertFeeEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, fee } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT MiscFees FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseMiscFees(locked.MiscFees as string | null);
+        const before = existing.find((f) => f.id === fee.id) ?? null;
+        const next = upsertMiscFee(existing, fee);
+        return {
+          column: "MiscFees",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: fee, before, subject: { id: fee.id, type: "misc_fee" } },
+          ],
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0)
-      return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseMiscFees(rows[0].MiscFees as string | null);
-    const next = upsertMiscFee(existing, fee);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         MiscFees = @MiscFees,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "MiscFees", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { fees: next } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (fees) => ({ fees }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertMiscFee failed:", error.message);
     return errorResponse("Failed to upsert misc fee", error.message);
   } finally {
@@ -3566,46 +3813,37 @@ async function deleteMiscFeeHandler(
     const body = (await request.json()) as Record<string, unknown>;
     const parsed = validateDeleteFeeEnvelope(body);
     if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+    const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
+    if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, feeId } = parsed;
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const outcome = await runScheduleWrite(
       connection,
-      `SELECT MiscFees FROM dbo.Tenants
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
+      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      (locked) => {
+        const existing = parseMiscFees(locked.MiscFees as string | null);
+        const before = existing.find((f) => f.id === feeId);
+        const next = deleteMiscFee(existing, feeId);
+        if (next === STEP_NOT_FOUND || !before) return { error: "Fee not found", kind: "reject", status: 404 };
+        return {
+          column: "MiscFees",
+          kind: "write",
+          ledgerEntries: [
+            { action: "schedule.manual_edit", after: null, before, subject: { id: feeId, type: "misc_fee" } },
+          ],
+          result: next,
+          value: next,
+        };
+      },
     );
-    if (rows.length === 0)
-      return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseMiscFees(rows[0].MiscFees as string | null);
-    const next = deleteMiscFee(existing, feeId);
-    if (next === STEP_NOT_FOUND)
-      return { status: 404, jsonBody: { error: "Fee not found" } };
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         MiscFees = @MiscFees,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "MiscFees", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
-    invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { fees: next } };
+    if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
+    return scheduleWriteResponse(outcome, (fees) => ({ fees }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteMiscFee failed:", error.message);
     return errorResponse("Failed to delete misc fee", error.message);
   } finally {

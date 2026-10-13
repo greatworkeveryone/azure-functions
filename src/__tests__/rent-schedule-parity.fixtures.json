@@ -1,0 +1,2271 @@
+{
+  "about": "Rent schedule parity fixtures (PLAN WP23a/WP23b). Identical in command-centre and rpcc-functions; Jest asserts them against FE computeRentSchedule/resolveScheduleRent and BE computeScheduleRows/resolveScheduleAnnual. input.terms (optional) are the lease's cpiCapPercent, cpiFloorPercent and reviewRatchet. rawPercent/appliedPercent are a review's increase before and after cap, floor and ratchet, to 4 dp. 'frontend' blocks cover car parks, misc fees and incentives, which only the frontend computes today. Expected values are derived by hand from the rules, not captured from either engine.",
+  "version": 2,
+  "cases": [
+    {
+      "name": "two open-ended rows: the later row is current",
+      "input": {
+        "steps": [
+          {
+            "id": "c1-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c1-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 6.09
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 106090,
+            "monthly": 8840.83,
+            "sqm": 100,
+            "sqmRate": 1060.9,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 6.09,
+            "appliedPercent": 6.09,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 106090
+          }
+        ]
+      }
+    },
+    {
+      "name": "an all-future schedule has no current rent and says when it starts",
+      "input": {
+        "steps": [
+          {
+            "id": "c2-a",
+            "effectiveFrom": "2027-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 120000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c2-b",
+            "effectiveFrom": "2028-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2027-01-01",
+            "annual": 120000,
+            "monthly": 10000,
+            "sqm": 100,
+            "sqmRate": 1200,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2028-01-01",
+            "annual": 123600,
+            "monthly": 10300,
+            "sqm": 100,
+            "sqmRate": 1236,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "notStarted",
+            "startsOn": "2027-01-01"
+          },
+          {
+            "now": "2027-01-01T00:00:00Z",
+            "today": "2027-01-01",
+            "kind": "row",
+            "effectiveFrom": "2027-01-01",
+            "annual": 120000
+          }
+        ]
+      }
+    },
+    {
+      "name": "Darwin/UTC boundary on the 1st: a step takes effect at midnight in Darwin",
+      "input": {
+        "steps": [
+          {
+            "id": "c3-a",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c3-b",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-06-30T14:29:59Z",
+            "today": "2026-06-30",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000
+          },
+          {
+            "now": "2026-06-30T14:30:00Z",
+            "today": "2026-07-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000
+          },
+          {
+            "now": "2026-06-30T20:00:00Z",
+            "today": "2026-07-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000
+          }
+        ]
+      }
+    },
+    {
+      "name": "zero area shows the rent (area missing), never $0",
+      "input": {
+        "steps": [
+          {
+            "id": "c4-a",
+            "effectiveFrom": "2024-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 0
+          },
+          {
+            "id": "c4-b",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 0
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000,
+            "monthly": 8750,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing area (no rows carry one, no occupancies) shows the rent, never $0",
+      "input": {
+        "steps": [
+          {
+            "id": "c5-a",
+            "effectiveFrom": "2024-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0
+          },
+          {
+            "id": "c5-b",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 0
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000,
+            "monthly": 8750,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000
+          }
+        ]
+      }
+    },
+    {
+      "name": "an area change mid-lease rescales from that row at the prevailing $/m\u00b2",
+      "input": {
+        "steps": [
+          {
+            "id": "c6-a",
+            "effectiveFrom": "2020-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 916598.59,
+            "ratePercent": 0,
+            "sqm": 1863.9
+          },
+          {
+            "id": "c6-b",
+            "effectiveFrom": "2021-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 0,
+            "sqm": 1863.9
+          },
+          {
+            "id": "c6-c",
+            "effectiveFrom": "2024-06-01",
+            "methodKind": "fixed",
+            "ratePercent": 0,
+            "sqm": 2070.9
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 2070.9
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2020-07-01",
+            "annual": 916598.59,
+            "monthly": 76383.22,
+            "sqm": 1863.9,
+            "sqmRate": 491.76,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2021-07-01",
+            "annual": 916598.59,
+            "monthly": 76383.22,
+            "sqm": 1863.9,
+            "sqmRate": 491.76,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 0,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2024-06-01",
+            "annual": 1018393.7,
+            "monthly": 84866.14,
+            "sqm": 2070.9,
+            "sqmRate": 491.76,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 0,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2024-06-01",
+            "annual": 1018393.7
+          }
+        ]
+      }
+    },
+    {
+      "name": "changing the tenancy's area doesn't change past rows",
+      "input": {
+        "steps": [
+          {
+            "id": "c7-a",
+            "effectiveFrom": "2020-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c7-b",
+            "effectiveFrom": "2021-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          },
+          {
+            "id": "c7-c",
+            "effectiveFrom": "2022-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 150
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2020-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2021-07-01",
+            "annual": 105000,
+            "monthly": 8750,
+            "sqm": 100,
+            "sqmRate": 1050,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2022-07-01",
+            "annual": 110250,
+            "monthly": 9187.5,
+            "sqm": 100,
+            "sqmRate": 1102.5,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2022-07-01",
+            "annual": 110250
+          }
+        ]
+      }
+    },
+    {
+      "name": "effectiveTo is exclusive: a car park group starting on a row's end belongs to the next row",
+      "input": {
+        "steps": [
+          {
+            "id": "c8-a",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100,
+            "effectiveTo": "2026-07-01"
+          },
+          {
+            "id": "c8-b",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 4
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 104000,
+            "monthly": 8666.67,
+            "sqm": 100,
+            "sqmRate": 1040,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 4,
+            "appliedPercent": 4,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 104000
+          }
+        ]
+      },
+      "frontend": {
+        "carparkGroups": [
+          {
+            "id": "g-end",
+            "label": "Bay 1",
+            "carparkIds": [
+              "bay-1"
+            ],
+            "baseMonthlyRate": 500,
+            "commencedAt": "2026-07-01"
+          },
+          {
+            "id": "g-before",
+            "label": "Bay 2",
+            "carparkIds": [
+              "bay-2"
+            ],
+            "baseMonthlyRate": 500,
+            "commencedAt": "2026-06-30"
+          }
+        ],
+        "carparkRows": [
+          {
+            "g-end": 0,
+            "g-before": 500
+          },
+          {
+            "g-end": 500,
+            "g-before": 520
+          }
+        ],
+        "carparkByBay": [
+          {
+            "today": "2026-08-01",
+            "bays": {
+              "bay-1": 500,
+              "bay-2": 520
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "effectiveTo doesn't end rent: a closed last row keeps charging (holdover)",
+      "input": {
+        "steps": [
+          {
+            "id": "c9-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100,
+            "effectiveTo": "2025-07-01"
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-06-30T12:00:00Z",
+            "today": "2025-06-30",
+            "kind": "row",
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000
+          },
+          {
+            "now": "2025-07-01T00:00:00Z",
+            "today": "2025-07-01",
+            "kind": "row",
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    },
+    {
+      "name": "a CPI review waiting on its index keeps the previous rent current",
+      "input": {
+        "steps": [
+          {
+            "id": "c10-a",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c10-b",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "cpi_index_missing",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    },
+    {
+      "name": "a pending review cascades until the next commencement row",
+      "input": {
+        "steps": [
+          {
+            "id": "c11-a",
+            "effectiveFrom": "2020-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c11-b",
+            "effectiveFrom": "2021-01-01",
+            "methodKind": "cpi",
+            "ratePercent": 0
+          },
+          {
+            "id": "c11-c",
+            "effectiveFrom": "2022-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "c11-d",
+            "effectiveFrom": "2023-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 110000,
+            "ratePercent": 0
+          },
+          {
+            "id": "c11-e",
+            "effectiveFrom": "2024-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2020-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2021-01-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "cpi_index_missing",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2022-01-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "earlier_review_pending",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2023-01-01",
+            "annual": 110000,
+            "monthly": 9166.67,
+            "sqm": 100,
+            "sqmRate": 1100,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2024-01-01",
+            "annual": 113300,
+            "monthly": 9441.67,
+            "sqm": 100,
+            "sqmRate": 1133,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2024-01-01",
+            "annual": 113300
+          }
+        ]
+      }
+    },
+    {
+      "name": "CPI applies the exact index ratio, not the stored 4 dp percent",
+      "input": {
+        "steps": [
+          {
+            "id": "c12-a",
+            "effectiveFrom": "2019-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 916598.59,
+            "ratePercent": 0,
+            "sqm": 1863.9
+          },
+          {
+            "id": "c12-b",
+            "effectiveFrom": "2020-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 109
+          },
+          {
+            "id": "c12-c",
+            "effectiveFrom": "2021-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 6.055,
+            "cpiValue": 115.6
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 1863.9
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2019-07-01",
+            "annual": 916598.59,
+            "monthly": 76383.22,
+            "sqm": 1863.9,
+            "sqmRate": 491.76,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2020-07-01",
+            "annual": 916598.59,
+            "monthly": 76383.22,
+            "sqm": 1863.9,
+            "sqmRate": 491.76,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 0,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2021-07-01",
+            "annual": 972099.06,
+            "monthly": 81008.25,
+            "sqm": 1863.9,
+            "sqmRate": 521.54,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 6.055,
+            "appliedPercent": 6.055,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2021-07-01",
+            "annual": 972099.06
+          }
+        ]
+      }
+    },
+    {
+      "name": "with no commencement row the stored rent applies until the first review",
+      "input": {
+        "steps": [
+          {
+            "id": "c13-a",
+            "effectiveFrom": "2027-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 90000,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2027-01-01",
+            "annual": 92700,
+            "monthly": 7725,
+            "sqm": 100,
+            "sqmRate": 927,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "base",
+            "annual": 90000
+          },
+          {
+            "now": "2027-01-01T00:00:00Z",
+            "today": "2027-01-01",
+            "kind": "row",
+            "effectiveFrom": "2027-01-01",
+            "annual": 92700
+          }
+        ]
+      }
+    },
+    {
+      "name": "a market review without its rate is pending",
+      "input": {
+        "steps": [
+          {
+            "id": "c14-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c14-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "market",
+            "ratePercent": 0
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "rate_not_set",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    },
+    {
+      "name": "AHAC compounds on the annual amount even with no area",
+      "input": {
+        "steps": [
+          {
+            "id": "c15-a",
+            "effectiveFrom": "2024-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "ahacBasePerAnnum": 20000
+          },
+          {
+            "id": "c15-b",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 0
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": 20000,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000,
+            "monthly": 8750,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": 21000,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 105000
+          }
+        ]
+      }
+    },
+    {
+      "name": "car park and misc fee 'current' follow today's row, not the last row",
+      "input": {
+        "steps": [
+          {
+            "id": "c16-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c16-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 4
+          },
+          {
+            "id": "c16-c",
+            "effectiveFrom": "2027-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 4
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 104000,
+            "monthly": 8666.67,
+            "sqm": 100,
+            "sqmRate": 1040,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 4,
+            "appliedPercent": 4,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2027-07-01",
+            "annual": 108160,
+            "monthly": 9013.33,
+            "sqm": 100,
+            "sqmRate": 1081.6,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 4,
+            "appliedPercent": 4,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-05-19T00:00:00Z",
+            "today": "2026-05-19",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 104000
+          }
+        ]
+      },
+      "frontend": {
+        "carparkGroups": [
+          {
+            "id": "g1",
+            "label": "Bays A & B",
+            "carparkIds": [
+              "bay-a",
+              "bay-b"
+            ],
+            "baseMonthlyRate": 500,
+            "commencedAt": "2024-07-01"
+          }
+        ],
+        "carparkRows": [
+          {
+            "g1": 500
+          },
+          {
+            "g1": 520
+          },
+          {
+            "g1": 540.8
+          }
+        ],
+        "carparkByBay": [
+          {
+            "today": "2026-05-19",
+            "bays": {
+              "bay-a": 260,
+              "bay-b": 260
+            }
+          }
+        ],
+        "miscFees": [
+          {
+            "id": "fee-1",
+            "title": "Air con",
+            "frequency": "monthly",
+            "baseAmount": 100,
+            "commencedAt": "2024-07-01"
+          }
+        ],
+        "miscRows": {
+          "fee-1": [
+            {
+              "amount": 100,
+              "annual": 1200,
+              "monthly": 100
+            },
+            {
+              "amount": 104,
+              "annual": 1248,
+              "monthly": 104
+            },
+            {
+              "amount": 108.16,
+              "annual": 1297.92,
+              "monthly": 108.16
+            }
+          ]
+        },
+        "miscCurrent": [
+          {
+            "today": "2026-05-19",
+            "fees": {
+              "fee-1": 104
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "misc fees round once per period, so cents never compound",
+      "input": {
+        "steps": [
+          {
+            "id": "c17-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "c17-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "c17-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 106090,
+            "monthly": 8840.83,
+            "sqm": 100,
+            "sqmRate": 1060.9,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 106090
+          }
+        ]
+      },
+      "frontend": {
+        "miscFees": [
+          {
+            "id": "fee-q",
+            "title": "Cleaning",
+            "frequency": "quarterly",
+            "baseAmount": 1000,
+            "commencedAt": "2024-07-01"
+          }
+        ],
+        "miscRows": {
+          "fee-q": [
+            {
+              "amount": 1000,
+              "annual": 4000,
+              "monthly": 333.33
+            },
+            {
+              "amount": 1030,
+              "annual": 4120,
+              "monthly": 343.33
+            },
+            {
+              "amount": 1060.9,
+              "annual": 4243.6,
+              "monthly": 353.63
+            }
+          ]
+        },
+        "miscCurrent": [
+          {
+            "today": "2026-08-01",
+            "fees": {
+              "fee-q": 1060.9
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a 24-month rent-free incentive runs its full length",
+      "input": {
+        "steps": [
+          {
+            "id": "c18-a",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 120000,
+            "ratePercent": 0,
+            "sqm": 100
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 120000,
+            "monthly": 10000,
+            "sqm": 100,
+            "sqmRate": 1200,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-06-15T00:00:00Z",
+            "today": "2026-06-15",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 120000
+          }
+        ]
+      },
+      "frontend": {
+        "commencement": "2025-01-01",
+        "incentives": [
+          {
+            "id": "rf-24",
+            "kind": "rentFreeMonths",
+            "freeMonthsFromStart": 24
+          }
+        ],
+        "incentiveChecks": [
+          {
+            "now": "2025-06-15T00:00:00Z",
+            "baseMonthly": 10000,
+            "annualLoss": 120000,
+            "expired": false,
+            "affectedMonths": 24
+          },
+          {
+            "now": "2026-06-15T00:00:00Z",
+            "baseMonthly": 10000,
+            "annualLoss": 120000,
+            "expired": false,
+            "affectedMonths": 24
+          },
+          {
+            "now": "2027-01-01T00:00:00Z",
+            "baseMonthly": 10000,
+            "annualLoss": 0,
+            "expired": true,
+            "affectedMonths": 24
+          }
+        ]
+      }
+    },
+    {
+      "name": "a CPI review above the lease's cap applies the cap (capped); a fixed review isn't capped",
+      "input": {
+        "steps": [
+          {
+            "id": "w1-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w1-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 105,
+            "cpiValuePrev": 100
+          },
+          {
+            "id": "w1-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "terms": {
+          "cpiCapPercent": 3
+        }
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 3,
+            "capApplied": true,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 108150,
+            "monthly": 9012.5,
+            "sqm": 100,
+            "sqmRate": 1081.5,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 5,
+            "appliedPercent": 5,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000
+          },
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 108150
+          }
+        ]
+      },
+      "frontend": {
+        "carparkGroups": [
+          {
+            "id": "g-cap",
+            "label": "Bay 7",
+            "carparkIds": [
+              "bay-7"
+            ],
+            "baseMonthlyRate": 500,
+            "commencedAt": "2024-07-01"
+          }
+        ],
+        "carparkRows": [
+          {
+            "g-cap": 500
+          },
+          {
+            "g-cap": 515
+          },
+          {
+            "g-cap": 540.75
+          }
+        ],
+        "carparkByBay": [
+          {
+            "today": "2025-08-01",
+            "bays": {
+              "bay-7": 515
+            }
+          }
+        ],
+        "miscFees": [
+          {
+            "id": "fee-cap",
+            "title": "Signage",
+            "frequency": "monthly",
+            "baseAmount": 100,
+            "commencedAt": "2024-07-01"
+          }
+        ],
+        "miscRows": {
+          "fee-cap": [
+            {
+              "amount": 100,
+              "annual": 1200,
+              "monthly": 100
+            },
+            {
+              "amount": 103,
+              "annual": 1236,
+              "monthly": 103
+            },
+            {
+              "amount": 108.15,
+              "annual": 1297.8,
+              "monthly": 108.15
+            }
+          ]
+        },
+        "miscCurrent": [
+          {
+            "today": "2025-08-01",
+            "fees": {
+              "fee-cap": 103
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a CPI review below the lease's floor applies the floor",
+      "input": {
+        "steps": [
+          {
+            "id": "w2-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w2-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 101,
+            "cpiValuePrev": 100
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "terms": {
+          "cpiFloorPercent": 2
+        }
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 102000,
+            "monthly": 8500,
+            "sqm": 100,
+            "sqmRate": 1020,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 1,
+            "appliedPercent": 2,
+            "capApplied": false,
+            "floorApplied": true,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 102000
+          }
+        ]
+      }
+    },
+    {
+      "name": "the ratchet stops any review lowering the rent (CPI fall, market decrease)",
+      "input": {
+        "steps": [
+          {
+            "id": "w3-a",
+            "effectiveFrom": "2023-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w3-b",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 98,
+            "cpiValuePrev": 100
+          },
+          {
+            "id": "w3-c",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "market",
+            "ratePercent": -5
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "terms": {
+          "reviewRatchet": true
+        }
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2023-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": -2,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": true
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": -5,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": true
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    },
+    {
+      "name": "without the ratchet a CPI fall lowers the rent",
+      "input": {
+        "steps": [
+          {
+            "id": "w4-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w4-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 98,
+            "cpiValuePrev": 100
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 98000,
+            "monthly": 8166.67,
+            "sqm": 100,
+            "sqmRate": 980,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": -2,
+            "appliedPercent": -2,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 98000
+          }
+        ]
+      }
+    },
+    {
+      "name": "a waived review leaves the rent unchanged and isn't pending",
+      "input": {
+        "steps": [
+          {
+            "id": "w5-a",
+            "effectiveFrom": "2023-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w5-b",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3,
+            "resolution": "waived"
+          },
+          {
+            "id": "w5-c",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "resolution": "waived"
+          },
+          {
+            "id": "w5-d",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2023-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000
+          },
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000
+          }
+        ]
+      }
+    },
+    {
+      "name": "a waived review after a pending one still waits on it",
+      "input": {
+        "steps": [
+          {
+            "id": "w6-a",
+            "effectiveFrom": "2023-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w6-b",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0
+          },
+          {
+            "id": "w6-c",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3,
+            "resolution": "waived"
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2023-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "cpi_index_missing",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "earlier_review_pending",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2023-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    },
+    {
+      "name": "an applied review is never pending (a market review agreed at 0%)",
+      "input": {
+        "steps": [
+          {
+            "id": "w7-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "w7-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "market",
+            "ratePercent": 0,
+            "resolution": "applied",
+            "reviewId": "rr-w7-2025"
+          },
+          {
+            "id": "w7-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 0,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 100000
+          }
+        ]
+      }
+    }
+  ]
+}
