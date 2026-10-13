@@ -22,30 +22,39 @@ export const LEDGER_ACTIONS = {
   sod_blocked: { exception: true, reasonRequired: false, subjects: "any" },
 
   // Quote, invoice, purchase order and payment decisions (WP19b). Mirrors of
-  // decisions Floorplan already made. The ones that undo or remove a money
-  // record are exceptions, because they are what an audit looks for first. None
-  // demands a reason: the endpoints don't ask for one yet (LAUNCH-READINESS WP42).
+  // decisions Floorplan already made. The ones that undo, remove or change a
+  // money record, and a request that failed to go out, are exceptions, because
+  // they are what an audit looks for first. None demands a reason: the
+  // endpoints don't ask for one yet (LAUNCH-READINESS WP42).
+  "invoice.approval_reset": { exception: true, reasonRequired: false, subjects: ["invoice"] },
   "invoice.approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.delete": { exception: true, reasonRequired: false, subjects: ["invoice"] },
   "invoice.director_approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  "invoice.director_request_failed": { exception: true, reasonRequired: false, subjects: ["invoice"] },
+  "invoice.director_request_sent": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.myob_created": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.reject": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.undo_director_approve": { exception: true, reasonRequired: false, subjects: ["invoice"] },
   "invoice.unmark_myob_created": { exception: true, reasonRequired: false, subjects: ["invoice"] },
+  "payment.amount_change": { exception: true, reasonRequired: false, subjects: ["payment"] },
   "payment.create": { exception: false, reasonRequired: false, subjects: ["payment"] },
   "payment.myob_applied": { exception: false, reasonRequired: false, subjects: ["payment"] },
   "po.complete": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
   "po.create": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
   "po.delete": { exception: true, reasonRequired: false, subjects: ["purchase_order"] },
+  "po.markers_reset": { exception: true, reasonRequired: false, subjects: ["purchase_order"] },
   "po.myob_created": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
   "po.send": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
   "po.uncomplete": { exception: true, reasonRequired: false, subjects: ["purchase_order"] },
   "po.unmark_myob_created": { exception: true, reasonRequired: false, subjects: ["purchase_order"] },
+  "quote.approval_reset": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.approve": { exception: false, reasonRequired: false, subjects: ["quote"] },
   "quote.complete": { exception: false, reasonRequired: false, subjects: ["quote"] },
   "quote.delete": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.director_approve": { exception: false, reasonRequired: false, subjects: ["quote"] },
   "quote.director_reject": { exception: false, reasonRequired: false, subjects: ["quote"] },
+  "quote.director_request_failed": { exception: true, reasonRequired: false, subjects: ["quote"] },
+  "quote.director_request_sent": { exception: false, reasonRequired: false, subjects: ["quote"] },
   "quote.reject": { exception: false, reasonRequired: false, subjects: ["quote"] },
   "quote.unapprove": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.uncomplete": { exception: true, reasonRequired: false, subjects: ["quote"] },

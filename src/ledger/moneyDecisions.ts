@@ -155,3 +155,47 @@ export function purchaseOrderSnapshot(row: SqlRow): Record<string, unknown> {
     sentBy: text(row.SentBy),
   };
 }
+
+/** What an amount edit tears down on a quote or invoice: the amount the
+ *  approvals covered, the status they held, and who gave them and when. */
+export function approvalSnapshot(row: SqlRow): Record<string, unknown> {
+  return {
+    amount: money(row.Amount),
+    approvedAt: iso(row.ApprovedAt),
+    approvedBy: text(row.ApprovedBy),
+    directorApprovedAt: iso(row.DirectorApprovedAt),
+    directorApprovedBy: text(row.DirectorApprovedBy),
+    status: text(row.Status),
+  };
+}
+
+/** What a cost edit tears down on a purchase order: the old cost and cap, and
+ *  the stamps of whichever markers are being cleared. */
+export function purchaseOrderMarkers(row: SqlRow, cleared: { myob: boolean; sent: boolean }): Record<string, unknown> {
+  return {
+    costNotToExceed: money(row.CostNotToExceed),
+    estimatedCost: money(row.EstimatedCost),
+    ...(cleared.sent ? { sentAt: iso(row.SentAt), sentBy: text(row.SentBy) } : {}),
+    ...(cleared.myob ? { myobCreatedAt: iso(row.MyobCreatedAt), myobCreatedBy: text(row.MyobCreatedBy) } : {}),
+  };
+}
+
+/** A payment's amount before and after an edit, with the invoice it pays and
+ *  the MYOB bill it had already been sent to, if any. */
+export function paymentEdit(
+  existing: SqlRow,
+  amount: number,
+  invoice?: SqlRow,
+): { after: Record<string, unknown>; before: Record<string, unknown> } {
+  const same = { jobInvoiceId: (existing.JobInvoiceID as number | null | undefined) ?? null, status: text(existing.Status) };
+  return {
+    after: {
+      ...same,
+      amount: money(amount),
+      contractorName: text(invoice?.ContractorName),
+      invoiceNumber: text(invoice?.InvoiceNumber),
+      supplierInvoiceNumber: text(invoice?.SupplierInvoiceNumber),
+    },
+    before: { ...same, amount: money(existing.Amount), myobBillUid: text(existing.MyobID) },
+  };
+}

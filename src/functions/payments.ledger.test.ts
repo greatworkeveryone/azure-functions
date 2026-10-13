@@ -517,7 +517,7 @@ describe("upsertPayment: recording a payment", () => {
     expect(myob.createMyobBill).not.toHaveBeenCalled();
   });
 
-  it("editing a payment is not a ledgered decision", async () => {
+  it("editing a payment's notes is not a ledgered decision, and doesn't look up who is editing", async () => {
     mockSql([
       { match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments/, rows: [payment({ MyobID: null })] },
       storedPayment,
@@ -642,6 +642,315 @@ describe("upsertPayment: recording a payment", () => {
         expect(res).toBe(gate);
         expect(db.createRequestConnection).not.toHaveBeenCalled();
         expect(rows()).toHaveLength(0);
+      });
+    });
+  });
+});
+
+// ── Changing a payment's amount ─────────────────────────────────────────────
+
+describe("upsertPayment: changing the amount of a payment", () => {
+  const invoiceLock = (over: Record<string, unknown> = {}): Route => ({
+    match: /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/,
+    rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
+  });
+  const invoiceRefs: Route = {
+    match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
+    rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
+  };
+  const existing = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments/,
+    rows: [payment({ MyobID: null, ...over })],
+  });
+  const storedPayment: Route = { match: /SELECT\s+PaymentID, JobID/, rows: [{ PaymentID: 11 }] };
+  const paymentScope: Route = { match: /FROM Payments s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] };
+  const routes = (over: Record<string, unknown> = {}, invoiceOver: Record<string, unknown> = {}): Route[] => [
+    APP_USER,
+    JOB_BUILDING,
+    invoiceRefs,
+    invoiceLock(invoiceOver),
+    existing(over),
+    storedPayment,
+  ];
+  const edit = (body: Record<string, unknown> = {}) => upsertPayment(makeRequest({ Amount: 150, PaymentID: 11, ...body }), ctx);
+  const rows = () => ledgerInserts(db.executeQuery);
+  const UPDATE = /UPDATE Payments SET/;
+
+  beforeEach(() => mockSql(routes()));
+
+  it("writes one payment.amount_change exception: the old amount before, the new amount after, and who it is for", async () => {
+    const res = await edit();
+
+    expect(res.status).toBe(200);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({
+      action: "payment.amount_change",
+      actorKind: "user",
+      actorName: "Casey Controller",
+      actorRole: "accounts_manager",
+      actorUserId: 21,
+      buildingId: 5,
+      isException: true,
+      jobId: 9,
+      subjectId: "11",
+      subjectType: "payment",
+    });
+    expect(rows()[0].before).toEqual({ amount: 100, jobInvoiceId: 5, myobBillUid: null, status: "pending" });
+    expect(rows()[0].after).toEqual({
+      amount: 150,
+      contractorName: "Acme",
+      invoiceNumber: "IV-9-1",
+      jobInvoiceId: 5,
+      status: "pending",
+      supplierInvoiceNumber: "INV-0042",
+    });
+  });
+
+  it("writes no row when the amount is sent back unchanged", async () => {
+    const res = await edit({ Amount: 100 });
+
+    expect(res.status).toBe(200);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("compares amounts in cents: a difference below a cent is not a change", async () => {
+    const res = await edit({ Amount: 100.004 });
+
+    expect(res.status).toBe(200);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("changes the amount and writes the ledger row inside one transaction that commits", async () => {
+    await edit();
+
+    const begun = db.beginTransaction.mock.invocationCallOrder[0];
+    const committed = db.commitTransaction.mock.invocationCallOrder[0];
+    expect(orderOf(FIRST_SELECT)).toBeGreaterThan(begun);
+    expect(orderOf(UPDATE)).toBeGreaterThan(orderOf(FIRST_SELECT));
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(UPDATE));
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it("reads the payment under lock, so the amount recorded as replaced is the one replaced", async () => {
+    await edit();
+
+    const read = db.executeQuery.mock.calls.find((c: unknown[]) => /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments/.test(String(c[1])));
+    expect(String(read?.[1])).toMatch(/FROM Payments WITH \(UPDLOCK, HOLDLOCK\) WHERE PaymentID = @Id/);
+  });
+
+  it("finds who is editing before anything is read or written", async () => {
+    await edit();
+
+    expect(orderOf(/FROM dbo\.AppUsers WHERE EntraOid/)).toBeLessThan(db.beginTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("is rolled back when the ledger write fails: the amount is not changed without its record", async () => {
+    mockSql([LEDGER_FAILS, ...routes()]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(orderOf(UPDATE)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    expect(db.closeConnection).toHaveBeenCalled();
+  });
+
+  it("answers 401 and starts nothing when the ledger can't name who is editing", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(CALLER).mockResolvedValueOnce(null);
+
+    const res = await edit();
+
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(orderOf(UPDATE)).toBe(-1);
+  });
+
+  it("404s an unknown payment inside the transaction, writing nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(404);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(0);
+  });
+
+  describe("refused attempts", () => {
+    beforeEach(() => {
+      limitsDb.getCachedApprovalLimits.mockResolvedValue([
+        { MaxApprovalAmount: 5000, RoleName: "accounts_manager" },
+        { MaxApprovalAmount: null, RoleName: "director" },
+      ]);
+    });
+
+    it("a payment already sent to MYOB: the same 422, recorded with the MYOB bill it was refused over", async () => {
+      mockSql(routes({ MyobID: "bill-uid" }));
+
+      const res = await edit();
+
+      expect(res).toEqual({
+        jsonBody: { error: "This payment has already been sent to MYOB or paid, so its job, invoice and amount can't be changed." },
+        status: 422,
+      });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "denied",
+        actorName: "Casey Controller",
+        actorRole: "accounts_manager",
+        before: {
+          amount: 100,
+          attempted: "payment.amount_change",
+          jobInvoiceId: 5,
+          myobBillUid: "bill-uid",
+          requestedAmount: 150,
+          status: "pending",
+        },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        ruleApplied: "payment_locked",
+        subjectId: "11",
+        subjectType: "payment",
+      });
+      expect(orderOf(UPDATE)).toBe(-1);
+    });
+
+    it("a payment already paid: the same 422, recorded", async () => {
+      mockSql(routes({ Status: "paid" }));
+
+      const res = await edit();
+
+      expect(res.status).toBe(422);
+      expect(rows()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          before: expect.objectContaining({ attempted: "payment.amount_change", status: "paid" }),
+          ruleApplied: "payment_locked",
+        }),
+      ]);
+      expect(orderOf(UPDATE)).toBe(-1);
+    });
+
+    it("more than is left unpaid on the invoice: exceeds_unpaid_balance, recorded against the payment", async () => {
+      mockSql(routes({}, { PaidSoFar: 950 }));
+
+      const res = await edit();
+
+      expect(res.status).toBe(422);
+      expect((res.jsonBody as { error: string }).error).toMatch(/more than the \$50\.00 still unpaid/);
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]).toMatchObject({
+        action: "denied",
+        before: { amount: 100, attempted: "payment.amount_change", invoiceStatus: "approved", requestedAmount: 150, status: "pending" },
+        isException: true,
+        ruleApplied: "exceeds_unpaid_balance",
+        subjectId: "11",
+        subjectType: "payment",
+      });
+      expect(orderOf(UPDATE)).toBe(-1);
+    });
+
+    it("an invoice that needs a director who hasn't approved it: director_approval_required", async () => {
+      mockSql(routes({}, { Amount: 6000 }));
+
+      const res = await edit();
+
+      expect(res.status).toBe(422);
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "director_approval_required" })]);
+    });
+
+    it("an invoice that is no longer approved: invoice_not_approved", async () => {
+      mockSql(routes({}, { Status: "pending" }));
+
+      const res = await edit();
+
+      expect(res.status).toBe(422);
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "invoice_not_approved" })]);
+    });
+
+    it("records it in a transaction of its own, once the edit's has rolled back", async () => {
+      mockSql(routes({ Status: "paid" }));
+
+      await edit();
+
+      expect(db.beginTransaction).toHaveBeenCalledTimes(2);
+      expect(db.rollbackTransaction.mock.invocationCallOrder[0]).toBeLessThan(db.beginTransaction.mock.invocationCallOrder[1]);
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("an invoice that has gone is a 422 as before, and is not recorded: that is bad data, not a control", async () => {
+      mockSql([APP_USER, JOB_BUILDING, invoiceRefs, existing(), storedPayment]);
+
+      const res = await edit();
+
+      expect(res).toEqual({
+        jsonBody: { error: "The invoice this payment was recorded against no longer exists." },
+        status: 422,
+      });
+      expect(rows()).toHaveLength(0);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+    });
+
+    it("moving a paid payment to another invoice without touching the amount is the same 422, and is not recorded", async () => {
+      mockSql(routes({ Status: "paid" }));
+
+      const res = await edit({ Amount: undefined, JobInvoiceID: 6, Notes: "moved" });
+
+      expect(res.status).toBe(422);
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("answers the same 422 even when the refusal can't be recorded", async () => {
+      mockSql([LEDGER_FAILS, ...routes({ Status: "paid" })]);
+
+      const res = await edit();
+
+      expect(res.status).toBe(422);
+      expect((res.jsonBody as { error: string }).error).toMatch(/already been sent to MYOB or paid/);
+    });
+
+    describe("when the role gate says no", () => {
+      const gate = { jsonBody: { details: "Required role: accounts_manager. Have: accounts", error: "Forbidden" }, status: 403 };
+
+      beforeEach(() => {
+        auth.requireRole.mockResolvedValue(gate);
+        auth.rolesForRequest.mockResolvedValue(["accounts"]);
+        mockSql([APP_USER, paymentScope]);
+      });
+
+      it("an attempt to change an amount is recorded against the payment, and answered with the gate's own 403", async () => {
+        const res = await edit();
+
+        expect(res).toBe(gate);
+        expect(rows()).toEqual([
+          expect.objectContaining({
+            action: "denied",
+            actorRole: "accounts",
+            before: { attempted: "payment.amount_change" },
+            buildingId: 5,
+            isException: true,
+            jobId: 9,
+            ruleApplied: "role_not_permitted",
+            subjectId: "11",
+            subjectType: "payment",
+          }),
+        ]);
+        expect(orderOf(UPDATE)).toBe(-1);
+      });
+
+      it("an attempt to record a new payment is still recorded against its invoice, not a payment", async () => {
+        mockSql([APP_USER, { match: /FROM JobInvoices s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
+
+        const res = await upsertPayment(makeRequest({ Amount: 100, JobID: 9, JobInvoiceID: 5 }), ctx);
+
+        expect(res).toBe(gate);
+        expect(rows()).toEqual([
+          expect.objectContaining({ before: { attempted: "payment.create" }, subjectId: "5", subjectType: "invoice" }),
+        ]);
       });
     });
   });

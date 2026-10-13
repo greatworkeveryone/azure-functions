@@ -3,12 +3,15 @@ import type { Connection } from "tedious";
 import { assertLedgerEntry, LEDGER_ACTIONS } from "./index";
 import {
   approvalRule,
+  approvalSnapshot,
   invoiceFacts,
   invoiceSnapshot,
   jobScope,
   ledgerReason,
+  paymentEdit,
   paymentFacts,
   purchaseOrderFacts,
+  purchaseOrderMarkers,
   purchaseOrderSnapshot,
   quoteFacts,
   quoteSnapshot,
@@ -251,6 +254,7 @@ describe("the money decision codes", () => {
   const plain = [
     "invoice.approve",
     "invoice.director_approve",
+    "invoice.director_request_sent",
     "invoice.myob_created",
     "invoice.reject",
     "payment.create",
@@ -263,6 +267,7 @@ describe("the money decision codes", () => {
     "quote.complete",
     "quote.director_approve",
     "quote.director_reject",
+    "quote.director_request_sent",
     "quote.reject",
   ] as const;
   // Undoing or removing a money record is what an audit looks for first.
@@ -278,12 +283,38 @@ describe("the money decision codes", () => {
     "quote.uncomplete",
   ] as const;
 
+  // A money record changed under a decision someone else made, or a request
+  // that was meant to go out and did not.
+  const changesAndFailures = [
+    "invoice.approval_reset",
+    "invoice.director_request_failed",
+    "payment.amount_change",
+    "po.markers_reset",
+    "quote.approval_reset",
+    "quote.director_request_failed",
+  ] as const;
+
   it.each(plain)("%s is a plain decision: not an exception, no reason demanded", (code) => {
     expect(LEDGER_ACTIONS[code]).toMatchObject({ exception: false, reasonRequired: false });
   });
 
   it.each(reversalsAndDeletions)("%s undoes or removes a money record: an exception, but no reason demanded yet", (code) => {
     expect(LEDGER_ACTIONS[code]).toMatchObject({ exception: true, reasonRequired: false });
+  });
+
+  it.each(changesAndFailures)("%s is a change under someone else's decision, or a request that failed: an exception, no reason demanded yet", (code) => {
+    expect(LEDGER_ACTIONS[code]).toMatchObject({ exception: true, reasonRequired: false });
+  });
+
+  it("the new codes apply to their own kind of record only", () => {
+    expect(LEDGER_ACTIONS["quote.approval_reset"].subjects).toEqual(["quote"]);
+    expect(LEDGER_ACTIONS["quote.director_request_sent"].subjects).toEqual(["quote"]);
+    expect(LEDGER_ACTIONS["quote.director_request_failed"].subjects).toEqual(["quote"]);
+    expect(LEDGER_ACTIONS["invoice.approval_reset"].subjects).toEqual(["invoice"]);
+    expect(LEDGER_ACTIONS["invoice.director_request_sent"].subjects).toEqual(["invoice"]);
+    expect(LEDGER_ACTIONS["invoice.director_request_failed"].subjects).toEqual(["invoice"]);
+    expect(LEDGER_ACTIONS["po.markers_reset"].subjects).toEqual(["purchase_order"]);
+    expect(LEDGER_ACTIONS["payment.amount_change"].subjects).toEqual(["payment"]);
   });
 
   it("each applies to its own kind of record only", () => {
@@ -298,5 +329,125 @@ describe("the money decision codes", () => {
         subject: { id: 7, type: "quote" },
       }),
     ).toThrow(/does not apply to a quote/);
+  });
+});
+
+describe("what an edit tears down", () => {
+  describe("approvalSnapshot", () => {
+    it("the amount the approvals covered, the status they held, and who gave them and when", () => {
+      expect(
+        approvalSnapshot({
+          Amount: "1234.50",
+          ApprovedAt: new Date("2026-10-01T02:03:04Z"),
+          ApprovedBy: "Pat Approver",
+          ContractorName: "Acme",
+          DirectorApprovedAt: "2026-10-02T05:06:07Z",
+          DirectorApprovedBy: "Dana Director",
+          Status: "approved",
+        }),
+      ).toEqual({
+        amount: 1234.5,
+        approvedAt: "2026-10-01T02:03:04.000Z",
+        approvedBy: "Pat Approver",
+        directorApprovedAt: "2026-10-02T05:06:07.000Z",
+        directorApprovedBy: "Dana Director",
+        status: "approved",
+      });
+    });
+
+    it("keeps a stable shape for a bare row: nulls, never undefined or an invalid date", () => {
+      const snapshot = JSON.parse(JSON.stringify(approvalSnapshot({ ApprovedAt: "not a date" })));
+
+      expect(snapshot).toEqual({
+        amount: null,
+        approvedAt: null,
+        approvedBy: null,
+        directorApprovedAt: null,
+        directorApprovedBy: null,
+        status: null,
+      });
+    });
+  });
+
+  describe("purchaseOrderMarkers", () => {
+    const row = {
+      CostNotToExceed: 900,
+      EstimatedCost: "800.00",
+      MyobCreatedAt: new Date("2026-10-02T05:06:07Z"),
+      MyobCreatedBy: "Ann Accounts",
+      SentAt: new Date("2026-10-01T02:03:04Z"),
+      SentBy: "Fred Facilities",
+    };
+
+    it("the old cost and cap, with the stamps of both markers when both are cleared", () => {
+      expect(purchaseOrderMarkers(row, { myob: true, sent: true })).toEqual({
+        costNotToExceed: 900,
+        estimatedCost: 800,
+        myobCreatedAt: "2026-10-02T05:06:07.000Z",
+        myobCreatedBy: "Ann Accounts",
+        sentAt: "2026-10-01T02:03:04.000Z",
+        sentBy: "Fred Facilities",
+      });
+    });
+
+    it("leaves out the stamp of a marker that stays", () => {
+      expect(purchaseOrderMarkers(row, { myob: false, sent: true })).toEqual({
+        costNotToExceed: 900,
+        estimatedCost: 800,
+        sentAt: "2026-10-01T02:03:04.000Z",
+        sentBy: "Fred Facilities",
+      });
+      expect(purchaseOrderMarkers(row, { myob: true, sent: false })).toEqual({
+        costNotToExceed: 900,
+        estimatedCost: 800,
+        myobCreatedAt: "2026-10-02T05:06:07.000Z",
+        myobCreatedBy: "Ann Accounts",
+      });
+    });
+
+    it("keeps a stable shape for a bare row", () => {
+      expect(JSON.parse(JSON.stringify(purchaseOrderMarkers({}, { myob: true, sent: true })))).toEqual({
+        costNotToExceed: null,
+        estimatedCost: null,
+        myobCreatedAt: null,
+        myobCreatedBy: null,
+        sentAt: null,
+        sentBy: null,
+      });
+    });
+  });
+
+  describe("paymentEdit", () => {
+    const existing = { Amount: "100.00", JobInvoiceID: 5, MyobID: null, Status: "pending" };
+    const invoice = { ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" };
+
+    it("the amount before and after, with the invoice it pays and who the money is for", () => {
+      expect(paymentEdit(existing, 150, invoice)).toEqual({
+        after: {
+          amount: 150,
+          contractorName: "Acme",
+          invoiceNumber: "IV-9-1",
+          jobInvoiceId: 5,
+          status: "pending",
+          supplierInvoiceNumber: "INV-0042",
+        },
+        before: { amount: 100, jobInvoiceId: 5, myobBillUid: null, status: "pending" },
+      });
+    });
+
+    it("puts the MYOB bill a payment already has in `before`", () => {
+      expect(paymentEdit({ ...existing, MyobID: "bill-uid" }, 150).before).toMatchObject({ myobBillUid: "bill-uid" });
+    });
+
+    it("needs no invoice: who the money is for is then unknown, not wrong", () => {
+      expect(paymentEdit(existing, 150).after).toMatchObject({ contractorName: null, invoiceNumber: null, supplierInvoiceNumber: null });
+    });
+
+    it("keeps a stable shape for a bare row", () => {
+      const edit = JSON.parse(JSON.stringify(paymentEdit({}, 150)));
+
+      expect(edit.before).toEqual({ amount: null, jobInvoiceId: null, myobBillUid: null, status: null });
+      expect(edit.after).toMatchObject({ amount: 150, jobInvoiceId: null, status: null });
+    });
   });
 });
