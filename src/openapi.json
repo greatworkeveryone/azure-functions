@@ -111,6 +111,231 @@
           }
         }
       }
+    },
+    "/getDecisionHistory": {
+      "get": {
+        "operationId": "getDecisionHistory",
+        "summary": "Decision history for one subject",
+        "description": "The newest 200 ledger rows about a job, tenancy or other subject, newest first. For a tenancy it also returns rows scoped to that tenant; for a job, rows scoped to that job. The roles allowed depend on the subject and mirror its own read endpoint.",
+        "parameters": [
+          {
+            "name": "subjectType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "e.g. job, tenancy, quote, invoice, purchase_order"
+          },
+          {
+            "name": "subjectId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Whole number for job and tenancy"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ledger rows, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DecisionRow"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/getDecisions": {
+      "get": {
+        "operationId": "getDecisions",
+        "summary": "Decisions & exceptions",
+        "description": "Filtered, paged view of the decision ledger for directors (and admin). format=csv returns every matching row as a CSV download (decisions-YYYYMMDD.csv, dates DD/MM/YYYY HH:mm Darwin) and ignores paging.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD, a Darwin calendar day, inclusive"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "YYYY-MM-DD, a Darwin calendar day, inclusive"
+          },
+          {
+            "name": "actorUserId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "An exact action code, or a prefix ending in '.' (e.g. schedule.)"
+          },
+          {
+            "name": "buildingId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "tenantId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "exceptionsOnly",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "occurredAt",
+                "impact"
+              ],
+              "default": "occurredAt"
+            },
+            "description": "Both descending"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of ledger rows, or a CSV file when format=csv",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DecisionRow"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "Present and true only when no paging was requested and the row ceiling cut the list short"
+                    }
+                  }
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -198,6 +423,111 @@
             "format": "date-time"
           }
         }
+      },
+      "DecisionRow": {
+        "type": "object",
+        "description": "One row of the append-only decision ledger.",
+        "properties": {
+          "ledgerId": {
+            "type": "integer"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601, UTC"
+          },
+          "action": {
+            "type": "string",
+            "description": "Decision code, e.g. user.role_change"
+          },
+          "subjectType": {
+            "type": "string"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "integer",
+            "nullable": true
+          },
+          "jobId": {
+            "type": "integer",
+            "nullable": true
+          },
+          "buildingId": {
+            "type": "integer",
+            "nullable": true
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "system"
+                ]
+              },
+              "userId": {
+                "type": "integer",
+                "nullable": true
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "nullable": true
+              }
+            }
+          },
+          "attributedTo": {
+            "type": "object",
+            "nullable": true,
+            "description": "The person the decider named, when the decision relied on their say-so",
+            "properties": {
+              "userId": {
+                "type": "integer",
+                "nullable": true
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              }
+            }
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "before": {
+            "description": "Parsed JSON snapshot, or null"
+          },
+          "after": {
+            "description": "Parsed JSON snapshot, or null"
+          },
+          "computed": {
+            "description": "What the system computed when a person chose otherwise, or null"
+          },
+          "financialImpact": {
+            "type": "number",
+            "nullable": true,
+            "description": "Annualised AUD; positive = money forgone or at risk"
+          },
+          "ruleApplied": {
+            "type": "string",
+            "nullable": true
+          },
+          "correlationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "isException": {
+            "type": "boolean"
+          }
+        }
       }
     },
     "responses": {
@@ -227,6 +557,36 @@
                   "type": "string"
                 },
                 "details": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Missing or invalid query parameter",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The caller's role may not do this",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": {
                   "type": "string"
                 }
               }
