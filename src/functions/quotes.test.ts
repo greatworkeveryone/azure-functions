@@ -80,6 +80,14 @@ const registered = (name: string): Handler => {
 };
 const approveQuote = registered("approveQuote");
 const resendDirectorQuoteEmail = registered("resendDirectorQuoteEmail");
+const bodyActorHandlers: [string, string][] = [
+  ["upsertQuote", "CreatedBy"],
+  ["unapproveQuote", "UnapprovedBy"],
+  ["completeQuote", "CompletedBy"],
+  ["uncompleteQuote", "UncompletedBy"],
+  ["validateQuote", "ValidatedBy"],
+];
+const bodyActorHandler = Object.fromEntries(bodyActorHandlers.map(([name]) => [name, registered(name)]));
 
 function makeRequest(body: unknown): HttpRequest {
   return {
@@ -332,5 +340,36 @@ describe("resendDirectorQuoteEmail", () => {
     const res = await resendDirectorQuoteEmail(makeRequest({ QuoteID: 7 }), ctx);
 
     expect(res.status).toBe(401);
+  });
+});
+
+describe("quote handlers that used to read the actor from the body", () => {
+  const anyQuote = {
+    Amount: 100, ApprovedAt: null, ContractorName: "Acme", JobID: 9, QuoteID: 7,
+    QuoteNumber: "QT-9-1", Status: "approved",
+  };
+
+  it.each(bodyActorHandlers)("%s records the token's name and ignores body %s", async (name, field) => {
+    const row = { ...anyQuote, NextSeq: 1, Status: name === "uncompleteQuote" ? "completed" : "approved" };
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /OUTPUT INSERTED|^\s*SELECT/i.test(sql) ? [row] : [],
+    );
+
+    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy.
+    const ids = name === "upsertQuote" ? { JobID: 9 } : { JobID: 9, QuoteID: 7 };
+    await bodyActorHandler[name](makeRequest({ ...ids, [field]: "Someone Else" }), ctx);
+
+    const values = sqlCalls().flatMap((c) => Object.values(c.params));
+    expect(values).not.toContain("Someone Else");
+    expect(values).toContain("Carlo Randazzo");
+  });
+
+  it.each(bodyActorHandlers)("%s 401s without a verified identity", async (name) => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+
+    const res = await bodyActorHandler[name](makeRequest({ JobID: 9, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(401);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });

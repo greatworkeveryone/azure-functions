@@ -79,6 +79,7 @@ interface UpsertJobInvoiceBody {
   InvoicePDFBlobName?: string;
   SourceEmailID?: number;
   ReceivedAt?: string;
+  /** @deprecated ignored — identity comes from the token */
   CreatedBy?: string;
   /** The supplier's own invoice number, verbatim (trimmed), at most 255 characters. */
   SupplierInvoiceNumber?: string | null;
@@ -348,6 +349,9 @@ export async function upsertJobInvoice(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as UpsertJobInvoiceBody;
@@ -362,7 +366,6 @@ export async function upsertJobInvoice(
       InvoicePDFBlobName,
       SourceEmailID,
       ReceivedAt,
-      CreatedBy,
       SupplierInvoiceNumber,
     } = body ?? {};
 
@@ -416,7 +419,7 @@ export async function upsertJobInvoice(
             { name: "InvoicePDFBlobName", type: TYPES.NVarChar, value: InvoicePDFBlobName ?? null },
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
           ],
         );
@@ -430,7 +433,7 @@ export async function upsertJobInvoice(
            VALUES (@JobID, @CreatedBy, @Text, 'invoice_added', @InvoiceID);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "Text", type: TYPES.NVarChar, value: `Added invoice ${invoiceNumber}${contractorLabel}${amountLabel}` },
             { name: "InvoiceID", type: TYPES.Int, value: newId },
           ],
@@ -532,7 +535,7 @@ export async function upsertJobInvoice(
          VALUES (@JobID, @CreatedBy, @Text, 'invoice_edited', @InvoiceID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           {
             name: "Text",
             type: TYPES.NVarChar,
@@ -565,7 +568,7 @@ export async function upsertJobInvoice(
            VALUES (@JobID, @CreatedBy, @Text, 'invoice_unapproved', @InvoiceID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
