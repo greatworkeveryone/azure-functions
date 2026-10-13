@@ -7,7 +7,7 @@ import { buildUpdateSet, executeQuery, type SqlParam, type SqlRow } from "../db"
 import { escapeLike } from "../ledger/filters";
 import { paginationSqlSuffix, type PaginationParams } from "../pagination";
 import { EscalationError } from "./errors";
-import { normaliseRole, teamRolesOfAll } from "./roles";
+import { normaliseRole, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, EscalationKind, EscalationRow, EscalationStatus, NotificationState, Viewer } from "./types";
 
 export const ESCALATION_COLUMNS = `EscalationId, SubjectType, SubjectId, BuildingId, Kind, Urgent, PolicyKey, [Level],
@@ -398,12 +398,27 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
     return `(e.TargetUserId = @ViewerUserId OR e.TargetRole IN (${placeholders}))`;
   };
   const raised = (): string => "e.RaisedByUserId = @ViewerUserId";
+  // Policy domains the viewer oversees in full (the CFO's finance. alerts),
+  // whoever they go to. The prefix is a constant of ours, escaped and bound like
+  // the policyKey filter's; no request input reaches it.
+  const seenPolicies = (): string[] =>
+    seenPolicyPrefixesOfAll(roles).map((prefix, index) => {
+      params.push({ name: `SeenPolicy${index}`, type: TYPES.NVarChar, value: `${escapeLike(prefix)}%` });
+      return `e.PolicyKey LIKE @SeenPolicy${index} ESCAPE '\\'`;
+    });
   const team = (): string | null => {
     const teamRoles = teamRolesOfAll(roles);
     if (teamRoles === null) return null; // everything
-    if (teamRoles.length === 0) return "1 = 0";
-    const placeholders = rolePlaceholders("TeamRole", teamRoles, params);
-    return `(e.TargetRole IN (${placeholders}) OR e.RaisedByUserId IN (SELECT u.UserID FROM dbo.AppUsers u WHERE u.Role IN (${placeholders})))`;
+    const clauses: string[] = [];
+    if (teamRoles.length > 0) {
+      const placeholders = rolePlaceholders("TeamRole", teamRoles, params);
+      clauses.push(
+        `e.TargetRole IN (${placeholders})`,
+        `e.RaisedByUserId IN (SELECT u.UserID FROM dbo.AppUsers u WHERE u.Role IN (${placeholders}))`,
+      );
+    }
+    clauses.push(...seenPolicies());
+    return clauses.length === 0 ? "1 = 0" : `(${clauses.join(" OR ")})`;
   };
 
   switch (filter.view) {

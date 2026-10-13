@@ -751,3 +751,93 @@ describe("escalateFurther", () => {
     expect((await push({ escalationId: 42 })).status).toBe(400);
   });
 });
+
+// ── The CFO and the Finance workspace's alerts ───────────────────────────────
+// The CFO sees every escalation whose policy key starts with finance., whoever it
+// goes to; seeing is not acting. The inbox query that applies this to a list is
+// buildListWhere (store.test.ts); here the store is replaced, so these cover the
+// single-row check, the response, and the action gates.
+
+describe("the CFO and finance. alerts", () => {
+  const NOBODY_CAN = { acknowledge: false, escalateFurther: false, resolve: false, withdraw: false };
+  // Raised by Floorplan, aimed at a director: nothing about it puts the CFO in the picture but the rule.
+  const alert = (policyKey: string) =>
+    row({ policyKey, raisedByKind: "system", raisedByName: "Floorplan", raisedByUserId: null, targetRole: "director" });
+  const FINANCE = "finance.variance_disputed";
+  const get = (roles: string) => getEscalation(makeRequest({ headers: headersFor(roles), query: { escalationId: "42" } }), context());
+
+  it("getEscalation: 200 for a finance alert aimed at a director, with every action off", async () => {
+    st.getEscalationRow.mockResolvedValue(alert(FINANCE));
+    st.listChain.mockResolvedValue([alert(FINANCE)]);
+
+    const res = await get("cfo");
+
+    expect(res.status).toBe(200);
+    const body = res.jsonBody as { chain: { actions: unknown }[]; escalation: { actions: unknown; policyKey: string; targetRole: string } };
+    expect(body.escalation).toMatchObject({ actions: NOBODY_CAN, policyKey: FINANCE, targetRole: "director" });
+    expect(body.chain[0].actions).toEqual(NOBODY_CAN);
+  });
+
+  it("getEscalation: still 404 for a non-finance escalation aimed at a director", async () => {
+    for (const policyKey of ["job.critical", "rent_review.approval", "financex.variance_disputed", "finance"]) {
+      st.getEscalationRow.mockResolvedValue(alert(policyKey));
+      const res = await get("cfo");
+      expect(res.status).toBe(404);
+      expect((res.jsonBody as { code: string }).code).toBe("not_found");
+    }
+  });
+
+  it("getEscalation: nobody else gains the sight (managers and staff still get a 404)", async () => {
+    st.getEscalationRow.mockResolvedValue(alert(FINANCE));
+    for (const roles of ["accounts_manager", "facilities_manager", "accounts", "facilities"]) {
+      expect((await get(roles)).status).toBe(404);
+    }
+    for (const roles of ["director", "admin"]) {
+      expect((await get(roles)).status).toBe(200);
+    }
+  });
+
+  it("getEscalations: the CFO's team view of finance. lists an alert aimed at a director, with every action off", async () => {
+    st.listEscalations.mockResolvedValue({ rows: [alert(FINANCE)], total: 1 });
+
+    const res = await getEscalations(makeRequest({ headers: headersFor("cfo"), query: { policyKey: "finance.", view: "team" } }), context());
+
+    expect(res.status).toBe(200);
+    expect(st.listEscalations).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ policyKeyPrefix: "finance.", view: "team", viewer: expect.objectContaining({ roles: ["cfo"] }) }),
+      expect.anything(),
+    );
+    const body = res.jsonBody as { items: { actions: unknown; policyKey: string; targetRole: string }[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({ actions: NOBODY_CAN, policyKey: FINANCE, targetRole: "director" });
+  });
+
+  // Seen but not hers to act on: the same 403 as anyone else with no part in it,
+  // not the 404 of an escalation she could not see.
+  it.each([
+    ["acknowledgeEscalation", acknowledgeEscalation, { escalationId: 42, rowVersion: VERSION }, () => eng.acknowledge],
+    ["resolveEscalation", resolveEscalation, { escalationId: 42, note: "Done", resolutionCode: "action_taken", rowVersion: VERSION }, () => eng.resolve],
+    ["withdrawEscalation", withdrawEscalation, { escalationId: 42, reason: "No longer needed", rowVersion: VERSION }, () => eng.withdraw],
+    ["escalateFurther", escalateFurther, { escalationId: 42, note: "Over to you", rowVersion: VERSION }, () => eng.escalateFurther],
+  ] as const)("%s: a 403 for the CFO on a finance alert that isn't aimed at her", async (_name, handler, body, engineCall) => {
+    st.getEscalationRow.mockResolvedValue(alert(FINANCE));
+
+    const res = await handler(makeRequest({ body, headers: headersFor("cfo") }), context());
+
+    expect(res.status).toBe(403);
+    expect((res.jsonBody as { code: string }).code).toBe("forbidden");
+    expect(engineCall()).not.toHaveBeenCalled();
+  });
+
+  it("acknowledgeEscalation: still lets her act when the alert is aimed at her", async () => {
+    st.getEscalationRow.mockResolvedValue({ ...alert(FINANCE), targetRole: "cfo" });
+    eng.acknowledge.mockResolvedValue(row({ policyKey: FINANCE, status: "acknowledged", targetRole: "cfo" }));
+
+    const res = await acknowledgeEscalation(makeRequest({ body: { escalationId: 42, rowVersion: VERSION }, headers: headersFor("cfo") }), context());
+
+    expect(res.status).toBe(200);
+    expect(eng.acknowledge).toHaveBeenCalledTimes(1);
+  });
+});

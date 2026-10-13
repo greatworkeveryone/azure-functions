@@ -20,7 +20,8 @@
 // Gate: ESCALATION_ROLES (frontend capability viewEscalations); view=team needs
 // TEAM_ESCALATION_ROLES (viewTeamEscalations); view=all needs ALL_ESCALATION_ROLES
 // (viewAllEscalations). Visibility within the view is §3.7: the targets, the
-// raiser and every role above the target.
+// raiser and every role above the target; the team and visible views also give
+// the CFO every escalation whose policy key starts with finance.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection } from "../db";
