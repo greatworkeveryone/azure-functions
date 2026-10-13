@@ -131,6 +131,15 @@ export function formatDarwinYYMMDD(date: Date): string {
 const SUFFIX_LETTERS = "bcdefghijklmnopqrstuvwxyz";
 const CODE_CHARS = /^[A-Za-z0-9]+$/;
 
+/** `{building}{charge}{YYMMDD}` before any collision suffix. Alphanumeric
+ *  only, so it is safe to use as a LIKE prefix. */
+export function poReferenceBase(input: { buildingCode: string; chargeCode: string; date: Date }): string {
+  const { buildingCode, chargeCode, date } = input;
+  if (!CODE_CHARS.test(buildingCode)) throw new Error(`Invalid building code "${buildingCode}"`);
+  if (!CODE_CHARS.test(chargeCode)) throw new Error(`Invalid charge code "${chargeCode}"`);
+  return `${buildingCode}${chargeCode}${formatDarwinYYMMDD(date)}`;
+}
+
 /**
  * `{building}{charge}{YYMMDD}`, e.g. `66Sm261013`. A second PO on the same
  * building, charge and day gets a lowercase suffix `b`..`z`. Throws rather
@@ -142,11 +151,8 @@ export function formatPoReference(input: {
   date: Date;
   existing: readonly string[];
 }): string {
-  const { buildingCode, chargeCode, date, existing } = input;
-  if (!CODE_CHARS.test(buildingCode)) throw new Error(`Invalid building code "${buildingCode}"`);
-  if (!CODE_CHARS.test(chargeCode)) throw new Error(`Invalid charge code "${chargeCode}"`);
-
-  const base = `${buildingCode}${chargeCode}${formatDarwinYYMMDD(date)}`;
+  const base = poReferenceBase(input);
+  const { existing } = input;
   const taken = new Set(existing);
   let reference = base;
   if (taken.has(base)) {
