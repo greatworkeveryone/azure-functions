@@ -1,5 +1,5 @@
 import { PDFDocument as PDFLibDocument } from "pdf-lib";
-import { buildInspectionPacket, InspectionPacketInput } from "./inspection-packet";
+import { buildInspectionPacket, InspectionPacketInput, pointHeadline } from "./inspection-packet";
 
 // 1x1 transparent PNG — a valid image PDFKit can embed.
 const PNG_1x1 = Buffer.from(
@@ -95,5 +95,35 @@ describe("buildInspectionPacket", () => {
     const pdf = await buildInspectionPacket(input);
     const parsed = await PDFLibDocument.load(pdf);
     expect(parsed.getPageCount()).toBeGreaterThan(1);
+  });
+});
+
+// IN1: a photo-only finding has no text — the PDF must say so instead of
+// printing a blank line (or "(no description)", which reads as a mistake).
+describe("pointHeadline", () => {
+  it("prints the description when the finding has one", () => {
+    expect(pointHeadline({ description: "Cracked tile" })).toBe("Cracked tile");
+  });
+
+  it('says "(photo only)" for an empty or whitespace-only description', () => {
+    expect(pointHeadline({ description: "" })).toBe("(photo only)");
+    expect(pointHeadline({ description: "   " })).toBe("(photo only)");
+  });
+});
+
+describe("buildInspectionPacket with a photo-only finding", () => {
+  it("renders a finding that has photos but no description", async () => {
+    const input = baseInput();
+    input.levels[0].rooms[0].points = [
+      {
+        description: "",
+        addedByName: "Jane Doe",
+        addedAt: new Date("2026-07-01T00:00:00.000Z"),
+        raisedJobIds: [],
+        photos: [{ fileName: "a.png", bytes: PNG_1x1 }],
+      },
+    ];
+    const pdf = await buildInspectionPacket(input);
+    expect(pdf.subarray(0, 4).toString("latin1")).toBe("%PDF");
   });
 });

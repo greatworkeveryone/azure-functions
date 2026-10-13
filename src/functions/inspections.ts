@@ -143,6 +143,19 @@ interface InspectionApi {
 
 const ATTACHMENT_SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
+// A finding is blank only when it has NO description AND NO photo: rooms seed
+// with an empty placeholder point, but a point holding just a photo is a real
+// finding. Mirrors the frontend `isBlankInspectionPoint` and the PDF loader
+// (pdf/inspection-packet-loader.ts) — change all three together. Contract: the
+// caller aliases dbo.InspectionPoints as `p`.
+const NON_BLANK_POINT_SQL = `(
+  LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+  OR EXISTS (SELECT 1 FROM dbo.InspectionAttachments att WHERE att.PointId = p.Id)
+)`;
+
+// addLevel stores into dbo.InspectionLevels.Name (NVARCHAR(100), m034).
+export const MAX_LEVEL_NAME_LENGTH = 100;
+
 // Builds a fully nested Inspection from a single ID using 5 batched queries.
 // Stays cheap because each query is a single index lookup keyed on InspectionId.
 async function loadInspection(connection: any, id: number): Promise<InspectionApi | null> {
@@ -381,9 +394,10 @@ export async function getInspections(
     const levelCountByInspection = new Map(levelRows.map((r) => [r.InspectionId as number, r.C as number]));
 
     // Match the detail view: only count rooms that have at least one non-blank
-    // inspection point. A room whose only point is the blank seed placeholder is
-    // hidden in the read-only detail body, so it must not inflate the list count.
-    // "Non-blank" uses the same predicate as the filled-points query below.
+    // inspection point (description OR photo). A room whose only point is the
+    // blank seed placeholder is hidden in the read-only detail body, so it must
+    // not inflate the list count. "Non-blank" is NON_BLANK_POINT_SQL — the same
+    // predicate as the filled-points query below.
     const roomRows = inspectionRows.length
       ? await executeQuery(
           connection,
@@ -393,7 +407,7 @@ export async function getInspections(
            WHERE EXISTS (
                SELECT 1 FROM dbo.InspectionPoints p
                WHERE p.RoomId = r.Id
-                 AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+                 AND ${NON_BLANK_POINT_SQL}
              )
            GROUP BY l.InspectionId`,
           [],
@@ -408,7 +422,7 @@ export async function getInspections(
            FROM dbo.InspectionLevels l
            JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
            JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
-           WHERE LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+           WHERE ${NON_BLANK_POINT_SQL}
            GROUP BY l.InspectionId`,
           [],
         )
@@ -732,6 +746,19 @@ async function applyOne(
       return;
     }
     case "addLevel": {
+      // Level names are free text: a building with no configured levels (the
+      // family residences, m093) needs "Ground floor" / "Whole property", and a
+      // configured building may add a name that isn't in its list. So the name
+      // is validated here against the column, never against a picklist — and
+      // an over-long one is rejected explicitly rather than as an opaque SQL
+      // truncation error.
+      const levelName = typeof op.name === "string" ? op.name.trim() : "";
+      if (levelName.length === 0) {
+        throw new Error("addLevel requires a non-empty name");
+      }
+      if (levelName.length > MAX_LEVEL_NAME_LENGTH) {
+        throw new Error(`addLevel: name exceeds ${MAX_LEVEL_NAME_LENGTH} characters`);
+      }
       await executeQuery(
         connection,
         `INSERT INTO dbo.InspectionLevels (Id, InspectionId, Name, AddedAt)
@@ -739,7 +766,7 @@ async function applyOne(
         [
           { name: "Id",           type: TYPES.NVarChar, value: op.levelId },
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
-          { name: "Name",         type: TYPES.NVarChar, value: op.name },
+          { name: "Name",         type: TYPES.NVarChar, value: levelName },
           { name: "AddedAt",      type: TYPES.NVarChar, value: op.addedAt },
         ],
       );
@@ -1570,6 +1597,14 @@ export async function mergeInspections(
 //      inspection UI marks the point as "Job raised".
 //
 // All writes run in one transaction — partial raises don't get persisted.
+//
+// Idempotent: a point already linked in dbo.InspectionRaisedJobs is SKIPPED and
+// reported in `skippedPointIds` (never raised twice). A retry after a lost
+// response, or two people raising the same inspection, therefore can't create
+// duplicate jobs. The links are read under an UPDLOCK on the inspection row so
+// concurrent raisers serialise — the second sees the first's links.
+// Response: { jobs, pointIds (raised now), skippedPointIds (already had a job) }.
+// A request whose points were all skipped is a 200 with `jobs: []`.
 
 interface RaiseJobsBody {
   Defaults?: {
@@ -1585,6 +1620,8 @@ interface RaiseJobsBody {
 }
 
 interface PointContext {
+  /** Photos on the point — a finding can be photo-only (empty description). */
+  attachmentCount: number;
   description: string;
   levelName: string;
   pointId: string;
@@ -1648,8 +1685,10 @@ export async function raiseJobsFromInspection(
       return { status: 400, jsonBody: { error: "Jobs can only be raised from a completed inspection" } };
     }
 
+    // A repeated id in one request must not raise two jobs for one finding.
+    const requestedPointIds = Array.from(new Set(pointIds));
     const pointIndex = buildPointIndex(inspection);
-    const missing = pointIds.filter((id) => !pointIndex.has(id));
+    const missing = requestedPointIds.filter((id) => !pointIndex.has(id));
     if (missing.length > 0) {
       return {
         status: 400,
@@ -1657,38 +1696,57 @@ export async function raiseJobsFromInspection(
       };
     }
 
-    // Group selected points into one batch per Job-to-create. The `missing`
-    // check above already rejected any id not in pointIndex, so a fresh lookup
-    // here can only miss if the inspection was mutated concurrently — in that
-    // case bail with a 409 rather than crashing on a non-null assertion.
-    const groups: PointContext[][] = [];
-    if (mode === "per-room") {
-      const byRoom = new Map<string, PointContext[]>();
-      for (const id of pointIds) {
-        const ctx = pointIndex.get(id);
-        if (!ctx) {
-          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
-        }
-        const list = byRoom.get(ctx.roomId);
-        if (list) list.push(ctx);
-        else byRoom.set(ctx.roomId, [ctx]);
-      }
-      for (const list of byRoom.values()) groups.push(list);
-    } else {
-      for (const id of pointIds) {
-        const ctx = pointIndex.get(id);
-        if (!ctx) {
-          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
-        }
-        groups.push([ctx]);
-      }
-    }
-
     const raised: RaisedJobOutput[] = [];
+    let raisedPointIds: string[] = [];
+    let skippedPointIds: string[] = [];
 
     await beginTransaction(connection);
     try {
-      for (const group of groups) {
+      // Lock the inspection row first so concurrent raisers (or a retry racing
+      // its own lost response) serialise, then read the existing links under
+      // that lock — the later request sees the earlier one's links and skips
+      // them. Also re-asserts the status gate now that the row can't change.
+      const locked = await executeQuery(
+        connection,
+        `SELECT Status FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      if (locked.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Inspection not found" } };
+      }
+      if (locked[0].Status !== "complete") {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: "Jobs can only be raised from a completed inspection" } };
+      }
+      const linkedRows = await executeQuery(
+        connection,
+        `SELECT DISTINCT PointId FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      const alreadyRaised = new Set(linkedRows.map((row) => row.PointId as string));
+      skippedPointIds = requestedPointIds.filter((id) => alreadyRaised.has(id));
+      raisedPointIds = requestedPointIds.filter((id) => !alreadyRaised.has(id));
+      if (skippedPointIds.length > 0) {
+        context.log(
+          `raiseJobsFromInspection: skipped ${skippedPointIds.length} point(s) of inspection ${inspectionId} that already have a job`,
+        );
+      }
+
+      // Group the points still to raise into one batch per Job-to-create. The
+      // `missing` check above already rejected any id not in pointIndex, so a
+      // fresh lookup here can only miss if the inspection was mutated
+      // concurrently — bail with a 409 rather than crash on a non-null assertion.
+      const grouped = groupPointsForJobs(raisedPointIds, mode, pointIndex);
+      if ("goneId" in grouped) {
+        await rollbackTransaction(connection).catch(() => {});
+        return {
+          status: 409,
+          jsonBody: { error: `Point ${grouped.goneId} no longer exists`, code: "POINT_GONE" },
+        };
+      }
+
+      for (const group of grouped.groups) {
         const first = group[0];
         const title = buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
         const description = buildJobDescription(group);
@@ -1766,7 +1824,7 @@ export async function raiseJobsFromInspection(
       throw err;
     }
 
-    return { status: 200, jsonBody: { jobs: raised, pointIds } };
+    return { status: 200, jsonBody: { jobs: raised, pointIds: raisedPointIds, skippedPointIds } };
   } catch (error: any) {
     context.error("raiseJobsFromInspection failed:", error.message);
     return errorResponse("Failed to raise jobs", error.message);
@@ -1781,6 +1839,7 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
     for (const room of lvl.rooms) {
       for (const point of room.points) {
         index.set(point.id, {
+          attachmentCount: point.attachments.length,
           description: point.description,
           levelName: lvl.name,
           pointId: point.id,
@@ -1793,16 +1852,51 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
   return index;
 }
 
+type GroupedPoints = { groups: PointContext[][] } | { goneId: string };
+
+// One batch of points per Job-to-create: a batch per point, or a batch per room.
+function groupPointsForJobs(
+  pointIds: string[],
+  mode: "per-point" | "per-room",
+  pointIndex: Map<string, PointContext>,
+): GroupedPoints {
+  if (mode === "per-room") {
+    const byRoom = new Map<string, PointContext[]>();
+    for (const id of pointIds) {
+      const ctx = pointIndex.get(id);
+      if (!ctx) return { goneId: id };
+      const list = byRoom.get(ctx.roomId);
+      if (list) list.push(ctx);
+      else byRoom.set(ctx.roomId, [ctx]);
+    }
+    return { groups: Array.from(byRoom.values()) };
+  }
+  const groups: PointContext[][] = [];
+  for (const id of pointIds) {
+    const ctx = pointIndex.get(id);
+    if (!ctx) return { goneId: id };
+    groups.push([ctx]);
+  }
+  return { groups };
+}
+
 function buildJobTitle(prefix: string, levelName: string, roomName: string): string {
   const location = `${levelName} / ${roomName}`;
   return prefix ? `${prefix} ${location}` : location;
 }
 
+// A photo-only finding has no text: say so, rather than raising a job with an
+// empty description (its photos are copied onto the job).
 function buildJobDescription(group: PointContext[]): string {
-  if (group.length === 1) return group[0].description;
+  if (group.length === 1) {
+    const only = group[0];
+    if (only.description.trim().length > 0) return only.description;
+    return only.attachmentCount > 0 ? "(photo only — see attached photos)" : "(no description)";
+  }
   return group
     .map((ctx) => {
-      const text = ctx.description.trim() || "(no description)";
+      const text =
+        ctx.description.trim() || (ctx.attachmentCount > 0 ? "(photo only)" : "(no description)");
       return `• ${text}`;
     })
     .join("\n");

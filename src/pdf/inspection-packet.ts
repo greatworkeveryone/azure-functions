@@ -103,6 +103,13 @@ export function buildInspectionPacket(input: InspectionPacketInput): Promise<Buf
   });
 }
 
+/** The line printed above an issue. The loader keeps a point with no text only
+ *  when it has photos (a photo-only finding), so an empty description means
+ *  "photo only" — never a blank line. */
+export function pointHeadline(point: Pick<PacketPoint, "description">): string {
+  return point.description.trim() || "(photo only)";
+}
+
 function renderPoint(doc: PDFKit.PDFDocument, point: PacketPoint) {
   doc.moveDown(0.6);
   // Keep the heading with at least the start of its content: if there's very
@@ -110,7 +117,7 @@ function renderPoint(doc: PDFKit.PDFDocument, point: PacketPoint) {
   const bottom = doc.page.height - doc.page.margins.bottom;
   if (doc.y > bottom - 120) doc.addPage();
 
-  doc.fontSize(10.5).fillColor("#000").text(point.description || "(no description)");
+  doc.fontSize(10.5).fillColor("#000").text(pointHeadline(point));
 
   const badges = point.raisedJobIds.map((id) => `Job #${id}`).join(" · ");
   const meta =
