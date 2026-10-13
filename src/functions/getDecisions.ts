@@ -4,6 +4,9 @@
 //   actorUserId    who decided
 //   action         an exact code, or a prefix ending in "." (e.g. "schedule.")
 //   buildingId, tenantId
+//   jobId          the job a decision was in
+//   contractorId   the contractor a money decision was for; read from the id the
+//                  row carries in `after` or `before`
 //   exceptionsOnly true | 1
 //   sort           occurredAt (default) | impact, both newest / largest first
 //   page, pageSize paging, see ../pagination
