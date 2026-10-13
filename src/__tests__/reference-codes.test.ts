@@ -10,6 +10,7 @@ import {
   formatPoReference,
   isChargeCode,
   parseReference,
+  periodToUtcRange,
 } from "../reference-codes";
 
 // Midday in Darwin on 13 Oct 2026 (UTC+9:30, no DST) is 02:30 UTC the same day.
@@ -451,5 +452,39 @@ describe("chargeCodeForJob", () => {
     expect(chargeCodeForJob({ category: "Common Areas", type: "Service Contracts", subType: "Cleaning" })).toBe("cl");
     expect(chargeCodeForJob({ category: "Common Areas", type: "Painting" })).toBe("m");
     expect(chargeCodeForJob({})).toBe("m");
+  });
+});
+
+describe("periodToUtcRange", () => {
+  const iso = (d: Date) => d.toISOString();
+
+  it("turns a Darwin day into the UTC window that contains it", () => {
+    const { from, toExclusive } = periodToUtcRange({ kind: "day", from: "2026-10-13", to: "2026-10-13" });
+    expect(iso(from)).toBe("2026-10-12T14:30:00.000Z");
+    expect(iso(toExclusive)).toBe("2026-10-13T14:30:00.000Z");
+  });
+
+  it("covers a whole month, leap February included", () => {
+    const [feb] = parseReference("HHse2402");
+    const { from, toExclusive } = periodToUtcRange(feb.period);
+    expect(iso(from)).toBe("2024-01-31T14:30:00.000Z");
+    expect(iso(toExclusive)).toBe("2024-02-29T14:30:00.000Z");
+  });
+
+  it("covers a quarter and a two-year span", () => {
+    const [q3] = parseReference("McMgm26q3");
+    expect(iso(periodToUtcRange(q3.period).from)).toBe("2026-06-30T14:30:00.000Z");
+    expect(iso(periodToUtcRange(q3.period).toExclusive)).toBe("2026-09-30T14:30:00.000Z");
+    const [two] = parseReference("66Sm26a2");
+    expect(iso(periodToUtcRange(two.period).from)).toBe("2024-12-31T14:30:00.000Z");
+    expect(iso(periodToUtcRange(two.period).toExclusive)).toBe("2026-12-31T14:30:00.000Z");
+  });
+
+  it("includes a PO created at 00:30 Darwin on the day but not one at 23:59 the day before", () => {
+    const { from, toExclusive } = periodToUtcRange({ kind: "day", from: "2026-10-13", to: "2026-10-13" });
+    const inside = new Date("2026-10-12T15:00:00Z");
+    const before = new Date("2026-10-12T14:29:59Z");
+    expect(inside >= from && inside < toExclusive).toBe(true);
+    expect(before >= from).toBe(false);
   });
 });

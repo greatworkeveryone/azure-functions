@@ -287,6 +287,19 @@ export function parseReference(
   return results;
 }
 
+// Darwin is UTC+9:30 all year (no DST), so a Darwin calendar day is a fixed
+// 24-hour window in UTC.
+const DARWIN_OFFSET = "+09:30";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The period as a half-open UTC range `[from, toExclusive)` for comparing
+ *  against DATETIME2 columns stored in UTC. */
+export function periodToUtcRange(period: ReferencePeriod): { from: Date; toExclusive: Date } {
+  const from = new Date(`${period.from}T00:00:00${DARWIN_OFFSET}`);
+  const toExclusive = new Date(new Date(`${period.to}T00:00:00${DARWIN_OFFSET}`).getTime() + DAY_MS);
+  return { from, toExclusive };
+}
+
 // ── Charge code for a job ────────────────────────────────────────────────────
 
 export const FALLBACK_CHARGE_CODE = "m";
