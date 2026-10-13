@@ -42,7 +42,7 @@ describe("migration 116 is purely additive", () => {
     for (const batch of BATCHES.filter((b) => /\bALTER\s+TABLE\b/i.test(b))) {
       const column = batch.match(/\bADD\s+(\w+)/i)?.[1];
       expect(column).toBeDefined();
-      expect(batch).toMatch(new RegExp(`IF NOT EXISTS \\(SELECT 1 FROM sys\\.columns[\\s\\S]*?name = '${column}'`, "i"));
+      expect(batch).toMatch(new RegExp("IF NOT EXISTS \\(SELECT 1 FROM sys\\.columns[\\s\\S]*?name = '" + column + "'", "i"));
     }
   });
 
