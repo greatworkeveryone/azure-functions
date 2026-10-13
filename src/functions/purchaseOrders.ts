@@ -34,6 +34,10 @@ import { resolvePoNumber } from "../po-reference-db";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { jobScope, purchaseOrderFacts } from "../ledger/moneyDecisions";
+import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 
 /**
  * Quote-approval guard for PO creation (WP8). Returns an error string if
@@ -121,7 +125,9 @@ async function getPurchaseOrders(
 //   Seq is per-contractor (total POs to this contractor ever + 1),
 //       or per-job for internal (no-contractor) jobs.
 // Wrapped in a transaction with UPDLOCK/HOLDLOCK on the MAX(Seq) read so
-// concurrent creates can't collide on the same seq number.
+// concurrent creates can't collide on the same seq number. Creating a PO is a
+// decision (PLAN §3.12): the same transaction carries its ledger row, so the PO
+// and the row commit together or not at all.
 
 interface UpsertPurchaseOrderBody {
   PurchaseOrderID?: number;
@@ -180,6 +186,9 @@ export async function upsertPurchaseOrder(
         return { status: 400, jsonBody: { error: "JobID (number) required to create a PO" } };
       }
 
+      const actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+
       await beginTransaction(connection);
       try {
         // Quote-approval gate: refuse a PO that would leapfrog an unapproved
@@ -203,7 +212,21 @@ export async function upsertPurchaseOrder(
           approvedQuoteId: (jobStateRows[0].ApprovedQuoteID as number | null) ?? null,
         });
         if (approvalError) {
+          // A PO that would act as the quote's approval is a refused attempt,
+          // ledgered in a transaction of its own now that this one has rolled back.
           await rollbackTransaction(connection).catch(() => {});
+          await recordRefusal(
+            connection,
+            actor,
+            { id: JobID, type: "job" },
+            {
+              attempted: "po.create",
+              code: "quote_not_approved",
+              message: approvalError,
+              state: { jobStatus: String(jobStateRows[0].Status) },
+            },
+            JobID,
+          );
           return { status: 422, jsonBody: { error: approvalError } };
         }
 
@@ -275,6 +298,22 @@ export async function upsertPurchaseOrder(
           actor: identity.name,
           purchaseOrderId: newId,
           note: `PO ${poNumber} created — work in progress.`,
+        });
+
+        const scope = await jobScope(connection, JobID);
+        await record(connection, {
+          action: "po.create",
+          actor,
+          after: purchaseOrderFacts({
+            ContractorID: ContractorID ?? null,
+            ContractorName: ContractorName ?? null,
+            CostNotToExceed: CostNotToExceed ?? null,
+            EstimatedCost: EstimatedCost ?? null,
+            PONumber: poNumber,
+          }),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: newId, type: "purchase_order" },
         });
 
         await commitTransaction(connection);
@@ -606,6 +645,10 @@ async function previewPurchaseOrder(
 // Requires PDFBlobName to be set — caller must hit previewPurchaseOrder first.
 // Flips SentAt/SentBy. Actual Microsoft Graph sendMail call is follow-on work
 // — resolveRecipient + the generated PDF are ready for that wiring.
+//
+// Sending is a decision and an external send (PLAN §3.12). The mail can't be
+// recalled, so the ledger actor and job scope are found before it goes; then
+// SentAt/SentBy and the ledger row commit together or not at all.
 
 interface SendPurchaseOrderBody {
   PurchaseOrderID?: number;
@@ -623,7 +666,14 @@ async function sendPurchaseOrder(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, {
+      attempted: "po.send",
+      idField: "PurchaseOrderID",
+      subjectType: "purchase_order",
+    });
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -637,11 +687,15 @@ async function sendPurchaseOrder(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
     const contractorRows = await executeQuery(
       connection,
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
-              po.EmailSubject, po.EmailBody
+              po.EmailSubject, po.EmailBody,
+              po.JobID, po.ContractorID, po.ContractorName,
+              po.EstimatedCost, po.CostNotToExceed, po.SentAt
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
         WHERE po.PurchaseOrderID = @Id`,
@@ -664,6 +718,8 @@ async function sendPurchaseOrder(
     const poNumber = contractorRows[0].PONumber as string | null;
     const emailSubject = (contractorRows[0].EmailSubject as string | null) ?? poNumber ?? "Purchase Order";
     const emailBody = (contractorRows[0].EmailBody as string | null) ?? "";
+    const scope = await jobScope(connection, contractorRows[0].JobID as number | null | undefined);
+    const previousSentAt = contractorRows[0].SentAt as Date | null | undefined;
 
     context.log(
       `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
@@ -689,16 +745,33 @@ async function sendPurchaseOrder(
       ccAddresses,
     );
 
-    await executeQuery(
-      connection,
-      `UPDATE PurchaseOrders
-       SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME()
-       WHERE PurchaseOrderID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
-        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `UPDATE PurchaseOrders
+         SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME()
+         WHERE PurchaseOrderID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+          { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+      await record(connection, {
+        action: "po.send",
+        actor,
+        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
+        // A re-send shows the earlier send here.
+        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: PurchaseOrderID, type: "purchase_order" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
     const stored = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,

@@ -21,6 +21,21 @@ export const LEDGER_ACTIONS = {
   denied: { exception: true, reasonRequired: false, subjects: "any" },
   sod_blocked: { exception: true, reasonRequired: false, subjects: "any" },
 
+  // Quote, invoice, purchase order and payment decisions (WP19b). Mirrors of
+  // decisions Floorplan already made, so none is an exception and none demands
+  // a reason: the endpoints don't ask for one yet (LAUNCH-READINESS WP42).
+  "invoice.approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  "invoice.director_approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  "invoice.myob_created": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  "invoice.reject": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  "payment.myob_applied": { exception: false, reasonRequired: false, subjects: ["payment"] },
+  "po.create": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
+  "po.send": { exception: false, reasonRequired: false, subjects: ["purchase_order"] },
+  "quote.approve": { exception: false, reasonRequired: false, subjects: ["quote"] },
+  "quote.director_approve": { exception: false, reasonRequired: false, subjects: ["quote"] },
+  "quote.director_reject": { exception: false, reasonRequired: false, subjects: ["quote"] },
+  "quote.reject": { exception: false, reasonRequired: false, subjects: ["quote"] },
+
   // Role, limit and attribution decisions (WP19b)
   "approval_limit.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },
   "quote.approve_attributed": {

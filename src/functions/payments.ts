@@ -10,6 +10,10 @@ import { requiresDirectorApproval, type ApprovalLimit } from "./invoices";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { MyobWritesDisabledError, userActor } from "../myob-api-log";
 import { applyMyobPayment, createMyobBill } from "../myob-client";
+import { newCorrelationId, record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { jobScope, paymentFacts } from "../ledger/moneyDecisions";
+import { recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 
 const PAYMENT_COLUMNS = `
   PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Variance,
@@ -442,12 +446,26 @@ async function upsertPayment(
 // Sets Status='paid' in our DB and applies the payment against the MYOB bill.
 // If MYOB has no bill for this payment (MyobID is null), logs a warning
 // but still marks the local record as paid.
+//
+// Marking a payment paid is a decision (PLAN §3.12): the status and its ledger
+// row commit together or not at all. Only then is MYOB told, so a failed ledger
+// write can't leave MYOB holding a payment that Floorplan still shows as
+// pending (and that a retry would apply a second time). One correlation id
+// goes to both the ledger row and the MYOB call, so MyobApiLog leads back to
+// the decision. What MYOB is sent, and the MYOB_WRITES_ENABLED switch, are
+// unchanged; MYOB failing is still not fatal.
 
 interface MarkPaymentPaidBody {
   PaymentID?: number;
   /** @deprecated ignored — identity comes from the token */
   MarkedPaidBy?: string;
 }
+
+const MARK_PAID_TARGET: RefusalTarget = {
+  attempted: "payment.myob_applied",
+  idField: "PaymentID",
+  subjectType: "payment",
+};
 
 async function markPaymentPaid(
   request: HttpRequest,
@@ -457,7 +475,10 @@ async function markPaymentPaid(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, MARK_PAID_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -472,18 +493,68 @@ async function markPaymentPaid(
     }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: PaymentID }],
-    );
-    if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Payment not found" } };
-    }
+    const ledgerActor = await resolveLedgerActor(request, connection);
+    if (!ledgerActor) return unauthorizedResponse();
 
-    const payment = rows[0];
-    if (payment.Status === "paid") {
-      return { status: 200, jsonBody: { payment } };
+    const correlationId = newCorrelationId();
+
+    await beginTransaction(connection);
+    let payment;
+    try {
+      // Locked until commit, so two clicks on "Mark as paid" can't both get
+      // past the paid check and apply the payment in MYOB twice.
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${PAYMENT_COLUMNS} FROM Payments WITH (UPDLOCK, HOLDLOCK) WHERE PaymentID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: PaymentID }],
+      );
+      if (rows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Payment not found" } };
+      }
+
+      payment = rows[0];
+      if (payment.Status === "paid") {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 200, jsonBody: { payment } };
+      }
+
+      await executeQuery(
+        connection,
+        `UPDATE Payments
+         SET Status = 'paid', MyobSyncedAt = SYSUTCDATETIME(),
+             PaidBy = @MarkedPaidBy
+         WHERE PaymentID = @Id`,
+        [
+          { name: "Id",           type: TYPES.Int,     value: PaymentID },
+          { name: "MarkedPaidBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+
+      // Who the money goes to is on the invoice being paid, not on the payment.
+      const invoiceRows =
+        payment.JobInvoiceID == null
+          ? []
+          : await executeQuery(
+              connection,
+              "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+              [{ name: "Id", type: TYPES.Int, value: payment.JobInvoiceID }],
+            );
+      const scope = await jobScope(connection, payment.JobID as number | null | undefined);
+      await record(connection, {
+        action: "payment.myob_applied",
+        actor: ledgerActor,
+        after: { status: "paid", ...paymentFacts(payment, invoiceRows[0]) },
+        before: { status: (payment.Status as string | null) ?? null },
+        buildingId: scope.buildingId,
+        correlationId,
+        jobId: scope.jobId,
+        subject: { id: PaymentID, type: "payment" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
 
     // ── Apply payment in MYOB if we have a bill UID ─────────────────────────
@@ -495,29 +566,18 @@ async function markPaymentPaid(
           actor,
           amount: payment.Amount as number,
           billUid: myobId,
+          correlationId,
           sqlToken: token,
         });
         context.log(`MYOB payment applied: bill ${myobId}, payment ${PaymentID}`);
       } catch (myobErr: any) {
         context.warn(`MYOB payment apply failed for payment ${PaymentID}: ${myobErr.message}`);
         if (myobErr instanceof MyobWritesDisabledError) myobWarning = MYOB_WRITES_OFF_ON_PAID;
-        // Continue — mark paid locally regardless.
+        // Continue — the payment is marked paid locally regardless.
       }
     } else {
       context.warn(`Payment ${PaymentID} has no MyobID — marking paid locally only`);
     }
-
-    await executeQuery(
-      connection,
-      `UPDATE Payments
-       SET Status = 'paid', MyobSyncedAt = SYSUTCDATETIME(),
-           PaidBy = @MarkedPaidBy
-       WHERE PaymentID = @Id`,
-      [
-        { name: "Id",           type: TYPES.Int,     value: PaymentID },
-        { name: "MarkedPaidBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
 
     const updated = await executeQuery(
       connection,

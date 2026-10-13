@@ -3,7 +3,7 @@
 // and stamps ApprovedBy/ApprovedAt so the Payment step has everything it needs.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { TYPES } from "tedious";
+import { TYPES, type Connection } from "tedious";
 import {
   beginTransaction,
   buildUpdateSet,
@@ -32,6 +32,11 @@ import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
 import { QUOTE_COLUMNS, approveDirectorQuote, rejectQuote as rejectQuoteWrite } from "../quote-decisions";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { approvalRule, jobScope, quoteFacts } from "../ledger/moneyDecisions";
+import { recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import type { LedgerActor } from "../ledger/types";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -395,6 +400,11 @@ async function upsertQuote(
 // Sets Quotes.Status='approved' + ApprovedBy/ApprovedAt, and mirrors the id
 // onto Jobs.ApprovedQuoteID / ApprovedBy / ApprovedAt so the Payment step
 // sees the approval without re-reading the Quotes table.
+//
+// The approval is a decision (PLAN §3.12): its writes and its ledger row
+// commit together or not at all. Routing the quote up to a director or a more
+// senior approver is part of the same decision and is ledgered as quote.approve
+// with the status it landed in.
 
 interface ApproveQuoteBody {
   QuoteID?: unknown;
@@ -402,43 +412,41 @@ interface ApproveQuoteBody {
   ApprovedBy?: string;
 }
 
-async function approveQuote(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
+const APPROVE_QUOTE_TARGET: RefusalTarget = { attempted: "quote.approve", idField: "QuoteID", subjectType: "quote" };
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
-  if (denied) return denied;
+interface QuoteApproval {
+  amount: number;
+  currency: string;
+  directorNeeded: boolean;
+  jobId: number;
+  newStatus: string;
+}
 
-  const identity = await verifiedIdentityFromRequest(request);
-  if (!identity) return unauthorizedResponse();
-  const approvedBy = identity.name;
+type QuoteApprovalOutcome = { approval: QuoteApproval; ok: true } | { ok: false; response: HttpResponseInit };
 
-  let connection;
+async function approveQuoteInTransaction(
+  connection: Connection,
+  input: { actor: LedgerActor; approvedBy: string; quoteId: number; userRoles: string[] },
+): Promise<QuoteApprovalOutcome> {
+  const { actor, approvedBy, quoteId, userRoles } = input;
+  await beginTransaction(connection);
   try {
-    const body = ((await request.json()) ?? {}) as ApproveQuoteBody;
-    const { QuoteID } = body;
-    if (typeof QuoteID !== "number") {
-      return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-
+    // Locked until commit, so the status we record as replaced is the one we replace.
     const quoteRows = await executeQuery(
       connection,
-      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency FROM Quotes WHERE QuoteID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, ContractorID FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id",
+      [{ name: "Id", type: TYPES.Int, value: quoteId }],
     );
     if (quoteRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Quote not found" } };
+      await rollbackTransaction(connection).catch(() => {});
+      return { ok: false, response: { status: 404, jsonBody: { error: "Quote not found" } } };
     }
-    const jobId = quoteRows[0].JobID as number;
-    const quoteNumber = (quoteRows[0].QuoteNumber as string | null) ?? `#${QuoteID}`;
-    const contractorName = quoteRows[0].ContractorName as string | null;
-    const amount = Number(quoteRows[0].Amount ?? 0);
-    const currency = quoteRows[0].Currency as string;
+    const quote = quoteRows[0];
+    const jobId = quote.JobID as number;
+    const quoteNumber = (quote.QuoteNumber as string | null) ?? `#${quoteId}`;
+    const contractorName = quote.ContractorName as string | null;
+    const amount = Number(quote.Amount ?? 0);
+    const currency = quote.Currency as string;
 
     // Three-tier routing:
     //   1. user can approve  + amount ≤ all non-director limits → 'approved' direct
@@ -446,7 +454,6 @@ async function approveQuote(
     //   3. user can't approve + amount > all non-director limits → 'awaiting_director'
     //   4. user can't approve + amount ≤ some non-director limit → 'awaiting_approval'
     // 403 only fires if the amount can't be covered by any role in the system.
-    const userRoles = await rolesForRequest(request);
     const allLimits = await getCachedApprovalLimits(connection);
     const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
 
@@ -468,7 +475,7 @@ async function approveQuote(
          SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
        WHERE QuoteID = @Id`,
       [
-        { name: "Id", type: TYPES.Int, value: QuoteID },
+        { name: "Id", type: TYPES.Int, value: quoteId },
         { name: "Status", type: TYPES.NVarChar, value: newStatus },
         { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
       ],
@@ -485,7 +492,7 @@ async function approveQuote(
              LastModifiedDate = SYSUTCDATETIME()
          WHERE JobID = @JobID`,
         [
-          { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+          { name: "QuoteID", type: TYPES.Int, value: quoteId },
           { name: "JobID", type: TYPES.Int, value: jobId },
           { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
         ],
@@ -522,7 +529,7 @@ async function approveQuote(
         { name: "CreatedBy", type: TYPES.NVarChar, value: approvedBy },
         { name: "Text", type: TYPES.NVarChar, value: eventText },
         { name: "EventType", type: TYPES.NVarChar, value: eventType },
-        { name: "QuoteID", type: TYPES.Int, value: QuoteID },
+        { name: "QuoteID", type: TYPES.Int, value: quoteId },
       ],
     );
 
@@ -532,10 +539,68 @@ async function approveQuote(
     if (newStatus === "approved") {
       await advanceJobStatus(connection, jobId, JobEvent.QUOTE_APPROVED, {
         actor: approvedBy,
-        quoteId: QuoteID,
+        quoteId,
         note: `Quote ${quoteLabel} approved — ready for PO.`,
       });
     }
+
+    const scope = await jobScope(connection, jobId);
+    await record(connection, {
+      action: "quote.approve",
+      actor,
+      after: { status: newStatus, ...quoteFacts(quote) },
+      before: { status: (quote.Status as string | null) ?? null },
+      buildingId: scope.buildingId,
+      jobId: scope.jobId,
+      ruleApplied: approvalRule({ directorNeeded, userCanApprove }),
+      subject: { id: quoteId, type: "quote" },
+    });
+
+    await commitTransaction(connection);
+    return { ok: true, approval: { amount, currency, directorNeeded, jobId, newStatus } };
+  } catch (err) {
+    await rollbackTransaction(connection).catch(() => {});
+    throw err;
+  }
+}
+
+async function approveQuote(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, APPROVE_QUOTE_TARGET);
+    return denied;
+  }
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const approvedBy = identity.name;
+
+  let connection;
+  try {
+    const body = ((await request.json()) ?? {}) as ApproveQuoteBody;
+    const { QuoteID } = body;
+    if (typeof QuoteID !== "number") {
+      return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
+    }
+
+    connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    const outcome = await approveQuoteInTransaction(connection, {
+      actor,
+      approvedBy,
+      quoteId: QuoteID,
+      userRoles: await rolesForRequest(request),
+    });
+    if (!outcome.ok) return outcome.response;
+    const { amount, currency, directorNeeded, jobId, newStatus } = outcome.approval;
 
     // Fire-and-forget director email: packet build + Graph sendMail can take
     // 5–20s with attachments, and we don't want the user's click to block on
@@ -610,6 +675,8 @@ interface RejectQuoteBody {
   QuoteID?: unknown;
 }
 
+const REJECT_QUOTE_TARGET: RefusalTarget = { attempted: "quote.reject", idField: "QuoteID", subjectType: "quote" };
+
 export async function rejectQuote(
   request: HttpRequest,
   context: InvocationContext,
@@ -618,7 +685,10 @@ export async function rejectQuote(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, REJECT_QUOTE_TARGET);
+    return denied;
+  }
 
   // Actor from the verified token. A RejectedBy in the body is ignored.
   const identity = await verifiedIdentityFromRequest(request);
@@ -633,8 +703,11 @@ export async function rejectQuote(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts.
+    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts. The
+    // rejection and its ledger row commit or roll back together.
     await beginTransaction(connection);
     let outcome;
     try {
@@ -647,6 +720,21 @@ export async function rejectQuote(
         await rollbackTransaction(connection).catch(() => {});
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
+      const scope = await jobScope(connection, outcome.jobId);
+      await record(connection, {
+        // A director turning down a quote that was waiting for them is the
+        // director's own decision; anyone else's rejection is a plain one.
+        action:
+          outcome.previousStatus === "awaiting_director" && actor.kind === "user" && actor.role === AppRole.DIRECTOR
+            ? "quote.director_reject"
+            : "quote.reject",
+        actor,
+        after: { status: "rejected", ...quoteFacts(outcome.quote) },
+        before: { status: outcome.previousStatus ?? null },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: QuoteID, type: "quote" },
+      });
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
@@ -1102,6 +1190,12 @@ interface DirectorApproveQuoteBody {
   QuoteID?: unknown;
 }
 
+const DIRECTOR_APPROVE_QUOTE_TARGET: RefusalTarget = {
+  attempted: "quote.director_approve",
+  idField: "QuoteID",
+  subjectType: "quote",
+};
+
 export async function directorApproveQuote(
   request: HttpRequest,
   context: InvocationContext,
@@ -1110,13 +1204,20 @@ export async function directorApproveQuote(
   if (!token) return unauthorizedResponse();
 
   const denied = await requireRole(request, [AppRole.DIRECTOR]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, DIRECTOR_APPROVE_QUOTE_TARGET);
+    return denied;
+  }
 
   // Director-only by policy. requireRole lets admin through via the role
   // hierarchy, so re-check the literal role. Admins are deliberately
   // excluded — keep this check.
   const userRoles = await rolesForRequest(request);
   if (!userRoles.includes(AppRole.DIRECTOR)) {
+    await recordRefusalForRequest(request, token, DIRECTOR_APPROVE_QUOTE_TARGET, {
+      code: "director_role_required",
+      message: "Director role required",
+    });
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
@@ -1132,8 +1233,11 @@ export async function directorApproveQuote(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts.
+    // Shared with recordEmailQuoteDecision — src/quote-decisions.ts. The
+    // approval and its ledger row commit or roll back together.
     await beginTransaction(connection);
     let outcome;
     try {
@@ -1145,6 +1249,16 @@ export async function directorApproveQuote(
         await rollbackTransaction(connection).catch(() => {});
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
+      const scope = await jobScope(connection, outcome.jobId);
+      await record(connection, {
+        action: "quote.director_approve",
+        actor,
+        after: { status: "approved", ...quoteFacts(outcome.quote) },
+        before: { status: "awaiting_director" },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: QuoteID, type: "quote" },
+      });
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
