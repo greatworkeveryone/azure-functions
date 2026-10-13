@@ -12,11 +12,16 @@
 
 export type Subject = "quote" | "invoice" | "purchase_order";
 
-/** One ApprovalLimits row. `limit: null` is an explicit NULL row: unlimited. */
+/** One ApprovalLimits row. `limit: null` is an explicit NULL row: unlimited. Roles match trimmed and lower-cased. */
 export interface RoleLimit {
   limit: number | null;
   role: string;
 }
+
+/** An ApprovalLimits row as SQL returns it, or as /getApprovalLimits sends it. */
+export type ApprovalLimitRow =
+  | { MaxApprovalAmount: number | null; RoleName: string }
+  | { maxApprovalAmount: number | null; roleName: string };
 
 /** Approves spend at a residence. `from`/`to`: YYYY-MM-DD, inclusive; a missing bound is open. */
 export interface ResidenceApprover {
@@ -134,15 +139,32 @@ export const ATTRIBUTED_APPROVAL_ROLES: Readonly<Record<Subject, readonly string
 });
 
 /**
+ * ApprovalLimits rows → RoleLimit[]: the one mapping both repos use. Role names
+ * are trimmed and lower-cased, so a row seeded as 'Admin' applies to admin. A
+ * limit that is not a number becomes NaN, which counts as no row; it never
+ * becomes null, which would mean unlimited.
+ */
+export function toRoleLimits(rows: readonly ApprovalLimitRow[]): RoleLimit[] {
+  return rows.map((row) => {
+    const limit = "RoleName" in row ? row.MaxApprovalAmount : row.maxApprovalAmount;
+    return { limit: limit === null ? null : Number(limit), role: roleKey("RoleName" in row ? row.RoleName : row.roleName) };
+  });
+}
+
+/**
  * Who can approve this item, in escalation order, and whether the director
- * gate applies. An amount that is not a finite number, or is negative, counts
- * as 0. `attribution` plays no part in routing.
+ * gate applies. `attribution` plays no part in routing.
+ *
+ * An unknown amount (anything but a finite number >= 0) needs the director:
+ * directorRequired is true and the route is the director alone, on residences
+ * too. Zero is a valid amount.
  *
  * effectiveDirectorThreshold: facts.directorThreshold when it is a finite
  * number > 0; otherwise the highest non-null limit over every non-director
  * row, including roles that cannot approve this subject and legacy roles
  * nobody holds (parity with requiresDirectorApproval in invoices.ts); null
- * when there is none. Reported on residences too, where it does not apply.
+ * when there is none. Role names compare trimmed and lower-cased. Reported on
+ * residences too, where it does not apply.
  *
  * Non-residence: directorRequired = amount > 0 and amount > threshold. When
  * required, the route is the director alone; an unlimited row does not bypass
@@ -156,25 +178,28 @@ export const ATTRIBUTED_APPROVAL_ROLES: Readonly<Record<Subject, readonly string
  * date matches nobody), occupants and property managers first, then owners,
  * each group by displayName; then the director (basis "residence") when
  * residenceDirectorFallback is on. The role ladder does not apply and
- * directorRequired is always false.
+ * directorRequired is false.
  */
 export function decideAuthority(input: AuthorityInput, facts: AuthorityFacts): AuthorityResult {
   const threshold = directorThresholdOf(facts);
-  if (facts.isResidence === true) {
+  const isResidence = facts.isResidence === true;
+  if (!isKnownAmount(input.amount)) {
+    return { directorRequired: true, effectiveDirectorThreshold: threshold, isResidence, route: [directorStep("director_threshold")] };
+  }
+  if (isResidence) {
     return {
       directorRequired: false,
       effectiveDirectorThreshold: threshold,
-      isResidence: true,
+      isResidence,
       route: residenceRoute(facts, input.at ?? facts.today),
     };
   }
-  const amount = routingAmount(input.amount);
-  const directorRequired = isDirectorRequired(amount, threshold);
+  const directorRequired = isDirectorRequired(input.amount, threshold);
   return {
     directorRequired,
     effectiveDirectorThreshold: threshold,
-    isResidence: false,
-    route: directorRequired ? [directorStep("director_threshold")] : ladderRoute(input.subject, amount, facts.limits),
+    isResidence,
+    route: directorRequired ? [directorStep("director_threshold")] : ladderRoute(input.subject, input.amount, facts.limits),
   };
 }
 
@@ -182,31 +207,35 @@ export function decideAuthority(input: AuthorityInput, facts: AuthorityFacts): A
  * Whether `identity` may approve this item. Checks run in this order and the
  * first that applies decides:
  *  1. creator: a purchase order cannot be approved by whoever created it
- *     (same userId, or same email ignoring case).
- *  2. residence: only an approver active on the day, or the director when the
+ *     (same userId, or same email ignoring case); another director can.
+ *  2. unknown amount: only a director approves; anyone else gets
+ *     director_required.
+ *  3. residence: only an approver active on the day, or the director when the
  *     fallback is on, is allowed (basis "residence"); anyone else gets
  *     not_residence_approver.
- *  3. director_required: above the threshold only the director approves.
- *  4. own authority: the highest limit among the actor's roles that are
- *     eligible for the subject (director and NULL rows unlimited, a missing
- *     row 0). If it covers the amount: allowed, basis "own_authority".
- *  5. attribution: the actor holds a role in ATTRIBUTED_APPROVAL_ROLES whose
+ *  4. director_required: above the threshold only the director approves.
+ *  5. own authority: the highest limit among the actor's roles that are
+ *     eligible for the subject and have a row (a NULL row is unlimited; the
+ *     director is unlimited without one). If it covers the amount: allowed,
+ *     basis "own_authority".
+ *  6. attribution: the actor holds a role in ATTRIBUTED_APPROVAL_ROLES whose
  *     row limit covers the amount. Without input.attribution:
  *     attribution_required. Allowed with basis "attributed" only when the
  *     named person has a userId or email, is not the actor, and would be
  *     allowed on their own authority for the same item; otherwise
  *     attribution_invalid.
- *  6. over_limit, or not_eligible when the actor holds no eligible or
- *     attributed role for the subject.
+ *  7. over_limit, or not_eligible when the actor holds no eligible or
+ *     attributed role that has a row.
+ * Role names compare trimmed and lower-cased, on rows and identities alike.
  * Role implication follows requireRole except for admin: facilities_manager
  * implies facilities, accounts_manager implies accounts, director implies
  * every role but admin; nothing implies admin and admin implies nothing.
  * On every denial, actorLimit is the highest limit the actor holds for the
- * subject, own or attributed (null = unlimited, undefined = holds none).
+ * subject, own or attributed (null = unlimited, undefined = no role with a row).
  */
 export function canApprove(identity: Identity, input: AuthorityInput, facts: AuthorityFacts): ApprovalDecision {
   const roles = rolesOf(identity);
-  const amount = routingAmount(input.amount);
+  const amount = input.amount;
   const own = heldLimit(roles, SUBJECT_ELIGIBLE_ROLES[input.subject], facts.limits);
   const attributed = heldLimit(roles, ATTRIBUTED_APPROVAL_ROLES[input.subject], facts.limits);
   const deny = (reason: DenyReason): ApprovalDecision => ({
@@ -214,19 +243,20 @@ export function canApprove(identity: Identity, input: AuthorityInput, facts: Aut
     allowed: false,
     reason,
   });
+  const directorOnly = (): ApprovalDecision =>
+    roles.includes(DIRECTOR) ? { allowed: true, basis: "own_authority" } : deny("director_required");
 
   if (input.subject === "purchase_order" && input.createdBy && samePerson(identity, input.createdBy)) {
     return deny("creator");
   }
+  if (!isKnownAmount(amount)) return directorOnly();
   if (facts.isResidence === true) {
     const day = input.at ?? facts.today;
     const isApprover = activeApprovers(facts.residenceApprovers, day).some((approver) => samePerson(identity, approver));
     const isFallback = facts.residenceDirectorFallback === true && roles.includes(DIRECTOR);
     return isApprover || isFallback ? { allowed: true, basis: "residence" } : deny("not_residence_approver");
   }
-  if (isDirectorRequired(amount, directorThresholdOf(facts))) {
-    return roles.includes(DIRECTOR) ? { allowed: true, basis: "own_authority" } : deny("director_required");
-  }
+  if (isDirectorRequired(amount, directorThresholdOf(facts))) return directorOnly();
   if (covers(own, amount)) return { allowed: true, basis: "own_authority" };
   if (!covers(attributed, amount)) {
     return deny(own === undefined && attributed === undefined ? "not_eligible" : "over_limit");
@@ -259,15 +289,19 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function routingAmount(amount: number): number {
-  return isFiniteNumber(amount) && amount > 0 ? amount : 0;
+function isKnownAmount(amount: number): boolean {
+  return isFiniteNumber(amount) && amount >= 0;
+}
+
+function roleKey(role: unknown): string {
+  return typeof role === "string" ? role.trim().toLowerCase() : "";
 }
 
 function directorThresholdOf(facts: AuthorityFacts): number | null {
   if (isFiniteNumber(facts.directorThreshold) && facts.directorThreshold > 0) return facts.directorThreshold;
   let highest: number | null = null;
   for (const row of facts.limits) {
-    if (row.role === DIRECTOR || !isFiniteNumber(row.limit)) continue;
+    if (roleKey(row.role) === DIRECTOR || !isFiniteNumber(row.limit)) continue;
     if (highest === null || row.limit > highest) highest = row.limit;
   }
   return highest;
@@ -281,7 +315,7 @@ function isDirectorRequired(amount: number, threshold: number | null): boolean {
 function rowLimit(role: string, limits: readonly RoleLimit[]): number | null | undefined {
   let highest: number | undefined;
   for (const row of limits) {
-    if (row.role !== role) continue;
+    if (roleKey(row.role) !== role) continue;
     if (row.limit === null) return null;
     if (isFiniteNumber(row.limit) && (highest === undefined || row.limit > highest)) highest = row.limit;
   }
@@ -292,8 +326,8 @@ function covers(limit: number | null | undefined, amount: number): boolean {
   return limit === null || (limit !== undefined && limit >= amount);
 }
 
-function rolesOf(identity: Identity): readonly string[] {
-  return Array.isArray(identity.roles) ? identity.roles : [];
+function rolesOf(identity: Identity): string[] {
+  return Array.isArray(identity.roles) ? identity.roles.map(roleKey) : [];
 }
 
 function holdsRole(roles: readonly string[], role: string): boolean {
@@ -304,15 +338,14 @@ function holdsRole(roles: readonly string[], role: string): boolean {
   return role === "accounts" && roles.includes("accounts_manager");
 }
 
-/** Highest limit among the candidate roles the actor holds: null = unlimited, undefined = holds none. */
+/** Highest limit among the candidate roles the actor holds: null = unlimited, undefined = none with a row. */
 function heldLimit(roles: readonly string[], candidates: readonly string[], limits: readonly RoleLimit[]): number | null | undefined {
   let highest: number | undefined;
   for (const role of candidates) {
     if (!holdsRole(roles, role)) continue;
     const limit = role === DIRECTOR ? null : rowLimit(role, limits);
     if (limit === null) return null;
-    const value = limit === undefined ? 0 : limit;
-    highest = highest === undefined ? value : Math.max(highest, value);
+    if (limit !== undefined && (highest === undefined || limit > highest)) highest = limit;
   }
   return highest;
 }

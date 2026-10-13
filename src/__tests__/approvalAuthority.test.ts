@@ -20,6 +20,7 @@ import {
   RoleLimit,
   Subject,
   SUBJECT_ELIGIBLE_ROLES,
+  toRoleLimits,
 } from "../approvalAuthority";
 
 // ═══ Shared vectors ══════════════════════════════════════════════════════════
@@ -66,8 +67,8 @@ function residence(approvers: ResidenceApprover[], residenceDirectorFallback: bo
 /** Frozen, so any mutation by the core throws. "envN" = DIRECTOR_APPROVAL_THRESHOLD. */
 const FACTS: Record<string, AuthorityFacts> = deepFreeze({
   "accounts-high": ladder([{ limit: 30000, role: "accounts" }, { limit: 20000, role: "accounts_manager" }, { limit: 20000, role: "facilities_manager" }], 40000),
-  "admin-null": ladder([...PROD, { limit: null, role: "admin" }], null),
-  "admin-row-capitalised": ladder([...PROD, { limit: 50000, role: "Admin" }], null),
+  "admin-50k-seeded": ladder([...PROD, ...toRoleLimits([{ MaxApprovalAmount: 50000, RoleName: "Admin" }])], null),
+  "admin-null-seeded": ladder([...PROD, { limit: null, role: " Admin " }], null),
   "all-null": ladder([{ limit: null, role: "facilities_manager" }, { limit: null, role: "accounts_manager" }], null),
   "am-null": ladder([...PROD.filter((row) => row.role !== "accounts_manager"), { limit: null, role: "accounts_manager" }], null),
   "director-row": ladder([...PROD, { limit: 100000, role: "director" }], null),
@@ -85,8 +86,8 @@ const FACTS: Record<string, AuthorityFacts> = deepFreeze({
 
 const THRESHOLDS: Record<string, number | null> = {
   "accounts-high": 40000,
-  "admin-null": 20000,
-  "admin-row-capitalised": 50000,
+  "admin-50k-seeded": 50000,
+  "admin-null-seeded": 20000,
   "all-null": null,
   "am-null": 20000,
   "director-row": 20000,
@@ -122,17 +123,19 @@ const COLUMNS = ["F", "A", "FM", "AM", "AD", "D", "U"];
 type LadderVector = [subject: Subject, facts: string, amounts: number[], route: string, outcomes: string];
 const LADDER_VECTORS: LadderVector[] = [
   // prod: today's rows, no env, no admin row: the director gate sits at 20000.
-  ["quote", "prod", [0, -5, NaN], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ok ok ne:-"],
-  ["quote", "prod", [4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ol:0 ok ne:-"],
-  ["quote", "prod", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ol:0 ok ne:-"],
-  ["quote", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:0 ok dr:-"],
-  ["invoice", "prod", [0, -5, NaN], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ok ok ne:-"],
-  ["invoice", "prod", [4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ol:0 ok ne:-"],
-  ["invoice", "prod", [5000.01, 20000], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ol:0 ok ne:-"],
-  ["invoice", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:0 ok dr:-"],
-  ["purchase_order", "prod", [0, -5, NaN], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ok ok ne:-"],
-  ["purchase_order", "prod", [4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ol:0 ok ne:-"],
-  ["purchase_order", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:0 ok dr:-"],
+  ["quote", "prod", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ne:- ok ne:-"],
+  ["quote", "prod", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
+  ["quote", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ne:- ok ne:-"],
+  ["invoice", "prod", [5000.01, 20000], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
+  ["invoice", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["purchase_order", "prod", [0, 4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
+  ["purchase_order", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
+  // An unknown amount (negative, or not a finite number) needs the director, even at a residence.
+  ["quote", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["purchase_order", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
+  ["quote", "residence-no-fallback", [NaN], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
   // prod+admin: an admin row of 50000 with no env lifts the derived gate to 50000.
   ["quote", "prod+admin", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ok ok ne:-"],
   ["quote", "prod+admin", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
@@ -146,17 +149,14 @@ const LADDER_VECTORS: LadderVector[] = [
   ["purchase_order", "prod+admin", [20000.01, 50000], "director=*", "ne:- ne:- ol:20000 ol:20000 ok ok ne:-"],
   ["purchase_order", "prod+admin", [50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:50000 ok dr:-"],
   // prod+env15k: an env threshold below the managers' limits wins from 15000.01.
-  ["quote", "prod+env15k", [0], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ok ok ne:-"],
-  ["quote", "prod+env15k", [4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ol:0 ok ne:-"],
-  ["quote", "prod+env15k", [5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ol:0 ok ne:-"],
-  ["quote", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:0 ok dr:-"],
-  ["invoice", "prod+env15k", [0], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ok ok ne:-"],
-  ["invoice", "prod+env15k", [4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ol:0 ok ne:-"],
-  ["invoice", "prod+env15k", [5000.01], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ol:0 ok ne:-"],
-  ["invoice", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:0 ok dr:-"],
-  ["purchase_order", "prod+env15k", [0], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ok ok ne:-"],
-  ["purchase_order", "prod+env15k", [4999.99, 5000, 5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ol:0 ok ne:-"],
-  ["purchase_order", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:0 ok dr:-"],
+  ["quote", "prod+env15k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ne:- ok ne:-"],
+  ["quote", "prod+env15k", [5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
+  ["quote", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod+env15k", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ne:- ok ne:-"],
+  ["invoice", "prod+env15k", [5000.01], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
+  ["invoice", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["purchase_order", "prod+env15k", [0, 4999.99, 5000, 5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
+  ["purchase_order", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
   // prod+admin+env20k: admin at 50000, with the env holding the gate at 20000.
   ["quote", "prod+admin+env20k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ok ok ne:-"],
   ["quote", "prod+admin+env20k", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
@@ -167,27 +167,28 @@ const LADDER_VECTORS: LadderVector[] = [
   ["purchase_order", "prod+admin+env20k", [0, 4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ok ok ne:-"],
   ["purchase_order", "prod+admin+env20k", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:50000 ok dr:-"],
   // Unlimited (NULL) rows sort last and never bypass the director gate.
-  ["quote", "am-null", [15000], "facilities_manager=20000 accounts_manager=* director=*", "ol:5000 ol:5000 ok ok ol:0 ok ne:-"],
-  ["quote", "am-null", [1000000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:* dr:0 ok dr:-"],
-  ["invoice", "am-null", [15000], "accounts_manager=* director=*", "ne:- ol:5000 ne:- ok ol:0 ok ne:-"],
-  ["quote", "all-null", [1000000], "facilities_manager=* accounts_manager=* director=*", "ol:0 ol:0 ok ok ol:0 ok ne:-"],
-  ["quote", "admin-null", [15000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
-  ["quote", "admin-null", [20000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:* ok dr:-"],
+  ["quote", "am-null", [15000], "facilities_manager=20000 accounts_manager=* director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
+  ["quote", "am-null", [1000000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:* dr:- ok dr:-"],
+  ["invoice", "am-null", [15000], "accounts_manager=* director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
+  ["quote", "all-null", [1000000], "facilities_manager=* accounts_manager=* director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
   // A director row is ignored: the director is always unlimited and never sets the gate.
-  ["quote", "director-row", [150000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:0 ok dr:-"],
-  // Rows match roles exactly: a row named "Admin" lifts the gate but gives admin nothing.
-  ["quote", "admin-row-capitalised", [20000.01], "director=*", "ol:5000 ol:5000 ol:20000 ol:20000 ol:0 ok ne:-"],
+  ["quote", "director-row", [150000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
+  // A row seeded as 'Admin' applies to admin, for its limit and for the gate, NULL or not.
+  ["quote", "admin-50k-seeded", [20000.01], "director=*", "ol:5000 ol:5000 ol:20000 ol:20000 ok ok ne:-"],
+  ["quote", "admin-null-seeded", [15000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
+  ["quote", "admin-null-seeded", [20000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:* ok dr:-"],
   // Implication: accounts_manager inherits the accounts row and facilities_manager
-  // the facilities row (for attribution only); admin inherits nothing.
-  ["quote", "accounts-high", [25000], "accounts=30000 director=*", "ol:0 ok ol:20000 ok ol:0 ok ne:-"],
-  ["purchase_order", "accounts-high", [25000], "director=*", "ne:- ne:- ol:20000 ol:20000 ol:0 ok ne:-"],
-  ["quote", "facilities-high", [25000], "director=*", "ar:30000 ol:0 ar:30000 ol:0 ol:0 ok ne:-"],
-  ["quote", "fm-high", [55000], "facilities_manager=60000 director=*", "ol:0 ol:0 ok ol:0 ol:50000 ok ne:-"],
+  // the facilities row (for attribution only); admin inherits nothing. A role
+  // with no row gives no authority.
+  ["quote", "accounts-high", [25000], "accounts=30000 director=*", "ne:- ok ol:20000 ok ne:- ok ne:-"],
+  ["purchase_order", "accounts-high", [25000], "director=*", "ne:- ne:- ol:20000 ol:20000 ne:- ok ne:-"],
+  ["quote", "facilities-high", [25000], "director=*", "ar:30000 ne:- ar:30000 ne:- ne:- ok ne:-"],
+  ["quote", "fm-high", [55000], "facilities_manager=60000 director=*", "ne:- ne:- ok ne:- ol:50000 ok ne:-"],
   // Residences: no role ladder and no director gate, whatever the amount.
-  ["quote", "residence", [1000000], "~#205=* ~#202=* ~#201=* ~director=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:0 rs nr:-"],
-  ["invoice", "residence", [100], "~#205=* ~#202=* ~#201=* ~director=*", "nr:- nr:5000 nr:- nr:20000 nr:0 rs nr:-"],
-  ["quote", "residence-no-fallback", [100], "~#205=* ~#202=* ~#201=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:0 nr:* nr:-"],
-  ["purchase_order", "residence-empty", [100], "", "nr:- nr:- nr:20000 nr:20000 nr:0 nr:* nr:-"],
+  ["quote", "residence", [1000000], "~#205=* ~#202=* ~#201=* ~director=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:- rs nr:-"],
+  ["invoice", "residence", [100], "~#205=* ~#202=* ~#201=* ~director=*", "nr:- nr:5000 nr:- nr:20000 nr:- rs nr:-"],
+  ["quote", "residence-no-fallback", [100], "~#205=* ~#202=* ~#201=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:- nr:* nr:-"],
+  ["purchase_order", "residence-empty", [100], "", "nr:- nr:- nr:20000 nr:20000 nr:- nr:* nr:-"],
 ];
 
 /** [at, route] on the "residence" facts: from/to are inclusive, a bad date matches nobody. */
@@ -241,7 +242,8 @@ const CASES: Case[] = [
   { actor: ACTORS.FM, amount: 1000, createdBy: { email: "am@example.com", userId: 104 }, facts: "prod", name: "PO created by someone else", outcome: "ok", subject: "purchase_order" },
   { actor: ACTORS.FM, amount: 1000, createdBy: { userId: 103 }, facts: "prod", name: "the creator rule is for purchase orders only", outcome: "ok", subject: "quote" },
   { actor: ACTORS.D, amount: 50000.01, createdBy: { userId: 106 }, facts: "prod", name: "director's own PO above the gate: director refused", outcome: "cr:*", subject: "purchase_order" },
-  { actor: ACTORS.AM, amount: 50000.01, createdBy: { userId: 106 }, facts: "prod", name: "director's own PO above the gate: no one else either", outcome: "dr:20000", subject: "purchase_order" },
+  { actor: ACTORS.AM, amount: 50000.01, createdBy: { userId: 106 }, facts: "prod", name: "director's own PO above the gate: a manager cannot", outcome: "dr:20000", subject: "purchase_order" },
+  { actor: { email: "d2@example.com", roles: ["director"], userId: 114 }, amount: 50000.01, createdBy: { userId: 106 }, facts: "prod", name: "director's own PO above the gate: a second director can", outcome: "ok", subject: "purchase_order" },
   { actor: { email: "", roles: ["facilities_manager"] }, amount: 1000, createdBy: { email: "" }, facts: "prod", name: "empty emails never match", outcome: "ok", subject: "purchase_order" },
   { actor: ACTORS.AD, amount: 1000, createdBy: { userId: 105 }, facts: "prod+admin", name: "creator check comes before the limit", outcome: "cr:50000", subject: "purchase_order" },
   // Residence approvers, by userId or email, on their dates.
@@ -256,10 +258,13 @@ const CASES: Case[] = [
   { actor: { roles: ["user"], userId: 202 }, amount: 100, createdBy: { userId: 202 }, facts: "residence", name: "residence PO creator", outcome: "cr:-", subject: "purchase_order" },
   { actor: { roles: ["user"], userId: 202 }, amount: 100, facts: "prod", name: "residence approvers count for nothing elsewhere", outcome: "ne:-", subject: "quote" },
   { actor: { roles: ["accounts_manager", "user"], userId: 202 }, amount: 1000000, facts: "residence-no-fallback", name: "staff who are approvers approve as approvers", outcome: "rs", subject: "quote" },
+  { actor: { roles: ["user"], userId: 202 }, amount: NaN, facts: "residence", name: "an unknown amount at a residence needs the director", outcome: "dr:-", subject: "quote" },
   // Several roles, legacy roles, admin and director together.
   { actor: { roles: ["admin", "accounts_manager"], userId: 110 }, amount: 30000, facts: "prod+admin", name: "several roles take the highest limit", outcome: "ok", subject: "quote" },
   { actor: { roles: ["accounts", "facilities"], userId: 111 }, amount: 6000, facts: "prod", name: "accounts plus facilities over both limits", outcome: "ol:5000", subject: "quote" },
   { actor: { roles: ["legacy_role"], userId: 112 }, amount: 1, facts: "prod", name: "a legacy role holds no authority", outcome: "ne:-", subject: "quote" },
+  { actor: ACTORS.AD, amount: 0, facts: "prod", name: "a role with no row cannot approve, even $0", outcome: "ne:-", subject: "quote" },
+  { actor: { roles: [" Accounts_Manager "], userId: 115 }, amount: 15000, facts: "prod", name: "identity roles are trimmed and lower-cased", outcome: "ok", subject: "invoice" },
   { actor: { roles: ["admin", "director"], userId: 113 }, amount: 50000.01, facts: "prod+admin", name: "admin who is also director clears the gate", outcome: "ok", subject: "invoice" },
 ];
 
@@ -369,10 +374,21 @@ describe("approval authority: shared vectors", () => {
     });
   });
 
-  it("routes a non-finite amount like $0", () => {
-    const atZero = decideAuthority(inputOf("quote", 0), FACTS.prod);
-    expect(decideAuthority(inputOf("quote", Infinity), FACTS.prod)).toEqual(atZero);
-    expect(decideAuthority(inputOf("quote", -Infinity), FACTS.prod)).toEqual(atZero);
+  it("sends an unknown amount to the director alone, even at a residence; $0 is a known amount", () => {
+    expect(decideAuthority(inputOf("quote", NaN), FACTS.residence)).toEqual({
+      directorRequired: true,
+      effectiveDirectorThreshold: 20000,
+      isResidence: true,
+      route: [{ basis: "director_threshold", kind: "role", limit: null, role: "director" }],
+    });
+    expect(decideAuthority(inputOf("quote", 0), FACTS.prod).directorRequired).toBe(false);
+  });
+
+  it("maps SQL rows and API rows the same way", () => {
+    expect(toRoleLimits([{ MaxApprovalAmount: null, RoleName: " Admin " }, { maxApprovalAmount: 5000, roleName: "Facilities" }])).toEqual([
+      { limit: null, role: "admin" },
+      { limit: 5000, role: "facilities" },
+    ]);
   });
 
   it("keeps the authority tables as agreed, frozen", () => {
@@ -404,21 +420,22 @@ describe("approval authority: backend only", () => {
     expect(source).not.toMatch(/^\s*import\s|\brequire\(|\bDate\b|process\.|console\.|Math\.random/m);
   });
 
-  // Parity with today's gate: every vector, with no env threshold and as a
-  // non-residence, must agree with requiresDirectorApproval in invoices.ts.
+  // Parity with today's gate: every vector with a known amount, with no env
+  // threshold and as a non-residence, must agree with requiresDirectorApproval.
   const parity: [string, Subject, number][] = [
     ...LADDER_CASES.map((row): [string, Subject, number] => [row.facts, row.subject, row.amount]),
     ...CASES.map((row): [string, Subject, number] => [row.facts, row.subject, row.amount]),
-  ];
+  ].filter(([, , amount]) => Number.isFinite(amount) && amount >= 0);
   it.each(parity)("director gate matches requiresDirectorApproval: %s %s %p", (name, subject, amount) => {
     const facts: AuthorityFacts = { ...FACTS[name], directorThreshold: null, isResidence: false };
     const rows: ApprovalLimit[] = facts.limits.map((row) => ({ MaxApprovalAmount: row.limit, RoleName: row.role }));
     expect(decideAuthority(inputOf(subject, amount), facts).directorRequired).toBe(requiresDirectorApproval(amount, rows));
   });
 
-  it("departs from requiresDirectorApproval only for an infinite amount (counted as $0)", () => {
+  it("departs from requiresDirectorApproval for unknown amounts, which now always need the director", () => {
     const rows: ApprovalLimit[] = PROD.map((row) => ({ MaxApprovalAmount: row.limit, RoleName: row.role }));
-    expect(requiresDirectorApproval(Infinity, rows)).toBe(true);
-    expect(decideAuthority(inputOf("quote", Infinity), FACTS.prod).directorRequired).toBe(false);
+    const unknown = [-5, NaN, Infinity];
+    expect(unknown.map((amount) => requiresDirectorApproval(amount, rows))).toEqual([false, false, true]);
+    expect(unknown.map((amount) => decideAuthority(inputOf("quote", amount), FACTS.prod).directorRequired)).toEqual([true, true, true]);
   });
 });

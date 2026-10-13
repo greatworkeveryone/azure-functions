@@ -4,7 +4,7 @@
 
 import { Connection } from "tedious";
 import { getCachedApprovalLimits } from "./approval-limits-db";
-import { AuthorityFacts, AuthorityInput, AuthorityResult, decideAuthority } from "./approvalAuthority";
+import { AuthorityFacts, AuthorityInput, AuthorityResult, decideAuthority, toRoleLimits } from "./approvalAuthority";
 
 /**
  * DIRECTOR_APPROVAL_THRESHOLD → AuthorityFacts.directorThreshold. Unset or
@@ -43,12 +43,9 @@ export async function loadApprovalFacts(conn: Connection, buildingId: number): P
     // WP44 seam: residences need Buildings.PropertyType and BuildingApprovers,
     // looked up by buildingId. Until then every building is a non-residence.
     isResidence: false,
-    // Number() only normalises the DECIMAL; a non-numeric value becomes NaN,
-    // which the core treats as no row. Never `?? null`: null means unlimited.
-    limits: rows.map((row) => ({
-      limit: row.MaxApprovalAmount === null ? null : Number(row.MaxApprovalAmount),
-      role: row.RoleName,
-    })),
+    // Trims and lower-cases RoleName, so the 'Admin' row seeded by migration
+    // 026 applies to admin, for its limit as well as for the director gate.
+    limits: toRoleLimits(rows),
     residenceApprovers: [],
     residenceDirectorFallback: true,
     today: darwinToday(),

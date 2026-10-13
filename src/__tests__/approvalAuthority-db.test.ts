@@ -53,10 +53,11 @@ describe("darwinToday", () => {
 });
 
 describe("loadApprovalFacts", () => {
-  it("maps ApprovalLimits rows, keeps NULL as unlimited, and has no residences yet", async () => {
+  it("maps ApprovalLimits rows, normalises role names, keeps NULL as unlimited, and has no residences yet", async () => {
     mockLimits.mockResolvedValue([
       { MaxApprovalAmount: 5000, RoleName: "facilities" },
       { MaxApprovalAmount: null, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: 50000, RoleName: " Admin " },
     ]);
     jest.useFakeTimers({ now: new Date("2026-10-13T15:00:00Z") });
 
@@ -69,6 +70,7 @@ describe("loadApprovalFacts", () => {
       limits: [
         { limit: 5000, role: "facilities" },
         { limit: null, role: "accounts_manager" },
+        { limit: 50000, role: "admin" },
       ],
       residenceApprovers: [],
       residenceDirectorFallback: true,
