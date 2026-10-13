@@ -69,7 +69,7 @@ describe("approveDirectorQuote", () => {
     });
   });
 
-  it("marks the event 'via email' and stores SourceEmailID when given one", async () => {
+  it("marks the event 'via email reply' and stores SourceEmailID when given one", async () => {
     stubQuote(awaiting);
 
     await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7, sourceEmailId: 99 });
@@ -77,8 +77,37 @@ describe("approveDirectorQuote", () => {
     const event = calls().find((c) => /INSERT INTO JobEvents/.test(c.sql));
     expect(event?.params).toMatchObject({
       SourceEmailID: 99,
-      Text: "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing via email",
+      Text: "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing via email reply",
     });
+  });
+
+  it("names the replying address in the event text", async () => {
+    stubQuote(awaiting);
+
+    await approveDirectorQuote(connection, {
+      approvedBy: "Carlo",
+      quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
+      sourceEmailId: 99,
+    });
+
+    const event = calls().find((c) => /INSERT INTO JobEvents/.test(c.sql));
+    expect(event?.params.Text).toBe(
+      "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing via email reply from carlo@randazzo.properties",
+    );
+  });
+
+  it("does not claim an email reply when the decision came from the app", async () => {
+    stubQuote(awaiting);
+
+    await approveDirectorQuote(connection, {
+      approvedBy: "Carlo",
+      quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
+    });
+
+    const event = calls().find((c) => /INSERT INTO JobEvents/.test(c.sql));
+    expect(event?.params.Text).toBe("Director-approved 260419-QT-42-ACM-1 from Acme Plumbing");
   });
 
   it("appends the director's note to the approval event text", async () => {
@@ -88,12 +117,13 @@ describe("approveDirectorQuote", () => {
       approvedBy: "Carlo",
       note: "  Subject to council sign-off  ",
       quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 99,
     });
 
     const event = calls().find((c) => /INSERT INTO JobEvents/.test(c.sql));
     expect(event?.params.Text).toBe(
-      "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing via email — Subject to council sign-off",
+      "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing via email reply from carlo@randazzo.properties — Subject to council sign-off",
     );
   });
 
@@ -147,6 +177,7 @@ describe("rejectQuote", () => {
       note: "Too expensive",
       quoteId: 7,
       rejectedBy: "Carlo",
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 99,
     });
 
@@ -160,7 +191,7 @@ describe("rejectQuote", () => {
       CreatedBy: "Carlo",
       QuoteID: 7,
       SourceEmailID: 99,
-      Text: "Rejected quote 260419-QT-42-ACM-1 via email — Too expensive",
+      Text: "Rejected quote 260419-QT-42-ACM-1 via email reply from carlo@randazzo.properties — Too expensive",
     });
     expect(calls().some((c) => /UPDATE Jobs SET LastModifiedDate/.test(c.sql))).toBe(true);
   });

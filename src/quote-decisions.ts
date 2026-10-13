@@ -23,6 +23,8 @@ export interface DirectorQuoteApprovalInput {
   approvedBy: string;
   /** Set when the decision was recorded from an inbound email. */
   sourceEmailId?: number;
+  /** The address that replied; named in the event text when sourceEmailId is set. */
+  sourceEmailAddress?: string | null;
   /** Director's conditions; appended to the event text. */
   note?: string | null;
 }
@@ -34,11 +36,19 @@ export interface QuoteRejectionInput {
   expectedStatuses: readonly string[];
   note?: string | null;
   sourceEmailId?: number;
+  sourceEmailAddress?: string | null;
 }
 
 export type QuoteDecisionOutcome =
   | { ok: true; jobId: number; quote: SqlRow; previousStatus?: string }
   | { ok: false; status: 404 | 409; error: string };
+
+// A decision taken from an email reply is weaker evidence than one clicked in
+// the app, so the audit trail says so and names who replied.
+function viaEmailReply(sourceEmailId: number | undefined, address: string | null | undefined): string {
+  if (sourceEmailId == null) return "";
+  return address ? ` via email reply from ${address}` : " via email reply";
+}
 
 const CONCURRENT_CHANGE: QuoteDecisionOutcome = {
   ok: false,
@@ -59,7 +69,7 @@ export async function approveDirectorQuote(
   connection: Connection,
   input: DirectorQuoteApprovalInput,
 ): Promise<QuoteDecisionOutcome> {
-  const { quoteId, approvedBy, sourceEmailId, note } = input;
+  const { quoteId, approvedBy, sourceEmailId, sourceEmailAddress, note } = input;
   const rows = await executeQuery(
     connection,
     `SELECT JobID, QuoteNumber, ContractorName, Status FROM Quotes WHERE QuoteID = @Id`,
@@ -108,7 +118,7 @@ export async function approveDirectorQuote(
       { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
     ],
   );
-  const via = sourceEmailId == null ? "" : " via email";
+  const via = viaEmailReply(sourceEmailId, sourceEmailAddress);
   const conditions = note && note.trim().length > 0 ? ` — ${note.trim()}` : "";
   await executeQuery(
     connection,
@@ -134,7 +144,7 @@ export async function rejectQuote(
   connection: Connection,
   input: QuoteRejectionInput,
 ): Promise<QuoteDecisionOutcome> {
-  const { quoteId, rejectedBy, expectedStatuses, note, sourceEmailId } = input;
+  const { quoteId, rejectedBy, expectedStatuses, note, sourceEmailId, sourceEmailAddress } = input;
   const rows = await executeQuery(
     connection,
     "SELECT JobID, QuoteNumber, Status FROM Quotes WHERE QuoteID = @Id",
@@ -165,7 +175,7 @@ export async function rejectQuote(
   );
   if (updated.length === 0) return CONCURRENT_CHANGE;
 
-  const via = sourceEmailId == null ? "" : " via email";
+  const via = viaEmailReply(sourceEmailId, sourceEmailAddress);
   const reason = note && note.trim().length > 0 ? ` — ${note.trim()}` : "";
   await executeQuery(
     connection,

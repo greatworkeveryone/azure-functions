@@ -908,6 +908,8 @@ export async function promoteEmailToJobUpdate(
 // (SenderAuthenticated = 1, see src/email/sender-auth.ts) — From is spoofable.
 // The actor stamped on the quote is that director's DisplayName, never the
 // body. Helpers + email flip are one transaction.
+// EMAIL_REPLY_DECISIONS_ENABLED=false switches the whole path off (403, nothing
+// recorded); the default is on.
 
 interface RecordEmailQuoteDecisionBody {
   Decision?: unknown;
@@ -944,6 +946,22 @@ export async function recordEmailQuoteDecision(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+
+  // Decisions belong in the app, where the approver is a verified sign-in rather
+  // than a reply's From address. Defaults to ON until the email deep link opens
+  // the approval step; read per call so it can be flipped without a redeploy.
+  if (process.env.EMAIL_REPLY_DECISIONS_ENABLED === "false") {
+    context.warn(
+      `recordEmailQuoteDecision: refused for ${identity.oid} — email-reply decisions are disabled (EMAIL_REPLY_DECISIONS_ENABLED=false); nothing recorded`,
+    );
+    return {
+      status: 403,
+      jsonBody: {
+        code: "EMAIL_REPLY_DECISIONS_DISABLED",
+        error: "Decisions are made in Floorplan — open the link in the email",
+      },
+    };
+  }
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
@@ -1048,6 +1066,7 @@ export async function recordEmailQuoteDecision(
             approvedBy: directorName,
             note: Note ?? null,
             quoteId: QuoteID,
+            sourceEmailAddress: sender,
             sourceEmailId: EmailID,
           })
         : await rejectQuote(connection, {
@@ -1055,6 +1074,7 @@ export async function recordEmailQuoteDecision(
             note: Note ?? null,
             quoteId: QuoteID,
             rejectedBy: directorName,
+            sourceEmailAddress: sender,
             sourceEmailId: EmailID,
           });
     if (!outcome.ok) {

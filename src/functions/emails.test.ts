@@ -340,6 +340,67 @@ describe("recordEmailQuoteDecision", () => {
     planner.resolveActivePlannerTasks.mockResolvedValue(undefined);
   });
 
+  describe("EMAIL_REPLY_DECISIONS_ENABLED", () => {
+    const original = process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+    afterEach(() => {
+      if (original === undefined) delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+      else process.env.EMAIL_REPLY_DECISIONS_ENABLED = original;
+    });
+
+    it("OFF: records nothing, warns, and points the user to Floorplan", async () => {
+      process.env.EMAIL_REPLY_DECISIONS_ENABLED = "false";
+      routeSql([email, quote("awaiting_director"), director, flipOk]);
+
+      const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+      expect(res.status).toBe(403);
+      expect(res.jsonBody).toEqual({
+        code: "EMAIL_REPLY_DECISIONS_DISABLED",
+        error: "Decisions are made in Floorplan — open the link in the email",
+      });
+      expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("EMAIL_REPLY_DECISIONS_ENABLED=false"));
+      expect(db.executeQuery).not.toHaveBeenCalled();
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+      expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
+      expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
+    });
+
+    it("OFF refuses a rejection as well as an approval", async () => {
+      process.env.EMAIL_REPLY_DECISIONS_ENABLED = "false";
+
+      const res = await recordEmailQuoteDecision(makeRequest({ Decision: "rejected", EmailID: 42, QuoteID: 7 }), ctx);
+
+      expect(res.status).toBe(403);
+      expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, "true", "", "0", "FALSE"])(
+      "stays ON for %p — only the exact string false switches it off",
+      async (value) => {
+        if (value === undefined) delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+        else process.env.EMAIL_REPLY_DECISIONS_ENABLED = value;
+        routeSql([email, quote("awaiting_director"), director, flipOk]);
+
+        const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+        expect(res.status).toBe(200);
+        expect(quoteDecisions.approveDirectorQuote).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("ON: hands the replying address to the helper so the job event can name it", async () => {
+      delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+      routeSql([email, quote("awaiting_director"), director, flipOk]);
+
+      await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+      expect(quoteDecisions.approveDirectorQuote).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ sourceEmailAddress: "carlo@randazzo.properties", sourceEmailId: 42 }),
+      );
+    });
+  });
+
   const NOT_MAILBOX = "Only emails received through the mailbox can record a director decision";
   const NOT_AUTHENTICATED =
     "The sender of this email couldn't be authenticated (DMARC/internal check failed) — ask the director to approve in-app";
@@ -431,6 +492,7 @@ describe("recordEmailQuoteDecision", () => {
       approvedBy: "Carlo Randazzo",
       note: null,
       quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 42,
     });
     const lookup = sqlCalls().find((c) => /FROM AppUsers/.test(c.sql));
@@ -461,6 +523,7 @@ describe("recordEmailQuoteDecision", () => {
       approvedBy: "Carlo Randazzo",
       note: "Subject to council sign-off",
       quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 42,
     });
   });
@@ -479,6 +542,7 @@ describe("recordEmailQuoteDecision", () => {
       note: "Too expensive",
       quoteId: 7,
       rejectedBy: "Carlo Randazzo",
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 42,
     });
     expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
@@ -598,6 +662,7 @@ describe("recordEmailQuoteDecision", () => {
       approvedBy: "carlo@randazzo.properties",
       note: null,
       quoteId: 7,
+      sourceEmailAddress: "carlo@randazzo.properties",
       sourceEmailId: 42,
     });
   });
