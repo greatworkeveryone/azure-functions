@@ -1,89 +1,72 @@
-# Decision ledger fallback: no ledger tables
+# Decision ledger: ledger table or fallback
 
-Migration `094_decision_ledger.sql` creates `dbo.DecisionLedger` as an Azure SQL
-append-only ledger table (PLAN §3.12). Use this fallback only if Step 0 against
-the real database shows ledger tables are refused (an error on `LEDGER = ON`, or
-the app's service principal lacks the `ENABLE LEDGER` permission).
+`migrations/094_decision_ledger.sql` creates `dbo.DecisionLedger` as an Azure SQL
+append-only ledger table. If the database refuses that (no ledger support, or the
+migrating principal lacks the `ENABLE LEDGER` permission) the migration does not
+fail, because a failing migration stops the whole API at startup. It creates the
+same table as an ordinary table instead, with an `INSTEAD OF UPDATE, DELETE`
+trigger that raises error 51000. `record()`, `getDecisions` and
+`getDecisionHistory` behave the same on both; the app does not need to know which
+one it got. The fallback table and its trigger are created in one transaction, so
+a failure leaves neither behind and the next start tries again.
 
-**Decide before 094 runs anywhere.** An applied migration is never edited. If the
-fallback is needed, replace the `CREATE TABLE` in 094 with the one below before
-the migration is merged, and give `dbo.MyobApiLog` (migration 115) the same
-treatment so both tables share one mechanism and one verification.
+`dbo.MyobApiLog` (migration 115) uses the same mechanism.
 
-Nothing here has been executed: it is written against SQL Server 2022 semantics.
-Run it against a throwaway database and attempt an `UPDATE` and a removal as
-both a `db_owner` user and a plain user before relying on it.
+## The fallback is NOT tamper-evident
 
-## 1. Table: the 094 columns, minus the ledger clause, plus a hash chain
+It blocks accidental and casual changes, including an `UPDATE` or delete run by
+`sa` or a `db_owner` member (the trigger fires for them too). It does not stop
+someone emptying or removing the table, disabling the trigger, or an
+administrator changing data without a trace: there is no hash chain and no
+digest to check afterwards. Only the ledger table gives tamper evidence. There
+the engine itself refuses any change for every principal, `dbo` included, and
+`sys.sp_verify_database_ledger` can prove nothing was altered.
 
-```sql
-CREATE TABLE dbo.DecisionLedger (
-  -- ... every column and CHECK constraint exactly as in 094, then:
-  PrevHash BINARY(32) NULL,       -- RowHash of the row before; NULL only for the first row
-  RowHash  BINARY(32) NOT NULL,   -- SHA-256 over PrevHash + this row's canonical text
-  CONSTRAINT PK_DecisionLedger PRIMARY KEY CLUSTERED (LedgerId)
-);
-```
-
-Same four (and two extra) indexes as 094. `OccurredAt` is supplied by the app,
-not defaulted, because the hash covers it.
-
-## 2. Make rows unchangeable
+## Which path ran
 
 ```sql
--- The app's service principal (name as in sys.database_principals).
--- ALTER is denied too: it is what disables a trigger or empties the table
--- (TRUNCATE fires no trigger).
-DENY UPDATE, DELETE, ALTER ON dbo.DecisionLedger TO [RP Command Centre];
-GO
-CREATE TRIGGER dbo.TR_DecisionLedger_BlockUpdate ON dbo.DecisionLedger
-INSTEAD OF UPDATE
-AS
-BEGIN
-  THROW 51010, 'dbo.DecisionLedger is append-only: rows cannot be changed.', 1;
-END
-GO
-CREATE TRIGGER dbo.TR_DecisionLedger_BlockDelete ON dbo.DecisionLedger
-INSTEAD OF DELETE
-AS
-BEGIN
-  THROW 51011, 'dbo.DecisionLedger is append-only: rows cannot be removed.', 1;
-END
-GO
+SELECT name, ledger_type_desc FROM sys.tables WHERE name = 'DecisionLedger';
+-- APPEND_ONLY_LEDGER_TABLE = ledger table
+-- NON_LEDGER_TABLE         = fallback
 ```
 
-## 3. The hash chain (app-computed, in `record()`)
+The migration also PRINTs which path it took and, for the fallback, why the
+ledger table was refused (for example `error 262: ENABLE LEDGER permission
+denied`). The migration runner does not log those messages, so use the query.
 
-Inside the caller's transaction, `record()` takes the chain tip under a lock so
-two decisions cannot both extend the same row, then inserts the new row:
+## If the fallback ran: one manual step
+
+The migration never changes permissions. A database owner runs this once, with
+the app's principal (`RP Command Centre`, see `docs/db-access.md`):
 
 ```sql
-SELECT TOP 1 RowHash FROM dbo.DecisionLedger WITH (UPDLOCK, HOLDLOCK) ORDER BY LedgerId DESC;
+DENY UPDATE, DELETE ON dbo.DecisionLedger TO [<app principal>];
 ```
 
-```ts
-const canonical = JSON.stringify([
-  occurredAtIso, action, subjectType, subjectId, tenantId, jobId, buildingId,
-  actorUserId, actorName, actorRole, actorKind, attributedUserId, attributedName,
-  attributedRole, reason, before, after, computed, impact?.toFixed(2) ?? null,
-  ruleApplied, correlationId, appVersion, isException,
-]);
-const rowHash = createHash("sha256").update(prevHash ?? Buffer.alloc(0)).update(canonical).digest();
-```
+The trigger already blocks the change; the `DENY` refuses it earlier, so the app
+principal cannot even attempt it. Do not rely on `DENY` against `dbo` or
+`db_owner` members: the trigger is the control for them.
 
-Verification (the `ledgerVerifyTimer` replaces its `sp_verify_database_ledger`
-call): walk the table in `LedgerId` order, recompute every `RowHash` from the
-stored columns, and check each `PrevHash` equals the previous row's `RowHash`.
-Any edit, removal or insertion in the middle breaks the chain from that row on.
+## Verification on the fallback
 
-Record the newest `RowHash` outside the database each time the timer runs (for
-example in the report emailed to the CFO). Without an external copy, someone with
-full database control could rewrite the whole table and recompute every hash.
+`ledgerVerifyTimer` must not treat the fallback as a failure. With no ledger table
+in the database, `sys.sp_verify_database_ledger` fails (error 37392 on an empty
+digest list) and `sys.sp_generate_database_ledger_digest` returns a NULL digest.
+Check `sys.tables.ledger_type_desc` first and report "not a ledger table
+(fallback in use)" for any table that is `NON_LEDGER_TABLE`; verify only the ledger
+tables. Verification also needs snapshot isolation enabled on the database (error
+37498 otherwise); Azure SQL should have it on, but that has not been checked.
 
-## 4. What this does and does not give you
+## Moving to a ledger table later
 
-- Stops the app principal and any ordinary user from changing or removing a row.
-- Detects tampering by anyone else, provided the latest hash is held elsewhere.
-- Does **not** stop a `db_owner` or server admin from disabling a trigger or
-  changing permissions first. The ledger table is stronger on exactly this point:
-  the engine refuses the statement for everyone, `dbo` included.
+Never in place: an existing table cannot be converted, and no row may be lost or
+rewritten. When the database supports ledger tables, in later releases and in this
+order:
+
+1. A migration creates a new ledger table under a new name.
+2. Copy every row across in batches, preserving `OccurredAt`, and check the row
+   counts match.
+3. Switch writes and reads (`record()` and the two endpoints) to the new table in
+   one release.
+4. Keep the old table, read-only, for the audit period; retire it in a later
+   release with its own approved migration.
