@@ -90,8 +90,9 @@ describe("who may open Decisions & exceptions", () => {
     expect((await getDecisions(makeRequest({}, {}), ctx)).status).toBe(401);
   });
 
-  it("lets directors and admin in", async () => {
+  it("lets directors, the CFO and admin in", async () => {
     expect((await get({}, "director")).status).toBe(200);
+    expect((await get({}, "cfo")).status).toBe(200);
     expect((await get({}, "admin")).status).toBe(200);
   });
 

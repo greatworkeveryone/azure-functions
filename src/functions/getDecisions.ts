@@ -30,8 +30,9 @@ export async function getDecisions(request: HttpRequest, context: InvocationCont
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  // Directors; admin passes through the hierarchy. The CFO role joins in WP20.
-  const roleCheck = await requireRole(request, [AppRole.DIRECTOR]);
+  // Directors and the CFO; admin passes through the hierarchy. Mirrors the
+  // frontend capability viewDecisions (director, cfo, admin).
+  const roleCheck = await requireRole(request, [AppRole.DIRECTOR, AppRole.CFO]);
   if (roleCheck) return roleCheck;
 
   const parsed = parseDecisionFilters(request.query);

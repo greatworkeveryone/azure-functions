@@ -1,0 +1,94 @@
+// The job adapter (WP20): describes a job to the engine, says when a job's
+// problem has cleared, links to /jobs?jobId=, and keeps Jobs.EscalatedAt in
+// step for the dashboard.
+
+import { TYPES } from "tedious";
+import { executeQuery } from "../../db";
+import { holidaysFromEnv } from "../businessTime";
+import { normaliseRole, ROLES } from "../roles";
+import { jobConditionActive } from "./jobRules";
+import { loadJobFacts } from "./jobFacts";
+import type { EscalationAdapter } from "./registry";
+
+// Who may see escalations about a job: whoever may read jobs (VIEW_JOBS_ROLES in
+// functions/jobs.ts). The CFO reads jobs through requireRole's accounts
+// inheritance, so it is listed here.
+const JOB_VIEW_ROLES: ReadonlySet<string> = new Set([
+  ROLES.accounts,
+  ROLES.accountsManager,
+  ROLES.admin,
+  ROLES.cfo,
+  ROLES.director,
+  ROLES.facilities,
+  ROLES.facilitiesManager,
+]);
+
+const SUMMARY_PARTS_MAX = 160;
+
+export function jobLabel(job: { buildingName?: string | null; jobId: number; title: string }): string {
+  const parts = [`Job #${job.jobId}`, job.title.trim(), job.buildingName?.trim()].filter((part): part is string => Boolean(part));
+  return parts.join(" · ").slice(0, SUMMARY_PARTS_MAX);
+}
+
+export const jobAdapter: EscalationAdapter = {
+  subjectType: "job",
+
+  deepLink: (subjectId) => `/jobs?jobId=${encodeURIComponent(subjectId)}`,
+
+  async isConditionActive(connection, ref, now) {
+    const jobId = Number(ref.subjectId);
+    if (!Number.isInteger(jobId)) return false;
+    const job = await loadJobFacts(connection, jobId);
+    if (!job) return false;
+    return jobConditionActive(ref.policyKey, job, { holidays: holidaysFromEnv(), now });
+  },
+
+  ledgerScope: (escalation) => {
+    const jobId = Number(escalation.subjectId);
+    return { jobId: Number.isInteger(jobId) ? jobId : null };
+  },
+
+  async loadSummary(connection, subjectId) {
+    const jobId = Number(subjectId);
+    if (!Number.isInteger(jobId) || jobId <= 0) return null;
+    const job = await loadJobFacts(connection, jobId);
+    if (!job) return null;
+    return {
+      buildingId: job.buildingId,
+      context: {
+        assignedTo: job.assignedTo,
+        buildingName: job.buildingName,
+        jobId: job.jobId,
+        priority: job.priority,
+        status: job.status,
+        title: job.title,
+      },
+      summary: jobLabel(job),
+    };
+  },
+
+  // The dashboard flag follows the escalations: set while any escalation on the
+  // job is still waiting for someone to pick it up, clear once none is. Runs in
+  // the engine's transaction, so the flag and the escalation change together.
+  async onChange(connection, escalation) {
+    const jobId = Number(escalation.subjectId);
+    if (!Number.isInteger(jobId)) return;
+    await executeQuery(
+      connection,
+      `UPDATE dbo.Jobs
+       SET EscalatedAt = CASE
+             WHEN EXISTS (SELECT 1 FROM dbo.Escalations e
+                          WHERE e.SubjectType = 'job' AND e.SubjectId = @SubjectId AND e.Status = 'open')
+             THEN COALESCE(EscalatedAt, SYSUTCDATETIME())
+             ELSE NULL
+           END
+       WHERE JobID = @JobID`,
+      [
+        { name: "JobID", type: TYPES.Int, value: jobId },
+        { name: "SubjectId", type: TYPES.NVarChar, value: String(jobId) },
+      ],
+    );
+  },
+
+  visibleTo: (viewer) => viewer.roles.some((role) => JOB_VIEW_ROLES.has(normaliseRole(role))),
+};

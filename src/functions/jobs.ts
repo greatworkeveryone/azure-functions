@@ -20,6 +20,7 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -649,6 +650,8 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
     }
 
     let newJobId: number;
+    // The Priority the job had before this save, for the job.critical hook below.
+    let previousPriority: unknown = null;
 
     if (JobID === undefined) {
       // INSERT — wrap the Jobs insert and the WR-attachment re-parenting in
@@ -750,10 +753,11 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         // so those diff/event blocks were removed.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, Kind, IsContract FROM Jobs WHERE JobID = @JobID",
+          "SELECT Status, AssignedTo, Kind, IsContract, Priority FROM Jobs WHERE JobID = @JobID",
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
+        previousPriority = previous?.Priority ?? null;
 
         // Guard the contract flip (WP10): isContract may only change while the
         // job is still New — flipping it mid-flow would invalidate the quote /
@@ -867,6 +871,17 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         throw err;
       }
     }
+
+    // job.critical (WP20): a job created or re-prioritised Critical raises an
+    // escalation at once. The save above has committed; this can't fail it.
+    await raiseCriticalJobEscalation({
+      connection,
+      jobId: newJobId,
+      log: (message) => context.warn(message),
+      previousPriority,
+      priority: fields.Priority,
+      request,
+    });
 
     const stored = await executeQuery(
       connection,

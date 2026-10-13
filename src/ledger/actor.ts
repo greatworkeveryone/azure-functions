@@ -13,6 +13,7 @@ import type { LedgerActor } from "./types";
 const ROLE_SENIORITY: readonly string[] = [
   AppRole.ADMIN,
   AppRole.DIRECTOR,
+  AppRole.CFO,
   AppRole.ACCOUNTS_APPROVAL,
   AppRole.FACILITIES_APPROVAL,
   AppRole.ACCOUNTS,
