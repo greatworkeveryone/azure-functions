@@ -238,9 +238,10 @@ export function buildOnchargeTaskDescription(
 
 // ── Escalation thresholds (WP18a) ────────────────────────────────────────────
 // How many days an assigned, un-acknowledged, non-terminal job may sit before
-// the daily evaluator escalates it to facilities managers. Keyed by Priority,
-// each env-overridable. Defaults: Critical 2 / High 4 / Normal 7 / Low 14;
-// anything else (or an unset/garbage priority) falls back to DEFAULT (7).
+// the escalation sweep (src/escalation, policy job.stalled_unacknowledged)
+// escalates it to facilities managers. Keyed by Priority, each env-overridable.
+// Defaults: Critical 2 / High 4 / Normal 7 / Low 14; anything else (or an
+// unset/garbage priority) falls back to DEFAULT (7).
 
 const DEFAULT_ESCALATION_THRESHOLD_DAYS = 7;
 
@@ -284,8 +285,9 @@ export function escalationThresholdDays(
 }
 
 /** Facilities-manager email recipients for escalation, parsed from the
- *  FACILITIES_MANAGER_EMAILS env var (comma-separated). Empty list when unset —
- *  the evaluator skips the send in that case. Mirrors getDirectorEmails(). */
+ *  FACILITIES_MANAGER_EMAILS env var (comma-separated). Empty list when unset.
+ *  The escalation notifier uses it only while no active facilities_manager
+ *  exists. Mirrors getDirectorEmails(). */
 export function getFacilitiesManagerEmails(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {

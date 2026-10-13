@@ -32,8 +32,13 @@ describe("primaryRole", () => {
     expect(primaryRole(["user", "facilities"])).toBe("facilities");
   });
 
+  it("ranks the CFO between the managers and the director", () => {
+    expect(primaryRole(["accounts_manager", "cfo"])).toBe("cfo");
+    expect(primaryRole(["cfo", "director"])).toBe("director");
+  });
+
   it("falls back to the first role it doesn't know, and to null for none", () => {
-    expect(primaryRole(["cfo"])).toBe("cfo");
+    expect(primaryRole(["auditor"])).toBe("auditor");
     expect(primaryRole([])).toBeNull();
   });
 });

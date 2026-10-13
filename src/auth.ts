@@ -17,6 +17,7 @@ export enum AppRole {
   ACCOUNTS            = "accounts",
   ACCOUNTS_APPROVAL   = "accounts_manager",
   ADMIN               = "admin",
+  CFO                 = "cfo",
   DIRECTOR            = "director",
   FACILITIES          = "facilities",
   FACILITIES_APPROVAL = "facilities_manager",
@@ -340,7 +341,10 @@ export async function verifiedIdentityFromRequest(
  * Role hierarchy applied here so call sites don't have to enumerate every
  * superset role:
  *   - `admin` satisfies every check.
- *   - `director` satisfies every non-admin-only check (anything operational).
+ *   - `director` satisfies every non-admin-only check (anything operational),
+ *     so it satisfies a `cfo` check too.
+ *   - `cfo` sits between accounts_manager and director: it satisfies any
+ *     `accounts_manager` or `accounts` check.
  *   - `facilities_manager` satisfies any `facilities` check.
  *   - `accounts_manager`   satisfies any `accounts` check.
  *   - `user` is the baseline tier — satisfied by ANY caller with an assigned,
@@ -370,6 +374,11 @@ export async function requireRole(
   if (
     roles.includes(AppRole.DIRECTOR) &&
     allowed.some((r) => r !== AppRole.ADMIN)
+  ) return null;
+
+  if (
+    roles.includes(AppRole.CFO) &&
+    (allowed.includes(AppRole.ACCOUNTS_APPROVAL) || allowed.includes(AppRole.ACCOUNTS))
   ) return null;
 
   if (

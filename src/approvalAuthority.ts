@@ -110,7 +110,7 @@ export const ROLE_ORDER: readonly string[] = Object.freeze([
   "accounts",
   "facilities_manager",
   "accounts_manager",
-  // PLAN WP20 slots "cfo" in here, on its own line, immediately before director.
+  "cfo",
   "director",
 ]);
 
@@ -122,9 +122,9 @@ export const ROLE_ORDER: readonly string[] = Object.freeze([
  * within its own row and is never an escalation target.
  */
 export const SUBJECT_ELIGIBLE_ROLES: Readonly<Record<Subject, readonly string[]>> = Object.freeze({
-  invoice: Object.freeze(["accounts", "accounts_manager", "admin", "director"]),
-  purchase_order: Object.freeze(["facilities_manager", "accounts_manager", "admin", "director"]),
-  quote: Object.freeze(["facilities_manager", "accounts", "accounts_manager", "admin", "director"]),
+  invoice: Object.freeze(["accounts", "accounts_manager", "cfo", "admin", "director"]),
+  purchase_order: Object.freeze(["facilities_manager", "accounts_manager", "cfo", "admin", "director"]),
+  quote: Object.freeze(["facilities_manager", "accounts", "accounts_manager", "cfo", "admin", "director"]),
 });
 
 /**

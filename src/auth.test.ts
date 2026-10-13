@@ -176,6 +176,47 @@ describe("requireRole", () => {
     expect(result).toBeNull();
   });
 
+  // WP20: cfo sits between accounts_manager and director.
+  it.each([[AppRole.ACCOUNTS], [AppRole.ACCOUNTS_APPROVAL], [AppRole.CFO]])(
+    "cfo satisfies a %s check",
+    async (gate) => {
+      db.executeQuery.mockResolvedValue([{ Role: "cfo" }]);
+      const req = makeRequest({ authorization: `Bearer ${makeJwt({ oid: "oid" })}` });
+
+      expect(await requireRole(req, [gate])).toBeNull();
+    },
+  );
+
+  it.each([[AppRole.FACILITIES], [AppRole.FACILITIES_APPROVAL], [AppRole.DIRECTOR], [AppRole.ADMIN]])(
+    "cfo does not satisfy a %s-only check",
+    async (gate) => {
+      db.executeQuery.mockResolvedValue([{ Role: "cfo" }]);
+      const req = makeRequest({ authorization: `Bearer ${makeJwt({ oid: "oid" })}` });
+
+      expect((await requireRole(req, [gate]))?.status).toBe(403);
+    },
+  );
+
+  it("director and admin satisfy a cfo-only check", async () => {
+    for (const role of ["director", "admin"]) {
+      clearRoleCache();
+      db.executeQuery.mockResolvedValue([{ Role: role }]);
+      const req = makeRequest({ authorization: `Bearer ${makeJwt({ oid: `oid-${role}` })}` });
+
+      expect(await requireRole(req, [AppRole.CFO])).toBeNull();
+    }
+  });
+
+  it.each(["accounts", "accounts_manager", "facilities", "facilities_manager", "user"])(
+    "%s does not satisfy a cfo-only check",
+    async (role) => {
+      db.executeQuery.mockResolvedValue([{ Role: role }]);
+      const req = makeRequest({ authorization: `Bearer ${makeJwt({ oid: "oid" })}` });
+
+      expect((await requireRole(req, [AppRole.CFO]))?.status).toBe(403);
+    },
+  );
+
   // USER is the baseline tier: any caller with an assigned, active role
   // satisfies it. Only Pending / no-role accounts (empty roles) are rejected.
   // This lets endpoints gate on [AppRole.USER] to mean "any authenticated app
@@ -185,6 +226,7 @@ describe("requireRole", () => {
     ["accounts"],
     ["facilities_manager"],
     ["accounts_manager"],
+    ["cfo"],
     ["director"],
     ["admin"],
     ["user"],

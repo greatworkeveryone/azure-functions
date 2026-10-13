@@ -21,8 +21,6 @@ import {
   buildTaskTitle,
   buildTenantTaskDescription,
   computeEventDate,
-  escalationThresholdDays,
-  getFacilitiesManagerEmails,
   groupPlannerTasksByKey,
   isInWindow,
   LEAD_TIMES,
@@ -33,8 +31,6 @@ import {
   type PlannerTenantRow,
   type TriggerType,
 } from "../plannerHelpers";
-import { graphSendMail } from "../graph";
-import { buildJobUrl } from "../email/director-emails";
 
 const TENANT_TRIGGER_TYPES: TriggerType[] = [
   "lease_expiry",
@@ -765,91 +761,9 @@ export async function plannerSyncTimer(
     const resolved = resolvedIds.length;
     context.log(`plannerSyncTimer: resolved ${resolved} overdue tasks`);
 
-    // ── Escalation evaluator (WP18a) ───────────────────────────────────────
-    // Once per day (this 02:30 run): assigned, non-archived, non-terminal jobs
-    // whose next action is still pending — (Awaiting Approval, *) needing a
-    // sign-off, OR New/Quote/Work needing the assignee to move it — that have
-    // NOT been escalated yet (EscalatedAt IS NULL) and have aged past their
-    // priority threshold since the later of last acknowledgement / status change
-    // / creation. For each: email the facilities managers and stamp EscalatedAt
-    // so it fires exactly once (cleared on the next ack / transition). The
-    // threshold is per-priority and env-derived, so the age compare happens in
-    // JS; SQL only narrows to the static candidate set.
-    //
-    // FACILITIES_MANAGER_EMAILS unset → recipients empty → we skip the send but
-    // STILL stamp EscalatedAt (documented choice: the job is escalated in the
-    // dashboard via EscalatedAt regardless; re-firing daily emails once the env
-    // is later configured would be noise for a backlog that's already surfaced).
-    const escalationRecipients = getFacilitiesManagerEmails();
-    const escalationCandidates = await executeQuery(
-      connection,
-      `SELECT j.JobID, j.Title, j.Priority,
-              DATEDIFF(DAY, COALESCE(j.AcknowledgedAt, j.StatusSince, j.CreatedAt),
-                       SYSUTCDATETIME()) AS AgeDays
-       FROM dbo.Jobs j
-       WHERE j.AssignedToUserID IS NOT NULL
-         AND j.IsArchived = 0
-         AND j.Status <> 'Done'
-         AND j.EscalatedAt IS NULL
-         AND (
-              (j.Status = 'Awaiting Approval')
-           OR (j.Status IN ('New', 'Quote', 'Work'))
-         )`,
-    );
-
-    let escalated = 0;
-    let escalationErrors = 0;
-    for (const r of escalationCandidates) {
-      const jobId = r.JobID as number;
-      const priority = (r.Priority as string | null) ?? null;
-      const ageDays = (r.AgeDays as number | null) ?? 0;
-      if (ageDays <= escalationThresholdDays(priority)) continue;
-
-      try {
-        if (escalationRecipients.length > 0) {
-          const title = (r.Title as string | null) ?? `Job #${jobId}`;
-          const jobUrl = buildJobUrl(jobId);
-          const linkLine = jobUrl
-            ? `Open in Command Centre: ${jobUrl}`
-            : "Open the job in Command Centre.";
-          const subject = `Job escalation — #${jobId} unactioned for ${ageDays} days`;
-          const body =
-`Hi,
-
-Job #${jobId} has been waiting on action for ${ageDays} day${ageDays === 1 ? "" : "s"} without acknowledgement and needs a manager's attention.
-
-Job: ${title}
-Priority: ${priority ?? "—"}
-Age since last update: ${ageDays} day${ageDays === 1 ? "" : "s"}
-
-${linkLine}
-`;
-          // Fire-and-forget per the existing email pattern: a Graph failure must
-          // not abort the sweep. Wrap each send so one bad recipient/job doesn't
-          // block the rest.
-          await graphSendMail(escalationRecipients, subject, body.trim() + "\n");
-        } else {
-          context.warn(
-            `plannerSyncTimer: FACILITIES_MANAGER_EMAILS unset — escalating JobID ${jobId} without email (dashboard only)`,
-          );
-        }
-        // Stamp once so this job won't re-escalate until its clock resets.
-        await executeQuery(
-          connection,
-          `UPDATE dbo.Jobs SET EscalatedAt = SYSUTCDATETIME() WHERE JobID = @JobID`,
-          [{ name: "JobID", type: TYPES.Int, value: jobId }],
-        );
-        escalated++;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        context.warn(`plannerSyncTimer: escalation failed for JobID ${jobId}: ${message}`);
-        Sentry.captureException(err, {
-          tags: { source: "planner_sync_timer", trigger: "escalation", jobId: String(jobId) },
-        });
-        escalationErrors++;
-      }
-    }
-    context.log(`plannerSyncTimer: escalation — escalated=${escalated} errors=${escalationErrors}`);
+    // Escalating stalled and unassigned jobs is no longer done here: it moved to
+    // escalationSweepTimer (src/escalation), which runs every 30 minutes and does
+    // not depend on the PLANNER_* settings this timer needs.
 
     context.log("plannerSyncTimer: complete");
   } catch (error: unknown) {

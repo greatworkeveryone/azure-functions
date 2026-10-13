@@ -13,9 +13,8 @@ export interface ActionDefinition {
 
 // Every decision code, `domain.verb`. Each package adds its codes in its own
 // block so parallel branches don't collide. Packages still to add theirs:
-// WP19b's later slice (the mirrored quote/invoice/PO/payment decisions), WP20
-// (escalations), WP25–WP26 (rent reviews), WP26b (billing holds), WP29b
-// (billing runs), WP32 (lease events), WP60–WP62 (comms).
+// WP25–WP26 (rent reviews), WP26b (billing holds), WP29b (billing runs), WP32
+// (lease events), WP60–WP62 (comms).
 export const LEDGER_ACTIONS = {
   // Refusals, any subject (WP19b)
   denied: { exception: true, reasonRequired: false, subjects: "any" },
@@ -79,6 +78,16 @@ export const LEDGER_ACTIONS = {
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.sign_off_cleared": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "schedule.sign_off_revoke": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+
+  // Escalations (WP20). The subject is the escalation itself; the row carries
+  // the job or tenant it is about in its scope columns. A withdrawal is the one
+  // exception: a person decided the escalation was not needed.
+  "escalation.acknowledge": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  "escalation.auto_resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  "escalation.raise": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
