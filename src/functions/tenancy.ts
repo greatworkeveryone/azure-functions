@@ -78,7 +78,7 @@ import {
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
 import * as ledger from "../ledger";
-import { ledgerActorFor } from "../ledgerActor";
+import { resolveLedgerActor } from "../ledger/actor";
 import {
   deriveNextReviewDate,
   nextAnniversary,
@@ -90,6 +90,7 @@ import {
   conflictResponse,
   isoTimestamp,
   type LedgerDraft,
+  ledgerRefusal,
   parseExpectedVersion,
   rollbackQuietly,
   rowVersionHex,
@@ -1037,7 +1038,8 @@ async function upsertRegisterTenant(
       ) {
         return { status: 400, jsonBody: { error: "RowVersion must be the 16-character hex the tenant was read with" } };
       }
-      const actor = await ledgerActorFor(request, connection, caller);
+      const actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
       const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId);
       if (refused) return refused;
       resultId = tenantId;
@@ -1072,6 +1074,8 @@ async function upsertRegisterTenant(
       jsonBody: { tenant: tenantRowToApi(stored[0], [], {}) },
     };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertRegisterTenant failed", {
       error: formatted,
@@ -1610,9 +1614,8 @@ async function upsertOccupancy(
     }
 
     connection = await createRequestConnection(token);
-    const actor = reassign
-      ? await ledgerActorFor(request, connection, callerFromToken(token))
-      : null;
+    const actor = reassign ? await resolveLedgerActor(request, connection) : null;
+    if (reassign && !actor) return unauthorizedResponse();
 
     // Fetch tenant rent fields up-front so the history snapshot is consistent.
     const tenantRows = await executeQuery(
@@ -1804,6 +1807,8 @@ async function upsertOccupancy(
       jsonBody: { occupancy: occupancyRowToApi(stored[0]) },
     };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertOccupancy failed", {
       error: formatted,
@@ -2429,7 +2434,8 @@ async function upsertTenantIncentive(
     const { TenantId, BuildingId, incentive } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -2460,6 +2466,8 @@ async function upsertTenantIncentive(
     invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("upsertTenantIncentive failed", {
       error: formatted,
@@ -2506,7 +2514,8 @@ async function deleteTenantIncentive(
     const { TenantId, BuildingId, incentiveId } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -2538,6 +2547,8 @@ async function deleteTenantIncentive(
     invalidateTenantAndBuilding(TenantId, BuildingId);
     return { status: 200, jsonBody: { tenant } };
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const formatted = formatSqlError(error);
     context.error("deleteTenantIncentive failed", {
       error: formatted,
@@ -2649,7 +2660,8 @@ async function upsertScheduledRateStep(
     const { TenantId, BuildingId, step } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
@@ -2708,6 +2720,8 @@ async function upsertScheduledRateStep(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertScheduledRateStep failed:", error.message);
     return errorResponse("Failed to upsert scheduled rate step", error.message);
   } finally {
@@ -2746,7 +2760,8 @@ async function deleteScheduledRateStep(
     const { TenantId, BuildingId, stepId } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
@@ -2782,6 +2797,8 @@ async function deleteScheduledRateStep(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteScheduledRateStep failed:", error.message);
     return errorResponse("Failed to delete scheduled rate step", error.message);
   } finally {
@@ -3233,7 +3250,8 @@ async function upsertCarparkScheduleGroup(
     const { TenantId, BuildingId, group } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -3255,6 +3273,8 @@ async function upsertCarparkScheduleGroup(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (groups) => ({ groups }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertCarparkScheduleGroup failed:", error.message);
     return errorResponse(
       "Failed to upsert carpark schedule group",
@@ -3296,7 +3316,8 @@ async function deleteCarparkScheduleGroup(
     const { TenantId, BuildingId, groupId } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -3319,6 +3340,8 @@ async function deleteCarparkScheduleGroup(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (groups) => ({ groups }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteCarparkScheduleGroup failed:", error.message);
     return errorResponse(
       "Failed to delete carpark schedule group",
@@ -3727,7 +3750,8 @@ async function upsertMiscFeeHandler(
     const { TenantId, BuildingId, fee } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -3749,6 +3773,8 @@ async function upsertMiscFeeHandler(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (fees) => ({ fees }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("upsertMiscFee failed:", error.message);
     return errorResponse("Failed to upsert misc fee", error.message);
   } finally {
@@ -3787,7 +3813,8 @@ async function deleteMiscFeeHandler(
     const { TenantId, BuildingId, feeId } = parsed;
 
     connection = await createRequestConnection(token);
-    const actor = await ledgerActorFor(request, connection, caller);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
@@ -3810,6 +3837,8 @@ async function deleteMiscFeeHandler(
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
     return scheduleWriteResponse(outcome, (fees) => ({ fees }));
   } catch (error: any) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     context.error("deleteMiscFee failed:", error.message);
     return errorResponse("Failed to delete misc fee", error.message);
   } finally {

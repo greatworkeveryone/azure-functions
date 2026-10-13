@@ -48,8 +48,8 @@ jest.mock("../tenant-register-cache", () => ({ invalidateTenantAndBuilding: jest
 
 // Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
 jest.mock("../ledger");
-jest.mock("../ledgerActor", () => ({
-  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Ada Admin", role: "admin", userId: 1 }),
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Ada Admin", role: "admin", userId: 1 }),
 }));
 
 const auth = require("../auth") as { extractToken: jest.Mock; requireRole: jest.Mock };
@@ -204,6 +204,14 @@ describe("recomputeNextReviewDates", () => {
     expect(db.rollbackTransaction).toHaveBeenCalled();
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("apply: returns 401 when the caller's token doesn't verify for the ledger", async () => {
+    const actorModule = require("../ledger/actor") as { resolveLedgerActor: jest.Mock };
+    actorModule.resolveLedgerActor.mockResolvedValueOnce(null);
+    const res = await handler(makeRequest({ apply: true, planId: "abc" }), ctx);
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
   });
 
   it("apply: needs the planId from a dry run", async () => {

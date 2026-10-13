@@ -61,8 +61,8 @@ jest.mock("../planner", () => ({
 
 // Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
 jest.mock("../ledger");
-jest.mock("../ledgerActor", () => ({
-  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
 }));
 
 jest.mock("../rateLimit", () => ({

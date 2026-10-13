@@ -20,7 +20,6 @@ import {
   AppRole,
   errorResponse,
   extractToken,
-  nameFromToken,
   oidFromToken,
   requireRole,
   unauthorizedResponse,
@@ -34,11 +33,11 @@ import {
   executeQuery,
 } from "../db";
 import * as ledger from "../ledger";
-import { ledgerActorFor } from "../ledgerActor";
+import { resolveLedgerActor } from "../ledger/actor";
 import { deriveNextReviewDate, nextReviewInputFromRow, RESOLVED_REVIEW_DATES_SQL } from "../nextReviewDate";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
-import { rollbackQuietly } from "../tenancyScheduleWrite";
+import { ledgerRefusal, rollbackQuietly } from "../tenancyScheduleWrite";
 
 interface NextReviewChange {
   buildingId: number;
@@ -174,10 +173,12 @@ export async function recomputeNextReviewDates(
       const plan = await computePlan(connection, false);
       return { status: 200, jsonBody: { ...plan, asOf: todayInDarwin(), dryRun: true } };
     }
-    const caller = { id: oidFromToken(token) ?? "unknown", name: nameFromToken(token) ?? "Unknown user" };
-    const actor = await ledgerActorFor(request, connection, caller);
-    return await applyPlan(connection, actor, caller.id, body.planId as string);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    return await applyPlan(connection, actor, oidFromToken(token) ?? "unknown", body.planId as string);
   } catch (error: unknown) {
+    const refusal = ledgerRefusal(error);
+    if (refusal) return refusal;
     const message = error instanceof Error ? error.message : String(error);
     context.error("recomputeNextReviewDates failed:", message);
     return errorResponse("Failed to recompute next review dates", error);

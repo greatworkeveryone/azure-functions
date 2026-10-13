@@ -61,8 +61,8 @@ jest.mock("../planner", () => ({
 
 // Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
 jest.mock("../ledger");
-jest.mock("../ledgerActor", () => ({
-  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
 }));
 
 jest.mock("../rateLimit", () => ({
@@ -654,6 +654,28 @@ describe("schedule writes — versioned, transactional, ledgered", () => {
       before: null,
       subject: { id: INCENTIVE_ID, type: "incentive" },
     });
+  });
+
+  it("returns 401, writing nothing, when the caller's token doesn't verify for the ledger", async () => {
+    const actorModule = require("../ledger/actor") as { resolveLedgerActor: jest.Mock };
+    actorModule.resolveLedgerActor.mockResolvedValueOnce(null);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 and rolls back when the ledger refuses the entry", async () => {
+    const ledgerModule = require("../ledger") as { LedgerValidationError: new (message: string) => Error };
+    const refusal = Object.create(ledgerModule.LedgerValidationError.prototype, {
+      message: { value: "Ledger user actor needs a role" },
+    });
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(refusal);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(res).toMatchObject({ jsonBody: { error: "Ledger user actor needs a role" }, status: 400 });
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 
   it("returns 409 on a stale incentive write", async () => {

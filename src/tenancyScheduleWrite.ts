@@ -127,6 +127,14 @@ export function scheduleWriteResponse<T>(
   }
 }
 
+/** 400 when the ledger refused a write's entry (LedgerValidationError): the
+ *  write was rolled back with it, and the caller can fix the request. */
+export function ledgerRefusal(error: unknown): HttpResponseInit | null {
+  return error instanceof ledger.LedgerValidationError
+    ? { status: 400, jsonBody: { error: error.message } }
+    : null;
+}
+
 /** Rolls back, ignoring a server that already rolled the transaction back. */
 export async function rollbackQuietly(connection: Connection): Promise<void> {
   try {
