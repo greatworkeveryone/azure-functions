@@ -3,23 +3,42 @@
 // the admin one-off recomputeNextReviewDates brings existing rows into line.
 //
 // The next review is the earliest review row (not commencement) after
-// LastReviewDate that no review has settled; failing that, the next lease
+// LastReviewDate that nothing has settled; failing that, the next lease
 // anniversary — the lease's latest commencement (a later commencement row is a
 // renewal or reset) + n × ReviewIntervalMonths, month-end clamped and always
 // counted from that commencement, so a review processed late doesn't move the
 // anniversary.
+//
+// What settles a review depends on REVIEW_WORKFLOW_LIVE_FROM
+// (reviewWorkflowLiveFrom). A row whose value is still unknown (CPI index,
+// market or other rate) is never settled by it, so an unkeyed review past its
+// date reads overdue either way.
 
 import { addMonthsClamped, isIsoDate } from "./darwinDate";
 import { type ScheduledRateStep, sortSteps, stepPendingReason } from "./scheduledRateStepLogic";
 
+let warnedSetting: string | null = null;
+
 /**
- * Schedule rows were entered by hand before Floorplan tracked reviews. A row
- * dated on or before this day whose value is known (not pending) was settled
- * outside Floorplan; from the next day on, a review is settled only by a
- * resolution on its row, a completed or waived RentReviews row for its date,
- * or LastReviewDate.
+ * REVIEW_WORKFLOW_LIVE_FROM (app setting, YYYY-MM-DD): the day the rent-review
+ * workflow (WP25/WP26) went live, set at gate B.
+ *  • Unset: reviews are done in Excel and their values keyed by hand, so any
+ *    known value on a row settles that review.
+ *  • Set: a review dated on or after it is settled only by a resolution on its
+ *    row, a completed or waived RentReviews row for its date, or
+ *    LastReviewDate; earlier rows still settle by their known value.
+ * An invalid value logs a warning and counts as unset.
  */
-export const LEGACY_REVIEWS_SETTLED_THROUGH = "2026-10-13";
+export function reviewWorkflowLiveFrom(raw: string | undefined = process.env.REVIEW_WORKFLOW_LIVE_FROM): string | null {
+  const value = raw?.trim() ?? "";
+  if (value === "") return null;
+  if (isIsoDate(value)) return value;
+  if (warnedSetting !== value) {
+    warnedSetting = value;
+    console.warn(`[nextReviewDate] REVIEW_WORKFLOW_LIVE_FROM "${value}" is not a YYYY-MM-DD date; treating it as unset`);
+  }
+  return null;
+}
 
 const DEFAULT_INTERVAL_MONTHS = 12;
 /** 200 years of monthly reviews — the loop below can't run away. */
@@ -37,12 +56,15 @@ export interface NextReviewInput {
   steps: ScheduledRateStep[];
   /** Tenants.NextReviewDate as stored. */
   storedNextReviewDate: string | null;
+  /** reviewWorkflowLiveFrom(): null while reviews are keyed by hand. */
+  workflowLiveFrom: string | null;
 }
 
 function isSettled(step: ScheduledRateStep, input: NextReviewInput): boolean {
   if (step.resolution) return true;
   if (input.resolvedReviewDates.has(step.effectiveFrom)) return true;
-  return step.effectiveFrom <= LEGACY_REVIEWS_SETTLED_THROUGH && stepPendingReason(step) === null;
+  const keyedByHand = input.workflowLiveFrom === null || step.effectiveFrom < input.workflowLiveFrom;
+  return keyedByHand && stepPendingReason(step) === null;
 }
 
 function latest(dates: Iterable<string | null>): string | null {
@@ -65,8 +87,7 @@ export function nextAnniversary(anchor: string, intervalMonths: number, after: s
  * The tenancy's next review date, or null when there is nothing to derive it
  * from — the caller then keeps the stored value. Without a schedule the
  * stored date is the only record of where the reviews stand, so it is kept;
- * one is derived only when none is stored (a new tenancy), and then reviews
- * before the legacy cutover count as done.
+ * one is derived only when none is stored (a new tenancy).
  */
 export function deriveNextReviewDate(input: NextReviewInput): string | null {
   const steps = sortSteps(input.steps);
@@ -91,8 +112,7 @@ export function deriveNextReviewDate(input: NextReviewInput): string | null {
       ? input.reviewIntervalMonths
       : DEFAULT_INTERVAL_MONTHS;
   const settledDates = reviews.filter((step) => isSettled(step, input)).map((step) => step.effectiveFrom);
-  const legacy = steps.length === 0 && anchor <= LEGACY_REVIEWS_SETTLED_THROUGH ? LEGACY_REVIEWS_SETTLED_THROUGH : null;
-  const after = latest([anchor, last, legacy, ...settledDates, ...input.resolvedReviewDates]) ?? anchor;
+  const after = latest([anchor, last, ...settledDates, ...input.resolvedReviewDates]) ?? anchor;
   return nextAnniversary(anchor, interval, after);
 }
 
@@ -124,7 +144,7 @@ export function sqlDateToIso(value: unknown): string | null {
 
 /** NextReviewInput from a Tenants row selected with Commencement,
  *  LastReviewDate, ReviewIntervalMonths, NextReviewDate and
- *  RESOLVED_REVIEW_DATES_SQL. */
+ *  RESOLVED_REVIEW_DATES_SQL, under the current REVIEW_WORKFLOW_LIVE_FROM. */
 export function nextReviewInputFromRow(row: Record<string, unknown>, steps: ScheduledRateStep[]): NextReviewInput {
   const interval = row.ReviewIntervalMonths == null ? Number.NaN : Number(row.ReviewIntervalMonths);
   return {
@@ -134,5 +154,6 @@ export function nextReviewInputFromRow(row: Record<string, unknown>, steps: Sche
     reviewIntervalMonths: Number.isFinite(interval) ? interval : null,
     steps,
     storedNextReviewDate: sqlDateToIso(row.NextReviewDate),
+    workflowLiveFrom: reviewWorkflowLiveFrom(),
   };
 }

@@ -646,7 +646,7 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     expect(res.status).toBe(400);
   });
 
-  it("re-derives NextReviewDate when a review date field changes, ledgered with the write", async () => {
+  it("re-derives NextReviewDate when a review date field changes; a derived date alone isn't ledgered", async () => {
     db.executeQuery
       .mockResolvedValueOnce([
         lockedRow({ NextReviewDate: new Date("2025-07-01T00:00:00Z"), ScheduledRateSteps: schedule }),
@@ -655,13 +655,7 @@ describe("upsertRegisterTenant — review terms and next review", () => {
       .mockResolvedValueOnce(storedRow());
     await handlers.upsertRegisterTenant(makeRequest({ Commencement: "2024-07-01", TenantId: 7 }), ctx);
     expect(param("NextReviewDate")).toBe("2027-07-01");
-    expect(actions()).toEqual(["schedule.recompute_next_review"]);
-    expect(ledger.record.mock.calls[0][1]).toMatchObject({
-      after: { nextReviewDate: "2027-07-01" },
-      before: { nextReviewDate: "2025-07-01" },
-      ruleApplied: "derived_on_write",
-      subject: { id: 7, type: "tenancy" },
-    });
+    expect(ledger.record).not.toHaveBeenCalled();
   });
 
   it("ignores a typed NextReviewDate on a tenancy with a schedule — the schedule decides", async () => {
@@ -688,18 +682,18 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     expect(ledger.record).not.toHaveBeenCalled();
   });
 
-  it("shares one correlation between a terms edit and the review date it moves", async () => {
+  it("carries a moved review date in the terms edit's ledger entry, not a row of its own", async () => {
     db.executeQuery
       .mockResolvedValueOnce([
         lockedRow({ NextReviewDate: new Date("2025-07-01T00:00:00Z"), ReviewIntervalMonths: 12, ScheduledRateSteps: schedule }),
       ])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(storedRow());
-    const ledgerModule = require("../ledger") as { newCorrelationId: jest.Mock };
-    ledgerModule.newCorrelationId.mockReturnValueOnce("corr-1");
     await handlers.upsertRegisterTenant(makeRequest({ ReviewIntervalMonths: 24, TenantId: 7 }), ctx);
-    expect(actions()).toEqual(["schedule.terms_edit", "schedule.recompute_next_review"]);
-    expect(ledger.record.mock.calls.map(([, entry]) => entry.correlationId)).toEqual(["corr-1", "corr-1"]);
+    expect(actions()).toEqual(["schedule.terms_edit"]);
+    const entry = ledger.record.mock.calls[0][1];
+    expect(entry.before).toEqual({ nextReviewDate: "2025-07-01", reviewIntervalMonths: 12 });
+    expect(entry.after).toEqual({ nextReviewDate: "2027-07-01", reviewIntervalMonths: 24 });
   });
 
   it("derives a new tenancy's first review from its commencement when none is sent", async () => {

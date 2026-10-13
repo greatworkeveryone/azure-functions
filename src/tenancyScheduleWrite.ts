@@ -127,6 +127,31 @@ export function scheduleWriteResponse<T>(
   }
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A NextReviewDate the write moved is derived, not a decision of its own: it
+ * rides in the before/after of the write's first ledger entry (a create's or
+ * delete's missing side becomes `{ nextReviewDate }`). No entries, no record.
+ */
+export function withNextReviewDate<T extends { after?: unknown; before?: unknown }>(
+  entries: T[],
+  before: string | null,
+  after: string,
+): T[] {
+  const [first, ...rest] = entries;
+  if (!first) return entries;
+  return [
+    {
+      ...first,
+      after: { ...(isRecord(first.after) ? first.after : {}), nextReviewDate: after },
+      before: { ...(isRecord(first.before) ? first.before : {}), nextReviewDate: before },
+    },
+    ...rest,
+  ];
+}
+
 /** 400 when the ledger refused a write's entry (LedgerValidationError): the
  *  write was rolled back with it, and the caller can fix the request. */
 export function ledgerRefusal(error: unknown): HttpResponseInit | null {
@@ -221,17 +246,8 @@ export async function runScheduleWrite<T>(
     if (mutation.afterUpdate) await mutation.afterUpdate(connection);
 
     const correlationId = ledger.newCorrelationId();
-    const entries: LedgerDraft[] = nextReview
-      ? [
-          ...mutation.ledgerEntries,
-          {
-            action: "schedule.recompute_next_review",
-            after: { nextReviewDate: nextReview },
-            before: { nextReviewDate: review.storedNextReviewDate },
-            ruleApplied: "derived_on_write",
-            subject: { id: target.tenantId, type: "tenancy" },
-          },
-        ]
+    const entries = nextReview
+      ? withNextReviewDate(mutation.ledgerEntries, review.storedNextReviewDate, nextReview)
       : mutation.ledgerEntries;
     for (const entry of entries) {
       await ledger.record(connection, {

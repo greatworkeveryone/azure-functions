@@ -715,7 +715,7 @@ describe("schedule writes — next review date", () => {
       | [unknown, string, Array<{ name: string; value: unknown }>]
       | undefined;
 
-  it("derives NextReviewDate from the schedule in the same UPDATE and ledgers the move under the write's correlation", async () => {
+  it("derives NextReviewDate in the same UPDATE and carries the move in the write's first ledger entry", async () => {
     db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     const res = await handlers.upsertScheduledRateStep(
       makeRequest({
@@ -730,15 +730,20 @@ describe("schedule writes — next review date", () => {
     expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
     // The earliest review row nothing has settled is next: the CPI row waiting on its index.
     expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2027-07-01");
-    const recompute = ledger.record.mock.calls.find(([, entry]) => entry.action === "schedule.recompute_next_review");
-    expect(recompute?.[1]).toMatchObject({
-      after: { nextReviewDate: "2027-07-01" },
-      before: { nextReviewDate: "2025-07-01" },
-      subject: { id: 1, type: "tenancy" },
-      tenantId: 1,
+    // A derived date isn't a decision: no row of its own. The new step (first
+    // entry) carries it; the commencement row it closed (second) doesn't.
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual([
+      "schedule.manual_edit",
+      "schedule.manual_edit",
+    ]);
+    const [[, created], [, closed]] = ledger.record.mock.calls;
+    expect(created).toMatchObject({
+      after: { effectiveFrom: "2027-07-01", id: STEP_ID, nextReviewDate: "2027-07-01" },
+      subject: { id: STEP_ID, type: "rate_step" },
     });
-    const correlations = new Set(ledger.record.mock.calls.map(([, entry]) => entry.correlationId));
-    expect(correlations.size).toBe(1);
+    expect(created.before).toEqual({ nextReviewDate: "2025-07-01" });
+    expect(closed.subject).toEqual({ id: COMMENCEMENT_ID, type: "rate_step" });
+    expect(closed.after).not.toHaveProperty("nextReviewDate");
   });
 
   it("re-derives on a car park, misc fee or incentive write too", async () => {
@@ -753,6 +758,13 @@ describe("schedule writes — next review date", () => {
     const [, sql, params] = updateCall()!;
     expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
     expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2025-07-01");
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { id: INCENTIVE_ID, nextReviewDate: "2025-07-01" },
+      before: { nextReviewDate: "2031-01-01" },
+      subject: { id: INCENTIVE_ID, type: "incentive" },
+    });
   });
 
   it("leaves NextReviewDate alone, and ledgers nothing about it, when it doesn't move", async () => {
@@ -766,6 +778,8 @@ describe("schedule writes — next review date", () => {
     );
     expect(updateCall()![1]).not.toMatch(/NextReviewDate/);
     expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual(["schedule.manual_edit"]);
+    expect(ledger.record.mock.calls[0][1].after).not.toHaveProperty("nextReviewDate");
+    expect(ledger.record.mock.calls[0][1].before).not.toHaveProperty("nextReviewDate");
   });
 
   it("a waived review settles its row; the next review is the following anniversary", async () => {
@@ -790,7 +804,7 @@ describe("schedule writes — next review date", () => {
 
   it("rolls back the derived date with the write when the ledger fails", async () => {
     db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-    ledger.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("ledger unavailable"));
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
     const res = await handlers.upsertScheduledRateStep(
       makeRequest({
         BuildingId: 5,

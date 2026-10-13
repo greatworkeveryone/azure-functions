@@ -96,6 +96,7 @@ import {
   rowVersionHex,
   runScheduleWrite,
   scheduleWriteResponse,
+  withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
 import {
@@ -1205,7 +1206,8 @@ function floorAboveCap(fields: Record<string, unknown>, current: SqlRow): HttpRe
 /**
  * NextReviewDate as this write leaves it (PLAN D1): re-derived when the write
  * touches a review date field. Sets or drops fields.NextReviewDate and returns
- * the change to ledger, or null when it doesn't move.
+ * the move (it rides in the write's terms_edit entry, if there is one), or
+ * null when it doesn't move.
  */
 function deriveNextReviewOnWrite(
   fields: Record<string, unknown>,
@@ -1337,16 +1339,10 @@ async function updateRegisterTenantRow(
       tenantId,
     };
     if (termsChanged) {
-      await ledger.record(connection, { ...scope, action: "schedule.terms_edit", after: termsAfter, before: termsBefore });
-    }
-    if (nextReview) {
-      await ledger.record(connection, {
-        ...scope,
-        action: "schedule.recompute_next_review",
-        after: { nextReviewDate: nextReview.after },
-        before: { nextReviewDate: nextReview.before },
-        ruleApplied: "derived_on_write",
-      });
+      const [terms] = nextReview
+        ? withNextReviewDate([{ after: termsAfter, before: termsBefore }], nextReview.before, nextReview.after)
+        : [{ after: termsAfter, before: termsBefore }];
+      await ledger.record(connection, { ...scope, action: "schedule.terms_edit", ...terms });
     }
     await commitTransaction(connection);
     return null;

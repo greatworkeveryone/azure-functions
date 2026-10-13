@@ -1,10 +1,11 @@
 import assert from "node:assert";
+import { computeReviewState } from "../functions/tenancy";
 import {
   deriveNextReviewDate,
-  LEGACY_REVIEWS_SETTLED_THROUGH,
   type NextReviewInput,
   nextReviewInputFromRow,
   parseResolvedReviewDates,
+  reviewWorkflowLiveFrom,
   sqlDateToIso,
 } from "../nextReviewDate";
 import type { ScheduledRateStep } from "../scheduledRateStepLogic";
@@ -31,6 +32,10 @@ const cpiPending = (effectiveFrom: string, extra: Partial<ScheduledRateStep> = {
   ...extra,
 });
 
+/** Gate B, in the "set" examples. */
+const LIVE_FROM = "2026-11-01";
+const TODAY = "2026-11-15";
+
 function input(over: Partial<NextReviewInput>): NextReviewInput {
   return {
     commencement: null,
@@ -39,29 +44,70 @@ function input(over: Partial<NextReviewInput>): NextReviewInput {
     reviewIntervalMonths: 12,
     steps: [],
     storedNextReviewDate: null,
+    workflowLiveFrom: null,
     ...over,
   };
 }
 
-describe("deriveNextReviewDate — review rows", () => {
-  it("the cutover is the day WP23b was built", () => {
-    assert.strictEqual(LEGACY_REVIEWS_SETTLED_THROUGH, "2026-10-13");
+describe("REVIEW_WORKFLOW_LIVE_FROM", () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    delete process.env.REVIEW_WORKFLOW_LIVE_FROM;
   });
 
-  it("is the earliest review row nothing has settled", () => {
+  it("is unset when missing or blank", () => {
+    assert.strictEqual(reviewWorkflowLiveFrom(undefined), null);
+    assert.strictEqual(reviewWorkflowLiveFrom("  "), null);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("reads a YYYY-MM-DD date", () => {
+    assert.strictEqual(reviewWorkflowLiveFrom(" 2026-11-01 "), "2026-11-01");
+  });
+
+  it("logs a warning for an invalid value and treats it as unset", () => {
+    assert.strictEqual(reviewWorkflowLiveFrom("2026-13-01"), null);
+    assert.strictEqual(reviewWorkflowLiveFrom("1/11/2026"), null);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"2026-13-01" is not a YYYY-MM-DD date'));
+  });
+
+  it("is what nextReviewInputFromRow derives with", () => {
+    process.env.REVIEW_WORKFLOW_LIVE_FROM = LIVE_FROM;
+    assert.strictEqual(nextReviewInputFromRow({}, []).workflowLiveFrom, LIVE_FROM);
+    process.env.REVIEW_WORKFLOW_LIVE_FROM = "soon";
+    assert.strictEqual(nextReviewInputFromRow({}, []).workflowLiveFrom, null);
+  });
+});
+
+describe("deriveNextReviewDate — unset: reviews keyed by hand", () => {
+  it("counts any known value as a settled review, past or future", () => {
     const steps = [comm("2020-07-01"), fixed("2025-07-01"), fixed("2027-07-01"), fixed("2028-07-01")];
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2027-07-01");
+    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2029-07-01");
   });
 
-  it("counts a known value on or before the cutover as settled, but not one still waiting", () => {
+  it("is the earliest review still waiting on its value", () => {
     const steps = [comm("2020-07-01"), fixed("2024-07-01"), cpiPending("2025-07-01"), fixed("2026-07-01")];
-    // The 2025 CPI review never got its index: it is the (overdue) next review.
     assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2025-07-01");
   });
+});
 
-  it("needs a settlement for rows after the cutover, even with their value known", () => {
-    const steps = [comm("2020-07-01"), fixed("2026-07-01"), fixed("2026-11-01")];
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2026-11-01");
+describe("deriveNextReviewDate — set: the review workflow is live", () => {
+  const live = (over: Partial<NextReviewInput>) => input({ workflowLiveFrom: LIVE_FROM, ...over });
+
+  it("from the live date only a settlement counts; a known value no longer does", () => {
+    const steps = [comm("2020-07-01"), fixed("2025-07-01"), fixed("2027-07-01"), fixed("2028-07-01")];
+    assert.strictEqual(deriveNextReviewDate(live({ commencement: "2020-07-01", steps })), "2027-07-01");
+  });
+
+  it("splits at the live date: the day before settles by its value, the day itself doesn't", () => {
+    const before = [comm("2020-10-31"), fixed("2026-10-31")];
+    assert.strictEqual(deriveNextReviewDate(live({ steps: before })), "2027-10-31");
+    const onTheDay = [comm("2020-11-01"), fixed("2026-11-01")];
+    assert.strictEqual(deriveNextReviewDate(live({ steps: onTheDay })), "2026-11-01");
   });
 
   it("is settled by an applied or waived resolution", () => {
@@ -71,21 +117,33 @@ describe("deriveNextReviewDate — review rows", () => {
       cpiPending("2028-07-01", { resolution: "waived" }),
       fixed("2029-07-01"),
     ];
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2020-07-01", steps })), "2029-07-01");
+    assert.strictEqual(deriveNextReviewDate(live({ commencement: "2020-07-01", steps })), "2029-07-01");
   });
 
   it("is settled by a completed or waived RentReviews row for its date", () => {
     const steps = [comm("2020-07-01"), fixed("2027-07-01"), fixed("2028-07-01")];
     const derived = deriveNextReviewDate(
-      input({ commencement: "2020-07-01", resolvedReviewDates: new Set(["2027-07-01"]), steps }),
+      live({ commencement: "2020-07-01", resolvedReviewDates: new Set(["2027-07-01"]), steps }),
     );
     assert.strictEqual(derived, "2028-07-01");
   });
 
   it("only looks after LastReviewDate", () => {
-    const steps = [comm("2020-07-01"), cpiPending("2025-07-01"), fixed("2027-07-01")];
-    const derived = deriveNextReviewDate(input({ commencement: "2020-07-01", lastReviewDate: "2025-07-01", steps }));
-    assert.strictEqual(derived, "2027-07-01");
+    const steps = [comm("2020-07-01"), fixed("2027-07-01"), fixed("2028-07-01")];
+    const derived = deriveNextReviewDate(live({ commencement: "2020-07-01", lastReviewDate: "2027-07-01", steps }));
+    assert.strictEqual(derived, "2028-07-01");
+  });
+});
+
+describe("an unkeyed review past its date reads overdue in both modes", () => {
+  it.each([
+    ["unset", null],
+    ["set", LIVE_FROM],
+  ])("%s", (_mode, workflowLiveFrom) => {
+    const steps = [comm("2020-07-01"), fixed("2025-07-01"), cpiPending("2026-07-01"), fixed("2027-07-01")];
+    const next = deriveNextReviewDate(input({ commencement: "2020-07-01", steps, workflowLiveFrom }));
+    assert.strictEqual(next, "2026-07-01");
+    assert.strictEqual(computeReviewState(next ?? undefined, "current", TODAY), "red");
   });
 });
 
@@ -155,13 +213,12 @@ describe("deriveNextReviewDate — tenancies without a schedule", () => {
     assert.strictEqual(derived, null);
   });
 
-  it("gives a new lease its first anniversary", () => {
+  it("gives a tenancy with no date its first anniversary after commencement or the last review", () => {
     assert.strictEqual(deriveNextReviewDate(input({ commencement: "2026-12-01" })), "2027-12-01");
-  });
-
-  it("takes reviews before the cutover as done for an older lease with no date", () => {
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2018-03-01" })), "2027-03-01");
-    assert.strictEqual(deriveNextReviewDate(input({ commencement: "2018-11-01" })), "2026-11-01");
+    assert.strictEqual(
+      deriveNextReviewDate(input({ commencement: "2018-03-01", lastReviewDate: "2026-03-01" })),
+      "2027-03-01",
+    );
   });
 
   it("has nothing to go on without a commencement date", () => {
@@ -206,6 +263,7 @@ describe("row helpers", () => {
       reviewIntervalMonths: 12,
       steps,
       storedNextReviewDate: "2021-07-01",
+      workflowLiveFrom: null,
     });
     assert.strictEqual(nextReviewInputFromRow({ ReviewIntervalMonths: null }, []).reviewIntervalMonths, null);
   });
