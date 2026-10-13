@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledgerActor", () => ({
+  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 const auth = require("../auth") as {
   extractToken:         jest.Mock;
   requireRole:          jest.Mock;
@@ -282,6 +288,96 @@ describe("upsertOccupancy", () => {
     db.executeQuery.mockRejectedValueOnce(new Error("connection lost"));
     const res = await handlers.upsertOccupancy(makeRequest(validBody), ctx);
     expect(res.status).toBe(500);
+  });
+
+  // ── A cell held by another tenancy (PLAN WP23a, F22d) ─────────────────────
+
+  const heldByOther = { LegalName: "Other Pty Ltd", OccupancyId: "other-occ", TenantId: 2, TradingName: "Other Co" };
+  const storedOcc = [{ Area: "A1", BuildingId: 5, Level: "G", OccupancyId: "other-occ", SizeSqm: 100, TenantId: 1 }];
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const sqlCalls = () => db.executeQuery.mock.calls.map(([, sql]: [unknown, string]) => sql);
+
+  it("returns 409 naming the tenancy that holds the cell, and moves nothing", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])
+      .mockResolvedValueOnce([heldByOther]);
+    const res = await handlers.upsertOccupancy(makeRequest(validBody), ctx);
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { error: string; heldBy: { name: string; tenantId: number } };
+    expect(body.error).toMatch(/held by Other Co/);
+    expect(body.heldBy).toMatchObject({ name: "Other Co", tenantId: 2 });
+    expect(sqlCalls().some((sql) => sql.includes("UPDATE dbo.TenantOccupancies"))).toBe(false);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("reads the cell under an update lock", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])
+      .mockResolvedValueOnce([heldByOther]);
+    await handlers.upsertOccupancy(makeRequest(validBody), ctx);
+    expect(sqlCalls()[1]).toMatch(/TenantOccupancies o WITH \(UPDLOCK, ROWLOCK\)/);
+  });
+
+  it("returns 409 when moving an area onto a cell another row holds", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])
+      .mockResolvedValueOnce([
+        { LegalName: "Acme", OccupancyId: "occ-uuid-1", TenantId: 1, TradingName: null },
+        { LegalName: "Acme", OccupancyId: "acme-other", TenantId: 1, TradingName: null },
+      ]);
+    const res = await handlers.upsertOccupancy(makeRequest(validBody), ctx);
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { heldBy: { occupancyId: string } }).heldBy.occupancyId).toBe("acme-other");
+  });
+
+  it("'Move from {tenant}' with a reason reassigns the cell and ledgers occupancy.reassign", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])
+      .mockResolvedValueOnce([heldByOther])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedOcc);
+    const res = await handlers.upsertOccupancy(
+      makeRequest({ ...validBody, Reassign: { FromTenantId: 2, Reason: "Surrendered to Acme from 1 Oct" } }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(sqlCalls().some((sql) => sql.includes("UPDATE dbo.TenantOccupancies"))).toBe(true);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "occupancy.reassign",
+      after: { tenantId: 1 },
+      before: { tenantId: 2, tenantName: "Other Co" },
+      buildingId: 5,
+      reason: "Surrendered to Acme from 1 Oct",
+      subject: { id: "other-occ", type: "occupancy" },
+      tenantId: 1,
+    });
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(2, 5);
+  });
+
+  it("refuses a reassign that names a different holder", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])
+      .mockResolvedValueOnce([heldByOther]);
+    const res = await handlers.upsertOccupancy(
+      makeRequest({ ...validBody, Reassign: { FromTenantId: 99, Reason: "wrong tenant" } }),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a reassign without a reason", async () => {
+    const res = await handlers.upsertOccupancy(
+      makeRequest({ ...validBody, Reassign: { FromTenantId: 2, Reason: "  " } }),
+      ctx,
+    );
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });
 

@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledgerActor", () => ({
+  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 const auth = require("../auth") as {
   extractToken:         jest.Mock;
   requireRole:          jest.Mock;
@@ -66,9 +72,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
   createRequestConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   getCachedTenantList:         jest.Mock;
@@ -101,13 +110,31 @@ function makeRequest(
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 
+const ledger = require("../ledger") as { record: jest.Mock };
+const CONNECTION = { id: "conn" };
+const ROW_VERSION = "00000000000007d1";
+
+/** The tenant row upsertRegisterTenant reads under UPDLOCK before an update. */
+function lockedRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    BuildingId: 3,
+    Expiry: null,
+    RowVersion: Buffer.from(ROW_VERSION, "hex"),
+    Status: "current",
+    TenantId: 7,
+    UpdatedAt: new Date("2026-10-01T02:00:00Z"),
+    UpdatedByName: "Earlier Editor",
+    ...over,
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   auth.extractToken.mockReturnValue("mock-token");
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createRequestConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue(CONNECTION);
   db.closeConnection.mockImplementation(() => undefined);
   cache.getCachedTenantList.mockReturnValue(null);
   cache.getCachedTenantDetail.mockReturnValue(null);
@@ -312,13 +339,14 @@ describe("upsertRegisterTenant", () => {
 
   it("updates an existing tenant on the happy path", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
-        { TenantId: 7, BuildingId: 3, LegalName: "Renamed", Status: "active" },
+        { TenantId: 7, BuildingId: 3, LegalName: "Renamed", Status: "current" },
       ]);
 
     const res = await handlers.upsertRegisterTenant(
-      makeRequest({ TenantId: 7, LegalName: "Renamed", Status: "active" }),
+      makeRequest({ TenantId: 7, LegalName: "Renamed", Status: "current" }),
       ctx,
     );
     expect(res.status).toBe(200);
@@ -326,6 +354,7 @@ describe("upsertRegisterTenant", () => {
       ([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"),
     );
     expect(updateCall).toBeDefined();
+    expect(db.commitTransaction).toHaveBeenCalled();
   });
 
   it("returns 404 when the tenant disappears after upsert", async () => {
@@ -342,6 +371,7 @@ describe("upsertRegisterTenant", () => {
 
   it("fires planner resolve when Status becomes vacated", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
         { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "vacated" },
@@ -360,9 +390,10 @@ describe("upsertRegisterTenant", () => {
 
   it("fires planner resolve when Expiry is supplied", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
-        { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "active", Expiry: new Date("2027-06-30") },
+        { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", Expiry: new Date("2027-06-30") },
       ]);
 
     await handlers.upsertRegisterTenant(
@@ -374,15 +405,17 @@ describe("upsertRegisterTenant", () => {
 
   it("does NOT fire planner resolve on a plain update", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
-        { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "active" },
+        { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current" },
       ]);
 
-    await handlers.upsertRegisterTenant(
+    const res = await handlers.upsertRegisterTenant(
       makeRequest({ TenantId: 7, Comments: "just updating a note" }),
       ctx,
     );
+    expect(res.status).toBe(200);
     expect(planner.resolveActivePlannerTasks).not.toHaveBeenCalled();
   });
 
@@ -393,6 +426,168 @@ describe("upsertRegisterTenant", () => {
       ctx,
     );
     expect(res.status).toBe(500);
+  });
+});
+
+// ── upsertRegisterTenant: write integrity (PLAN WP23a) ──────────────────────
+
+describe("upsertRegisterTenant — write integrity", () => {
+  const storedRow = (over: Record<string, unknown> = {}) => [
+    { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
+  ];
+  const updateSql = (): string | undefined =>
+    (db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) =>
+      sql.includes("UPDATE dbo.Tenants"),
+    ) as [unknown, string] | undefined)?.[1];
+
+  it("reads the row under an update lock inside a transaction", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Comments: "x", RowVersion: ROW_VERSION }), ctx);
+    expect(db.beginTransaction).toHaveBeenCalled();
+    expect(db.executeQuery.mock.calls[0][1]).toMatch(/WITH \(UPDLOCK, ROWLOCK\)/);
+  });
+
+  it("returns 409 naming who changed it when the RowVersion is stale, and writes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([
+      lockedRow({ RowVersion: Buffer.from("00000000000007d2", "hex"), UpdatedByName: "Priya Accounts" }),
+    ]);
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, Comments: "mine", RowVersion: ROW_VERSION }),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { error: string; conflict: { changedBy: string; rowVersion: string } };
+    expect(body.error).toMatch(/Priya Accounts/);
+    expect(body.conflict.changedBy).toBe("Priya Accounts");
+    expect(body.conflict.rowVersion).toBe("00000000000007d2");
+    expect(updateSql()).toBeUndefined();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("accepts the RowVersion case-insensitively", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, Comments: "x", RowVersion: ROW_VERSION.toUpperCase() }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("returns 400 for a malformed RowVersion", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, RowVersion: "abc" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("does not store a re-sent derived holdover status (expiry passed, stored current)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ Expiry: new Date("2020-06-30T00:00:00Z"), Status: "current" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, Status: "holdover", Comments: "edited after expiry" }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(updateSql()).toBeDefined();
+    expect(updateSql()).not.toMatch(/Status = @Status/);
+    expect(updateSql()).toMatch(/Comments = @Comments/);
+  });
+
+  it("reads holdover only while the expiry has passed, so extending it reads current", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ Expiry: new Date("2020-06-30T00:00:00Z") })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ Expiry: new Date("2031-06-30T00:00:00Z") }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Expiry: "2031-06-30" }), ctx);
+    expect((res.jsonBody as { tenant: { status: string } }).tenant.status).toBe("current");
+  });
+
+  it("stores an explicit status change", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ Status: "holdover", Expiry: new Date("2031-06-30T00:00:00Z") })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Status: "current" }), ctx);
+    expect(updateSql()).toMatch(/Status = @Status/);
+  });
+
+  it("skips the UPDATE entirely when nothing would change", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce(storedRow());
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Status: "current" }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateSql()).toBeUndefined();
+    expect(db.commitTransaction).toHaveBeenCalled();
+  });
+
+  it("ledgers schedule-term changes as schedule.terms_edit in the write's transaction and bumps ScheduleVersion", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ FixedReviewPercent: 3, ReviewType: "Fixed 3%" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, FixedReviewPercent: 3.5, ReviewType: "Fixed 3%", RowVersion: ROW_VERSION }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(updateSql()).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    const [tx, entry] = ledger.record.mock.calls[0];
+    expect(tx).toBe(CONNECTION);
+    expect(entry).toMatchObject({
+      action: "schedule.terms_edit",
+      actor: { kind: "user", name: "Test User" },
+      after: { fixedReviewPercent: 3.5 },
+      before: { fixedReviewPercent: 3 },
+      buildingId: 3,
+      subject: { id: 7, type: "tenancy" },
+      tenantId: 7,
+    });
+    // Unchanged terms are not part of the record.
+    expect(entry.after).not.toHaveProperty("reviewType");
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("does not ledger or bump ScheduleVersion when no schedule term changes", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ RentPerAnnum: 120000 })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, RentPerAnnum: 120000, Comments: "x" }), ctx);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(updateSql()).not.toMatch(/ScheduleVersion/);
+  });
+
+  it("rolls the edit back when the ledger write fails", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ RentPerAnnum: 100000 })])
+      .mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, RentPerAnnum: 110000 }), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("exposes rowVersion and scheduleVersion on the tenant", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ RowVersion: Buffer.from("00000000000007d1", "hex"), ScheduleVersion: 4 }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Comments: "x" }), ctx);
+    const { tenant } = res.jsonBody as { tenant: { rowVersion: string; scheduleVersion: number } };
+    expect(tenant.rowVersion).toBe("00000000000007d1");
+    expect(tenant.scheduleVersion).toBe(4);
   });
 });
 

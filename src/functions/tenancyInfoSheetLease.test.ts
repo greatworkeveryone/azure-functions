@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledgerActor", () => ({
+  ledgerActorFor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 jest.mock("../rateLimit", () => ({
   checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }),
 }));
@@ -70,9 +76,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
   createRequestConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   invalidateTenantAndBuilding: jest.Mock;
@@ -657,5 +666,73 @@ describe("deleteMiscFee", () => {
 
     const res = await handlers.deleteMiscFee(makeRequest(validBody), ctx);
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Misc fee writes: versioned and ledgered (PLAN WP23a) ────────────────────
+
+describe("misc fee writes — versioned and ledgered", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const fee = { baseAmount: 100, commencedAt: "2025-01-01", frequency: "monthly", id: FEE_ID, title: "Cleaning" };
+
+  it("ledgers an upsert as schedule.manual_edit on the misc fee, before commit", async () => {
+    const stored = [{ ...fee, baseAmount: 90 }];
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify(stored), ScheduleVersion: 2 }])
+      .mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000000bb", "hex"), ScheduleVersion: 3 }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ rowVersion: "00000000000000bb", scheduleVersion: 3 });
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { baseAmount: 100, id: FEE_ID },
+      before: { baseAmount: 90, id: FEE_ID },
+      subject: { id: FEE_ID, type: "misc_fee" },
+      tenantId: 1,
+    });
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("returns 409 when the fee is written against a stale ScheduleVersion", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ MiscFees: "[]", ScheduleVersion: 6, UpdatedByName: "Sam" }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toMatch(/Sam/);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("accepts cpiValuePrev on a misc fee CPI override (the dialog sends it)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: null, ScheduleVersion: 0 }])
+      .mockResolvedValueOnce([]);
+    const withOverride = {
+      ...fee,
+      rateSteps: [{ cpiValue: 140.2, cpiValuePrev: 136.1, effectiveFrom: "2026-07-01", id: FEE_ID_2, methodKind: "cpi" }],
+    };
+    const res = await handlers.upsertMiscFee(makeRequest({ BuildingId: 5, fee: withOverride, TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    const saved = (res.jsonBody as { fees: Array<{ rateSteps: Array<{ cpiValuePrev?: number }> }> }).fees[0];
+    expect(saved.rateSteps[0].cpiValuePrev).toBe(136.1);
+  });
+
+  it("ledgers a deleted fee with its before snapshot", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify([fee]), ScheduleVersion: 1 }])
+      .mockResolvedValueOnce([]);
+    await handlers.deleteMiscFee(makeRequest({ BuildingId: 5, feeId: FEE_ID, TenantId: 1 }), ctx);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: null,
+      before: { id: FEE_ID, title: "Cleaning" },
+      subject: { id: FEE_ID, type: "misc_fee" },
+    });
   });
 });
