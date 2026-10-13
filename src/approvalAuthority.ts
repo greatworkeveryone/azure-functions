@@ -159,7 +159,23 @@ export const ATTRIBUTED_APPROVAL_ROLES: Readonly<Record<Subject, readonly string
  * directorRequired is always false.
  */
 export function decideAuthority(input: AuthorityInput, facts: AuthorityFacts): AuthorityResult {
-  throw new Error(`decideAuthority(${input.subject}, ${facts.today}): not implemented yet (WP43a)`);
+  const threshold = directorThresholdOf(facts);
+  if (facts.isResidence === true) {
+    return {
+      directorRequired: false,
+      effectiveDirectorThreshold: threshold,
+      isResidence: true,
+      route: residenceRoute(facts, input.at ?? facts.today),
+    };
+  }
+  const amount = routingAmount(input.amount);
+  const directorRequired = isDirectorRequired(amount, threshold);
+  return {
+    directorRequired,
+    effectiveDirectorThreshold: threshold,
+    isResidence: false,
+    route: directorRequired ? [directorStep("director_threshold")] : ladderRoute(input.subject, amount, facts.limits),
+  };
 }
 
 /**
@@ -189,5 +205,210 @@ export function decideAuthority(input: AuthorityInput, facts: AuthorityFacts): A
  * subject, own or attributed (null = unlimited, undefined = holds none).
  */
 export function canApprove(identity: Identity, input: AuthorityInput, facts: AuthorityFacts): ApprovalDecision {
-  throw new Error(`canApprove(${identity.roles.join(",")}, ${input.subject}, ${facts.today}): not implemented yet (WP43a)`);
+  const roles = rolesOf(identity);
+  const amount = routingAmount(input.amount);
+  const own = heldLimit(roles, SUBJECT_ELIGIBLE_ROLES[input.subject], facts.limits);
+  const attributed = heldLimit(roles, ATTRIBUTED_APPROVAL_ROLES[input.subject], facts.limits);
+  const deny = (reason: DenyReason): ApprovalDecision => ({
+    actorLimit: higherLimit(own, attributed),
+    allowed: false,
+    reason,
+  });
+
+  if (input.subject === "purchase_order" && input.createdBy && samePerson(identity, input.createdBy)) {
+    return deny("creator");
+  }
+  if (facts.isResidence === true) {
+    const day = input.at ?? facts.today;
+    const isApprover = activeApprovers(facts.residenceApprovers, day).some((approver) => samePerson(identity, approver));
+    const isFallback = facts.residenceDirectorFallback === true && roles.includes(DIRECTOR);
+    return isApprover || isFallback ? { allowed: true, basis: "residence" } : deny("not_residence_approver");
+  }
+  if (isDirectorRequired(amount, directorThresholdOf(facts))) {
+    return roles.includes(DIRECTOR) ? { allowed: true, basis: "own_authority" } : deny("director_required");
+  }
+  if (covers(own, amount)) return { allowed: true, basis: "own_authority" };
+  if (!covers(attributed, amount)) {
+    return deny(own === undefined && attributed === undefined ? "not_eligible" : "over_limit");
+  }
+
+  const named = input.attribution?.attributedTo;
+  if (!named) return deny("attribution_required");
+  if (!hasIdentifier(named) || samePerson(identity, named)) return deny("attribution_invalid");
+  const theirs = canApprove(named, { ...input, attribution: undefined }, facts);
+  if (!theirs.allowed || theirs.basis !== "own_authority") return deny("attribution_invalid");
+  return {
+    allowed: true,
+    attributedTo: { displayName: named.displayName, email: named.email, userId: named.userId },
+    basis: "attributed",
+  };
+}
+
+// ── Internals ────────────────────────────────────────────────────────────────
+
+const ADMIN = "admin";
+const DIRECTOR = "director";
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+interface Person {
+  email?: string;
+  userId?: number;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function routingAmount(amount: number): number {
+  return isFiniteNumber(amount) && amount > 0 ? amount : 0;
+}
+
+function directorThresholdOf(facts: AuthorityFacts): number | null {
+  if (isFiniteNumber(facts.directorThreshold) && facts.directorThreshold > 0) return facts.directorThreshold;
+  let highest: number | null = null;
+  for (const row of facts.limits) {
+    if (row.role === DIRECTOR || !isFiniteNumber(row.limit)) continue;
+    if (highest === null || row.limit > highest) highest = row.limit;
+  }
+  return highest;
+}
+
+function isDirectorRequired(amount: number, threshold: number | null): boolean {
+  return amount > 0 && threshold !== null && amount > threshold;
+}
+
+/** A role's row: null = unlimited, undefined = no usable row. */
+function rowLimit(role: string, limits: readonly RoleLimit[]): number | null | undefined {
+  let highest: number | undefined;
+  for (const row of limits) {
+    if (row.role !== role) continue;
+    if (row.limit === null) return null;
+    if (isFiniteNumber(row.limit) && (highest === undefined || row.limit > highest)) highest = row.limit;
+  }
+  return highest;
+}
+
+function covers(limit: number | null | undefined, amount: number): boolean {
+  return limit === null || (limit !== undefined && limit >= amount);
+}
+
+function rolesOf(identity: Identity): readonly string[] {
+  return Array.isArray(identity.roles) ? identity.roles : [];
+}
+
+function holdsRole(roles: readonly string[], role: string): boolean {
+  if (roles.includes(role)) return true;
+  if (role === ADMIN) return false;
+  if (roles.includes(DIRECTOR)) return true;
+  if (role === "facilities") return roles.includes("facilities_manager");
+  return role === "accounts" && roles.includes("accounts_manager");
+}
+
+/** Highest limit among the candidate roles the actor holds: null = unlimited, undefined = holds none. */
+function heldLimit(roles: readonly string[], candidates: readonly string[], limits: readonly RoleLimit[]): number | null | undefined {
+  let highest: number | undefined;
+  for (const role of candidates) {
+    if (!holdsRole(roles, role)) continue;
+    const limit = role === DIRECTOR ? null : rowLimit(role, limits);
+    if (limit === null) return null;
+    const value = limit === undefined ? 0 : limit;
+    highest = highest === undefined ? value : Math.max(highest, value);
+  }
+  return highest;
+}
+
+function higherLimit(left: number | null | undefined, right: number | null | undefined): number | null | undefined {
+  if (left === null || right === null) return null;
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+}
+
+function emailKey(email: string | undefined): string {
+  return typeof email === "string" ? email.trim().toLowerCase() : "";
+}
+
+function hasIdentifier(person: Person): boolean {
+  return isFiniteNumber(person.userId) || emailKey(person.email) !== "";
+}
+
+function samePerson(left: Person, right: Person): boolean {
+  if (isFiniteNumber(left.userId) && left.userId === right.userId) return true;
+  const email = emailKey(left.email);
+  return email !== "" && email === emailKey(right.email);
+}
+
+function compareText(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function directorStep(basis: Approver["basis"]): Approver {
+  return { basis, kind: "role", limit: null, role: DIRECTOR };
+}
+
+function ladderRank(role: string | undefined): number {
+  const index = role === undefined ? -1 : ROLE_ORDER.indexOf(role);
+  return index === -1 ? ROLE_ORDER.length : index;
+}
+
+function byLimitThenLadder(a: Approver, b: Approver): number {
+  if (a.limit !== b.limit) {
+    if (a.limit === null) return 1;
+    if (b.limit === null) return -1;
+    return a.limit - b.limit;
+  }
+  return ladderRank(a.role) - ladderRank(b.role) || compareText(a.role ?? "", b.role ?? "");
+}
+
+function ladderRoute(subject: Subject, amount: number, limits: readonly RoleLimit[]): Approver[] {
+  const levels: Approver[] = [];
+  for (const role of SUBJECT_ELIGIBLE_ROLES[subject]) {
+    if (role === ADMIN || role === DIRECTOR) continue;
+    const limit = rowLimit(role, limits);
+    if (limit !== undefined && covers(limit, amount)) levels.push({ basis: "role_limit", kind: "role", limit, role });
+  }
+  return [...levels.sort(byLimitThenLadder), directorStep("role_limit")];
+}
+
+function relationshipRank(relationship: string): number {
+  if (relationship === "occupant" || relationship === "property_manager") return 0;
+  return relationship === "owner" ? 1 : -1;
+}
+
+function isActiveOn(approver: ResidenceApprover, day: string): boolean {
+  const from = approver.from ?? "";
+  const until = approver.to ?? "";
+  if (from !== "" && !(ISO_DAY.test(from) && from <= day)) return false;
+  return until === "" || (ISO_DAY.test(until) && day <= until);
+}
+
+function byRelationshipThenName(a: ResidenceApprover, b: ResidenceApprover): number {
+  return (
+    relationshipRank(a.relationship) - relationshipRank(b.relationship) ||
+    compareText(a.displayName.toLowerCase(), b.displayName.toLowerCase()) ||
+    compareText(a.displayName, b.displayName) ||
+    a.userId - b.userId
+  );
+}
+
+/** Approvers active on `day`, in route order. A malformed day matches nobody. */
+function activeApprovers(approvers: readonly ResidenceApprover[], day: string): ResidenceApprover[] {
+  if (!ISO_DAY.test(day)) return [];
+  return approvers
+    .filter((approver) => relationshipRank(approver.relationship) >= 0 && isActiveOn(approver, day))
+    .sort(byRelationshipThenName);
+}
+
+function residenceRoute(facts: AuthorityFacts, day: string): Approver[] {
+  const route = activeApprovers(facts.residenceApprovers, day).map(
+    (approver): Approver => ({
+      basis: "residence",
+      displayName: approver.displayName,
+      kind: "user",
+      limit: null,
+      userId: approver.userId,
+    }),
+  );
+  return facts.residenceDirectorFallback === true ? [...route, directorStep("residence")] : route;
 }
