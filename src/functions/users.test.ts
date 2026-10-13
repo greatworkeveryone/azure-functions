@@ -21,10 +21,13 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../db", () => ({
+  beginTransaction:               jest.fn(),
   closeConnection:                jest.fn(),
+  commitTransaction:              jest.fn(),
   createRequestConnection:        jest.fn(),
   createServiceRequestConnection: jest.fn(),
   executeQuery:                   jest.fn(),
+  rollbackTransaction:            jest.fn(),
 }));
 
 jest.mock("../sentry", () => ({
@@ -44,9 +47,12 @@ const auth = require("../auth") as {
 };
 
 const db = require("../db") as {
+  beginTransaction:               jest.Mock;
   closeConnection:                jest.Mock;
+  commitTransaction:              jest.Mock;
   createServiceRequestConnection: jest.Mock;
   executeQuery:                   jest.Mock;
+  rollbackTransaction:            jest.Mock;
 };
 
 const sentry = require("../sentry") as {
@@ -77,6 +83,9 @@ beforeEach(() => {
   rateLimit._resetRateLimitForTests();
   db.createServiceRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
+  db.beginTransaction.mockResolvedValue(undefined);
+  db.commitTransaction.mockResolvedValue(undefined);
+  db.rollbackTransaction.mockResolvedValue(undefined);
   auth.verifiedIdentityFromRequest.mockResolvedValue({
     oid: "caller-oid-123",
     name: "Test User",
@@ -262,6 +271,188 @@ describe("upsertAppUser", () => {
     const res = await upsertAppUser(req, ctx);
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("upsertAppUser decision ledger (WP19b)", () => {
+  type SqlCall = [unknown, string, { name: string; value: unknown }[]];
+  const callsMatching = (needle: string): SqlCall[] =>
+    (db.executeQuery.mock.calls as SqlCall[]).filter(([, sql]) => sql.includes(needle));
+  const paramValue = (call: SqlCall, name: string) => call[2].find((p) => p.name === name)?.value;
+
+  /** Call order of every executeQuery whose SQL contains `needle`. */
+  const orderOf = (needle: string): number[] =>
+    (db.executeQuery.mock.calls as SqlCall[])
+      .map(([, sql], i) => (sql.includes(needle) ? db.executeQuery.mock.invocationCallOrder[i] : -1))
+      .filter((n) => n >= 0);
+
+  beforeEach(() => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    auth.requireRole.mockResolvedValue(null);
+  });
+
+  describe("changing a role", () => {
+    const changeRole = () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid" }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockResolvedValueOnce([]); // audit
+      return upsertAppUser(makeRequest({ userId: 7, role: "facilities" }), ctx);
+    };
+
+    it("writes the ledger row, with the person who decided and both roles", async () => {
+      const res = await changeRole();
+
+      expect(res.status).toBe(200);
+      const [ledger] = callsMatching("INSERT INTO dbo.DecisionLedger");
+      expect(ledger).toBeDefined();
+      expect(paramValue(ledger, "Action")).toBe("user.role_change");
+      expect(paramValue(ledger, "SubjectType")).toBe("app_user");
+      expect(paramValue(ledger, "SubjectId")).toBe("7");
+      expect(paramValue(ledger, "ActorName")).toBe("Test User");
+      expect(paramValue(ledger, "ActorRole")).toBe("admin");
+      expect(paramValue(ledger, "ActorUserId")).toBe(3);
+      expect(paramValue(ledger, "IsException")).toBe(true);
+      expect(JSON.parse(paramValue(ledger, "Before") as string)).toEqual({ role: "user" });
+      expect(JSON.parse(paramValue(ledger, "After") as string)).toEqual({ role: "facilities" });
+    });
+
+    it("runs the UPDATE, the audit row and the ledger row inside one transaction, then commits", async () => {
+      await changeRole();
+
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      for (const write of ["UPDATE dbo.AppUsers", "INSERT INTO dbo.UserRoleAudit", "INSERT INTO dbo.DecisionLedger"]) {
+        const [at] = orderOf(write);
+        expect(at).toBeGreaterThan(begun);
+        expect(at).toBeLessThan(committed);
+      }
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rolls the role change back when the ledger write fails: no ledger row, no decision", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid" }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockResolvedValueOnce([]) // audit
+        .mockRejectedValueOnce(new Error("ledger unavailable")); // ledger INSERT
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities" }), ctx);
+
+      expect(res.status).toBe(500);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      // Both of the other writes were inside the transaction that was rolled back.
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const rolledBack = db.rollbackTransaction.mock.invocationCallOrder[0];
+      for (const write of ["UPDATE dbo.AppUsers", "INSERT INTO dbo.UserRoleAudit"]) {
+        const [at] = orderOf(write);
+        expect(at).toBeGreaterThan(begun);
+        expect(at).toBeLessThan(rolledBack);
+      }
+    });
+
+    it("refuses to continue (and rolls back) when the ledger entry itself is invalid", async () => {
+      auth.rolesForRequest.mockResolvedValue([]);
+      auth.requireRole.mockResolvedValue(null);
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid" }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities" }), ctx);
+
+      expect(res.status).toBe(500);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    });
+  });
+
+  it("writes no ledger row when the role is unchanged (an isActive-only edit)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+      .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid" }])
+      .mockResolvedValueOnce([]); // UPDATE
+
+    const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    expect(callsMatching("INSERT INTO dbo.UserRoleAudit")).toHaveLength(0);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("ledgers clearing a role (null) as a change", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+      .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    await upsertAppUser(makeRequest({ userId: 7, role: null }), ctx);
+
+    const [ledger] = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(JSON.parse(paramValue(ledger, "Before") as string)).toEqual({ role: "facilities" });
+    expect(JSON.parse(paramValue(ledger, "After") as string)).toEqual({ role: null });
+  });
+
+  describe("inviting a user with a role", () => {
+    const invite = () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([]) // duplicate-email check
+        .mockResolvedValueOnce([{ UserID: 99 }]) // INSERT
+        .mockResolvedValueOnce([]); // audit
+      return upsertAppUser(makeRequest({ email: "jane@co.com", role: "facilities" }), ctx);
+    };
+
+    it("ledgers the initial role against the new user's id", async () => {
+      const res = await invite();
+
+      expect(res.status).toBe(201);
+      const [ledger] = callsMatching("INSERT INTO dbo.DecisionLedger");
+      expect(paramValue(ledger, "SubjectId")).toBe("99");
+      expect(JSON.parse(paramValue(ledger, "Before") as string)).toEqual({ role: null });
+      expect(JSON.parse(paramValue(ledger, "After") as string)).toEqual({ role: "facilities" });
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("rolls the invite back when the ledger write fails", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ UserID: 99 }])
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(new Error("ledger unavailable"));
+
+      const res = await upsertAppUser(makeRequest({ email: "jane@co.com", role: "facilities" }), ctx);
+
+      expect(res.status).toBe(500);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const rolledBack = db.rollbackTransaction.mock.invocationCallOrder[0];
+      const [insertAt] = orderOf("INSERT INTO dbo.AppUsers");
+      expect(insertAt).toBeGreaterThan(begun);
+      expect(insertAt).toBeLessThan(rolledBack);
+    });
+  });
+
+  it("writes no ledger row for an invite without a role", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ UserID: 99 }]);
+
+    const res = await upsertAppUser(makeRequest({ email: "jane@co.com" }), ctx);
+
+    expect(res.status).toBe(201);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 });
 

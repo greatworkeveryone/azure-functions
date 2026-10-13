@@ -39,9 +39,22 @@ export type LedgerActor =
   /** A timer, webhook or other unattended process, named by its function. */
   | { kind: "system"; name: string };
 
+/** A second person a decision is attributed to: the manager a plain staff
+ *  member discussed it with. They did not decide; their name and role are
+ *  recorded so the decision can be traced to both people. */
+export interface LedgerAttribution {
+  /** AppUsers.UserID when the named person is a Floorplan user. */
+  userId: number | null;
+  name: string;
+  role: string;
+}
+
 export interface LedgerEntryInput {
   action: LedgerAction;
   actor: LedgerActor;
+  /** Required by actions whose registry entry sets `attributionRequired`.
+   *  Must not be the actor. */
+  attributedTo?: LedgerAttribution;
   /** Denormalised scope so history filters without joins (§3.12 indexes). */
   buildingId?: number | null;
   /** What the system computed when a person chose something else. */
