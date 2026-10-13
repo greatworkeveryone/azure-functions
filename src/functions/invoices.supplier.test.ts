@@ -27,6 +27,11 @@ jest.mock("../auth", () => {
     extractToken: jest.fn().mockReturnValue("mock-token"),
     requireRole: jest.fn().mockResolvedValue(null),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
+    verifiedIdentityFromRequest: jest.fn().mockResolvedValue({
+      email: "ann@randazzo.properties",
+      name: "Ann Accounts",
+      oid: "ann-oid",
+    }),
   };
 });
 
@@ -142,5 +147,15 @@ describe("upsertJobInvoice — SupplierInvoiceNumber", () => {
   it("rejects an over-long number on update too", async () => {
     const res = await upsertJobInvoice(makeRequest({ JobInvoiceID: 5, SupplierInvoiceNumber: "x".repeat(300) }), ctx);
     expect(res.status).toBe(400);
+  });
+});
+
+describe("upsertJobInvoice — actor", () => {
+  it("records the token's name as CreatedBy, ignoring the body", async () => {
+    await upsertJobInvoice(makeRequest({ JobID: 42, Amount: 100, CreatedBy: "Someone Else" }), ctx);
+
+    const values = calls().flatMap((c: { params: Record<string, unknown> }) => Object.values(c.params));
+    expect(values).not.toContain("Someone Else");
+    expect(calls().find((c: { sql: string }) => /INSERT INTO JobInvoices/.test(c.sql))!.params.CreatedBy).toBe("Ann Accounts");
   });
 });

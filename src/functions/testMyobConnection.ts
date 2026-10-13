@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { myobRequest, userActor } from "../myob-api-log";
 import { getValidMyobAccessToken, MyobNotLinkedError } from "../myob-auth";
 
 // Verifies the MYOB integration end-to-end by:
@@ -45,6 +46,10 @@ async function testMyobConnection(
   const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const actor = userActor(identity, [AppRole.ADMIN]);
+
   const apiBase = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
   const clientId = process.env.MYOB_CLIENT_ID ?? "";
   const clientSecret = process.env.MYOB_CLIENT_SECRET ?? "";
@@ -81,7 +86,7 @@ async function testMyobConnection(
 
   let accessToken: string;
   try {
-    accessToken = await getValidMyobAccessToken(token);
+    accessToken = await getValidMyobAccessToken(token, actor);
   } catch (error) {
     if (error instanceof MyobNotLinkedError) {
       const body: TestResponse = {
@@ -103,21 +108,23 @@ async function testMyobConnection(
 
   try {
     context.log("Testing MYOB connection — fetching company files");
-    const response = await fetch(`${apiBase}/`, {
-      method: "GET",
+    const response = await myobRequest({
+      actor,
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "x-myobapi-key": clientId,
         "x-myobapi-version": "v2",
         Accept: "application/json",
       },
+      method: "GET",
+      purpose: "test-connection",
+      url: `${apiBase}/`,
     });
 
     if (!response.ok) {
-      const text = await response.text();
       const body: TestResponse = {
         ok: false,
-        message: `MYOB API ${response.status} ${response.statusText}: ${text.slice(0, 300)}`,
+        message: `MYOB API ${response.status} ${response.statusText}: ${response.text.slice(0, 300)}`,
         configStatus,
         linked: true,
         configuredFileId: companyFileId || null,
@@ -128,7 +135,7 @@ async function testMyobConnection(
       return { status: 200, jsonBody: body };
     }
 
-    const files = (await response.json()) as MyobCompanyFile[];
+    const files = response.json<MyobCompanyFile[]>();
     const configured = companyFileId
       ? files.find((file) => file.Id === companyFileId) ?? null
       : null;

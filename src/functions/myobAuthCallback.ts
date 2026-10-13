@@ -59,7 +59,12 @@ async function myobAuthCallback(
   try {
     // The callback runs without a user JWT — MYOB drives this redirect —
     // so token storage falls back to the service-principal SQL connection.
-    await exchangeCodeForTokens({ code, authorizedBy: null, sqlToken: null });
+    await exchangeCodeForTokens({
+      actor: { kind: "system", name: "myobAuthCallback" },
+      authorizedBy: null,
+      code,
+      sqlToken: null,
+    });
     return htmlPage(
       `<h1>MYOB connected.</h1><p>You can close this tab. Reload the admin page to see the linked status.</p>`,
     );

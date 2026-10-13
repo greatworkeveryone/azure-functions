@@ -65,10 +65,9 @@ needs `CREATE USER [x] FROM EXTERNAL PROVIDER` plus `db_datareader` and
 
 Two things the lever does **not** cover:
 
-- `myobWebhook` in `payments.ts` is deliberately outside it. It previously read
-  a long-lived `SYSTEM_DB_TOKEN` app setting and silently returned
-  `{ processed: 0 }` whenever that was unset, so there is no old behaviour worth
-  restoring.
+- The MYOB audit log (`dbo.MyobApiLog`, `src/myob-api-log.ts`) is written over
+  `createServiceRequestConnection()` whatever the lever says, because the log
+  must be writable regardless of who the caller is.
 - Three jobs pass `MYBUILDINGS_BEARER_TOKEN` — a static myBuildings API key, not
   an Entra SQL token — where a SQL token is expected:
   `syncAllWorkRequests.ts`, `parseEmails.ts` and `graphWebhook.ts`. Under the

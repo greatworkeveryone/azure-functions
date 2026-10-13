@@ -3,7 +3,7 @@ import { TYPES } from "tedious";
 import { buildUpdateSet, createRequestConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
@@ -79,16 +79,33 @@ interface UpsertJobInvoiceBody {
   InvoicePDFBlobName?: string;
   SourceEmailID?: number;
   ReceivedAt?: string;
+  /** @deprecated ignored — identity comes from the token */
   CreatedBy?: string;
   /** The supplier's own invoice number, verbatim (trimmed), at most 255 characters. */
   SupplierInvoiceNumber?: string | null;
 }
-interface ApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
-interface DirectorApproveJobInvoiceBody { JobInvoiceID: number; ApprovedBy?: string }
+interface ApproveJobInvoiceBody {
+  JobInvoiceID: number;
+  /** @deprecated ignored — identity comes from the token */
+  ApprovedBy?: string;
+}
+interface DirectorApproveJobInvoiceBody {
+  JobInvoiceID: number;
+  /** @deprecated ignored — identity comes from the token */
+  ApprovedBy?: string;
+}
 interface UndoDirectorApproveJobInvoiceBody { JobInvoiceID: number }
-interface RejectJobInvoiceBody { JobInvoiceID: number; RejectedBy?: string }
+interface RejectJobInvoiceBody {
+  JobInvoiceID: number;
+  /** @deprecated ignored — identity comes from the token */
+  RejectedBy?: string;
+}
 interface DeleteJobInvoiceBody { JobInvoiceID: number }
-interface MarkJobInvoiceMyobCreatedBody { JobInvoiceID: number; CreatedBy?: string }
+interface MarkJobInvoiceMyobCreatedBody {
+  JobInvoiceID: number;
+  /** @deprecated ignored — identity comes from the token */
+  CreatedBy?: string;
+}
 interface UnmarkJobInvoiceMyobCreatedBody { JobInvoiceID: number }
 
 // POST /api/syncInvoices - fetch from myBuildings and upsert into SQL
@@ -332,6 +349,9 @@ export async function upsertJobInvoice(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as UpsertJobInvoiceBody;
@@ -346,7 +366,6 @@ export async function upsertJobInvoice(
       InvoicePDFBlobName,
       SourceEmailID,
       ReceivedAt,
-      CreatedBy,
       SupplierInvoiceNumber,
     } = body ?? {};
 
@@ -400,7 +419,7 @@ export async function upsertJobInvoice(
             { name: "InvoicePDFBlobName", type: TYPES.NVarChar, value: InvoicePDFBlobName ?? null },
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
           ],
         );
@@ -414,7 +433,7 @@ export async function upsertJobInvoice(
            VALUES (@JobID, @CreatedBy, @Text, 'invoice_added', @InvoiceID);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "Text", type: TYPES.NVarChar, value: `Added invoice ${invoiceNumber}${contractorLabel}${amountLabel}` },
             { name: "InvoiceID", type: TYPES.Int, value: newId },
           ],
@@ -516,7 +535,7 @@ export async function upsertJobInvoice(
          VALUES (@JobID, @CreatedBy, @Text, 'invoice_edited', @InvoiceID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           {
             name: "Text",
             type: TYPES.NVarChar,
@@ -549,7 +568,7 @@ export async function upsertJobInvoice(
            VALUES (@JobID, @CreatedBy, @Text, 'invoice_unapproved', @InvoiceID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
@@ -582,7 +601,7 @@ export async function upsertJobInvoice(
 }
 
 // ── POST /api/approveJobInvoice ───────────────────────────────────────────────
-// Body: { JobInvoiceID, ApprovedBy? }
+// Body: { JobInvoiceID } — the approver is the verified caller, never the body.
 // Checks approval limits against the caller's roles before approving.
 // Does NOT auto-transition the job — the job stays in its current status so a
 // person decides when it's truly done (e.g. after marking it created in MYOB).
@@ -597,10 +616,13 @@ async function approveJobInvoice(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as ApproveJobInvoiceBody;
-    const { JobInvoiceID, ApprovedBy } = body ?? {};
+    const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
@@ -643,7 +665,7 @@ async function approveJobInvoice(
       [
         { name: "Id", type: TYPES.Int, value: JobInvoiceID },
         { name: "Status", type: TYPES.NVarChar, value: newStatus },
-        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "ApprovedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     await executeQuery(
@@ -652,7 +674,7 @@ async function approveJobInvoice(
        VALUES (@JobID, @CreatedBy, @Text, @EventType, @InvoiceID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         {
           name: "Text",
           type: TYPES.NVarChar,
@@ -689,7 +711,7 @@ async function approveJobInvoice(
             stage: "invoice",
             amount,
             currency: "AUD",
-            triggeredBy: ApprovedBy ?? undefined,
+            triggeredBy: identity.name,
           });
           await executeQuery(
             bgConnection,
@@ -702,7 +724,7 @@ async function approveJobInvoice(
               { name: "Id", type: TYPES.Int, value: JobInvoiceID },
               { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
               { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-              { name: "SentBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+              { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
             ],
           );
         } catch (emailErr: any) {
@@ -746,7 +768,7 @@ async function approveJobInvoice(
 }
 
 // ── POST /api/directorApproveJobInvoice ──────────────────────────────────────
-// Body: { JobInvoiceID, ApprovedBy }
+// Body: { JobInvoiceID } — the approver is the verified caller, never the body.
 // Stage-2 (Director) approval. Caller MUST hold the 'director' role — Admin
 // does not double for this on purpose (separation of duties). The invoice must
 // be at Status='approved'; this flips it to 'director_approved' and stamps the
@@ -767,10 +789,13 @@ async function directorApproveJobInvoice(
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as DirectorApproveJobInvoiceBody;
-    const { JobInvoiceID, ApprovedBy } = body ?? {};
+    const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
@@ -807,7 +832,7 @@ async function directorApproveJobInvoice(
        WHERE JobInvoiceID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: JobInvoiceID },
-        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "ApprovedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     await executeQuery(
@@ -816,7 +841,7 @@ async function directorApproveJobInvoice(
        VALUES (@JobID, @CreatedBy, @Text, 'invoice_director_approved', @InvoiceID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Director-approved invoice ${invoiceNumber}` },
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
@@ -980,7 +1005,7 @@ async function getApprovalLimits(
 }
 
 // ── POST /api/rejectJobInvoice ────────────────────────────────────────────────
-// Body: { JobInvoiceID, RejectedBy? }
+// Body: { JobInvoiceID } — the actor is the verified caller, never the body.
 
 async function rejectJobInvoice(
   request: HttpRequest,
@@ -992,10 +1017,13 @@ async function rejectJobInvoice(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as RejectJobInvoiceBody;
-    const { JobInvoiceID, RejectedBy } = body ?? {};
+    const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
@@ -1022,7 +1050,7 @@ async function rejectJobInvoice(
        VALUES (@JobID, @CreatedBy, @Text, 'invoice_rejected', @InvoiceID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: RejectedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Rejected invoice ${invoiceNumber}` },
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
@@ -1048,7 +1076,7 @@ async function rejectJobInvoice(
 }
 
 // ── POST /api/markJobInvoiceMyobCreated ──────────────────────────────────────
-// Body: { JobInvoiceID, CreatedBy? }
+// Body: { JobInvoiceID } — the actor is the verified caller, never the body.
 // Records that this invoice has been entered into MYOB. Currently only used
 // by outgoing (oncharge) invoices via the InvoicesStep — incoming contractor
 // invoices may opt in later when the direct integration lands.
@@ -1063,10 +1091,13 @@ async function markJobInvoiceMyobCreated(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as MarkJobInvoiceMyobCreatedBody;
-    const { JobInvoiceID, CreatedBy } = body ?? {};
+    const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
@@ -1109,7 +1140,7 @@ async function markJobInvoiceMyobCreated(
        WHERE JobInvoiceID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: JobInvoiceID },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     await executeQuery(
@@ -1118,7 +1149,7 @@ async function markJobInvoiceMyobCreated(
        VALUES (@JobID, @CreatedBy, @Text, 'invoice_myob_created', @InvoiceID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Marked invoice ${invoiceNumber} as created in MYOB` },
         { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
       ],
@@ -1263,11 +1294,15 @@ async function deleteJobInvoice(
 }
 
 // ── POST /api/resendDirectorInvoiceEmail ─────────────────────────────────────
-// Body: { JobInvoiceID, TriggeredBy? }
+// Body: { JobInvoiceID } — the sender is the verified caller, never the body.
 // Re-fires the director packet email for an invoice already in the
 // awaiting-director state (Status='approved'). Updates the audit columns.
 
-interface ResendDirectorInvoiceEmailBody { JobInvoiceID: number; TriggeredBy?: string }
+interface ResendDirectorInvoiceEmailBody {
+  JobInvoiceID: number;
+  /** @deprecated ignored — identity comes from the token */
+  TriggeredBy?: string;
+}
 
 async function resendDirectorInvoiceEmail(
   request: HttpRequest,
@@ -1283,10 +1318,13 @@ async function resendDirectorInvoiceEmail(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as ResendDirectorInvoiceEmailBody;
-    const { JobInvoiceID, TriggeredBy } = body ?? {};
+    const { JobInvoiceID } = body ?? {};
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
@@ -1315,7 +1353,7 @@ async function resendDirectorInvoiceEmail(
       stage: "invoice",
       amount,
       currency: "AUD",
-      triggeredBy: TriggeredBy ?? undefined,
+      triggeredBy: identity.name,
     });
     await executeQuery(
       connection,
@@ -1328,7 +1366,7 @@ async function resendDirectorInvoiceEmail(
         { name: "Id", type: TYPES.Int, value: JobInvoiceID },
         { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
         { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-        { name: "SentBy", type: TYPES.NVarChar, value: TriggeredBy ?? null },
+        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
 

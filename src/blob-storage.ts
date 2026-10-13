@@ -13,6 +13,39 @@ import {
 } from "@azure/storage-blob";
 import { randomUUID } from "crypto";
 
+/**
+ * The blob host (no port) that an `AzureWebJobsStorage` connection string points
+ * at: `BlobEndpoint` when present, otherwise `{AccountName}.blob.{EndpointSuffix}`.
+ * Null when the string yields neither (e.g. `UseDevelopmentStorage=true`).
+ *
+ * Connection-string keys are matched case-insensitively and split on the first
+ * `=` only, because base64 account keys end in `=` padding.
+ */
+export function blobHostFromConnectionString(connectionString: string | undefined): string | null {
+  if (!connectionString) return null;
+  const parts = new Map<string, string>();
+  for (const segment of connectionString.split(";")) {
+    const eq = segment.indexOf("=");
+    if (eq <= 0) continue;
+    parts.set(segment.slice(0, eq).trim().toLowerCase(), segment.slice(eq + 1).trim());
+  }
+
+  const endpoint = parts.get("blobendpoint");
+  if (endpoint) {
+    try {
+      const host = new URL(endpoint).hostname.toLowerCase();
+      if (host) return host;
+    } catch {
+      // Malformed BlobEndpoint: fall back to the account name below.
+    }
+  }
+
+  const account = parts.get("accountname");
+  const suffix = parts.get("endpointsuffix");
+  if (account && suffix) return `${account}.blob.${suffix}`.toLowerCase();
+  return null;
+}
+
 const CONTAINER_NAME = process.env.ATTACHMENTS_CONTAINER_NAME ?? "wr-attachments";
 const SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 

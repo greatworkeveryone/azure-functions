@@ -24,6 +24,11 @@ jest.mock("../auth", () => {
     extractToken: jest.fn().mockReturnValue("mock-token"),
     requireRole: jest.fn().mockResolvedValue(null),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
+    verifiedIdentityFromRequest: jest.fn().mockResolvedValue({
+      email: "fred@randazzo.properties",
+      name: "Fred Facilities",
+      oid: "fred-oid",
+    }),
   };
 });
 

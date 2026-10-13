@@ -11,7 +11,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
+import { blobHostFromConnectionString, uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
@@ -37,15 +37,33 @@ const VACANCY_ROLES = [
 // known-public CDN hosts. Without this we'd happily fetch
 // http://169.254.169.254/... (the IMDS endpoint), arbitrary internal hosts, or
 // attacker-controlled domains. Allowlist is env-driven so deploys can extend it
-// without code changes; defaults to the public blob CDN host.
-const DEFAULT_VACANCY_IMAGE_HOSTS = "cmctest.blob.core.windows.net";
+// without code changes; by default it is the blob host of the storage account
+// the app itself uses (AzureWebJobsStorage), so it follows the real account
+// instead of a name baked into the code.
+export function allowedVacancyImageHosts(
+  env: { AzureWebJobsStorage?: string; VACANCY_IMAGE_ALLOWED_HOSTS?: string },
+  warn: (message: string) => void = console.warn,
+): ReadonlySet<string> {
+  let hosts = env.VACANCY_IMAGE_ALLOWED_HOSTS;
+  if (hosts === undefined) {
+    const derived = blobHostFromConnectionString(env.AzureWebJobsStorage);
+    if (!derived) {
+      warn(
+        "vacancies: no image host is allowed — VACANCY_IMAGE_ALLOWED_HOSTS is unset and AzureWebJobsStorage has no blob host. Vacancy image URLs will be rejected.",
+      );
+    }
+    hosts = derived ?? "";
+  }
+  return new Set(
+    hosts
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter((h) => h.length > 0),
+  );
+}
 
-const ALLOWED_VACANCY_IMAGE_HOSTS: ReadonlySet<string> = new Set(
-  (process.env.VACANCY_IMAGE_ALLOWED_HOSTS ?? DEFAULT_VACANCY_IMAGE_HOSTS)
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter((h) => h.length > 0),
-);
+// Evaluated once at load, so a missing host is logged once.
+const ALLOWED_VACANCY_IMAGE_HOSTS: ReadonlySet<string> = allowedVacancyImageHosts(process.env);
 
 // Reject any URL that resolves (textually) to a private/loopback IP literal.
 // Defence-in-depth — the allowlist check already filters out IP literal hosts

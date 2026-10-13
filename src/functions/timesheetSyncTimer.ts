@@ -1,14 +1,11 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { createServiceConnection, closeConnection, executeQuery } from "../db";
-import { TYPES } from "tedious";
 import { Sentry } from "../sentry";
 
 // ── Timer trigger: Sunday midnight (UTC) ─────────────────────────────────────
-// Syncs all newly approved timesheets (both facilities and accounts) to MYOB.
-// Uses service credentials (client_credentials flow) since there is no user
-// token in a timer context.
+// Reports approved timesheets not yet in MYOB. Sending them is not built.
 
-async function timesheetSyncTimer(
+export async function timesheetSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
@@ -25,34 +22,14 @@ async function timesheetSyncTimer(
        WHERE Approved = 1 AND SentToMyobDate IS NULL`,
     );
 
-    context.log(`timesheetSyncTimer: ${pending.length} timesheets pending sync`);
-
-    let synced = 0;
-    const errors: string[] = [];
-
-    for (const row of pending) {
-      try {
-        // TODO: call MYOB API here when credentials are available
-        // await sendToMyob(row);
-
-        await executeQuery(
-          connection,
-          "UPDATE dbo.Timesheets SET SentToMyobDate = GETUTCDATE() WHERE TimesheetID = @Id",
-          [{ name: "Id", type: TYPES.Int, value: row.TimesheetID }],
-        );
-        synced++;
-        context.log(`timesheetSyncTimer: synced TimesheetID ${row.TimesheetID} (${row.UserDisplayName})`);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        errors.push(`TimesheetID ${row.TimesheetID}: ${message}`);
-        context.error(`timesheetSyncTimer error for TimesheetID ${row.TimesheetID}:`, message);
-        Sentry.captureException(err, {
-          extra: { context: `timesheetSyncTimer row TimesheetID=${row.TimesheetID}` },
-        });
-      }
-    }
-
-    context.log(`timesheetSyncTimer: complete — synced=${synced}, errors=${errors.length}`);
+    // Nothing is sent to MYOB yet, so nothing is stamped: SentToMyobDate on a
+    // row that never reached MYOB would be a false record in the CFO's audit
+    // trail and would stop the row ever being sent once sending is built. When
+    // it is, send through myob-client (logged, behind MYOB_WRITES_ENABLED) and
+    // stamp only after MYOB confirms.
+    context.log(
+      `timesheetSyncTimer: ${pending.length} approved timesheets awaiting MYOB sync; sending is not built yet, nothing stamped`,
+    );
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     context.error("timesheetSyncTimer: fatal error:", message);

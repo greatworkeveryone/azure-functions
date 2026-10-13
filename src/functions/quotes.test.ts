@@ -34,6 +34,17 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../approval-limits-db", () => ({ getCachedApprovalLimits: jest.fn() }));
+jest.mock("../jobStatusHelpers", () => ({ advanceJobStatus: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../jobPlannerSync", () => ({
+  syncJobActionTriggersStandalone: jest.fn().mockResolvedValue(undefined),
+}));
+jest.mock("../email/director-emails", () => ({
+  sendDirectorApprovalEmail: jest.fn().mockResolvedValue({
+    sentAt: new Date("2026-10-13T00:00:00Z"),
+    sentTo: ["carlo@randazzo.properties"],
+  }),
+}));
 jest.mock("../quote-decisions", () => ({
   QUOTE_COLUMNS: "QuoteID",
   approveDirectorQuote: jest.fn(),
@@ -41,7 +52,15 @@ jest.mock("../quote-decisions", () => ({
 }));
 
 const auth = require("../auth") as { rolesForRequest: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
-const db = require("../db") as { commitTransaction: jest.Mock; rollbackTransaction: jest.Mock; beginTransaction: jest.Mock };
+const db = require("../db") as {
+  beginTransaction: jest.Mock;
+  commitTransaction: jest.Mock;
+  executeQuery: jest.Mock;
+  rollbackTransaction: jest.Mock;
+};
+const limitsDb = require("../approval-limits-db") as { getCachedApprovalLimits: jest.Mock };
+const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest.Mock };
+const directorEmails = require("../email/director-emails") as { sendDirectorApprovalEmail: jest.Mock };
 const planner = require("../planner") as { resolveActivePlannerTasks: jest.Mock };
 const decisions = require("../quote-decisions") as { approveDirectorQuote: jest.Mock; rejectQuote: jest.Mock };
 
@@ -50,6 +69,25 @@ const { directorApproveQuote, rejectQuote } = require("./quotes") as {
   directorApproveQuote: Handler;
   rejectQuote: Handler;
 };
+
+// approveQuote / resendDirectorQuoteEmail are registered, not exported. Capture
+// them now: beforeEach's clearAllMocks wipes app.http's recorded calls.
+const { app } = require("@azure/functions") as { app: { http: jest.Mock } };
+const registered = (name: string): Handler => {
+  const hit = app.http.mock.calls.find((c: unknown[]) => c[0] === name);
+  if (!hit) throw new Error(`handler ${name} not registered`);
+  return (hit[1] as { handler: Handler }).handler;
+};
+const approveQuote = registered("approveQuote");
+const resendDirectorQuoteEmail = registered("resendDirectorQuoteEmail");
+const bodyActorHandlers: [string, string][] = [
+  ["upsertQuote", "CreatedBy"],
+  ["unapproveQuote", "UnapprovedBy"],
+  ["completeQuote", "CompletedBy"],
+  ["uncompleteQuote", "UncompletedBy"],
+  ["validateQuote", "ValidatedBy"],
+];
+const bodyActorHandler = Object.fromEntries(bodyActorHandlers.map(([name]) => [name, registered(name)]));
 
 function makeRequest(body: unknown): HttpRequest {
   return {
@@ -64,6 +102,7 @@ const storedQuote = { QuoteID: 7, Status: "rejected" };
 
 beforeEach(() => {
   jest.clearAllMocks();
+  db.executeQuery.mockReset().mockResolvedValue([]);
   decisions.rejectQuote.mockResolvedValue({ jobId: 9, ok: true, previousStatus: "pending", quote: storedQuote });
   decisions.approveDirectorQuote.mockResolvedValue({ jobId: 9, ok: true, quote: { ...storedQuote, Status: "approved" } });
 });
@@ -198,5 +237,139 @@ describe("directorApproveQuote", () => {
     expect(res.status).toBe(500);
     expect(db.rollbackTransaction).toHaveBeenCalled();
     expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+type SqlRoute = [RegExp, Record<string, unknown>[]];
+
+function routeSql(routes: SqlRoute[]): void {
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+    const hit = routes.find(([re]) => re.test(sql));
+    return hit ? hit[1] : [];
+  });
+}
+
+function sqlCalls(): { params: Record<string, unknown>; sql: string }[] {
+  return db.executeQuery.mock.calls.map((c: unknown[]) => ({
+    params: Object.fromEntries(
+      ((c[2] as { name: string; value: unknown }[] | undefined) ?? []).map((p) => [p.name, p.value]),
+    ),
+    sql: String(c[1]),
+  }));
+}
+
+const flush = async () => {
+  for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r));
+};
+
+describe("approveQuote", () => {
+  const quoteRow = (amount: number): SqlRoute => [
+    /SELECT JobID, QuoteNumber, ContractorName, Amount/,
+    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1" }],
+  ];
+  const stored: SqlRoute = [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7, Status: "approved" }]];
+
+  beforeEach(() => {
+    auth.rolesForRequest.mockResolvedValue(["accounts_manager"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 1000, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+  });
+
+  it("records the token's name on the quote, job, event and status transition, ignoring ApprovedBy", async () => {
+    routeSql([quoteRow(500), stored]);
+
+    const res = await approveQuote(makeRequest({ ApprovedBy: "Someone Else", QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(200);
+    const calls = sqlCalls();
+    expect(calls.find((c) => /UPDATE Quotes\s+SET Status = @Status/.test(c.sql))?.params.ApprovedBy).toBe("Carlo Randazzo");
+    expect(calls.find((c) => /UPDATE Jobs\s+SET ApprovedQuoteID/.test(c.sql))?.params.ApprovedBy).toBe("Carlo Randazzo");
+    expect(calls.find((c) => /INSERT INTO JobEvents/.test(c.sql))?.params.CreatedBy).toBe("Carlo Randazzo");
+    expect(statusHelpers.advanceJobStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      9,
+      expect.anything(),
+      expect.objectContaining({ actor: "Carlo Randazzo" }),
+    );
+    expect(calls.flatMap((c) => Object.values(c.params))).not.toContain("Someone Else");
+  });
+
+  it("stamps the director email trigger and SentBy with the token's name", async () => {
+    routeSql([quoteRow(5000), stored]);
+
+    await approveQuote(makeRequest({ ApprovedBy: "Someone Else", QuoteID: 7 }), ctx);
+    await flush();
+
+    expect(directorEmails.sendDirectorApprovalEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ triggeredBy: "Carlo Randazzo" }),
+    );
+    expect(sqlCalls().find((c) => /DirectorEmailSentBy = @SentBy/.test(c.sql))?.params.SentBy).toBe("Carlo Randazzo");
+  }, 30_000);
+
+  it("401s without touching the database when the token has no verified identity", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+
+    const res = await approveQuote(makeRequest({ ApprovedBy: "Someone Else", QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(401);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe("resendDirectorQuoteEmail", () => {
+  it("uses the token's name for triggeredBy and DirectorEmailSentBy, ignoring TriggeredBy", async () => {
+    routeSql([
+      [/SELECT JobID, Amount, ISNULL\(Currency/, [{ Amount: 5000, Currency: "AUD", JobID: 9, Status: "awaiting_director" }]],
+      [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7 }]],
+    ]);
+
+    const res = await resendDirectorQuoteEmail(makeRequest({ QuoteID: 7, TriggeredBy: "Someone Else" }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(directorEmails.sendDirectorApprovalEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ triggeredBy: "Carlo Randazzo" }),
+    );
+    expect(sqlCalls().find((c) => /DirectorEmailSentBy = @SentBy/.test(c.sql))?.params.SentBy).toBe("Carlo Randazzo");
+  });
+
+  it("401s when the token has no verified identity", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+
+    const res = await resendDirectorQuoteEmail(makeRequest({ QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("quote handlers that used to read the actor from the body", () => {
+  const anyQuote = {
+    Amount: 100, ApprovedAt: null, ContractorName: "Acme", JobID: 9, QuoteID: 7,
+    QuoteNumber: "QT-9-1", Status: "approved",
+  };
+
+  it.each(bodyActorHandlers)("%s records the token's name and ignores body %s", async (name, field) => {
+    const row = { ...anyQuote, NextSeq: 1, Status: name === "uncompleteQuote" ? "completed" : "approved" };
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /OUTPUT INSERTED|^\s*SELECT/i.test(sql) ? [row] : [],
+    );
+
+    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy.
+    const ids = name === "upsertQuote" ? { JobID: 9 } : { JobID: 9, QuoteID: 7 };
+    await bodyActorHandler[name](makeRequest({ ...ids, [field]: "Someone Else" }), ctx);
+
+    const values = sqlCalls().flatMap((c) => Object.values(c.params));
+    expect(values).not.toContain("Someone Else");
+    expect(values).toContain("Carlo Randazzo");
+  });
+
+  it.each(bodyActorHandlers)("%s 401s without a verified identity", async (name) => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+
+    const res = await bodyActorHandler[name](makeRequest({ JobID: 9, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(401);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });

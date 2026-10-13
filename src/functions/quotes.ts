@@ -120,6 +120,9 @@ async function upsertQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -134,7 +137,6 @@ async function upsertQuote(
       QuotePDFBlobName,
       SourceEmailID,
       ReceivedAt,
-      CreatedBy,
     } = body ?? {};
 
     connection = await createRequestConnection(token);
@@ -195,7 +197,7 @@ async function upsertQuote(
             { name: "QuotePDFBlobName", type: TYPES.NVarChar, value: QuotePDFBlobName ?? null },
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           ],
         );
         const newId = inserted[0].QuoteID as number;
@@ -215,7 +217,7 @@ async function upsertQuote(
            VALUES (@JobID, @CreatedBy, @Text, 'quote_added', @QuoteID);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
@@ -227,7 +229,7 @@ async function upsertQuote(
         // First quote attached advances New/Quote → (Awaiting Approval, facilities).
         // Helper no-ops on subsequent quotes (status already past Quote).
         await advanceJobStatus(connection, JobID, JobEvent.QUOTE_RECEIVED, {
-          actor: CreatedBy ?? null,
+          actor: identity.name,
           quoteId: newId,
           note: `Quote ${quoteNumber} received — awaiting approval.`,
         });
@@ -310,7 +312,7 @@ async function upsertQuote(
          VALUES (@JobID, @CreatedBy, @Text, 'quote_edited', @QuoteID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
           {
             name: "Text",
             type: TYPES.NVarChar,
@@ -354,7 +356,7 @@ async function upsertQuote(
            VALUES (@JobID, @CreatedBy, @Text, 'status_change', @QuoteID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
-            { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
@@ -389,10 +391,16 @@ async function upsertQuote(
 }
 
 // ── POST /api/approveQuote ───────────────────────────────────────────────────
-// Body: { QuoteID, ApprovedBy }
+// Body: { QuoteID } — the approver is the verified caller, never the body.
 // Sets Quotes.Status='approved' + ApprovedBy/ApprovedAt, and mirrors the id
 // onto Jobs.ApprovedQuoteID / ApprovedBy / ApprovedAt so the Payment step
 // sees the approval without re-reading the Quotes table.
+
+interface ApproveQuoteBody {
+  QuoteID?: unknown;
+  /** @deprecated ignored — identity comes from the token */
+  ApprovedBy?: string;
+}
 
 async function approveQuote(
   request: HttpRequest,
@@ -404,10 +412,14 @@ async function approveQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const approvedBy = identity.name;
+
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { QuoteID, ApprovedBy } = body ?? {};
+    const body = ((await request.json()) ?? {}) as ApproveQuoteBody;
+    const { QuoteID } = body;
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -458,7 +470,7 @@ async function approveQuote(
       [
         { name: "Id", type: TYPES.Int, value: QuoteID },
         { name: "Status", type: TYPES.NVarChar, value: newStatus },
-        { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
       ],
     );
 
@@ -475,7 +487,7 @@ async function approveQuote(
         [
           { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "ApprovedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+          { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
         ],
       );
     } else {
@@ -507,7 +519,7 @@ async function approveQuote(
        VALUES (@JobID, @CreatedBy, @Text, @EventType, @QuoteID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: approvedBy },
         { name: "Text", type: TYPES.NVarChar, value: eventText },
         { name: "EventType", type: TYPES.NVarChar, value: eventType },
         { name: "QuoteID", type: TYPES.Int, value: QuoteID },
@@ -519,7 +531,7 @@ async function approveQuote(
     // in (Awaiting Approval, facilities) until the final approval lands.
     if (newStatus === "approved") {
       await advanceJobStatus(connection, jobId, JobEvent.QUOTE_APPROVED, {
-        actor: ApprovedBy ?? null,
+        actor: approvedBy,
         quoteId: QuoteID,
         note: `Quote ${quoteLabel} approved — ready for PO.`,
       });
@@ -542,7 +554,7 @@ async function approveQuote(
             stage: "quote",
             amount,
             currency,
-            triggeredBy: ApprovedBy ?? undefined,
+            triggeredBy: approvedBy,
           });
           await executeQuery(
             bgConnection,
@@ -555,7 +567,7 @@ async function approveQuote(
               { name: "Id", type: TYPES.Int, value: QuoteID },
               { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
               { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-              { name: "SentBy", type: TYPES.NVarChar, value: ApprovedBy ?? null },
+              { name: "SentBy", type: TYPES.NVarChar, value: approvedBy },
             ],
           );
         } catch (emailErr: any) {
@@ -660,7 +672,7 @@ export async function rejectQuote(
 }
 
 // ── POST /api/unapproveQuote ─────────────────────────────────────────────────
-// Body: { QuoteID, UnapprovedBy }
+// Body: { QuoteID } — the actor is the verified caller.
 // Reverts an approved quote back to 'pending' — clears Quote approval
 // stamps, nulls Jobs.ApprovedQuoteID (only if this quote was the approved
 // one — guards against a race where a different quote got approved in the
@@ -677,10 +689,13 @@ async function unapproveQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { QuoteID, UnapprovedBy } = body ?? {};
+    const { QuoteID } = body ?? {};
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -745,7 +760,7 @@ async function unapproveQuote(
        VALUES (@JobID, @CreatedBy, @Text, 'quote_unapproved', @QuoteID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: UnapprovedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         {
           name: "Text",
           type: TYPES.NVarChar,
@@ -770,7 +785,7 @@ async function unapproveQuote(
 }
 
 // ── POST /api/completeQuote ──────────────────────────────────────────────────
-// Body: { QuoteID, CompletedBy }
+// Body: { QuoteID } — the actor is the verified caller.
 // Marks an approved quote as 'completed' — work has been done and the job is
 // waiting on an invoice. Only allowed from 'approved'; logs a job event.
 
@@ -784,10 +799,13 @@ async function completeQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { QuoteID, CompletedBy } = body ?? {};
+    const { QuoteID } = body ?? {};
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -819,7 +837,7 @@ async function completeQuote(
        VALUES (@JobID, @CreatedBy, @Text, 'quote_completed', @QuoteID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CompletedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Marked work completed on ${quoteNumber}` },
         { name: "QuoteID", type: TYPES.Int, value: QuoteID },
       ],
@@ -845,7 +863,7 @@ async function completeQuote(
 }
 
 // ── POST /api/uncompleteQuote ────────────────────────────────────────────────
-// Body: { QuoteID, UncompletedBy }
+// Body: { QuoteID } — the actor is the verified caller.
 // Reverts a completed quote back to 'approved' — "Work remaining".
 
 async function uncompleteQuote(
@@ -858,10 +876,13 @@ async function uncompleteQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { QuoteID, UncompletedBy } = body ?? {};
+    const { QuoteID } = body ?? {};
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -893,7 +914,7 @@ async function uncompleteQuote(
        VALUES (@JobID, @CreatedBy, @Text, 'comment', @QuoteID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: UncompletedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         { name: "Text", type: TYPES.NVarChar, value: `Work remaining on ${quoteNumber} — marked back in progress` },
         { name: "QuoteID", type: TYPES.Int, value: QuoteID },
       ],
@@ -976,7 +997,7 @@ async function deleteQuote(
 }
 
 // ── POST /api/validateQuote ──────────────────────────────────────────────────
-// Body: { QuoteID, ValidatedBy }
+// Body: { QuoteID } — the actor is the verified caller.
 // Stamps AIValidatedAt / AIValidatedBy so the UI's "AI Generated — must be
 // validated" tag clears. Idempotent: re-validating just refreshes the
 // timestamp and validator.
@@ -991,10 +1012,13 @@ async function validateQuote(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { QuoteID, ValidatedBy } = body ?? {};
+    const { QuoteID } = body ?? {};
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -1019,7 +1043,7 @@ async function validateQuote(
        WHERE QuoteID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: QuoteID },
-        { name: "ValidatedBy", type: TYPES.NVarChar, value: ValidatedBy ?? null },
+        { name: "ValidatedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     await executeQuery(
@@ -1029,7 +1053,7 @@ async function validateQuote(
        VALUES (@JobID, @CreatedBy, @Text, 'comment', @QuoteID);`,
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: ValidatedBy ?? null },
+        { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
         {
           name: "Text",
           type: TYPES.NVarChar,
@@ -1144,11 +1168,15 @@ export async function directorApproveQuote(
 app.http("directorApproveQuote", { methods: ["POST"], authLevel: "anonymous", handler: directorApproveQuote });
 
 // ── POST /api/resendDirectorQuoteEmail ───────────────────────────────────────
-// Body: { QuoteID, TriggeredBy }
+// Body: { QuoteID } — the sender is the verified caller, never the body.
 // Re-fires the director packet email for a quote currently awaiting director
 // approval — used when the initial best-effort send failed or got missed.
 
-interface ResendDirectorQuoteEmailBody { QuoteID: number; TriggeredBy?: string }
+interface ResendDirectorQuoteEmailBody {
+  QuoteID: number;
+  /** @deprecated ignored — identity comes from the token */
+  TriggeredBy?: string;
+}
 
 async function resendDirectorQuoteEmail(
   request: HttpRequest,
@@ -1162,10 +1190,13 @@ async function resendDirectorQuoteEmail(
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as ResendDirectorQuoteEmailBody;
-    const { QuoteID, TriggeredBy } = body ?? {};
+    const { QuoteID } = body ?? {};
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
@@ -1195,7 +1226,7 @@ async function resendDirectorQuoteEmail(
       stage: "quote",
       amount,
       currency,
-      triggeredBy: TriggeredBy ?? undefined,
+      triggeredBy: identity.name,
     });
     await executeQuery(
       connection,
@@ -1208,7 +1239,7 @@ async function resendDirectorQuoteEmail(
         { name: "Id", type: TYPES.Int, value: QuoteID },
         { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
         { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-        { name: "SentBy", type: TYPES.NVarChar, value: TriggeredBy ?? null },
+        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
 

@@ -1,6 +1,7 @@
 // MYOB AccountRight Live API client.
 //
-// All calls go through Azure Functions — the frontend never touches MYOB.
+// All calls go through Azure Functions — the frontend never touches MYOB, and
+// every HTTP call is made, logged and write-gated by myobRequest().
 // The access token is fetched from dbo.MyobAuth on every call (refreshed
 // automatically when within 60s of expiry). Authorize via the admin page.
 //
@@ -14,51 +15,60 @@
 //   MYOB_BANK_ACCOUNT_UID  — UID of the bank/payment account used for outgoing payments
 //   MYOB_WEB_APP_URL       — base URL of MYOB web app for "View on MYOB" links
 //                            (default: https://app.myob.com)
-//   MYOB_WEBHOOK_KEY       — secret used to validate incoming webhook HMAC signatures
+//   MYOB_WRITES_ENABLED    — must be exactly "true" for any write to reach MYOB
+//                            (see myob-api-log.ts)
 
-import { createHmac, timingSafeEqual } from "crypto";
 import { getValidMyobAccessToken } from "./myob-auth";
+import { myobRequest, type MyobActor } from "./myob-api-log";
 
 const MYOB_API_BASE        = process.env.MYOB_API_BASE ?? "https://api.myob.com/accountright";
 const MYOB_COMPANY_FILE_ID = process.env.MYOB_COMPANY_FILE_ID ?? "";
 const MYOB_EXPENSE_ACCOUNT_UID = process.env.MYOB_EXPENSE_ACCOUNT_UID ?? "";
 const MYOB_BANK_ACCOUNT_UID    = process.env.MYOB_BANK_ACCOUNT_UID ?? "";
 const MYOB_WEB_APP_URL     = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
-export const MYOB_WEBHOOK_KEY  = process.env.MYOB_WEBHOOK_KEY ?? "";
 
-const base = () => `${MYOB_API_BASE}/${MYOB_COMPANY_FILE_ID}`;
+export const myobBase = () => `${MYOB_API_BASE}/${MYOB_COMPANY_FILE_ID}`;
 
-async function myobHeaders(sqlToken: string | null): Promise<Record<string, string>> {
+export async function myobHeaders(
+  sqlToken: string | null,
+  actor: MyobActor,
+  correlationId?: string,
+): Promise<Record<string, string>> {
   return {
-    Authorization: `Bearer ${await getValidMyobAccessToken(sqlToken)}`,
+    Authorization: `Bearer ${await getValidMyobAccessToken(sqlToken, actor, correlationId)}`,
     "Content-Type": "application/json",
     "x-myobapi-key": process.env.MYOB_CLIENT_ID ?? "",
     "x-myobapi-version": "v2",
   };
 }
 
-// ── Shared fetch ─────────────────────────────────────────────────────────────
+// ── Shared request ───────────────────────────────────────────────────────────
 
-async function myobFetch(
-  path: string,
-  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
-  body?: unknown,
-  sqlToken: string | null = null,
-): Promise<any> {
-  const url = `${base()}${path}`;
-  const response = await fetch(url, {
-    method,
-    headers: await myobHeaders(sqlToken),
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+export async function myobFetch(opts: {
+  actor: MyobActor;
+  body?: unknown;
+  correlationId?: string;
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  purpose: string;
+  sqlToken: string | null;
+}): Promise<any> {
+  const response = await myobRequest({
+    actor: opts.actor,
+    body: opts.body,
+    correlationId: opts.correlationId,
+    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    method: opts.method ?? "GET",
+    purpose: opts.purpose,
+    url: `${myobBase()}${opts.path}`,
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`MYOB API ${response.status} ${response.statusText}: ${text}`);
+    throw new Error(`MYOB API ${response.status} ${response.statusText}: ${response.text}`);
   }
 
   // 204 No Content on successful POST (MYOB returns the UID in Location header)
-  if (response.status === 204 || response.headers.get("content-length") === "0") {
+  if (response.status === 204 || response.text === "") {
     return null;
   }
 
@@ -82,10 +92,14 @@ export interface MyobBillResult {
  * @param contractorName — supplier display name (informational, not a MYOB contact lookup)
  * @param notes        — optional extra notes to append to the line description
  * @param referenceNumber — our internal payment reference (e.g. "PAY-42-1")
+ * @param actor        — who this call is on behalf of, for the MYOB audit log
+ * @param correlationId — links the log rows to a decision-ledger row
  */
 export async function createMyobBill(opts: {
+  actor: MyobActor;
   amount: number;
   contractorName?: string;
+  correlationId?: string;
   jobId: number;
   jobTitle: string;
   notes?: string;
@@ -101,10 +115,9 @@ export async function createMyobBill(opts: {
     .join(" · ");
 
   // POST returns 204 with Location header containing the new UID
-  const response = await fetch(`${base()}/Purchase/Bill/Service`, {
-    method: "POST",
-    headers: await myobHeaders(opts.sqlToken),
-    body: JSON.stringify({
+  const response = await myobRequest({
+    actor: opts.actor,
+    body: {
       Date: new Date().toISOString().slice(0, 10),
       Lines: [
         {
@@ -115,47 +128,60 @@ export async function createMyobBill(opts: {
         },
       ],
       Number: opts.referenceNumber,
-      // Supplier is optional here — MYOB will accept a bill without a contact.
-      // Wire up MYOB_SUPPLIER_UID per-contractor if you want proper supplier tracking.
-    }),
+      // No Supplier yet — see the MYOB_WRITES_ENABLED note above applyMyobPayment.
+    },
+    correlationId: opts.correlationId,
+    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    method: "POST",
+    purpose: "create-bill",
+    url: `${myobBase()}/Purchase/Bill/Service`,
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`MYOB createBill ${response.status}: ${text}`);
+    throw new Error(`MYOB createBill ${response.status}: ${response.text}`);
   }
 
   // The new resource UID is returned in the Location header:
   // Location: https://api.myob.com/accountright/{cfId}/Purchase/Bill/Service/{uid}
-  const location = response.headers.get("Location") ?? "";
-  const uid = location.split("/").pop() ?? "";
+  const uid = response.myobUid ?? "";
   const url = buildMyobBillUrl(uid);
 
   return { uid, url };
 }
 
+// MYOB_WRITES_ENABLED stays false until applyMyobPayment and createMyobBill are
+// corrected and verified against a real company file:
+//   1. The documented endpoint for paying a bill is POST /Purchase/SupplierPayment
+//      with Lines[{ Type: "Bill", Purchase: { UID }, AmountApplied }] plus
+//      PayFrom, Account and Supplier — not /Purchase/PaymentPurchase with Bills[].
+//   2. A Service Bill needs a Supplier; createMyobBill sends none.
 /**
  * Applies a payment against an existing Purchase Bill — marks it as paid in MYOB.
  * Called when the user clicks "Mark as paid" in the app.
  */
 export async function applyMyobPayment(opts: {
+  actor: MyobActor;
   billUid: string;
   amount: number;
+  correlationId?: string;
   paidDate?: Date;
   sqlToken: string | null;
 }): Promise<void> {
-  await myobFetch(
-    "/Purchase/PaymentPurchase",
-    "POST",
-    {
+  await myobFetch({
+    actor: opts.actor,
+    body: {
       Bills: [{ AmountApplied: opts.amount, UID: opts.billUid }],
       PaymentDate: (opts.paidDate ?? new Date()).toISOString().slice(0, 10),
       SupplierPaymentDetails: MYOB_BANK_ACCOUNT_UID
         ? { Account: { UID: MYOB_BANK_ACCOUNT_UID } }
         : undefined,
     },
-    opts.sqlToken,
-  );
+    correlationId: opts.correlationId,
+    method: "POST",
+    path: "/Purchase/PaymentPurchase",
+    purpose: "apply-payment",
+    sqlToken: opts.sqlToken,
+  });
 }
 
 /**
@@ -165,41 +191,3 @@ export async function applyMyobPayment(opts: {
 export function buildMyobBillUrl(uid: string): string {
   return `${MYOB_WEB_APP_URL}/app/#/In/Bills/AccountsPayable/Bill/${uid}`;
 }
-
-// ── Webhook validation ────────────────────────────────────────────────────────
-
-/**
- * Validates the HMAC-SHA256 signature MYOB attaches to every webhook delivery.
- * MYOB sends the signature in the `x-myob-hmac-sha256` header as a base64 string.
- *
- * Returns true if the signature matches (i.e. the request genuinely came from MYOB).
- */
-export function validateMyobWebhookSignature(
-  rawBody: string,
-  signatureHeader: string,
-): boolean {
-  if (!MYOB_WEBHOOK_KEY) return false;
-  const expected = createHmac("sha256", MYOB_WEBHOOK_KEY)
-    .update(rawBody, "utf8")
-    .digest("base64");
-  const a = Buffer.from(expected, "base64");
-  const b = Buffer.from(signatureHeader, "base64");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
-// ── Webhook event shapes ──────────────────────────────────────────────────────
-
-export interface MyobWebhookEvent {
-  CompanyFileId: string;
-  EntityUID: string;
-  EventType: string;
-  LastUpdated: string;
-}
-
-export interface MyobWebhookPayload {
-  Events: MyobWebhookEvent[];
-}
-
-/** Event types we act on. */
-export const MYOB_PAYMENT_APPLIED_EVENT = "PaymentPurchase.Created";
