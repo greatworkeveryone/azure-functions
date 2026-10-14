@@ -1,4 +1,6 @@
 /// <reference types="jest" />
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { HttpRequest, InvocationContext } from "@azure/functions";
 
 // SEC-05: the baseline `user` tier reads no email and no job attachment, and
@@ -149,6 +151,27 @@ describe("archiveEmail", () => {
       subject: { id: 4, type: "email" },
     }));
     expect(db.commitTransaction).toHaveBeenCalled();
+  });
+
+  it("stamps ArchivedBy and ArchivedAt on the email in the same transaction as the ledger row", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ EmailID: 4, MatchedJobID: null, PreviousStatus: "matched" }]);
+
+    await handler("archiveEmail")(request("facilities", { body: { EmailID: 4, ArchivedBy: "Mallory" } }), ctx);
+
+    const [, sql, params] = db.executeQuery.mock.calls[0] as [unknown, string, { name: string; value: unknown }[]];
+    expect(sql).toMatch(/ArchivedAt = SYSUTCDATETIME\(\)/);
+    expect(sql).toMatch(/ArchivedBy = @ArchivedBy/);
+    expect(params.find((p) => p.name === "ArchivedBy")?.value).toBe("Fay Facilities");
+    const order = (mock: jest.Mock) => mock.mock.invocationCallOrder[0];
+    expect(order(db.beginTransaction)).toBeLessThan(db.executeQuery.mock.invocationCallOrder[0]);
+    expect(db.executeQuery.mock.invocationCallOrder[0]).toBeLessThan(order(ledger.record));
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("has migration 133 adding both columns, nullable and guarded", () => {
+    const sql = readFileSync(join(__dirname, "..", "..", "migrations", "133_email_archive_columns.sql"), "utf8");
+    expect(sql).toMatch(/IF COL_LENGTH\('dbo\.Emails', 'ArchivedBy'\) IS NULL\s+ALTER TABLE dbo\.Emails ADD ArchivedBy NVARCHAR\(256\) NULL;/);
+    expect(sql).toMatch(/IF COL_LENGTH\('dbo\.Emails', 'ArchivedAt'\) IS NULL\s+ALTER TABLE dbo\.Emails ADD ArchivedAt DATETIME2 NULL;/);
   });
 
   it("returns 404 and ledgers nothing when the email does not exist", async () => {

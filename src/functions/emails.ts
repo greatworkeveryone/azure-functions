@@ -447,8 +447,9 @@ async function promoteEmailToQuote(
 // ── POST /api/archiveEmail ──────────────────────────────────────────────────
 // Body: { EmailID: number }
 // Sets Status = 'archived' and stamps ProcessedAt so the email leaves the
-// active inbox without being tied to a job/quote/invoice. Who archived it is
-// ledgered (email.archive) in the same transaction (SEC-05).
+// active inbox without being tied to a job/quote/invoice. Who archived it and
+// when are stamped on the row (ArchivedBy/ArchivedAt, migration 133) and
+// ledgered (email.archive), all in one transaction (SEC-05).
 
 async function archiveEmail(
   request: HttpRequest,
@@ -489,10 +490,14 @@ async function archiveEmail(
     try {
       const archived = await executeQuery(
         connection,
-        `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
+        `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME(),
+                ArchivedAt = SYSUTCDATETIME(), ArchivedBy = @ArchivedBy
          OUTPUT INSERTED.EmailID, INSERTED.MatchedJobID, DELETED.Status AS PreviousStatus
          WHERE EmailID = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: EmailID }],
+        [
+          { name: "Id", type: TYPES.Int, value: EmailID },
+          { name: "ArchivedBy", type: TYPES.NVarChar, value: identity.name },
+        ],
       );
       if (archived.length === 0) {
         await rollbackTransaction(connection);
