@@ -5,8 +5,9 @@
 -- the record back. Payload is the exact JSON sent; PayloadHash is what the
 -- preview showed; Rendered is the record in the CFO's words.
 --
---   State: proposed -> approved -> pushed -> verified, or exception (MYOB said
---   no, the outcome is unknown, or the read-back differs), or withdrawn.
+--   State: proposed -> pushed (approved and being sent) -> verified, or
+--   exception (MYOB said no, the outcome is unknown, or the read-back differs),
+--   or withdrawn; approved is an approval Floorplan's own controls held back.
 --   TargetUid: for an update, the Floorplan-created MYOB record it amends.
 --   LastReadBackAt, MyobRowVersion, MyobStatus, MyobSnapshot, Discrepancy:
 --   kept current by the read-back sync (plan M10).
@@ -73,7 +74,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_MyobProposals_State' A
 GO
 
 -- One live proposal per subject and operation: a second "Propose" while one is
--- open is refused by the database as well as by the code.
+-- open or being sent is refused by the database as well as by the code.
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_MyobProposals_OpenSubject' AND object_id = OBJECT_ID('dbo.MyobProposals'))
-  EXEC('CREATE UNIQUE INDEX UX_MyobProposals_OpenSubject ON dbo.MyobProposals (SubjectType, SubjectId, Operation) WHERE State IN (N''proposed'', N''approved'')');
+  EXEC('CREATE UNIQUE INDEX UX_MyobProposals_OpenSubject ON dbo.MyobProposals (SubjectType, SubjectId, Operation) WHERE State IN (N''proposed'', N''approved'', N''pushed'')');
 GO

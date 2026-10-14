@@ -30,6 +30,7 @@ const MAY_REACH_PIPELINE = new Set([
   "myob/proposalHttp.ts",
   "myob/propose.ts",
   "myob/send.ts",
+  "myob/sendOutcome.ts",
   "myob/sendSteps.ts",
   "myob/withdraw.ts",
 ]);

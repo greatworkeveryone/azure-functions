@@ -102,4 +102,20 @@ describe("buildDraft for an update", () => {
     expect(result.draft.rendered.changes).toEqual([{ after: "$4,840.00 inc GST", before: "$4,400.00 inc GST", field: "Amount" }]);
     expect(result.draft.rendered.sentence).toContain("This updates Order 66Sm261014 in Demo Pty Ltd: Amount $4,400.00 inc GST → $4,840.00 inc GST");
   });
+
+  it("keeps the creator's attribution in the memo and comment and appends the updater's", async () => {
+    const creatorMemo = "FP 66Sm261014 · proposed Ana 02/10 10:00 · approved Johanne 02/10 11:00";
+    const created = {
+      companyFileId: CF, myobUid: UID, operation: "orders.create",
+      payload: { Comment: `${creatorMemo} · proposal #3 · https://floorplan/jobs/12`, Date: "2026-10-02T00:00:00", JournalMemo: creatorMemo },
+      readBack: null, state: "verified",
+    };
+    store.proposalsForSubject.mockResolvedValue([created]);
+    store.latestVerifiedForUid.mockResolvedValue({ myobRowVersion: "7", readBack: { ...created.payload, JournalMemo: `${creatorMemo} · updated Someone 05/10 08:00` } });
+    const result = await draft({ approver: { at: new Date("2026-10-13T23:50:00Z"), name: "Johanne" }, operation: "orders.update", proposalId: 8 });
+    if (!result.ok) throw new Error("expected a draft");
+    expect(result.draft.payload.JournalMemo).toBe(`${creatorMemo} · updated Ray 14/10 09:12 · approved Johanne 14/10 09:20`);
+    expect(String(result.draft.payload.Comment)).toMatch(new RegExp(`^${creatorMemo} · updated Ray 14/10 09:12 · approved Johanne 14/10 09:20 · proposal #8`));
+    expect(String(result.draft.payload.JournalMemo).length).toBeLessThanOrEqual(255);
+  });
 });

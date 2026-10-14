@@ -1,7 +1,8 @@
 // Withdrawing a MYOB proposal: the proposer, or the CFO, says it shouldn't go.
-// Only before anything is in flight (proposed) or after it failed
-// (exception); an approved proposal is mid-send and can't be withdrawn under
-// it. Nothing is deleted: the row stays, marked withdrawn with who and why.
+// Allowed while nothing is in flight: proposed, approved (Floorplan's controls
+// held the send back) or exception (it failed). A pushed proposal is mid-send
+// and can't be withdrawn under it. Nothing is deleted: the row stays, marked
+// withdrawn with who and why.
 
 import type { Connection } from "tedious";
 import { record } from "../ledger";
@@ -9,7 +10,7 @@ import type { Person } from "./propose";
 import { ProposalError } from "./proposalErrors";
 import { getProposal, updateProposal, type ProposalRow } from "./proposalsStore";
 
-const WITHDRAWABLE = new Set(["proposed", "exception"]);
+const WITHDRAWABLE = new Set(["proposed", "approved", "exception"]);
 
 export async function withdrawProposal(
   tx: Connection,

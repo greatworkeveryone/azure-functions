@@ -7,7 +7,7 @@
 import type { Connection } from "tedious";
 import { record, type LedgerActor } from "../ledger";
 import { buildDraft } from "./draft";
-import { checkPreviewTime, ProposalError } from "./proposalErrors";
+import { checkPreviewTime, isUniqueViolation, ProposalError } from "./proposalErrors";
 import { insertProposal, proposalsForSubject, type ProposalOperation, type ProposalRow } from "./proposalsStore";
 import type { ProposalSubjectType } from "./subjects";
 
@@ -25,7 +25,8 @@ export interface Person {
   oid: string;
 }
 
-const OPEN = new Set(["proposed", "approved"]);
+const OPEN = new Set(["proposed", "approved", "pushed"]);
+const ALREADY_OPEN = "There is already an open MYOB proposal for this record.";
 
 export async function propose(tx: Connection, person: Person, input: ProposeInput, correlationId: string, now: Date): Promise<ProposalRow> {
   checkPreviewTime(input.previewedAt, now);
@@ -43,9 +44,10 @@ export async function propose(tx: Connection, person: Person, input: ProposeInpu
 
   const existing = await proposalsForSubject(tx, input.subjectType, input.subjectId);
   if (existing.some((row) => row.operation === input.operation && OPEN.has(row.state))) {
-    throw new ProposalError(409, "There is already an open MYOB proposal for this record.");
+    throw new ProposalError(409, ALREADY_OPEN);
   }
 
+  // Two people at the same moment both pass the check above; the unique index refuses the second.
   const row = await insertProposal(tx, {
     companyFileId: draft.companyFileId,
     correlationId,
@@ -61,6 +63,8 @@ export async function propose(tx: Connection, person: Person, input: ProposeInpu
     subjectId: input.subjectId,
     subjectType: input.subjectType,
     targetUid: draft.target?.uid ?? null,
+  }).catch((error: unknown) => {
+    throw isUniqueViolation(error) ? new ProposalError(409, ALREADY_OPEN) : error;
   });
   await record(tx, {
     action: "myob.propose",

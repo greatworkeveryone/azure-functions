@@ -43,11 +43,23 @@ describe("propose", () => {
     ["a changed record (hash differs)", () => propose({} as never, RAY, { ...INPUT, payloadHash: "stale" }, CORRELATION, NOW)],
     ["a file switched off", () => (buildDraft.mockResolvedValue(draft("off")), propose({} as never, RAY, INPUT, CORRELATION, NOW))],
     ["a second open proposal", () => (store.proposalsForSubject.mockResolvedValue([{ operation: "orders.create", state: "proposed" }]), propose({} as never, RAY, INPUT, CORRELATION, NOW))],
+    ["a proposal while one is being sent", () => (store.proposalsForSubject.mockResolvedValue([{ operation: "orders.create", state: "pushed" }]), propose({} as never, RAY, INPUT, CORRELATION, NOW))],
     ["an unmapped contractor", () => (buildDraft.mockResolvedValue({ ok: false, reasons: ["Ask Johanne to add ACME Air to the supplier export"], status: 409 }), propose({} as never, RAY, INPUT, CORRELATION, NOW))],
   ])("refuses %s with 409, recording nothing", async (_label, act) => {
     await expect((act as () => Promise<unknown>)()).rejects.toMatchObject({ status: 409 });
     expect(store.insertProposal).not.toHaveBeenCalled();
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it("answers 409, not 500, when two proposals land at the same moment and the database's unique index refuses the second", async () => {
+    store.insertProposal.mockRejectedValue(Object.assign(new Error("Cannot insert duplicate key row ... UX_MyobProposals_OpenSubject"), { number: 2601 }));
+    await expect(propose({} as never, RAY, INPUT, CORRELATION, NOW)).rejects.toMatchObject({
+      message: expect.stringContaining("already an open MYOB proposal"),
+      status: 409,
+    });
+    expect(record).not.toHaveBeenCalled();
+    store.insertProposal.mockRejectedValue(Object.assign(new Error("deadlock"), { number: 1205 }));
+    await expect(propose({} as never, RAY, INPUT, CORRELATION, NOW)).rejects.not.toHaveProperty("status");
   });
 
   it("passes the plain reason for an unmapped contractor through", async () => {
