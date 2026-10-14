@@ -65,11 +65,14 @@ const sqlCalls = () =>
     sql: String(c[1]),
   }));
 
-// A small stand-in for the database, enough to answer the two statements the
-// join handlers send: the guarded attach and the list. It applies SQL's rule
-// that a NULL JobID equals nothing, and it only checks jobs when the statement
-// itself joins the parent table and compares a.JobID = p.JobID, so a handler
-// that forgets the check links and lists across jobs here as it would in SQL.
+// A small stand-in for the database, enough to answer what the join handlers
+// send: the attach batch and the list. It reads a batch statement by statement
+// (split on ";"), each on its own, as SQL runs them: an INSERT writes its row
+// unless its own WHERE carries the job match (or the link already exists), and
+// a SELECT ... AS Linked answers whether the file is on the parent's job. It
+// applies SQL's rule that a NULL JobID equals nothing, and only checks jobs
+// where the statement joins the parent table and compares a.JobID = p.JobID,
+// so a handler that writes the link outside the job match is caught writing it.
 // Job 9 owns PO 4, quote 7, invoice 5 and file 11; file 21 is on job 8; file
 // 31 has no job (a tenancy lease or a key signature).
 const FILE_JOB: Record<number, number | null> = { 11: 9, 21: 8, 31: null };
@@ -78,27 +81,43 @@ const PARENT_JOB: Record<string, Record<number, number>> = {
   PurchaseOrders: { 4: 9 },
   Quotes: { 7: 9 },
 };
+/** Links already in the tables (some across jobs, made before the check). */
 const LINKS: Record<string, number[]> = { JobInvoiceAttachments: [11, 21, 31], PurchaseOrderAttachments: [11, 21, 31], QuoteAttachments: [11, 21, 31] };
+/** Link rows the handler wrote during a test. */
+let written: { attachmentId: number; parentId: number; table: string }[] = [];
 
-function sameJob(sql: string, parentId: number, attachmentId: number): boolean {
-  const parent = /JOIN (\w+) p ON p\.\w+ = (?:@ParentID|j\.\w+)/.exec(sql)?.[1];
-  if (!parent || !/\ba\.JobID = p\.JobID\b/.test(sql)) return true;
+function sameJob(statement: string, parentId: number, attachmentId: number): boolean {
+  const parent = /JOIN (\w+) p ON p\.\w+ = (?:@ParentID|j\.\w+)/.exec(statement)?.[1];
+  if (!parent || !/\ba\.JobID = p\.JobID\b/.test(statement)) return true;
   const fileJob = FILE_JOB[attachmentId];
   return fileJob !== null && fileJob !== undefined && fileJob === PARENT_JOB[parent]?.[parentId];
 }
 
 async function fakeDb(_connection: unknown, sql: string, params: { name: string; value: unknown }[] = []): Promise<Record<string, unknown>[]> {
   const value = (name: string) => params.find((p) => p.name === name)?.value as number;
-  if (/INSERT INTO \w+Attachments/.test(sql)) {
-    return [{ Linked: sameJob(sql, value("ParentID"), value("AttachmentID")) ? 1 : 0 }];
-  }
+  const parentId = value("ParentID");
   const list = /FROM (\w+Attachments) j\s+JOIN Attachments a/.exec(sql);
   if (list) {
     return (LINKS[list[1]] ?? [])
-      .filter((id) => sameJob(sql, value("ParentID"), id))
+      .filter((id) => sameJob(sql, parentId, id))
       .map((id) => ({ BlobName: blobOf(id), Id: id, JobID: FILE_JOB[id], MyBuildingsConfirmedAt: null }));
   }
-  return [];
+  let answer: Record<string, unknown>[] = [];
+  for (const statement of sql.split(";")) {
+    const attachmentId = value("AttachmentID");
+    const insert = /INSERT INTO (\w+Attachments)/.exec(statement);
+    if (insert) {
+      const table = insert[1];
+      const alreadyLinked = written.some((row) => row.table === table && row.parentId === parentId && row.attachmentId === attachmentId);
+      const guardsLink = statement.includes("NOT EXISTS (") && new RegExp("\\bFROM " + table + "\\s+WHERE").test(statement);
+      if (sameJob(statement, parentId, attachmentId) && !(guardsLink && alreadyLinked)) {
+        written.push({ attachmentId, parentId, table });
+      }
+    } else if (/\bAS Linked\b/.test(statement)) {
+      answer = [{ Linked: sameJob(statement, parentId, attachmentId) ? 1 : 0 }];
+    }
+  }
+  return answer;
 }
 
 beforeEach(() => {
@@ -109,6 +128,7 @@ beforeEach(() => {
   auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "abby@example.com", name: "Abby Accounts", oid: "abby-oid" });
   db.createRequestConnection.mockResolvedValue({ id: "connection" });
   db.executeQuery.mockImplementation(fakeDb);
+  written = [];
 });
 
 // Minted attachment names (S1): the list route only signs names of this shape.
@@ -139,16 +159,18 @@ describe("attachToInvoice", () => {
 
     expect(res).toEqual({ jsonBody: { ok: true }, status: 200 });
     const [call] = sqlCalls();
-    expect(call.sql).toMatch(/IF NOT EXISTS \(\s*SELECT 1 FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
-    expect(call.sql).toMatch(/INSERT INTO JobInvoiceAttachments \(JobInvoiceID, AttachmentID, AttachedBy\)/);
+    expect(call.sql).toMatch(/INSERT INTO JobInvoiceAttachments \(JobInvoiceID, AttachmentID, AttachedBy\)\s+SELECT @ParentID, @AttachmentID, @AttachedBy/);
+    expect(call.sql).toMatch(/AND NOT EXISTS \(\s*SELECT 1 FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
+    expect(written).toEqual([{ attachmentId: 11, parentId: 5, table: "JobInvoiceAttachments" }]);
     expect(call.params).toEqual({ AttachedBy: "Abby Accounts", AttachmentID: 11, ParentID: 5 });
   });
 
-  it("is idempotent: attaching twice sends the same guarded insert both times", async () => {
-    await attach({ AttachmentID: 11, InvoiceID: 5 });
-    await attach({ AttachmentID: 11, InvoiceID: 5 });
+  it("is idempotent: attaching twice writes one link row and answers ok both times", async () => {
+    expect((await attach({ AttachmentID: 11, InvoiceID: 5 })).status).toBe(200);
+    expect((await attach({ AttachmentID: 11, InvoiceID: 5 })).status).toBe(200);
     const [first, second] = sqlCalls();
     expect(second).toEqual(first);
+    expect(written).toHaveLength(1);
   });
 
   it("400s without a numeric InvoiceID or AttachmentID, before touching the database", async () => {
@@ -255,17 +277,28 @@ describe.each([
 ])("%s only links files on the parent's job", (attachRoute, listRoute, ids, query, parentTable) => {
   const attach = (attachmentId: number) => handler(attachRoute)(post({ ...ids, AttachmentID: attachmentId }), ctx);
 
-  it("links a file on the same job", async () => {
+  it("links a file on the same job, writing one link row", async () => {
     expect(await attach(11)).toEqual({ jsonBody: { ok: true }, status: 200 });
     expect(sqlCalls()[0].sql).toMatch(new RegExp(`JOIN ${parentTable} p ON p\\.\\w+ = @ParentID`));
+    expect(written).toHaveLength(1);
   });
 
-  it("refuses a file from another job with 422", async () => {
+  it("refuses a file from another job with 422, writing no link row", async () => {
     expect(await attach(21)).toEqual({ jsonBody: { error: "That file isn't on this job." }, status: 422 });
+    expect(written).toEqual([]);
   });
 
-  it("refuses a file with no job (a lease or a key signature) with 422", async () => {
+  it("refuses a file with no job (a lease or a key signature) with 422, writing no link row", async () => {
     expect(await attach(31)).toEqual({ jsonBody: { error: "That file isn't on this job." }, status: 422 });
+    expect(written).toEqual([]);
+  });
+
+  it("writes the link in one statement that carries the job match itself", async () => {
+    await attach(11);
+    const insert = sqlCalls()[0].sql.split(";").find((statement) => /INSERT INTO/.test(statement)) ?? "";
+    expect(insert).toMatch(/WHERE EXISTS \(/);
+    expect(insert).toMatch(new RegExp(`JOIN ${parentTable} p ON p\\.\\w+ = @ParentID`));
+    expect(insert).toMatch(/\ba\.JobID = p\.JobID\b/);
   });
 
   it("leaves out links made across jobs before this check, so no read link is minted for them", async () => {

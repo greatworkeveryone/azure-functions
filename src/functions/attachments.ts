@@ -301,28 +301,32 @@ async function attachToParent(
     }
 
     connection = await createRequestConnection(token);
-    // One batch: the job check and the guarded insert read the same rows. A
-    // file that isn't on the parent's job (or has no job) links nothing.
+    // The link is written by one statement whose own WHERE carries the job
+    // match and the not-yet-linked check, so it is atomic: a file that isn't
+    // on the parent's job (or has no job) writes nothing. The SELECT after it
+    // answers whether the file is on the job, which is also true when the
+    // link already existed (attach is idempotent).
     /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     const result = await executeQuery(
       connection,
-      `IF NOT EXISTS (
-         SELECT 1
-           FROM Attachments a
-           JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = @ParentID
-          WHERE a.Id = @AttachmentID AND a.JobID = p.JobID
-       )
-         SELECT CAST(0 AS BIT) AS Linked;
-       ELSE
-       BEGIN
-         IF NOT EXISTS (
-           SELECT 1 FROM ${spec.table}
-            WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID
-         )
-         INSERT INTO ${spec.table} (${spec.parentColumn}, AttachmentID, AttachedBy)
-         VALUES (@ParentID, @AttachmentID, @AttachedBy);
-         SELECT CAST(1 AS BIT) AS Linked;
-       END`,
+      `INSERT INTO ${spec.table} (${spec.parentColumn}, AttachmentID, AttachedBy)
+       SELECT @ParentID, @AttachmentID, @AttachedBy
+        WHERE EXISTS (
+                SELECT 1
+                  FROM Attachments a
+                  JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = @ParentID
+                 WHERE a.Id = @AttachmentID AND a.JobID = p.JobID
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM ${spec.table}
+                 WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID
+              );
+       SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1
+                  FROM Attachments a
+                  JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = @ParentID
+                 WHERE a.Id = @AttachmentID AND a.JobID = p.JobID
+              ) THEN 1 ELSE 0 END AS BIT) AS Linked;`,
       [
         { name: "ParentID", type: TYPES.Int, value: parentId },
         { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
