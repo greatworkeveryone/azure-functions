@@ -38,7 +38,9 @@ const BUILDING_MAX = 40;
 const FACILITIES_ROLES: ReadonlySet<string> = new Set(["facilities", "facilities_manager"]);
 const URGENT_FIRST = 1e14;
 
-const KIND_RANK: Record<DigestItemKind, number> = { approval: 1, due: 2, escalation: 0, key: 3 };
+// Escalations first, then approvals, then keys (a thing out of the building), then jobs whose
+// update date has come.
+const KIND_RANK: Record<DigestItemKind, number> = { approval: 1, due: 3, escalation: 0, key: 2 };
 
 const jobPath = (jobId: number | string): string => `/jobs?jobId=${encodeURIComponent(String(jobId))}`;
 
@@ -72,7 +74,8 @@ function escalationItems(user: DigestUser, facts: DigestFacts): DigestItem[] {
 
 /** Whose move it is: the first approver (anyone with authority for the amount) or the director. */
 function approvalStage(approval: WaitingApproval, facts: AuthorityFacts, amount: number): "director" | "first" | null {
-  if (approval.status === "pending") return "first";
+  // 'awaiting_approval' is a junior's submission waiting for someone whose limit covers it.
+  if (approval.status === "pending" || approval.status === "awaiting_approval") return "first";
   if (approval.subject === "quote") return approval.status === "awaiting_director" ? "director" : null;
   if (approval.status !== "approved") return null;
   // A stage-1 approved invoice only waits for someone when its amount needs the director.

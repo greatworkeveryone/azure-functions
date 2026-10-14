@@ -48,12 +48,12 @@ describe("listWaitingApprovals", () => {
     const rows = await listWaitingApprovals(conn);
     const [quoteSql, invoiceSql] = calls().map((c) => c[1]);
     expect(quoteSql).toMatch(/FROM dbo\.Quotes/);
-    expect(quoteSql).toMatch(/Status IN \('pending', 'awaiting_director'\)/);
+    expect(quoteSql).toMatch(/Status IN \('pending', 'awaiting_approval', 'awaiting_director'\)/);
     expect(quoteSql).toMatch(/j\.Status = 'Awaiting Approval'/);
     expect(quoteSql).toMatch(/IsArchived = 0/);
     expect(invoiceSql).toMatch(/FROM dbo\.JobInvoices/);
     expect(invoiceSql).toMatch(/Direction = 'incoming'/);
-    expect(invoiceSql).toMatch(/Status IN \('pending', 'approved'\)/);
+    expect(invoiceSql).toMatch(/Status IN \('pending', 'awaiting_approval', 'approved'\)/);
     expect(invoiceSql).toMatch(/IsArchived = 0/);
     expect(invoiceSql).toMatch(/j\.Status <> 'Done'/);
     expect(rows).toEqual([

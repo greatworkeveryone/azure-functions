@@ -17,7 +17,7 @@ import { DIGEST_MAX_LINES } from "./config";
 import { buildDigestEmail } from "./email";
 import { deriveItems, type DeriveContext } from "./items";
 import { loadDigestFacts } from "./store";
-import type { DigestFacts } from "./types";
+import type { DigestFacts, DigestUser } from "./types";
 
 export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
 
@@ -95,24 +95,20 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
   const context: DeriveContext = { authorityFacts, now };
   const today = darwinDateKey(now);
 
-  for (const user of facts.users) {
-    if (user.optedOut) {
-      report.optedOut += 1;
-      continue;
-    }
-    report.considered += 1;
-
+  // Everything for one person runs in one try: a problem with one person's items,
+  // email or send is recorded against them and never stops the others.
+  const handle = async (user: DigestUser): Promise<void> => {
     const items = deriveItems(user, facts, context);
     if (items.length === 0) {
       report.nothingToSend += 1;
-      continue;
+      return;
     }
 
     const recipient = resolveRecipient(user.email);
     if (!recipient.address) {
       report.noAddress += 1;
       options.log(`digest: user #${user.userId} has ${items.length} item(s) waiting but no email address`);
-      continue;
+      return;
     }
 
     const email = buildDigestEmail(user, items, {
@@ -127,12 +123,21 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
       options.log(`digest dry run: would email user #${user.userId} (${user.role}) "${email.subject}"`);
       for (const item of items.slice(0, DIGEST_MAX_LINES)) options.log(`  ${item.line} -> ${item.path}`);
       if (items.length > DIGEST_MAX_LINES) options.log(`  and ${items.length - DIGEST_MAX_LINES} more`);
-      continue;
+      return;
     }
 
+    await deps.send([recipient.address], email.subject, email.body);
+    report.sent += 1;
+  };
+
+  for (const user of facts.users) {
+    if (user.optedOut) {
+      report.optedOut += 1;
+      continue;
+    }
+    report.considered += 1;
     try {
-      await deps.send([recipient.address], email.subject, email.body);
-      report.sent += 1;
+      await handle(user);
     } catch (error) {
       report.errors.push(`user #${user.userId}: ${errorText(error)}`);
     }

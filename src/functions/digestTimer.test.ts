@@ -154,6 +154,13 @@ describe("logging and failure", () => {
     expect(ctx.error).toHaveBeenCalled();
   });
 
+  it("does not fail a dry run just because nothing was sent: would-send counts", async () => {
+    process.env.DIGEST_DRY_RUN = "true";
+    runDigest.mockResolvedValue(report({ dryRun: true, errors: ["user #4: bad data"], sent: 0, wouldSend: 2 }));
+    await expect(run({} as Timer, ctx)).resolves.toBeUndefined();
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining("1 of 3"), "error");
+  });
+
   it("fails the run when every send failed", async () => {
     runDigest.mockResolvedValue(report({ errors: ["user #1: down", "user #2: down"], sent: 0 }));
     await expect(run({} as Timer, ctx)).rejects.toThrow(/every send failed/i);

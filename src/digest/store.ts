@@ -58,7 +58,8 @@ function toWaiting(subject: WaitingApproval["subject"], idColumn: string, row: S
 
 /**
  * Quotes waiting on a first approver or a director, and incoming invoices
- * awaiting stage 1 or (once approved) a possible director. A quote only counts
+ * awaiting stage 1 or (once approved) a possible director. 'awaiting_approval'
+ * is a junior's submission waiting for a senior, on both. A quote only counts
  * while its job is still at Awaiting Approval: approving one quote leaves the
  * job's other pending quotes behind, and those are not waiting on anyone.
  * Purchase orders have no approval status at this base, so none are read.
@@ -71,7 +72,7 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
        FROM dbo.Quotes q
        JOIN dbo.Jobs j ON j.JobID = q.JobID
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
-      WHERE q.Status IN ('pending', 'awaiting_director')
+      WHERE q.Status IN ('pending', 'awaiting_approval', 'awaiting_director')
         AND j.Status = 'Awaiting Approval'
         AND j.IsArchived = 0
       ORDER BY q.CreatedAt, q.QuoteID`,
@@ -84,7 +85,7 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
        JOIN dbo.Jobs j ON j.JobID = ji.JobID
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
       WHERE ji.Direction = 'incoming'
-        AND ji.Status IN ('pending', 'approved')
+        AND ji.Status IN ('pending', 'awaiting_approval', 'approved')
         AND j.IsArchived = 0
         AND j.Status <> 'Done'
       ORDER BY ji.CreatedAt, ji.JobInvoiceID`,

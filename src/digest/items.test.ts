@@ -171,6 +171,28 @@ describe("approvals waiting for a role they hold", () => {
     expect(deriveItems(USERS.facilities, f, ctx)).toEqual([]);
   });
 
+  it("a junior's quote waiting for a senior reaches those whose limit covers it, and not the junior", () => {
+    // 8,000 is over the facilities manager (5,000) and accounts (2,000), within accounts manager (10,000).
+    const f = facts({ waitingApprovals: [approval({ amount: 8_000, status: "awaiting_approval" })] });
+    expect(who(f)).toEqual(["accountsManager", "cfo", "director"]);
+    expect(deriveItems(USERS.facilitiesManager, f, ctx)).toEqual([]);
+    expect(deriveItems(USERS.facilities, f, ctx)).toEqual([]);
+    expect(lines(USERS.accountsManager, f)).toEqual(["Approve quote: Job #20 · Replace pump · Tower A"]);
+  });
+
+  it("a junior's invoice waiting for a senior reaches those whose limit covers it, and not the junior", () => {
+    const f = facts({ waitingApprovals: [approval({ amount: 3_000, status: "awaiting_approval", subject: "invoice" })] });
+    expect(who(f)).toEqual(["accountsManager", "cfo", "director"]);
+    expect(deriveItems(USERS.accounts, f, ctx)).toEqual([]);
+    expect(lines(USERS.accountsManager, f)[0]).toMatch(/^Approve invoice: /);
+  });
+
+  it("an awaiting_approval submission over the director threshold waits for the director alone", () => {
+    for (const subject of ["quote", "invoice"] as const) {
+      expect(who(facts({ waitingApprovals: [approval({ amount: 60_000, status: "awaiting_approval", subject })] }))).toEqual(["director"]);
+    }
+  });
+
   it("ignores statuses that are not waiting on anyone", () => {
     const f = facts({ waitingApprovals: [approval({ status: "approved" }), approval({ status: "rejected" }), approval({ status: "director_approved", subject: "invoice" })] });
     expect(who(f)).toEqual([]);
@@ -260,14 +282,14 @@ describe("keys overdue, for facilities roles", () => {
 });
 
 describe("order, duplicates and the cap", () => {
-  it("lists escalations, then approvals, then due items, then keys", () => {
+  it("lists escalations, then approvals, then keys, then due items", () => {
     const f = facts({
       dueJobs: [dueJob({ assignedToUserId: 2 })],
       escalations: [escalation({ subjectId: "40", summary: "Escalated job" })],
       overdueKeys: [key()],
       waitingApprovals: [approval()],
     });
-    expect(deriveItems(USERS.facilitiesManager, f, ctx).map((i) => i.kind)).toEqual(["escalation", "approval", "due", "key"]);
+    expect(deriveItems(USERS.facilitiesManager, f, ctx).map((i) => i.kind)).toEqual(["escalation", "approval", "key", "due"]);
   });
 
   it("shows a job once when it is escalated, awaiting approval and due all at once, as the escalation", () => {

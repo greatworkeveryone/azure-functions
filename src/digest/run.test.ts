@@ -4,6 +4,13 @@ import type { AuthorityFacts } from "../approvalAuthority";
 import { formatDigestSummary, runDigest, type DigestDeps } from "./run";
 import type { DigestFacts, DigestUser, DueJob } from "./types";
 
+// A real deriveItems that a test can make fail for one person.
+jest.mock("./items", () => {
+  const actual = jest.requireActual("./items");
+  return { ...actual, deriveItems: jest.fn(actual.deriveItems) };
+});
+const { deriveItems } = require("./items") as { deriveItems: jest.Mock };
+
 const NOW = new Date("2026-10-13T22:00:00Z"); // 07:30 Wednesday 14/10/2026, Darwin
 const conn = {} as Connection;
 
@@ -154,6 +161,41 @@ describe("a send that fails", () => {
     const d = deps(facts({ dueJobs: [due(1)], users: [person(1)] }), send);
     const report = await runDigest(conn, options(), d);
     expect(report.errors.join()).not.toContain("example.test");
+  });
+});
+
+describe("a problem with one person", () => {
+  it("working out their items fails: recorded against them, the others still get theirs", async () => {
+    deriveItems.mockImplementationOnce(() => {
+      throw new Error("bad data for this person");
+    });
+    const d = deps(facts({ dueJobs: [due(1), due(2), due(3)], users: [person(1), person(2), person(3)] }));
+    const report = await runDigest(conn, options(), d);
+    expect(d.send).toHaveBeenCalledTimes(2);
+    expect(report.sent).toBe(2);
+    expect(report.errors).toHaveLength(1);
+    expect(report.errors[0]).toContain("#1");
+    expect(report.errors[0]).toContain("bad data");
+  });
+
+  it("building their email fails: recorded against them, the others still get theirs", async () => {
+    const broken = { ...person(2), name: null as unknown as string };
+    const d = deps(facts({ dueJobs: [due(1), due(2), due(3)], users: [person(1), broken, person(3)] }));
+    const report = await runDigest(conn, options(), d);
+    expect(d.send.mock.calls.map((c) => c[0])).toEqual([["user1@example.test"], ["user3@example.test"]]);
+    expect(report.sent).toBe(2);
+    expect(report.errors).toHaveLength(1);
+    expect(report.errors[0]).toContain("#2");
+  });
+
+  it("does the same in a dry run", async () => {
+    deriveItems.mockImplementationOnce(() => {
+      throw new Error("bad data");
+    });
+    const d = deps(facts({ dueJobs: [due(1), due(2)], users: [person(1), person(2)] }));
+    const report = await runDigest(conn, options({ dryRun: true }), d);
+    expect(report).toMatchObject({ wouldSend: 1 });
+    expect(report.errors).toHaveLength(1);
   });
 });
 

@@ -49,9 +49,11 @@ function settle(report: DigestReport, context: InvocationContext): void {
     throw new DigestProblem(message);
   }
   if (report.errors.length === 0) return;
-  const attempted = report.sent + report.errors.length;
+  // A dry run sends nothing; "would send" is its success.
+  const succeeded = report.sent + report.wouldSend;
+  const attempted = succeeded + report.errors.length;
   context.error(`digestTimer: ${report.errors.length} of ${attempted} sends failed:`, ...report.errors);
-  if (report.sent === 0) {
+  if (succeeded === 0) {
     const message = `Morning digest: every send failed (${attempted}). First: ${report.errors[0]}`;
     Sentry.captureMessage(message, "error");
     throw new DigestProblem(message);

@@ -42,7 +42,7 @@ export function buildDigestEmail(
   if (more > 0) lines.push("", `and ${more} more: ${link(options.baseUrl, "/dashboard")}`);
   lines.push(
     "",
-    'You only get this email on mornings when something needs you. To stop it, switch off "Morning digest email" in the user menu in Floorplan.',
+    'You only get this email on mornings when something needs you. To stop it, switch off "Morning digest email": use the bell icon at the top of Floorplan, or the menu on your phone.',
   );
   if (options.overriddenFrom) lines.push("", `(Redirected by DEV_EMAIL_OVERRIDE; this was meant for ${options.overriddenFrom}.)`);
   return { body: `${lines.join("\n")}\n`, subject };

@@ -67,6 +67,13 @@ describe("the body", () => {
     expect(build([item(1)]).body).toMatch(/Morning digest email/);
   });
 
+  it("points at controls that exist: the bell icon in the header and the phone menu, not a user menu", () => {
+    const { body } = build([item(1)]);
+    expect(body).toMatch(/bell icon/);
+    expect(body).toMatch(/menu on your phone/);
+    expect(body).not.toMatch(/user menu/i);
+  });
+
   it("falls back to relative paths when APP_BASE_URL is not set (dry run)", () => {
     const { body } = build([item(1)], { baseUrl: null });
     expect(body).toContain("/jobs?jobId=1");
