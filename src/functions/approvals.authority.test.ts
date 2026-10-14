@@ -231,8 +231,8 @@ describe("approveQuote", () => {
 
     expect(res).toEqual({
       jsonBody: {
+        code: "admin_test_records_only",
         error: "Admin can approve test records only. Real spend is approved by a manager, the CFO or a director.",
-        reason: "admin_test_records_only",
       },
       status: 403,
     });
@@ -261,7 +261,7 @@ describe("approveQuote", () => {
     const res = await approve();
 
     expect(res.status).toBe(403);
-    expect(res.jsonBody).toEqual({ error: "Your role can't approve this quote.", reason: "not_eligible" });
+    expect(res.jsonBody).toEqual({ code: "not_eligible", error: "Your role can't approve this quote." });
     expect(ran(/UPDATE Quotes/)).toBe(false);
   });
 });

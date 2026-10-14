@@ -213,12 +213,24 @@ describe("approveQuote", () => {
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
   });
 
-  it("records what the quote was before, when it was approved again", async () => {
-    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "rejected" }), stored]);
+  it("records what the quote was before it was approved", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "awaiting_approval" }), stored]);
 
     await approve();
 
-    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ status: "rejected" });
+    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ status: "awaiting_approval" });
+  });
+
+  it("a rejected quote is not approved again (J3): 409, a `denied` row, nothing written", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "rejected" }), stored, { match: /FROM Quotes s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
+
+    const res = await approve();
+
+    expect(res.status).toBe(409);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: { attempted: "quote.approve", status: "rejected" }, ruleApplied: "not_approvable" }),
+    ]);
+    expect(sqlCalls().some((c) => /UPDATE Quotes/.test(c.sql))).toBe(false);
   });
 
   it("does the approval's writes and the ledger row inside one transaction, then commits", async () => {
@@ -472,7 +484,7 @@ describe("directorApproveQuote", () => {
     APP_USER,
     JOB_BUILDING,
     {
-      match: /SELECT JobID, QuoteNumber, ContractorName, Status FROM Quotes/,
+      match: /SELECT JobID, QuoteNumber, ContractorName, Status, CreatedBy, ApprovedBy FROM Quotes/,
       rows: [{ ContractorName: "Acme", JobID: 9, QuoteNumber: "QT-9-1", Status: status }],
     },
     { match: /UPDATE Quotes\s+SET Status = 'approved'/, rows: [{ QuoteID: 7 }] },

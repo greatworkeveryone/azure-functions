@@ -265,7 +265,7 @@ const flush = async () => {
 describe("approveQuote", () => {
   const quoteRow = (amount: number): SqlRoute => [
     /SELECT JobID, QuoteNumber, ContractorName, Amount/,
-    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1" }],
+    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
   ];
   const stored: SqlRoute = [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7, Status: "approved" }]];
 
@@ -355,8 +355,9 @@ describe("quote handlers that used to read the actor from the body", () => {
       /OUTPUT INSERTED|^\s*SELECT/i.test(sql) ? [row] : [],
     );
 
-    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy.
-    const ids = name === "upsertQuote" ? { JobID: 9 } : { JobID: 9, QuoteID: 7 };
+    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy
+    // (and, since J3, needs an amount above $0).
+    const ids = name === "upsertQuote" ? { Amount: 100, JobID: 9 } : { JobID: 9, QuoteID: 7 };
     await bodyActorHandler[name](makeRequest({ ...ids, [field]: "Someone Else" }), ctx);
 
     const values = sqlCalls().flatMap((c) => Object.values(c.params));
@@ -381,7 +382,7 @@ describe("upsertQuote: editing an approved quote's amount (J2, N2)", () => {
   it("clears the approval and records why, but never moves the job", async () => {
     dbWithUpdate.buildUpdateSet.mockReturnValue({ params: [{ name: "Amount", type: undefined, value: 9000 }], setClause: "Amount = @Amount" });
     routeSql([
-      [/SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorName, Status, ApprovedAt/, [
+      [/SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorID, ContractorName, Status, ApprovedAt/, [
         { Amount: 4000, ApprovedAt: new Date("2026-10-10T00:00:00Z"), ContractorName: "Acme", JobID: 9, QuoteID: 7, QuoteNumber: "QT-9-1", Status: "approved" },
       ]],
       [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7 }]],

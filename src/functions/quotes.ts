@@ -28,6 +28,8 @@ import { SUBJECT_ELIGIBLE_ROLES } from "../approvalAuthority";
 import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
+import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal } from "../moneyRules";
+import { loadJobForMoney } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
@@ -39,6 +41,11 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { approvalRule, jobScope, quoteFacts, quoteSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
+
+/** A J3 money-rule refusal as the response: the code the ledger records and the sentence people see. */
+function refusalResponse(refusal: MoneyRefusal): HttpResponseInit {
+  return { status: refusal.status, jsonBody: { code: refusal.code, error: refusal.message } };
+}
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -153,9 +160,22 @@ async function upsertQuote(
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create a quote" } };
       }
+      const badAmount = amountRefusal(Amount, "Amount", true);
+      if (badAmount) return refusalResponse(badAmount);
 
       await beginTransaction(connection);
       try {
+        // J3: no quotes on internal, done or archived jobs (row locked to commit).
+        const moneyJob = await loadJobForMoney(connection, JobID);
+        if (!moneyJob) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 404, jsonBody: { error: "Job not found" } };
+        }
+        const jobRefusal = jobMoneyRefusal(moneyJob);
+        if (jobRefusal) {
+          await rollbackTransaction(connection).catch(() => {});
+          return refusalResponse(jobRefusal);
+        }
         const acronym =
           typeof ContractorID === "number"
             ? await ensureContractorAcronym(connection, ContractorID)
@@ -280,33 +300,48 @@ async function upsertQuote(
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
-    // Read the existing quote before mutating so we can diff for the audit
-    // trail and detect whether the edit invalidates a prior approval.
-    const beforeRows = await executeQuery(
-      connection,
-      `SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorName, Status, ApprovedAt
-         FROM Quotes WHERE QuoteID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-    );
-    if (beforeRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Quote not found" } };
-    }
-    const before = beforeRows[0];
-    const jobId = before.JobID as number;
-    const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
+    const badAmount = amountRefusal(Amount, "Amount", false);
+    if (badAmount) return refusalResponse(badAmount);
 
-    const effects = decideApprovalAmountEdit(
-      {
-        amount: before.Amount != null ? Number(before.Amount) : null,
-        approvedAt: (before.ApprovedAt as Date | null) ?? null,
-        contractorName: (before.ContractorName as string | null) ?? null,
-        status: (before.Status as string | null) ?? null,
-      },
-      { amount: Amount, contractorName: ContractorName },
-    );
-
+    // J3: one transaction. The quote and its job are read under locks, so the
+    // diff and the rules decide on the rows the write replaces.
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
     await beginTransaction(connection);
     try {
+      const beforeRows = await executeQuery(
+        connection,
+        `SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorID, ContractorName, Status, ApprovedAt,
+                ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, Currency, QuotePDFBlobName
+           FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: QuoteID }],
+      );
+      if (beforeRows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Quote not found" } };
+      }
+      const before = beforeRows[0];
+      const jobId = before.JobID as number;
+      const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
+
+      const moneyJob = await loadJobForMoney(connection, jobId);
+      const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
+      if (jobRefusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        return refusalResponse(jobRefusal);
+      }
+
+      const effects = decideApprovalAmountEdit(
+        {
+          amount: before.Amount != null ? Number(before.Amount) : null,
+          approvedAt: (before.ApprovedAt as Date | null) ?? null,
+          contractorId: (before.ContractorID as number | null) ?? null,
+          contractorName: (before.ContractorName as string | null) ?? null,
+          status: (before.Status as string | null) ?? null,
+        },
+        { amount: Amount, contractorId: ContractorID, contractorName: ContractorName },
+      );
+
       await executeQuery(
         connection,
         `UPDATE Quotes SET ${update.setClause} WHERE QuoteID = @Id`,
@@ -329,10 +364,10 @@ async function upsertQuote(
         ],
       );
 
-      // Material change to an already-approved quote: tear down the approval
-      // so the next reviewer re-runs the tier check against the new amount.
-      // Without this a $150 quote could be edited to $25k and ride through
-      // on the original sign-off without director routing.
+      // A changed amount or payee on an approved quote tears the approval down
+      // so the next reviewer re-runs the authority check (J3: the approver
+      // approved paying this amount to this contractor). N2 (J2): the job's
+      // status is never changed here; only the approval is cleared.
       if (effects.clearApproval) {
         await executeQuery(
           connection,
@@ -345,8 +380,6 @@ async function upsertQuote(
             WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: QuoteID }],
         );
-        // N2 (J2): the job's status is never changed here. Done stays done,
-        // and a job in Work stays in Work; only the approval is cleared.
         await executeQuery(
           connection,
           `UPDATE Jobs
@@ -358,6 +391,7 @@ async function upsertQuote(
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );
+        const why = effects.contractorChanged ? "payee_changed" : "amount_changed";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
@@ -368,12 +402,22 @@ async function upsertQuote(
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `Quote ${quoteNumber} amount changed — approval cleared. The job keeps its status until a quote is approved again.`,
+              value: `Quote ${quoteNumber} ${effects.contractorChanged ? "contractor" : "amount"} changed — approval cleared. The job keeps its status until a quote is approved again.`,
             },
             { name: "EventType", type: TYPES.NVarChar, value: "quote_approval_cleared" },
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );
+        await record(connection, {
+          action: "quote.approval_reset",
+          actor,
+          after: { status: "pending", ...quoteFacts({ ...before, Amount: Amount ?? before.Amount, ContractorID: ContractorID ?? before.ContractorID, ContractorName: ContractorName ?? before.ContractorName }) },
+          before: quoteSnapshot(before),
+          buildingId: moneyJob?.buildingId ?? null,
+          jobId,
+          ruleApplied: why,
+          subject: { id: QuoteID, type: "quote" },
+        });
       }
 
       await commitTransaction(connection);
@@ -429,7 +473,26 @@ interface QuoteApproval {
 type QuoteApprovalOutcome =
   | { approval: QuoteApproval; ok: true }
   | { ok: false; response: HttpResponseInit }
-  | { jobId: number; ok: false; refusal: { message: string; reason: ApprovalRefusalReason; status: string | null } };
+  | { jobId: number; ok: false; refusal: ApprovalRefusal };
+
+/** A refused approval: what the ledger records (`sod_blocked` for self-approval) and what the caller sees. */
+interface ApprovalRefusal {
+  action: "denied" | "sod_blocked";
+  code: ApprovalRefusalReason | string;
+  httpStatus: number;
+  message: string;
+  status: string | null;
+}
+
+function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): ApprovalRefusal {
+  return {
+    action: refusal.code === "creator" || refusal.code === "same_approver" ? "sod_blocked" : "denied",
+    code: refusal.code,
+    httpStatus: refusal.status,
+    message: refusal.message,
+    status: quoteStatus,
+  };
+}
 
 /** Who may press Approve on a quote: every role the authority core lets approve one (J1). */
 const APPROVE_QUOTE_ROLES = SUBJECT_ELIGIBLE_ROLES.quote as readonly AppRole[];
@@ -444,7 +507,7 @@ async function approveQuoteInTransaction(
     // Locked until commit, so the status we record as replaced is the one we replace.
     const quoteRows = await executeQuery(
       connection,
-      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, ContractorID FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id",
+      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, ContractorID, CreatedBy FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id",
       [{ name: "Id", type: TYPES.Int, value: quoteId }],
     );
     if (quoteRows.length === 0) {
@@ -459,6 +522,23 @@ async function approveQuoteInTransaction(
     // but is never treated as $0 by the authority check below.
     const amount = Number(quote.Amount ?? 0);
     const currency = quote.Currency as string;
+    const quoteStatus = (quote.Status as string | null) ?? null;
+
+    // J3, in order: the job takes money changes; the quote is still waiting
+    // for a decision; whoever added it doesn't approve it; and the job has no
+    // other approved quote (a second one would overwrite Jobs.ApprovedQuoteID).
+    const moneyJob = await loadJobForMoney(connection, jobId);
+    const stateRefusal =
+      (moneyJob ? jobMoneyRefusal(moneyJob) : null) ??
+      approvableRefusal(quoteStatus, "quote") ??
+      creatorRefusal(quote.CreatedBy, approvedBy, "quote") ??
+      (moneyJob?.hasApprovedQuote
+        ? { code: "quote_already_approved", message: "This job already has an approved quote. Deselect it before approving another.", status: 409 as const }
+        : null);
+    if (stateRefusal) {
+      await rollbackTransaction(connection).catch(() => {});
+      return { jobId, ok: false, refusal: approvalRefusal(stateRefusal, quoteStatus) };
+    }
 
     // The approval-authority core decides (J1): approved on the caller's own
     // authority; past the director threshold (or with no amount) to the
@@ -478,7 +558,7 @@ async function approveQuoteInTransaction(
       return {
         jobId,
         ok: false,
-        refusal: { message: outcome.message, reason: outcome.reason, status: (quote.Status as string | null) ?? null },
+        refusal: { action: "denied", code: outcome.reason, httpStatus: 403, message: outcome.message, status: quoteStatus },
       };
     }
     const userCanApprove = outcome.kind === "approved";
@@ -617,16 +697,16 @@ async function approveQuote(
     });
     if (!outcome.ok) {
       if ("response" in outcome) return outcome.response;
-      const { message, reason, status } = outcome.refusal;
+      const { action, code, httpStatus, message, status } = outcome.refusal;
       // Ledgered in a transaction of its own now that the decision's has rolled back.
       await recordRefusal(
         connection,
         actor,
         { id: QuoteID, type: "quote" },
-        { attempted: "quote.approve", code: reason, message, state: { status } },
+        { action, attempted: "quote.approve", code, message, state: { status } },
         outcome.jobId,
       );
-      return { status: 403, jsonBody: { error: message, reason } };
+      return { status: httpStatus, jsonBody: { code, error: message } };
     }
     const { amount, currency, directorNeeded, jobId, newStatus } = outcome.approval;
 
@@ -1414,6 +1494,17 @@ export async function directorApproveQuote(
       });
       if (!outcome.ok) {
         await rollbackTransaction(connection).catch(() => {});
+        if ("code" in outcome) {
+          // Separation of duties (J3), ledgered in a transaction of its own.
+          await recordRefusal(
+            connection,
+            actor,
+            { id: QuoteID, type: "quote" },
+            { action: "sod_blocked", attempted: "quote.director_approve", code: outcome.code, message: outcome.error },
+            outcome.jobId,
+          );
+          return { status: outcome.status, jsonBody: { code: outcome.code, error: outcome.error } };
+        }
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
       const scope = await jobScope(connection, outcome.jobId);

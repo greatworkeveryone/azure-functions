@@ -49,6 +49,16 @@ export const LEDGER_ACTIONS = {
   "quote.unapprove": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.uncomplete": { exception: true, reasonRequired: false, subjects: ["quote"] },
 
+  // Money-record integrity (beta sprint J3). An edit that changes an approved
+  // quote's or invoice's amount or payee clears the approval; a PO's cost or
+  // payee change clears its sent and MYOB markers: undoing a decision, so an
+  // exception. Marking a payment paid is recorded in Floorplan only (MYOB
+  // writes are their own explicit actions, decision 12).
+  "invoice.approval_reset": { exception: true, reasonRequired: false, subjects: ["invoice"] },
+  "payment.mark_paid": { exception: false, reasonRequired: false, subjects: ["payment"] },
+  "po.markers_reset": { exception: true, reasonRequired: false, subjects: ["purchase_order"] },
+  "quote.approval_reset": { exception: true, reasonRequired: false, subjects: ["quote"] },
+
   // Job lifecycle decisions (beta sprint J2). Done is final: reopening one is
   // a manager's exception with a reason. The MYOB read-back closing a job
   // whose invoices are all paid is a system decision.
