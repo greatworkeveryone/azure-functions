@@ -54,9 +54,6 @@ const db = require("../db") as {
   rollbackTransaction: jest.Mock;
 };
 const auth = require("../auth") as { rolesForRequest: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
-const { MyobWritesDisabledError } = require("../myob-api-log") as {
-  MyobWritesDisabledError: new () => Error;
-};
 const myob = require("../myob-client") as { applyMyobPayment: jest.Mock; createMyobBill: jest.Mock };
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ status?: number; jsonBody?: unknown }>;
@@ -260,7 +257,7 @@ describe("upsertPayment create", () => {
     expect(args.find((a) => a.name === "Amount")?.options).toEqual({ precision: 18, scale: 2 });
   });
 
-  it("locks the invoice row, checks and inserts in one transaction, then calls MYOB after commit", async () => {
+  it("locks the invoice row, checks and inserts in one transaction, and asks MYOB for nothing", async () => {
     routeSql([invoiceRoute(), insertRoute, storedRoute]);
 
     await upsertPayment(makeRequest(valid), ctx);
@@ -268,9 +265,7 @@ describe("upsertPayment create", () => {
     expect(db.beginTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
     expect(db.rollbackTransaction).not.toHaveBeenCalled();
-    expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeLessThan(
-      myob.createMyobBill.mock.invocationCallOrder[0],
-    );
+    expect(myob.createMyobBill).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -427,11 +422,18 @@ describe("upsertPayment update", () => {
   });
 });
 
+const APPROVED_INVOICE: SqlRoute = [
+  /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/,
+  [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved" }],
+];
+const unpaidPayment = (over: Record<string, unknown> = {}): SqlRoute => [
+  /SELECT\s+PaymentID, JobID/,
+  [{ Amount: 100, JobID: 9, JobInvoiceID: 5, MyobID: null, PaymentID: 11, Status: "pending", ...over }],
+];
+
 describe("markPaymentPaid identity", () => {
   it("records the token's name as PaidBy, ignoring MarkedPaidBy in the body", async () => {
-    routeSql([
-      [/SELECT\s+PaymentID, JobID/, [{ Amount: 100, MyobID: null, PaymentID: 11, Status: "pending" }]],
-    ]);
+    routeSql([APPROVED_INVOICE, unpaidPayment()]);
 
     const res = await markPaymentPaid(makeRequest({ MarkedPaidBy: "Someone Else", PaymentID: 11 }), ctx);
 
@@ -450,101 +452,57 @@ describe("markPaymentPaid identity", () => {
   });
 });
 
-// ── MYOB calls ───────────────────────────────────────────────────────────────
+// ── MYOB is never called from here (J3) ─────────────────────────────────────
+// A payment is recorded and marked paid in Floorplan only; a MYOB bill is its
+// own explicit action through lane M's proposals (decision 12).
 
-describe("payments MYOB calls", () => {
-  const ACTOR = { kind: "user", name: "Johanne CFO", oid: "cfo-oid", role: "accounts_manager" };
+describe("payments and MYOB", () => {
   const createRoutes = (): SqlRoute[] => [
-    [
-      /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/,
-      [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved" }],
-    ],
+    APPROVED_INVOICE,
     [/INSERT INTO Payments/, [{ PaymentID: 11 }]],
     [/SELECT\s+PaymentID, JobID/, [{ PaymentID: 11 }]],
   ];
   const valid = { Amount: 100, JobID: 9, JobInvoiceID: 5 };
-  const unpaid: SqlRoute = [
-    /SELECT\s+PaymentID, JobID/,
-    [{ Amount: 100, MyobID: "bill-uid", PaymentID: 11, Status: "pending" }],
-  ];
 
   it("registers no myobWebhook endpoint: MYOB has no webhooks to call it", () => {
     expect(registeredNames).toEqual(expect.arrayContaining(["getPayments", "upsertPayment", "markPaymentPaid"]));
     expect(registeredNames).not.toContain("myobWebhook");
   });
 
-  it("create: asks MYOB for the bill as the signed-in user, with their role", async () => {
-    routeSql(createRoutes());
-
-    const res = await upsertPayment(makeRequest(valid), ctx);
-
-    expect(res.status).toBe(200);
-    expect(myob.createMyobBill).toHaveBeenCalledWith(expect.objectContaining({ actor: ACTOR, sqlToken: "mock-token" }));
-    expect((res.jsonBody as { myobWarning?: string }).myobWarning).toBeUndefined();
+  it("imports no MYOB client at all, so lane M's bill pipeline is the only way a bill reaches MYOB", () => {
+    const source = require("fs").readFileSync(require("path").join(__dirname, "payments.ts"), "utf8") as string;
+    expect(source).not.toMatch(/from "\.\.\/myob-client"|from "\.\.\/myob-api-log"/);
   });
 
-  it("create: when MYOB writes are off, keeps the committed payment and says so", async () => {
+  it("create: records the payment without a MYOB bill, and warns about nothing", async () => {
     routeSql(createRoutes());
-    myob.createMyobBill.mockRejectedValueOnce(new MyobWritesDisabledError());
 
     const res = await upsertPayment(makeRequest(valid), ctx);
 
     expect(res.status).toBe(200);
-    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
-    expect((res.jsonBody as { myobWarning: string }).myobWarning).toMatch(/MYOB sync is switched off/);
+    expect(myob.createMyobBill).not.toHaveBeenCalled();
     expect(callMatching(/SET MyobID = @MyobID/)).toBeUndefined();
+    expect(res.jsonBody).not.toHaveProperty("myobWarning");
   });
 
-  it("create: any other MYOB failure is still non-fatal, with no warning field", async () => {
-    routeSql(createRoutes());
-    myob.createMyobBill.mockRejectedValueOnce(new Error("MYOB createBill 500: boom"));
-
-    const res = await upsertPayment(makeRequest(valid), ctx);
-
-    expect(res.status).toBe(200);
-    expect((res.jsonBody as { myobWarning?: string }).myobWarning).toBeUndefined();
-  });
-
-  it("create: a failed role lookup doesn't stop the payment, it just leaves the role off", async () => {
+  it("create: a failed role lookup fails closed, recording nothing", async () => {
     routeSql(createRoutes());
     auth.rolesForRequest.mockRejectedValueOnce(new Error("lookup failed"));
 
     const res = await upsertPayment(makeRequest(valid), ctx);
 
-    expect(res.status).toBe(200);
-    expect(myob.createMyobBill).toHaveBeenCalledWith(
-      expect.objectContaining({ actor: { kind: "user", name: "Johanne CFO", oid: "cfo-oid" } }),
-    );
+    expect(res.status).toBe(500);
+    expect(callMatching(/INSERT INTO Payments/)).toBeUndefined();
   });
 
-  it("mark paid: applies the payment in MYOB as the signed-in user", async () => {
-    routeSql([unpaid]);
-
-    const res = await markPaymentPaid(makeRequest({ PaymentID: 11 }), ctx);
-
-    expect(res.status).toBe(200);
-    expect(myob.applyMyobPayment).toHaveBeenCalledWith(
-      expect.objectContaining({ actor: ACTOR, billUid: "bill-uid", sqlToken: "mock-token" }),
-    );
-  });
-
-  it("mark paid: when MYOB writes are off, still marks it paid locally and says so", async () => {
-    routeSql([unpaid]);
-    myob.applyMyobPayment.mockRejectedValueOnce(new MyobWritesDisabledError());
+  it("mark paid: marks a payment that carries a MYOB bill paid in Floorplan only", async () => {
+    routeSql([APPROVED_INVOICE, unpaidPayment({ MyobID: "bill-uid" })]);
 
     const res = await markPaymentPaid(makeRequest({ PaymentID: 11 }), ctx);
 
     expect(res.status).toBe(200);
     expect(callMatching(/SET Status = 'paid'/)).toBeDefined();
-    expect((res.jsonBody as { myobWarning: string }).myobWarning).toMatch(/MYOB sync is switched off/);
-  });
-
-  it("mark paid: skips MYOB entirely when the payment has no bill", async () => {
-    routeSql([[/SELECT\s+PaymentID, JobID/, [{ Amount: 100, MyobID: null, PaymentID: 11, Status: "pending" }]]]);
-
-    const res = await markPaymentPaid(makeRequest({ PaymentID: 11 }), ctx);
-
-    expect(res.status).toBe(200);
     expect(myob.applyMyobPayment).not.toHaveBeenCalled();
+    expect(res.jsonBody).not.toHaveProperty("myobWarning");
   });
 });

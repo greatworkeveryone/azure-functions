@@ -1,7 +1,9 @@
 /// <reference types="jest" />
-// Marking a payment paid writes one decision-ledger row in the decision's own
-// transaction, and the same correlation id goes to the MYOB call it makes
-// (WP19b, PLAN §3.12, D17). The DB layer is mocked and the real ledger runs.
+// Recording a payment and marking one paid each write one decision-ledger row
+// in the decision's own transaction (WP19b, PLAN §3.12). Since J3 neither
+// calls MYOB: a payment lives in Floorplan only, and a MYOB bill is its own
+// explicit action through lane M's proposals (decision 12). The DB layer is
+// mocked and the real ledger runs.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
 
@@ -53,7 +55,6 @@ const db = require("../db") as {
 };
 const myob = require("../myob-client") as { applyMyobPayment: jest.Mock; createMyobBill: jest.Mock };
 const limitsDb = require("../approval-limits-db") as { getCachedApprovalLimits: jest.Mock };
-const { MyobWritesDisabledError } = require("../myob-api-log") as { MyobWritesDisabledError: new () => Error };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ jsonBody?: unknown; status?: number }>;
@@ -102,13 +103,19 @@ const payment = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   ...over,
 });
 const FIRST_SELECT = /FROM Payments WITH \(UPDLOCK, HOLDLOCK\) WHERE PaymentID = @Id/;
-const paymentRoutes = (over: Record<string, unknown> = {}): Route[] => [
+const INVOICE_LOCK = /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/;
+const invoiceLock = (over: Record<string, unknown> = {}): Route => ({
+  match: INVOICE_LOCK,
+  rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
+});
+const paymentRoutes = (over: Record<string, unknown> = {}, invoice: Record<string, unknown> = {}): Route[] => [
   APP_USER,
   JOB_BUILDING,
   {
     match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
     rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   },
+  invoiceLock(invoice),
   { match: FIRST_SELECT, rows: [payment(over)] },
   { match: /SELECT\s+PaymentID, JobID/, rows: [payment({ Status: "paid" })] },
 ];
@@ -135,14 +142,14 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe("markPaymentPaid", () => {
-  it("writes one payment.myob_applied row naming who, what, where and from what", async () => {
+  it("writes one payment.mark_paid row naming who, what, where and from what", async () => {
     const res = await markPaid();
 
     expect(res.status).toBe(200);
     const rows = ledgerInserts(db.executeQuery);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      action: "payment.myob_applied",
+      action: "payment.mark_paid",
       actorKind: "user",
       actorName: "Casey Controller",
       actorRole: "accounts_manager",
@@ -168,102 +175,72 @@ describe("markPaymentPaid", () => {
     });
   });
 
-  describe("MYOB correlation", () => {
-    it("gives the ledger row and the MYOB call the same correlation id", async () => {
-      await markPaid();
-
-      const [row] = ledgerInserts(db.executeQuery);
-      expect(myob.applyMyobPayment).toHaveBeenCalledTimes(1);
-      const sent = myob.applyMyobPayment.mock.calls[0][0] as { correlationId: string };
-      expect(String(row.correlationId)).toMatch(GUID);
-      expect(sent.correlationId).toBe(row.correlationId);
-    });
-
-    it("uses a fresh id for each decision", async () => {
-      await markPaid();
-      await markPaid();
-
-      const [first, second] = ledgerInserts(db.executeQuery);
-      expect(first.correlationId).not.toBe(second.correlationId);
-      expect((myob.applyMyobPayment.mock.calls[1][0] as { correlationId: string }).correlationId).toBe(second.correlationId);
-    });
-
-    it("sends MYOB exactly what it always did, plus the id", async () => {
-      await markPaid();
-
-      expect(myob.applyMyobPayment).toHaveBeenCalledWith({
-        actor: { kind: "user", name: "Casey Controller", oid: "controller-oid", role: "accounts_manager" },
-        amount: 100,
-        billUid: "bill-uid",
-        correlationId: expect.stringMatching(GUID),
-        sqlToken: "mock-token",
-      });
-    });
-
-    it("tells MYOB only after the status and its ledger row have committed", async () => {
-      await markPaid();
-
-      const committed = db.commitTransaction.mock.invocationCallOrder[0];
-      expect(orderOf(/UPDATE Payments\s+SET Status = 'paid'/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
-      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/UPDATE Payments\s+SET Status = 'paid'/));
-      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
-      expect(committed).toBeLessThan(myob.applyMyobPayment.mock.invocationCallOrder[0]);
-      expect(db.rollbackTransaction).not.toHaveBeenCalled();
-    });
-
-    it("still records the payment, and says so, when MYOB writes are switched off", async () => {
-      myob.applyMyobPayment.mockRejectedValue(new MyobWritesDisabledError());
-
-      const res = await markPaid();
-
-      expect(res.status).toBe(200);
-      expect((res.jsonBody as { myobWarning: string }).myobWarning).toMatch(/MYOB sync is switched off/);
-      expect(ledgerInserts(db.executeQuery)).toHaveLength(1);
-      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
-    });
-
-    it("a failing MYOB call is still not fatal: the payment stays paid and ledgered", async () => {
-      myob.applyMyobPayment.mockRejectedValue(new Error("MYOB API 500"));
-
-      const res = await markPaid();
-
-      expect(res.status).toBe(200);
-      expect((res.jsonBody as { myobWarning?: string }).myobWarning).toBeUndefined();
-      expect(ledgerInserts(db.executeQuery)).toHaveLength(1);
-    });
-
-    it("a payment with no MYOB bill is ledgered without one and calls nothing", async () => {
-      mockSql(paymentRoutes({ MyobID: null }));
-
+  describe("in Floorplan only (J3)", () => {
+    it("never calls MYOB, even for a payment that carries a MYOB bill, and warns about nothing", async () => {
       const res = await markPaid();
 
       expect(res.status).toBe(200);
       expect(myob.applyMyobPayment).not.toHaveBeenCalled();
-      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ after: { myobBillUid: null, status: "paid" } });
+      expect(res.jsonBody).not.toHaveProperty("myobWarning");
+    });
+
+    it("re-checks the invoice under the payment's lock, then writes the status and its ledger row in one commit", async () => {
+      await markPaid();
+
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      expect(orderOf(INVOICE_LOCK)).toBeGreaterThan(orderOf(FIRST_SELECT));
+      expect(orderOf(/UPDATE Payments\s+SET Status = 'paid'/)).toBeGreaterThan(orderOf(INVOICE_LOCK));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/UPDATE Payments\s+SET Status = 'paid'/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("counts only the invoice's other payments against its balance", async () => {
+      await markPaid();
+
+      const call = db.executeQuery.mock.calls.find((c: unknown[]) => INVOICE_LOCK.test(String(c[1])));
+      const params = Object.fromEntries((call?.[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]));
+      expect(params).toMatchObject({ ExcludePaymentID: 11, JobInvoiceID: 5 });
     });
   });
 
-  it("a payment recorded before invoices were linked is ledgered with no contractor, and asks nothing about an invoice", async () => {
+  it("a payment recorded before invoices were linked is refused: there is no invoice to check it against", async () => {
     mockSql(paymentRoutes({ JobInvoiceID: null }));
 
     const res = await markPaid();
 
-    expect(res.status).toBe(200);
-    expect(ledgerInserts(db.executeQuery)[0].after).toMatchObject({
-      contractorName: null,
-      jobInvoiceId: null,
-      supplierInvoiceNumber: null,
-    });
-    expect(orderOf(/FROM JobInvoices/)).toBe(-1);
+    expect(res).toMatchObject({ jsonBody: { code: "no_invoice" }, status: 422 });
+    expect(orderOf(/UPDATE Payments/)).toBe(-1);
+    expect(orderOf(INVOICE_LOCK)).toBe(-1);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "denied",
+        before: { attempted: "payment.mark_paid", status: "pending" },
+        ruleApplied: "no_invoice",
+        subjectId: "11",
+        subjectType: "payment",
+      }),
+    ]);
   });
 
-  it("locks the payment row for the transaction, so two clicks can't both apply it in MYOB", async () => {
+  it("an invoice that has since been rejected stops the payment being marked paid", async () => {
+    mockSql(paymentRoutes({}, { Status: "rejected" }));
+
+    const res = await markPaid();
+
+    expect(res).toMatchObject({ jsonBody: { code: "invoice_not_approved" }, status: 422 });
+    expect(orderOf(/UPDATE Payments/)).toBe(-1);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "invoice_not_approved" })]);
+  });
+
+  it("locks the payment row for the transaction, so two clicks can't both mark it paid", async () => {
     await markPaid();
 
     expect(orderOf(FIRST_SELECT)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
   });
 
-  it("rolls the payment back when the ledger write fails, and never tells MYOB", async () => {
+  it("rolls the payment back when the ledger write fails", async () => {
     mockSql([LEDGER_FAILS, ...paymentRoutes()]);
 
     const res = await markPaid();
@@ -272,11 +249,10 @@ describe("markPaymentPaid", () => {
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(orderOf(/UPDATE Payments\s+SET Status = 'paid'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
-    expect(myob.applyMyobPayment).not.toHaveBeenCalled();
     expect(db.closeConnection).toHaveBeenCalled();
   });
 
-  it("rolls back, with no ledger row and no MYOB call, when the status write fails", async () => {
+  it("rolls back, with no ledger row, when the status write fails", async () => {
     mockSql([{ match: /UPDATE Payments\s+SET Status = 'paid'/, reject: new Error("deadlock") }, ...paymentRoutes()]);
 
     const res = await markPaid();
@@ -284,17 +260,15 @@ describe("markPaymentPaid", () => {
     expect(res.status).toBe(500);
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
-    expect(myob.applyMyobPayment).not.toHaveBeenCalled();
   });
 
-  it("an already paid payment is not decided again: no row, no MYOB call, nothing changed", async () => {
+  it("an already paid payment is not decided again: no row, nothing changed", async () => {
     mockSql(paymentRoutes({ Status: "paid" }));
 
     const res = await markPaid();
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
-    expect(myob.applyMyobPayment).not.toHaveBeenCalled();
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(orderOf(/UPDATE Payments/)).toBe(-1);
   });
@@ -307,16 +281,14 @@ describe("markPaymentPaid", () => {
     expect(res.status).toBe(404);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(myob.applyMyobPayment).not.toHaveBeenCalled();
   });
 
-  it("answers 401 before any MYOB call when the ledger can't name who is marking it paid", async () => {
+  it("answers 401 before starting when the ledger can't name who is marking it paid", async () => {
     auth.verifiedIdentityFromRequest.mockResolvedValueOnce(CALLER).mockResolvedValueOnce(null);
 
     const res = await markPaid();
 
     expect(res.status).toBe(401);
-    expect(myob.applyMyobPayment).not.toHaveBeenCalled();
     expect(db.beginTransaction).not.toHaveBeenCalled();
   });
 
@@ -329,7 +301,7 @@ describe("markPaymentPaid", () => {
       mockSql([APP_USER, { match: /FROM Payments s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
     });
 
-    it("still answers with the gate's own 403, records `denied`, and calls nothing in MYOB", async () => {
+    it("still answers with the gate's own 403 and records `denied` against payment.mark_paid", async () => {
       const res = await markPaid();
 
       expect(res).toBe(gate);
@@ -337,7 +309,7 @@ describe("markPaymentPaid", () => {
         expect.objectContaining({
           action: "denied",
           actorRole: "accounts",
-          before: { attempted: "payment.myob_applied" },
+          before: { attempted: "payment.mark_paid" },
           buildingId: 5,
           jobId: 9,
           reason: "Required role: accounts_manager. Have: accounts",
@@ -346,7 +318,6 @@ describe("markPaymentPaid", () => {
           subjectType: "payment",
         }),
       ]);
-      expect(myob.applyMyobPayment).not.toHaveBeenCalled();
       expect(orderOf(/UPDATE Payments/)).toBe(-1);
     });
   });
@@ -355,18 +326,12 @@ describe("markPaymentPaid", () => {
 // ── Recording a payment ─────────────────────────────────────────────────────
 
 describe("upsertPayment: recording a payment", () => {
-  const invoiceLock = (over: Record<string, unknown> = {}): Route => ({
-    match: /FROM JobInvoices i WITH \(UPDLOCK, HOLDLOCK\)/,
-    rows: [{ Amount: 1000, DirectorApprovedAt: null, Direction: "incoming", JobID: 9, PaidSoFar: 0, Status: "approved", ...over }],
-  });
   const invoiceRefs: Route = {
     match: /SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices/,
     rows: [{ ContractorName: "Acme", InvoiceNumber: "IV-9-1", SupplierInvoiceNumber: "INV-0042" }],
   };
   const insertPayment: Route = { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] };
   const storedPayment: Route = { match: /SELECT\s+PaymentID, JobID/, rows: [{ PaymentID: 11 }] };
-  const jobTitle: Route = { match: /SELECT Title FROM Jobs/, rows: [{ Title: "Roof repair" }] };
-  const quoteContractor: Route = { match: /SELECT ContractorName FROM Quotes/, rows: [{ ContractorName: "Acme" }] };
   const invoiceScope: Route = { match: /FROM JobInvoices s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] };
   const createRoutes = (over: Record<string, unknown> = {}): Route[] => [
     APP_USER,
@@ -375,8 +340,6 @@ describe("upsertPayment: recording a payment", () => {
     invoiceLock(over),
     insertPayment,
     storedPayment,
-    jobTitle,
-    quoteContractor,
   ];
   const valid = { Amount: 100, JobID: 9, JobInvoiceID: 5, Notes: "first instalment", QuoteID: 7 };
   const create = (body: Record<string, unknown> = valid) => upsertPayment(makeRequest(body), ctx);
@@ -416,66 +379,30 @@ describe("upsertPayment: recording a payment", () => {
     });
   });
 
-  describe("MYOB correlation", () => {
-    it("gives the ledger row and the MYOB bill the same correlation id", async () => {
-      await create();
+  describe("in Floorplan only (J3)", () => {
+    it("never asks MYOB for a bill, and gives the ledger row a correlation id of its own", async () => {
+      const res = await create();
 
-      const [row] = rows();
-      expect(String(row.correlationId)).toMatch(GUID);
-      expect(myob.createMyobBill).toHaveBeenCalledTimes(1);
-      expect((myob.createMyobBill.mock.calls[0][0] as { correlationId: string }).correlationId).toBe(row.correlationId);
+      expect(res.status).toBe(200);
+      expect(String(rows()[0].correlationId)).toMatch(GUID);
+      expect(myob.createMyobBill).not.toHaveBeenCalled();
+      expect(res.jsonBody).not.toHaveProperty("myobWarning");
     });
 
-    it("asks MYOB for exactly what it always did, plus the id", async () => {
-      await create();
-
-      expect(myob.createMyobBill).toHaveBeenCalledWith({
-        actor: { kind: "user", name: "Casey Controller", oid: "controller-oid", role: "accounts_manager" },
-        amount: 100,
-        contractorName: "Acme",
-        correlationId: expect.stringMatching(GUID),
-        jobId: 9,
-        jobTitle: "Roof repair",
-        notes: "first instalment",
-        referenceNumber: "PAY-9-11",
-        sqlToken: "mock-token",
-      });
-    });
-
-    it("keeps its order: the payment and its ledger row commit first, and only then is MYOB asked for the bill", async () => {
+    it("the payment, its history line and its ledger row commit together", async () => {
       await create();
 
       const committed = db.commitTransaction.mock.invocationCallOrder[0];
       expect(orderOf(/INSERT INTO Payments/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
-      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/INSERT INTO Payments/));
+      expect(orderOf(/INSERT INTO JobEvents/)).toBeGreaterThan(orderOf(/INSERT INTO Payments/));
+      expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/INSERT INTO JobEvents/));
       expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
-      expect(committed).toBeLessThan(myob.createMyobBill.mock.invocationCallOrder[0]);
       expect(db.beginTransaction).toHaveBeenCalledTimes(1);
       expect(db.rollbackTransaction).not.toHaveBeenCalled();
     });
-
-    it("still keeps the payment and its record, and says so, when MYOB writes are switched off", async () => {
-      myob.createMyobBill.mockRejectedValue(new MyobWritesDisabledError());
-
-      const res = await create();
-
-      expect(res.status).toBe(200);
-      expect((res.jsonBody as { myobWarning: string }).myobWarning).toMatch(/MYOB sync is switched off/);
-      expect(rows()).toHaveLength(1);
-      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
-    });
-
-    it("a failing MYOB call is still not fatal: the payment stays recorded and ledgered", async () => {
-      myob.createMyobBill.mockRejectedValue(new Error("MYOB createBill 500: boom"));
-
-      const res = await create();
-
-      expect(res.status).toBe(200);
-      expect(rows()).toHaveLength(1);
-    });
   });
 
-  it("is rolled back when the ledger write fails: no payment, no bill in MYOB", async () => {
+  it("is rolled back when the ledger write fails: no payment, no history line", async () => {
     mockSql([LEDGER_FAILS, ...createRoutes()]);
 
     const res = await create();
@@ -484,10 +411,9 @@ describe("upsertPayment: recording a payment", () => {
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(orderOf(/INSERT INTO Payments/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
-    expect(myob.createMyobBill).not.toHaveBeenCalled();
   });
 
-  it("writes no ledger row and asks MYOB for nothing when the payment itself can't be inserted", async () => {
+  it("writes no ledger row when the payment itself can't be inserted", async () => {
     mockSql([{ match: /INSERT INTO Payments/, reject: new Error("deadlock") }, ...createRoutes()]);
 
     const res = await create();
