@@ -20,6 +20,20 @@
 --   5. A cfo row (NULL: unlimited below the director threshold) where none exists.
 --
 -- RUNBOOK (Will, same deploy as the J1 code, never before it):
+--   - BEFORE the deploy, run this read-only check on production. Invoices it
+--     lists were approved at stage 1 by someone with a $20,000 limit and are
+--     still waiting on a director. Once the gate is $50,000 they count as fully
+--     approved (they could be marked in MYOB, paid and closed), so a director
+--     must approve each one first:
+--       SELECT i.JobInvoiceID, i.JobID, j.BuildingID, i.InvoiceNumber,
+--              i.SupplierInvoiceNumber, i.Direction, i.ContractorName, i.Amount,
+--              i.Status, i.ApprovedBy, i.ApprovedAt, i.MyobCreatedAt
+--         FROM dbo.JobInvoices AS i
+--         JOIN dbo.Jobs AS j ON j.JobID = i.JobID
+--        WHERE i.Status = 'approved'
+--          AND i.DirectorApprovedAt IS NULL
+--          AND i.Amount > 20000
+--        ORDER BY i.Amount DESC;
 --   - set DIRECTOR_APPROVAL_THRESHOLD=50000 on the Function App;
 --   - this migration seeds admin's $50,000 row; admin approves only records
 --     flagged as test data (decision 4), so the row matters on test records only.
