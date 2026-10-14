@@ -17,12 +17,14 @@ const MIGRATIONS = [
   "128_timer_runs.sql",
   "129_email_intake_watermark.sql",
   "133_email_archive_columns.sql",
+  "134_invoice_attachments.sql",
 ];
 
-// Destructive-looking phrases the money migrations need, none of which changes
-// data: the trigger that makes the append-only log refuse changes, and the
-// names of the MYOB update operations in 124's CHECK constraint.
-const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi, /N'(quotes|orders)\.update'/g];
+// Destructive-looking phrases that change no data themselves: the trigger that
+// makes the append-only log refuse changes, the names of the MYOB update
+// operations in 124's CHECK constraint, and a link table's foreign key removing
+// its own link row when the parent goes (134, as migration 010 does).
+const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi, /N'(quotes|orders)\.update'/g, /\bON\s+DELETE\s+CASCADE\b/gi];
 
 function stripComments(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");

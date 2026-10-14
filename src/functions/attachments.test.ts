@@ -139,6 +139,7 @@ describe("getAttachments", () => {
 
 describe("attachToQuote (SEC-23)", () => {
   it("stamps AttachedBy from the verified token and ignores the body", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Linked: 1 }]); // the file is on the quote's job (J9)
     const res = await attachToQuote(post({ QuoteID: 7, AttachmentID: 5, AttachedBy: "Mallory" }), ctx);
     expect(res.status).toBe(200);
     const params = db.executeQuery.mock.calls[0][2] as { name: string; value: unknown }[];
