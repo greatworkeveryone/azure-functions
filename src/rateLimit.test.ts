@@ -44,18 +44,30 @@ describe("checkSignInRateLimit", () => {
 });
 
 describe("clientIpFromHeaders", () => {
+  // Same rule as the access log / money gate (lane S, clientAddress): the
+  // rightmost PUBLIC entry, unreadable entries skipped.
   it("takes the hop the platform appended, not the caller's first entry", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "10.9.9.9, 203.0.113.5" }))).toBe("203.0.113.5");
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "198.51.100.77, 203.0.113.5" }))).toBe("203.0.113.5");
   });
 
-  it("drops the port Azure adds to IPv4 and bracketed IPv6 addresses", () => {
+  it("skips private hops the platform added after the client", () => {
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5, 10.1.2.3, 169.254.0.9" }))).toBe("203.0.113.5");
+  });
+
+  it("skips entries that are not addresses", () => {
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5, nonsense, office" }))).toBe("203.0.113.5");
+  });
+
+  it("drops ports and brackets and unwraps IPv4-mapped IPv6", () => {
     expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5:61234" }))).toBe("203.0.113.5");
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "[2001:db8::1]:443" }))).toBe("2001:db8::1");
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "2001:db8::1" }))).toBe("2001:db8::1");
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "[2001:DB8::1]:443" }))).toBe("2001:db8::1");
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "::ffff:203.0.113.9" }))).toBe("203.0.113.9");
   });
 
-  it("falls back to x-azure-clientip, then unknown", () => {
-    expect(clientIpFromHeaders(headers({ "x-azure-clientip": "198.51.100.7" }))).toBe("198.51.100.7");
+  it("falls back to the rightmost address when none is public, then to unknown", () => {
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "127.0.0.1" }))).toBe("127.0.0.1");
+    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "junk" }))).toBe("unknown");
+    expect(clientIpFromHeaders(headers({ "x-azure-clientip": "198.51.100.7" }))).toBe("unknown");
     expect(clientIpFromHeaders(headers({}))).toBe("unknown");
   });
 });
