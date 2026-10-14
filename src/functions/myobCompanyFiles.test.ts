@@ -127,6 +127,18 @@ describe("discoverMyobCompanyFiles", () => {
     expect((await discoverMyobCompanyFiles(post({}), ctx)).status).toBe(403);
     expect(myobRequest).not.toHaveBeenCalled();
   });
+
+  it("401s, calling nothing, when the caller can't be identified (the log must name a person)", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+    expect((await discoverMyobCompanyFiles(post({}), ctx)).status).toBe(401);
+    expect(myobRequest).not.toHaveBeenCalled();
+    expect(admin.recordDiscoveredFiles).not.toHaveBeenCalled();
+  });
+
+  it("calls MYOB as the verified person", async () => {
+    await discoverMyobCompanyFiles(post({}), ctx);
+    expect(myobRequest.mock.calls[0][0].actor).toMatchObject({ kind: "user", name: "Johanne", oid: "cfo-oid" });
+  });
 });
 
 describe("getMyobCompanyFiles", () => {
