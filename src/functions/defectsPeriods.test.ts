@@ -247,7 +247,7 @@ describe("upsertDefectsPeriod", () => {
     const stale = Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]).toString("base64");
     const response = await upsertDefectsPeriod(post(validBody({ defectsPeriodId: 3, rowVersion: stale })), context);
     expect(response.status).toBe(409);
-    expect(errorOf(response)).toMatch(/Simone changed/);
+    expect(errorOf(response)).toBe("Simone changed this defects period on 01/07/2026. Load their changes, then make your edit again.");
     expect(callsMatching(db.executeQuery, UPDATE)).toHaveLength(0);
   });
 

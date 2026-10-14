@@ -17,7 +17,7 @@ import { requireRole } from "./auth";
 import { executeQuery } from "./db";
 import { displayDate, livePeriodsForBuilding, servicesLabel, type DefectsPeriodApi } from "./defectsPeriods";
 import { DEFECTS_OVERRIDE_ROLES } from "./facilitiesRoles";
-import { coveringPeriods, type CoverageJob } from "./facilitiesRules";
+import { coveringPeriods, missingAnswer, type CoverageJob, type MissingAnswer } from "./facilitiesRules";
 import { record } from "./ledger";
 import { Sentry } from "./sentry";
 import { resolveLedgerActor } from "./ledger/actor";
@@ -61,6 +61,12 @@ function scopeLabel(period: DefectsPeriodApi): string {
   return "in this building";
 }
 
+/** "Choose the {answer} first: the {works} defects period covers part of this building …" */
+export function missingAnswerMessage(period: DefectsPeriodApi, answer: MissingAnswer, canOverride: boolean): string {
+  const next = canOverride ? "Book anyway with a reason if RP should do it." : "Ask a facilities manager if RP should book it anyway.";
+  return `Choose the ${answer} first: the ${period.works} defects period covers part of this building until ${displayDate(period.endsOn)}, and Floorplan needs it to tell whether ${period.contractorName ?? "the builder"} owes this work. ${next}`;
+}
+
 /** "This is inside the {works} defects period until {date}: {who} is responsible for {services} {where}." */
 export function blockedMessage(period: DefectsPeriodApi, canOverride: boolean): string {
   const who = `${period.contractorName ?? "The builder"}${period.contractorContact ? ` (${period.contractorContact})` : ""}`;
@@ -92,9 +98,26 @@ export async function guardNewJob(
 ): Promise<DefectsGuardResult> {
   const job = coverageFromFields(fields);
   if (!job) return { override: null, warnings: [] };
-  const covering = coveringPeriods(job, await livePeriodsOrNone(connection, job.buildingId, today), today);
+  const live = await livePeriodsOrNone(connection, job.buildingId, today);
+  const covering = coveringPeriods(job, live, today);
   const blocking = covering.filter((period) => period.enforcement === "block");
-  if (job.kind !== "maintenance" || blocking.length === 0) return { override: null, warnings: covering };
+  // A maintenance job that leaves out its category, level or tenant can't be
+  // told apart from covered work, so it is held the same way (sprint F, UX C1).
+  const unanswered =
+    job.kind === "maintenance" && blocking.length === 0
+      ? live.filter((period) => period.enforcement === "block" && missingAnswer(job, period, today) !== null)
+      : [];
+  if (job.kind !== "maintenance" || (blocking.length === 0 && unanswered.length === 0)) {
+    // Reactive work never blocks. A manager's reason on covered reactive work
+    // (say, after the form held a maintenance job switched to Facilities) is
+    // still recorded, so the decision leaves a trail.
+    const note = text(body.DefectsOverrideReason);
+    if (note && note.length <= REASON_MAX && covering.length > 0 && (await requireRole(request, DEFECTS_OVERRIDE_ROLES)) === null) {
+      return { override: { periods: covering, reason: note }, warnings: covering };
+    }
+    return { override: null, warnings: covering };
+  }
+  const held = blocking.length > 0 ? blocking : unanswered;
 
   const raw = body.DefectsOverrideReason;
   if (raw !== undefined && raw !== null && (typeof raw !== "string" || raw.trim().length > REASON_MAX)) {
@@ -109,10 +132,15 @@ export async function guardNewJob(
       warnings: covering,
     };
   }
-  if (reason) return { override: { periods: blocking, reason }, warnings: covering };
+  if (reason) return { override: { periods: held, reason }, warnings: covering };
+  const missing = blocking.length > 0 ? null : missingAnswer(job, unanswered[0], today);
+  const error = missing ? missingAnswerMessage(unanswered[0], missing, canOverride) : blockedMessage(held[0], canOverride);
   return {
     override: null,
-    response: { jsonBody: { canOverride, code: "defects_period", error: blockedMessage(blocking[0], canOverride), periods: blocking }, status: 409 },
+    response: {
+      jsonBody: { canOverride, code: "defects_period", error, missing, needsDetail: missing !== null, periods: held },
+      status: 409,
+    },
     warnings: covering,
   };
 }

@@ -81,11 +81,54 @@ describe("guardNewJob", () => {
     expect(result.warnings.map((p) => p.defectsPeriodId)).toEqual([3]);
   });
 
+  it("records a manager's reason on covered reactive work too, so a kind change leaves a trail", async () => {
+    const result = await guardNewJob(conn, post({}), { DefectsOverrideReason: "Tenant emergency" }, reactive, TODAY);
+    expect(result.response).toBeUndefined();
+    expect(result.override).toMatchObject({ reason: "Tenant emergency" });
+  });
+
+  it("ignores a reason on covered reactive work from someone who isn't a manager (it never blocked)", async () => {
+    auth.requireRole.mockResolvedValue({ jsonBody: { error: "Forbidden" }, status: 403 });
+    const result = await guardNewJob(conn, post({}), { DefectsOverrideReason: "Because" }, reactive, TODAY);
+    expect(result).toMatchObject({ override: null });
+    expect(result.response).toBeUndefined();
+  });
+
   it("only warns for a warn-only period", async () => {
     routeQueries(db.executeQuery, [{ match: LIVE, rows: [periodRow({ Enforcement: "warn" })] }]);
     const result = await guardNewJob(conn, post({}), {}, maintenance, TODAY);
     expect(result.response).toBeUndefined();
     expect(result.warnings).toHaveLength(1);
+  });
+
+  it("won't let a maintenance job slip past by leaving its category empty", async () => {
+    auth.requireRole.mockResolvedValue({ jsonBody: { error: "Forbidden" }, status: 403 });
+    const result = await guardNewJob(conn, post({}), {}, { ...maintenance, Category: undefined }, TODAY);
+    expect(result.response?.status).toBe(409);
+    const body = result.response?.jsonBody as { error: string; missing: string; needsDetail: boolean };
+    expect(body).toMatchObject({ missing: "category", needsDetail: true });
+    expect(body.error).toBe(
+      "Choose the category first: the Level 3 mechanical upgrade defects period covers part of this building until 30/06/2027, and Floorplan needs it to tell whether Acme Builders owes this work. Ask a facilities manager if RP should book it anyway.",
+    );
+  });
+
+  it("won't let it slip past by leaving the level empty under a level-scoped period", async () => {
+    routeQueries(db.executeQuery, [{ match: LIVE, rows: [periodRow({ LevelName: "Level 3", Scope: "level" })] }]);
+    const result = await guardNewJob(conn, post({}), {}, maintenance, TODAY);
+    expect(result.response?.status).toBe(409);
+    expect(result.response?.jsonBody).toMatchObject({ missing: "level", needsDetail: true });
+  });
+
+  it("lets a manager book it anyway with a reason when the answer isn't known", async () => {
+    const result = await guardNewJob(conn, post({}), { DefectsOverrideReason: "Roof plant, every level" }, { ...maintenance, Category: undefined }, TODAY);
+    expect(result.response).toBeUndefined();
+    expect(result.override?.periods.map((p) => p.defectsPeriodId)).toEqual([3]);
+  });
+
+  it("asks nothing more under a warn-only period", async () => {
+    routeQueries(db.executeQuery, [{ match: LIVE, rows: [periodRow({ Enforcement: "warn" })] }]);
+    const result = await guardNewJob(conn, post({}), {}, { ...maintenance, Category: undefined }, TODAY);
+    expect(result.response).toBeUndefined();
   });
 
   it("lets maintenance through when nothing covers it", async () => {

@@ -670,5 +670,133 @@
     "Lifts": true,
     "HVAC / mechanical": false,
     "Cleaning": false
-  }
+  },
+  "missingAnswer": [
+    {
+      "name": "a maintenance job with no category, in a building with a service-limited period, must say its category",
+      "period": "hvacBuilding",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": null,
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": "category"
+    },
+    {
+      "name": "an all-services period needs no category",
+      "period": "archivedBuilding",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": null,
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": null
+    },
+    {
+      "name": "a level period asks for the level",
+      "period": "allLevel3",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": "Hydraulic",
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": "level"
+    },
+    {
+      "name": "a tenancy period asks for the tenant",
+      "period": "fireTenancy",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": "Fire & life safety",
+        "type": null,
+        "levelName": "Level 2",
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": "tenant"
+    },
+    {
+      "name": "category first when both are missing",
+      "period": "fireTenancy",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": null,
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": "category"
+    },
+    {
+      "name": "a job on another level of a level period needs nothing more",
+      "period": "allLevel3",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": "Hydraulic",
+        "type": null,
+        "levelName": "Level 4",
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": null
+    },
+    {
+      "name": "a reactive job with an unmapped type isn't asked for a category",
+      "period": "hvacBuilding",
+      "job": {
+        "buildingId": 1,
+        "kind": "facilities",
+        "category": "Common Areas",
+        "type": "Doors",
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": null
+    },
+    {
+      "name": "another building needs nothing",
+      "period": "hvacBuilding",
+      "job": {
+        "buildingId": 9,
+        "kind": "maintenance",
+        "category": null,
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": null
+    },
+    {
+      "name": "a period that hasn't started needs nothing",
+      "period": "notStarted",
+      "job": {
+        "buildingId": 1,
+        "kind": "maintenance",
+        "category": null,
+        "type": null,
+        "levelName": null,
+        "levelLocationId": null,
+        "tenantId": null
+      },
+      "answer": null
+    }
+  ]
 }

@@ -8,6 +8,7 @@ import {
   isServiceOverdue,
   isUrgentService,
   jobService,
+  missingAnswer,
   needsLocationChoice,
   nextDueAfter,
   seriesDate,
@@ -32,6 +33,12 @@ describe("isJobCovered (shared vectors)", () => {
 describe("needsLocationChoice (shared vectors)", () => {
   it.each(vectors.locationChoice)("$name", ({ ask, job, period }) => {
     expect(needsLocationChoice(job as CoverageJob, periods[period], vectors.today)).toBe(ask);
+  });
+});
+
+describe("missingAnswer (shared vectors)", () => {
+  it.each(vectors.missingAnswer)("$name", ({ answer, job, period }) => {
+    expect(missingAnswer(job as CoverageJob, periods[period], vectors.today)).toBe(answer);
   });
 });
 

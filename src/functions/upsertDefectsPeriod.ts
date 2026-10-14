@@ -102,7 +102,7 @@ async function update(connection: Connection, input: DefectsPeriodInput, caller:
     return txFail(badRequest("A defects period can't move to another building. Archive it and add a new one."));
   }
   const stale = conflict(
-    `${before.updatedBy ?? "Someone"} changed this defects period${before.updatedAt ? ` on ${displayDate(before.updatedAt.slice(0, 10))}` : ""}. Reload to see their change, then edit again.`,
+    `${before.updatedBy ?? "Someone"} changed this defects period${before.updatedAt ? ` on ${displayDate(before.updatedAt.slice(0, 10))}` : ""}. Load their changes, then make your edit again.`,
   );
   if (before.rowVersion !== input.rowVersion) return txFail(stale);
 

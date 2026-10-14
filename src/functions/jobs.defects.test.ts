@@ -39,7 +39,8 @@ import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
 import { callsMatching, paramsOf, periodRow, post, routeQueries } from "../__tests__/fixtures/facilitiesHarness";
 
 const auth = require("../auth") as { requireRole: jest.Mock };
-const db = require("../db") as { commitTransaction: jest.Mock; executeQuery: jest.Mock };
+const db = require("../db") as { beginTransaction: jest.Mock; commitTransaction: jest.Mock; executeQuery: jest.Mock; rollbackTransaction: jest.Mock };
+const order = (mock: jest.Mock, index = 0): number => mock.mock.invocationCallOrder[index];
 const context = new InvocationContext();
 const LIVE = /FROM dbo\.DefectsPeriods d[\s\S]*d\.PracticalCompletion <= @Today/;
 const INSERT_JOB = /INSERT INTO Jobs/;
@@ -80,6 +81,34 @@ it("lets a manager book anyway with a reason: job, override event and ledger exc
   expect(paramsOf(callsMatching(db.executeQuery, JOB_EVENT)[0])).toMatchObject({ EventType: "defects_override", JobID: 88 });
   expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "job.defects_override", jobId: 88 });
   expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+});
+
+it("puts the job, the override event and the ledger row inside one transaction, in that order", async () => {
+  await upsertJob(post(newJob({ DefectsOverrideReason: "Builder in liquidation" })), context);
+  const calls = db.executeQuery.mock.calls as Array<[unknown, string]>;
+  const at = (match: RegExp): number => db.executeQuery.mock.invocationCallOrder[calls.findIndex(([, sql]) => match.test(sql))];
+  const begin = order(db.beginTransaction);
+  const commit = order(db.commitTransaction);
+  const insertJob = at(INSERT_JOB);
+  const event = at(JOB_EVENT);
+  const ledger = ledgerInserts(db.executeQuery)[0].order;
+  expect(begin).toBeLessThan(insertJob);
+  expect(insertJob).toBeLessThan(event);
+  expect(event).toBeLessThan(ledger);
+  expect(ledger).toBeLessThan(commit);
+});
+
+it("rolls the job back when the ledger row can't be written: no ledger row, no job", async () => {
+  routeQueries(db.executeQuery, [
+    { match: LIVE, rows: [periodRow()] },
+    { match: INSERT_JOB, rows: [{ JobID: 88 }] },
+    { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ UserID: 4 }] },
+    { match: /INSERT INTO dbo\.DecisionLedger/, throws: new Error("ledger unavailable") },
+  ]);
+  const response = await upsertJob(post(newJob({ DefectsOverrideReason: "Builder in liquidation" })), context);
+  expect(response.status).toBe(500);
+  expect(db.rollbackTransaction).toHaveBeenCalled();
+  expect(db.commitTransaction).not.toHaveBeenCalled();
 });
 
 it("creates a covered reactive job and returns the period as a warning", async () => {
