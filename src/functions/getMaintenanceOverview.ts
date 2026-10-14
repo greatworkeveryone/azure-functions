@@ -29,7 +29,7 @@ const SCHEDULES_IN_WINDOW = `${SELECT_SCHEDULE}
   ORDER BY s.NextDue, s.ServiceScheduleId`;
 const HAS_SCHEDULES = `SELECT COUNT(*) AS Total FROM dbo.ServiceSchedules
   WHERE ArchivedAt IS NULL AND (@BuildingId IS NULL OR BuildingId = @BuildingId)`;
-const RUNS = `SELECT r.ServiceScheduleId, r.DueDate, r.JobId, r.Outcome, r.CompletedAt,
+const RUNS = `SELECT r.ServiceScheduleId, r.DueDate, r.JobId, r.Outcome, r.CompletedAt, r.Note,
     j.Status AS JobStatus, j.Title AS JobTitle, j.IsArchived AS JobArchived
   FROM dbo.ServiceScheduleRuns r
   JOIN dbo.ServiceSchedules s ON s.ServiceScheduleId = r.ServiceScheduleId
@@ -54,7 +54,8 @@ function toRun(row: SqlRow): OverviewRun {
     jobId: row.JobId == null ? null : Number(row.JobId),
     jobStatus: row.JobStatus == null ? null : String(row.JobStatus),
     jobTitle: row.JobTitle == null ? null : String(row.JobTitle),
-    outcome: row.Outcome === "skipped_defects" ? "skipped_defects" : "job_created",
+    note: row.Note == null ? null : String(row.Note),
+    outcome: ["recorded", "skipped", "skipped_defects"].includes(String(row.Outcome)) ? (row.Outcome as OverviewRun["outcome"]) : "job_created",
     serviceScheduleId: Number(row.ServiceScheduleId),
   };
 }
@@ -95,6 +96,7 @@ export async function getMaintenanceOverview(request: HttpRequest, context: Invo
     const overview = assembleOverview({
       days,
       hasSchedules: Number(has[0]?.Total ?? 0) > 0,
+      scheduleCount: Number(has[0]?.Total ?? 0),
       linkedJobs: linked.map(toLinkedJob),
       periods: periods.map((row) => periodRowToApi(row, today)).filter((period) => period.active),
       runs: runs.map(toRun),

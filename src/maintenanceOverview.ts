@@ -34,7 +34,9 @@ export interface OverviewHistoryItem {
   jobId: number | null;
   jobStatus: string | null;
   jobTitle: string | null;
-  outcome: "done" | "open" | "skipped_defects";
+  /** A manager's note: why a due date was skipped, or how it was serviced. */
+  note: string | null;
+  outcome: "done" | "open" | "skipped" | "skipped_defects";
   source: "linked_job" | "schedule";
 }
 
@@ -64,6 +66,8 @@ export interface MaintenanceOverview {
   days: number;
   /** Any live schedule exists (in this scope): the page may say "scheduled servicing". */
   hasSchedules: boolean;
+  /** Live schedules set up in this scope, whether or not anything is due in the window. */
+  scheduleCount: number;
   /** Jobs the scheduler created, so the plain jobs list can leave them out. */
   scheduledJobIds: number[];
   today: string;
@@ -77,7 +81,8 @@ export interface OverviewRun {
   jobId: number | null;
   jobStatus: string | null;
   jobTitle: string | null;
-  outcome: "job_created" | "skipped_defects";
+  note: string | null;
+  outcome: "job_created" | "recorded" | "skipped" | "skipped_defects";
   serviceScheduleId: number;
 }
 
@@ -95,6 +100,7 @@ export interface OverviewInput {
   linkedJobs: OverviewLinkedJob[];
   periods: DefectsPeriodApi[];
   runs: OverviewRun[];
+  scheduleCount: number;
   schedules: ScheduleApi[];
   today: string;
 }
@@ -142,18 +148,22 @@ function historyFor(schedules: ScheduleApi[], assetId: number | null, runs: Over
   const ids = new Set(schedules.map((s) => s.serviceScheduleId));
   const fromRuns: OverviewHistoryItem[] = runs
     .filter((run) => ids.has(run.serviceScheduleId) && !run.jobArchived)
-    .map((run) => ({
-      date: run.outcome === "job_created" && run.jobStatus === "Done" && run.completedAt ? run.completedAt.slice(0, 10) : run.dueDate,
-      jobId: run.jobId,
-      jobStatus: run.jobStatus,
-      jobTitle: run.jobTitle,
-      outcome: run.outcome === "skipped_defects" ? "skipped_defects" : run.jobStatus === "Done" ? "done" : "open",
-      source: "schedule",
-    }));
+    .map((run): OverviewHistoryItem => {
+      const done = run.outcome === "recorded" || (run.outcome === "job_created" && run.jobStatus === "Done");
+      return {
+        date: done && run.completedAt ? run.completedAt.slice(0, 10) : run.dueDate,
+        jobId: run.jobId,
+        jobStatus: run.jobStatus,
+        jobTitle: run.jobTitle,
+        note: run.note,
+        outcome: run.outcome === "skipped_defects" || run.outcome === "skipped" ? run.outcome : done ? "done" : "open",
+        source: "schedule",
+      };
+    });
   const seen = new Set(fromRuns.map((item) => item.jobId).filter((id): id is number => id !== null));
   const fromLinks: OverviewHistoryItem[] = assetId === null ? [] : linkedJobs
     .filter((job) => job.assetId === assetId && !seen.has(job.jobId))
-    .map((job) => ({ date: job.completedOn, jobId: job.jobId, jobStatus: job.jobStatus, jobTitle: job.jobTitle, outcome: "done", source: "linked_job" }));
+    .map((job) => ({ date: job.completedOn, jobId: job.jobId, jobStatus: job.jobStatus, jobTitle: job.jobTitle, note: null, outcome: "done", source: "linked_job" }));
   return [...fromRuns, ...fromLinks].sort((a, b) => b.date.localeCompare(a.date)).slice(0, HISTORY_LIMIT);
 }
 
@@ -209,6 +219,7 @@ export function assembleOverview(input: OverviewInput): MaintenanceOverview {
     buildings: buildings.sort((a, b) => a.buildingName.localeCompare(b.buildingName)),
     days: input.days,
     hasSchedules: input.hasSchedules,
+    scheduleCount: input.scheduleCount,
     scheduledJobIds: [...new Set(input.runs.map((run) => run.jobId).filter((id): id is number => id !== null))],
     today: input.today,
     until,

@@ -13,13 +13,14 @@ const run = (overrides: Partial<OverviewRun> = {}): OverviewRun => ({
   jobId: 500,
   jobStatus: "New",
   jobTitle: "Chiller service",
+  note: null,
   outcome: "job_created",
   serviceScheduleId: 21,
   ...overrides,
 });
 
 function build(input: Partial<Parameters<typeof assembleOverview>[0]> = {}) {
-  return assembleOverview({ days: 90, hasSchedules: true, linkedJobs: [], periods: [], runs: [], schedules: [schedule()], today: TODAY, ...input });
+  return assembleOverview({ days: 90, hasSchedules: true, linkedJobs: [], periods: [], runs: [], scheduleCount: 1, schedules: [schedule()], today: TODAY, ...input });
 }
 
 describe("assembleOverview", () => {
@@ -77,6 +78,25 @@ describe("assembleOverview", () => {
       ["2026-04-30", "done", 400, "schedule"],
       ["2025-10-28", "skipped_defects", null, "schedule"],
     ]);
+  });
+
+  it("shows a manager's mark-serviced as done and a skip with its reason (UX review E4)", () => {
+    const overview = build({
+      runs: [
+        run({ completedAt: "2026-05-02T00:00:00.000Z", dueDate: "2026-04-28", jobId: null, jobStatus: null, note: "Contractor's own visit", outcome: "recorded" }),
+        run({ dueDate: "2025-10-28", jobId: null, jobStatus: null, note: "Building closed", outcome: "skipped" }),
+      ],
+    });
+    const [asset] = overview.buildings[0].assets;
+    expect(asset.lastServiced).toEqual({ date: "2026-05-02", jobId: null });
+    expect(asset.history.map((h) => [h.date, h.outcome, h.note])).toEqual([
+      ["2026-05-02", "done", "Contractor's own visit"],
+      ["2025-10-28", "skipped", "Building closed"],
+    ]);
+  });
+
+  it("counts the schedules set up, so an empty window can say how many exist (UX review E2)", () => {
+    expect(build({ scheduleCount: 150 }).scheduleCount).toBe(150);
   });
 
   it("groups a service without an asset under its scope", () => {
