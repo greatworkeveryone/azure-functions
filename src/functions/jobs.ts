@@ -41,6 +41,7 @@ import {
 } from "../jobStatusMachine";
 import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
+import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 
 // Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
@@ -601,11 +602,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           jsonBody: { error: "Status must be 'New' when creating a job" },
         };
       }
-      // Default AwaitingRole to 'facilities' when the caller omits it — a New
-      // job is always on the facilities side first.
-      if (fields.AwaitingRole === undefined || fields.AwaitingRole === null) {
-        fields.AwaitingRole = "facilities";
+      // A New job is always on the facilities side first (J3): who it waits
+      // on isn't the caller's to choose, here or later (N1).
+      if (fields.AwaitingRole != null && fields.AwaitingRole !== "facilities") {
+        return {
+          status: 422,
+          jsonBody: { code: "awaiting_role_derived", error: "A new job always starts with facilities, so who it waits on can't be set." },
+        };
       }
+      fields.AwaitingRole = "facilities";
       // N4 (J2): only a manager starts a job as contract or internal.
       if (fields.IsContract || fields.IsInternal) {
         const refusal = flagChangeRefusal({ actor: { kind: "user", roles: await rolesForRequest(request) }, hasMoneyRecords: false });
@@ -1282,6 +1287,13 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         },
       };
     }
+    // J3: money, contractor, archive and flag entries come from the handler
+    // that made the change, never from a client.
+    const typeRefusal = eventTypeRefusal(EventType);
+    if (typeRefusal) return { status: 422, jsonBody: typeRefusal };
+    if (linkedIdsInvalid({ InvoiceID, PurchaseOrderID, QuoteID })) {
+      return { status: 400, jsonBody: { error: "QuoteID, InvoiceID and PurchaseOrderID must be positive whole numbers" } };
+    }
     const isStalledBit =
       IsStalled == null ? null : IsStalled ? 1 : 0;
 
@@ -1311,6 +1323,11 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     let insertedEventId: number;
     await beginTransaction(connection);
     try {
+      const linkRefusal = await linkedRecordRefusal(connection, JobID, { InvoiceID, PurchaseOrderID, QuoteID });
+      if (linkRefusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 422, jsonBody: linkRefusal };
+      }
       if (NewStatus != null) {
         const locked = await loadJobForTransition(connection, JobID);
         if (!locked) {
