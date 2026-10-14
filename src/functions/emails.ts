@@ -90,7 +90,7 @@ async function getEmails(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const rawStatuses = request.query.get("statuses") ?? "unread,matched";
@@ -172,7 +172,7 @@ async function getEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));
@@ -446,7 +446,8 @@ async function promoteEmailToQuote(
 // ── POST /api/archiveEmail ──────────────────────────────────────────────────
 // Body: { EmailID: number }
 // Sets Status = 'archived' and stamps ProcessedAt so the email leaves the
-// active inbox without being tied to a job/quote/invoice.
+// active inbox without being tied to a job/quote/invoice. Who archived it is
+// ledgered (email.archive) in the same transaction (SEC-05).
 
 async function archiveEmail(
   request: HttpRequest,
@@ -455,7 +456,7 @@ async function archiveEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -480,12 +481,35 @@ async function archiveEmail(
     }
 
     connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
-       WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    await beginTransaction(connection);
+    try {
+      const archived = await executeQuery(
+        connection,
+        `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
+         OUTPUT INSERTED.EmailID, INSERTED.MatchedJobID, DELETED.Status AS PreviousStatus
+         WHERE EmailID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: EmailID }],
+      );
+      if (archived.length === 0) {
+        await rollbackTransaction(connection);
+        return { status: 404, jsonBody: { error: "Email not found" } };
+      }
+      await record(connection, {
+        action: "email.archive",
+        actor,
+        after: { status: "archived" },
+        before: { status: (archived[0].PreviousStatus as string | null) ?? null },
+        jobId: (archived[0].MatchedJobID as number | null) ?? null,
+        subject: { id: EmailID, type: "email" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
@@ -508,7 +532,7 @@ async function flagEmailForReview(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -1186,7 +1210,7 @@ async function getEmailThread(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));

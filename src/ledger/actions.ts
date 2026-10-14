@@ -88,6 +88,9 @@ export const LEDGER_ACTIONS = {
   "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
+
+  // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
+  "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
