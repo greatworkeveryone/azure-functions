@@ -10,7 +10,8 @@
     "watch": "tsc -w",
     "test": "jest",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "check:routes": "node scripts/check-routes.cjs"
   },
   "dependencies": {
     "@azure/functions": "4.12.0",

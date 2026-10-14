@@ -84,9 +84,10 @@ jobs:
       - name: Audit production dependencies (critical, blocking)
         run: npm audit --omit=dev --audit-level=critical
 
-      # Skipped until O5 lands scripts/check-routes.cjs; O5 removes this guard.
-      - name: Route and role-check parity
-        if: hashFiles('scripts/check-routes.cjs') != ''
+      # Every http route needs a role check or a reason to be public. The
+      # frontend-calls-match-backend comparison is a separate command in the
+      # frontend repo (scripts/check-api-calls.cjs --backend <this checkout>).
+      - name: Every route has a role check
         run: node scripts/check-routes.cjs
 
       - name: Build metadata
