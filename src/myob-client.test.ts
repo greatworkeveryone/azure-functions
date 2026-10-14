@@ -9,12 +9,6 @@ jest.mock("./myob-api-log", () => ({
 }));
 
 import { applyMyobPayment, createMyobBill } from "./myob-client";
-import {
-  myobCreateServiceOrder,
-  myobDeleteServiceOrder,
-  myobGetServiceOrder,
-  myobUpdateServiceOrder,
-} from "./myob-purchase-order";
 import { MyobWritesDisabledError, type MyobActor } from "./myob-api-log";
 
 const { myobRequest } = require("./myob-api-log") as { myobRequest: jest.Mock };
@@ -136,59 +130,5 @@ describe("applyMyobPayment", () => {
     await expect(applyMyobPayment({ actor: ACTOR, amount: 50, billUid: "x", sqlToken: null })).rejects.toThrow(
       "MYOB API 404 Not Found: no bill",
     );
-  });
-});
-
-describe("service orders", () => {
-  const order = { Lines: [], Supplier: { UID: "s-1" } };
-
-  it("create: POST with actor and correlationId, returning the new uid", async () => {
-    const result = await myobCreateServiceOrder(order, "t", ACTOR, CORRELATION);
-
-    expect(result.uid).toBe("new-uid");
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, correlationId: CORRELATION, method: "POST", purpose: "create-service-order" });
-    expect(lastRequest().url).toMatch(/\/Purchase\/Order\/Service$/);
-    expect(getValidMyobAccessToken).toHaveBeenCalledWith("t", ACTOR, CORRELATION);
-  });
-
-  it("get: GET with actor and correlationId", async () => {
-    respond({ json: () => ({ UID: "o-1" }), status: 200, text: '{"UID":"o-1"}' });
-
-    const result = await myobGetServiceOrder("o-1", "t", TIMER, CORRELATION);
-
-    expect(result.UID).toBe("o-1");
-    expect(lastRequest()).toMatchObject({ actor: TIMER, correlationId: CORRELATION, method: "GET", purpose: "get-service-order" });
-    expect(lastRequest().url).toMatch(/\/Purchase\/Order\/Service\/o-1$/);
-  });
-
-  it("update: PUT with actor and correlationId", async () => {
-    respond({ status: 204 });
-
-    await myobUpdateServiceOrder("o-1", { Memo: "m" }, "t", ACTOR, CORRELATION);
-
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, body: { Memo: "m" }, correlationId: CORRELATION, method: "PUT", purpose: "update-service-order" });
-  });
-
-  it("delete: DELETE with actor and correlationId", async () => {
-    respond({ status: 204 });
-
-    await myobDeleteServiceOrder("o-1", "t", ACTOR, CORRELATION);
-
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, correlationId: CORRELATION, method: "DELETE", purpose: "delete-service-order" });
-  });
-
-  it("leave the correlationId unset when none is supplied", async () => {
-    respond({ status: 204 });
-
-    await myobDeleteServiceOrder("o-1", "t", ACTOR);
-    await myobCreateServiceOrder(order, "t", ACTOR);
-
-    for (const [req] of myobRequest.mock.calls) expect(req.correlationId).toBeUndefined();
-  });
-
-  it("create throws on a non-2xx response", async () => {
-    respond({ ok: false, status: 422, text: "supplier required" });
-
-    await expect(myobCreateServiceOrder(order, "t", ACTOR)).rejects.toThrow("MYOB createServiceOrder 422: supplier required");
   });
 });

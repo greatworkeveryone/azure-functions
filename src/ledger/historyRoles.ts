@@ -50,6 +50,7 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["job", JOB_READ],
   ["myob_control", MYOB_CONTROL_READ],
   ["myob_link", MYOB_CONTROL_READ],
+  ["myob_proposal", MYOB_CONTROL_READ],
   ["payment", PAYMENT_READ],
   ["purchase_order", INVOICE_AND_PO_READ],
   ["quote", QUOTE_READ],

@@ -48,11 +48,19 @@ class LinkRefusal extends Error {
   }
 }
 
-/** The file's mode, or null when it isn't registered at all. */
-async function fileMode(connection: Connection, businessId: string): Promise<MyobFileMode | null> {
-  const rows = await executeQuery(connection, `SELECT Mode FROM dbo.MyobCompanyFiles WHERE CompanyFileId = @CompanyFileId`, [
-    { name: "CompanyFileId", type: TYPES.NVarChar, value: businessId },
-  ]);
+/**
+ * The file's mode, or null when it isn't registered at all. Under the token
+ * lock it takes the row's update lock too, so a mode change (which takes the
+ * same lock in setMyobFileMode) is serialised against the link.
+ */
+async function fileMode(connection: Connection, businessId: string, lock = false): Promise<MyobFileMode | null> {
+  const rows = await executeQuery(
+    connection,
+    lock
+      ? `SELECT Mode FROM dbo.MyobCompanyFiles WITH (UPDLOCK, HOLDLOCK) WHERE CompanyFileId = @CompanyFileId`
+      : `SELECT Mode FROM dbo.MyobCompanyFiles WHERE CompanyFileId = @CompanyFileId`,
+    [{ name: "CompanyFileId", type: TYPES.NVarChar, value: businessId }],
+  );
   if (!rows[0]) return null;
   return isMyobFileMode(rows[0].Mode) ? rows[0].Mode : "off";
 }
@@ -169,7 +177,7 @@ async function storeLink(
     await beginTransaction(connection);
     try {
       await lockMyobTokens(connection);
-      const refused = modeRefusal(businessId, await fileMode(connection, businessId));
+      const refused = modeRefusal(businessId, await fileMode(connection, businessId, true));
       if (refused) throw new LinkRefusal(refused.title, refused.detail);
       const prior = await readMyobAuthRow(connection);
       const stillExpected = expectedFile(prior);

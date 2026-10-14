@@ -113,6 +113,14 @@ export const LEDGER_ACTIONS = {
   "myob.control_change": { exception: true, reasonRequired: true, subjects: ["myob_control"] },
   // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
   "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
+  // The proposal pipeline (sprint M3, decision 12): one row per step. An
+  // exception (MYOB said no, the outcome is unknown, or the read-back differs)
+  // and a withdrawal are exceptions; a withdrawal needs its reason.
+  "myob.approve": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
+  "myob.exception": { exception: true, reasonRequired: false, subjects: ["myob_proposal"] },
+  "myob.propose": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
+  "myob.push": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
+  "myob.withdraw": { exception: true, reasonRequired: true, subjects: ["myob_proposal"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

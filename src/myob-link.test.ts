@@ -139,6 +139,25 @@ describe("completeMyobLink refusals: nothing is exchanged or stored", () => {
     expect(raiseMyobHealth).not.toHaveBeenCalled();
   });
 
+  it("re-reads the mode under the token lock with the row's update lock", async () => {
+    await link();
+    const modeReads = db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1])).filter((sql: string) => /FROM dbo\.MyobCompanyFiles/.test(sql));
+    expect(modeReads).toHaveLength(2);
+    expect(modeReads[0]).not.toMatch(/UPDLOCK/);
+    expect(modeReads[1]).toMatch(/WITH \(UPDLOCK, HOLDLOCK\)/);
+  });
+
+  it("409, storing nothing, when another file was linked between the first check and the token lock", async () => {
+    store.readMyobAuthRow.mockResolvedValueOnce(null).mockResolvedValueOnce({ BusinessId: OTHER });
+
+    const outcome = await link();
+
+    expect(outcome).toMatchObject({ ok: false, status: 409, title: "That is not the company file Floorplan is set up for" });
+    expect(store.saveLinkedTokens).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
   it("409 when MYOB grants a scope beyond the agreement", async () => {
     exchangeCode.mockRejectedValue(new MyobScopeError(["sme-banking"]));
 
