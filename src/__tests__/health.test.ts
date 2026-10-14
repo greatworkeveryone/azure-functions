@@ -27,7 +27,7 @@ const { checkMigrations } = jest.requireMock("../migrate") as { checkMigrations:
 const auth = jest.requireMock("../auth") as { requireRole: jest.Mock };
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
-const deep = { query: new URLSearchParams("deep=true") } as unknown as HttpRequest;
+const deep = { headers: new Headers(), query: new URLSearchParams("deep=true") } as unknown as HttpRequest;
 const SAVED = { ...process.env };
 
 function setAllSettings() {
@@ -123,7 +123,7 @@ describe("health?deep=true", () => {
   it("stays admin-only and minimal without deep", async () => {
     auth.requireRole.mockResolvedValueOnce({ status: 403, jsonBody: { error: "Forbidden" } });
     expect((await health(deep, ctx)).status).toBe(403);
-    const shallow = await health({ query: new URLSearchParams() } as unknown as HttpRequest, ctx);
+    const shallow = await health({ headers: new Headers(), query: new URLSearchParams() } as unknown as HttpRequest, ctx);
     expect(shallow.jsonBody).toEqual({ ok: true });
   });
 });

@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { Connection, TYPES } from "tedious";
 import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
 import {
@@ -26,7 +26,6 @@ interface UpdateWorkRequestBody {
 }
 interface UpdateWorkRequestLocalBody {
   WorkRequestID: number;
-  UpdatedBy?: string;
   [key: string]: unknown;
 }
 interface ResetWorkRequestLocalBody { WorkRequestID: number }
@@ -554,10 +553,14 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
   const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  // UpdatedBy is an audit column — stamped from the verified token (SEC-23).
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as UpdateWorkRequestLocalBody;
-    const { WorkRequestID, UpdatedBy, ...fields } = body ?? {};
+    const { WorkRequestID, ...fields } = body ?? {};
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
     }
@@ -582,7 +585,7 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
 
     const params: SqlParam[] = [
       { name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID },
-      { name: "UpdatedBy", type: TYPES.NVarChar, value: UpdatedBy ?? null },
+      { name: "UpdatedBy", type: TYPES.NVarChar, value: identity.name },
     ];
     for (const [k, v] of Object.entries(accepted)) {
       const isNumeric = k === "TotalCost" || k === "CostNotToExceed";

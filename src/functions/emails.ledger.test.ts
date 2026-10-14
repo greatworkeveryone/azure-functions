@@ -137,7 +137,8 @@ const decide = (over: Record<string, unknown> = {}) =>
 beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(console, "error").mockImplementation(() => undefined);
-  delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+  // These cases exercise reply-to-approve itself, which is off by default.
+  process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
   auth.requireRole.mockResolvedValue(null);
   auth.verifiedIdentityFromRequest.mockResolvedValue(OPERATOR);
   auth.rolesForRequest.mockResolvedValue(["accounts_manager"]);
@@ -423,12 +424,12 @@ describe("a reply that can't stand as the director's decision", () => {
     expect(refusalRows()).toEqual([expect.objectContaining({ before: { attempted: "quote.director_reject" } })]);
   });
 
-  it("switching email decisions off is a policy, not a refused attempt: nothing is recorded", async () => {
+  it("switching email decisions off is a policy, not a refused attempt: no ledger row", async () => {
     process.env.EMAIL_REPLY_DECISIONS_ENABLED = "false";
 
     const res = await decide();
 
     expect(res.status).toBe(403);
-    expect(db.executeQuery).not.toHaveBeenCalled();
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBe(-1);
   });
 });

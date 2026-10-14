@@ -27,6 +27,7 @@ import { getCachedApprovalLimits } from "../approval-limits-db";
 import { formatDocNumber } from "../doc-number";
 import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
 import { decideApprovalAmountEdit } from "../edit-effects";
+import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { advanceJobStatus } from "../jobStatusHelpers";
@@ -153,6 +154,9 @@ export async function upsertQuote(
       // Create — runs in a tx so the SELECT MAX(Seq) + INSERT pair is atomic.
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create a quote" } };
+      }
+      if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, JobID, QuotePDFBlobName))) {
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
       }
 
       await beginTransaction(connection);
@@ -294,6 +298,9 @@ export async function upsertQuote(
     }
     const before = beforeRows[0];
     const jobId = before.JobID as number;
+    if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, QuotePDFBlobName))) {
+      return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+    }
     const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
 
     const effects = decideApprovalAmountEdit(

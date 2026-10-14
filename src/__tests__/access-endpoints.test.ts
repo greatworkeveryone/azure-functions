@@ -58,9 +58,13 @@ const GOOD_PROFILE = {
 
 beforeAll(() => {
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+  // The dev-roles header only works on a local Development host (jwt.ts).
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+  delete process.env.WEBSITE_INSTANCE_ID;
 });
 afterAll(() => {
   delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
+  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
 });
 beforeEach(() => {
   jest.clearAllMocks();

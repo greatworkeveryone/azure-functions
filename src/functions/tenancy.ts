@@ -2248,8 +2248,23 @@ async function applyRentReview(
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
-// Returns amber+red tenants for the dashboard widget. Same shape as
-// getRegisterTenants but filtered to ones needing attention.
+// Returns amber+red tenants for the dashboard widget and the activity feed.
+// Every role reads it, so each row carries only what those show — never ABN,
+// contacts, rent or deposits; the full record stays behind the register's
+// accounts-only gate (SEC-05).
+
+function reviewDueProjection(tenant: ReturnType<typeof tenantRowToApi>) {
+  return {
+    buildingId: tenant.buildingId,
+    daysToExpiry: tenant.daysToExpiry,
+    expiry: tenant.expiry,
+    legalName: tenant.legalName,
+    nextReviewDate: tenant.nextReviewDate,
+    reviewState: tenant.reviewState,
+    reviewType: tenant.reviewType,
+    tenantId: tenant.tenantId,
+  };
+}
 
 async function getReviewsDue(
   request: HttpRequest,
@@ -2290,7 +2305,8 @@ async function getReviewsDue(
     // has moved on, so keep only what is still due or overdue today.
     const tenants = rows
       .map((row) => tenantRowToApi(row, [], {}))
-      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red");
+      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red")
+      .map(reviewDueProjection);
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {
     context.error("getReviewsDue failed:", error.message);

@@ -1,5 +1,6 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from "@azure/functions";
-import { errorResponse, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
+import { errorResponse, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
+import { AppRole } from "../auth";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { writeDigestOptOut } from "../digest/preference";
 import { checkRateLimit } from "../rateLimit";
@@ -10,6 +11,10 @@ import { checkRateLimit } from "../rateLimit";
 // token's, never a userId or email in the body.
 
 export async function setDigestPreference(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  // Any signed-in staff member may read or set their own digest preference;
+  // the role gate exists so the route guard (and check-routes) can see it.
+  const denied = await requireRole(request, Object.values(AppRole));
+  if (denied) return denied;
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
 

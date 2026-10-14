@@ -11,7 +11,14 @@ import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+
+// A stored name that was never minted (a legacy upload kept its raw file
+// extension) gets no link rather than failing the tenant's whole list (SEC-01).
+function readSasOrNull(blobName: unknown): string | null {
+  return isBlobName(blobName, WR_ATTACHMENTS_SHAPES) ? generateReadSasUrl(blobName) : null;
+}
 
 // ── POST /api/uploadTenancyAttachment (multipart/form-data) ──────────────────
 // Fields: file (binary), tenantId (number)
@@ -136,7 +143,7 @@ async function handleGetTenancyAttachments(
     );
     const attachments = rows.map((r: any) => ({
       ...r,
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
   } catch (error: any) {

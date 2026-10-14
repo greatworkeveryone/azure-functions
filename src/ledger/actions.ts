@@ -101,6 +101,8 @@ export const LEDGER_ACTIONS = {
   "myob.link": { exception: true, reasonRequired: false, subjects: ["myob_link"] },
   // The CFO's switches (sprint M1): set, pause, resume. Her note is the reason.
   "myob.control_change": { exception: true, reasonRequired: true, subjects: ["myob_control"] },
+  // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
+  "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

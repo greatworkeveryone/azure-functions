@@ -16,6 +16,7 @@ const MIGRATIONS = [
   "123_graph_subscriptions.sql",
   "128_timer_runs.sql",
   "129_email_intake_watermark.sql",
+  "133_email_archive_columns.sql",
 ];
 
 // Destructive-looking phrases the money migrations need, none of which changes

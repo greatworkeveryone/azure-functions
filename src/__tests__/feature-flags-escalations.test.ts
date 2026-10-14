@@ -38,6 +38,7 @@ beforeEach(() => {
   jest.spyOn(console, "warn").mockImplementation(() => undefined);
   clearRoleCache();
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   db.createRequestConnection.mockResolvedValue({});
   db.executeQuery.mockResolvedValue([]);
 });

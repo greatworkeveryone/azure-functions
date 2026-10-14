@@ -42,10 +42,14 @@ const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as 
 
 beforeAll(() => {
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+  // The dev-roles header only works on a local Development host (jwt.ts).
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+  delete process.env.WEBSITE_INSTANCE_ID;
   process.env.MONEY_ALLOWED_CIDRS = "203.0.113.0/28";
 });
 afterAll(() => {
   delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
+  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
   delete process.env.MONEY_ALLOWED_CIDRS;
 });
 beforeEach(() => {

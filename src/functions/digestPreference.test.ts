@@ -11,6 +11,7 @@ jest.mock("../auth", () => {
   return {
     ...actual,
     errorResponse: jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
+    requireRole: jest.fn().mockResolvedValue(null),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     verifiedIdentityFromRequest: jest.fn(),
   };
@@ -48,6 +49,15 @@ describe("registration", () => {
 });
 
 describe("getDigestPreference", () => {
+  it("returns the role gate's refusal before reading the identity or the database", async () => {
+    const auth = jest.requireMock("../auth") as { requireRole: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
+    auth.requireRole.mockResolvedValueOnce({ jsonBody: { error: "Forbidden" }, status: 403 });
+    const res = await getDigestPreference(request(), ctx);
+    expect(res).toEqual({ jsonBody: { error: "Forbidden" }, status: 403 });
+    expect(auth.verifiedIdentityFromRequest).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
   it("says whether the signed-in person has switched the digest off, by their verified identity", async () => {
     db.executeQuery.mockResolvedValue([{ DigestOptOut: true }]);
     const res = await getDigestPreference(request(), ctx);
