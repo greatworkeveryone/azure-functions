@@ -39,9 +39,9 @@ const PERIOD_JOINS = `
   LEFT JOIN dbo.Buildings b ON b.BuildingID = d.BuildingId
   LEFT JOIN dbo.Tenants t ON t.TenantID = d.TenantId
   LEFT JOIN dbo.Contractors c ON c.ContractorID = d.ContractorId`;
-const SELECT_PERIOD = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, t.TenantName, c.ContractorName
+const SELECT_PERIOD = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, COALESCE(t.TradingName, t.LegalName) AS TenantName, c.ContractorName
   FROM dbo.DefectsPeriods d ${PERIOD_JOINS}`;
-const SELECT_PERIOD_FOR_UPDATE = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, t.TenantName, c.ContractorName
+const SELECT_PERIOD_FOR_UPDATE = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, COALESCE(t.TradingName, t.LegalName) AS TenantName, c.ContractorName
   FROM dbo.DefectsPeriods d WITH (UPDLOCK, ROWLOCK) ${PERIOD_JOINS}`;
 const LIST_ORDER = "ORDER BY d.EndsOn, d.DefectsPeriodId";
 const LIST_SQL = {
