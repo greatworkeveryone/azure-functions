@@ -19,6 +19,7 @@ import { displayDate, livePeriodsForBuilding, servicesLabel, type DefectsPeriodA
 import { DEFECTS_OVERRIDE_ROLES } from "./facilitiesRoles";
 import { coveringPeriods, type CoverageJob } from "./facilitiesRules";
 import { record } from "./ledger";
+import { Sentry } from "./sentry";
 import { resolveLedgerActor } from "./ledger/actor";
 
 export const DEFECTS_OVERRIDE_EVENT = "defects_override";
@@ -67,6 +68,21 @@ export function blockedMessage(period: DefectsPeriodApi, canOverride: boolean): 
   return `This is inside the ${period.works} defects period until ${displayDate(period.endsOn)}: ${who} is responsible for ${servicesLabel(period.services)} ${scopeLabel(period)}. ${next}`;
 }
 
+// Migration 119 is applied by hand. If this code reaches an app whose database
+// doesn't have the table yet, job creation must keep working: no table means no
+// periods, said loudly to Sentry. Any other failure still fails the create.
+const MISSING_TABLE = /Invalid object name 'dbo\.DefectsPeriods'/i;
+
+async function livePeriodsOrNone(connection: Connection, buildingId: number, today: string): Promise<DefectsPeriodApi[]> {
+  try {
+    return await livePeriodsForBuilding(connection, buildingId, today);
+  } catch (error) {
+    if (!(error instanceof Error) || !MISSING_TABLE.test(error.message)) throw error;
+    Sentry.captureMessage("dbo.DefectsPeriods is missing: apply migration 119. Jobs are created without the defects check.", "error");
+    return [];
+  }
+}
+
 export async function guardNewJob(
   connection: Connection,
   request: HttpRequest,
@@ -76,7 +92,7 @@ export async function guardNewJob(
 ): Promise<DefectsGuardResult> {
   const job = coverageFromFields(fields);
   if (!job) return { override: null, warnings: [] };
-  const covering = coveringPeriods(job, await livePeriodsForBuilding(connection, job.buildingId, today), today);
+  const covering = coveringPeriods(job, await livePeriodsOrNone(connection, job.buildingId, today), today);
   const blocking = covering.filter((period) => period.enforcement === "block");
   if (job.kind !== "maintenance" || blocking.length === 0) return { override: null, warnings: covering };
 

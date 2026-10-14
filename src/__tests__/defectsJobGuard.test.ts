@@ -2,6 +2,7 @@
 import type { Connection } from "tedious";
 
 jest.mock("../db", () => ({ executeQuery: jest.fn() }));
+jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
 jest.mock("../auth", () => {
   const actual = jest.requireActual("../auth");
   return {
@@ -90,6 +91,19 @@ describe("guardNewJob", () => {
   it("lets maintenance through when nothing covers it", async () => {
     const result = await guardNewJob(conn, post({}), {}, { ...maintenance, Category: "Lifts" }, TODAY);
     expect(result).toEqual({ override: null, warnings: [] });
+  });
+
+  it("keeps job creation working, loudly, if migration 119 hasn't been applied", async () => {
+    routeQueries(db.executeQuery, [{ match: LIVE, throws: new Error("Invalid object name 'dbo.DefectsPeriods'.") }]);
+    const result = await guardNewJob(conn, post({}), {}, maintenance, TODAY);
+    expect(result).toEqual({ override: null, warnings: [] });
+    const { Sentry } = require("../sentry") as { Sentry: { captureMessage: jest.Mock } };
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/apply migration 119/), "error");
+  });
+
+  it("fails the create on any other database error", async () => {
+    routeQueries(db.executeQuery, [{ match: LIVE, throws: new Error("deadlock victim") }]);
+    await expect(guardNewJob(conn, post({}), {}, maintenance, TODAY)).rejects.toThrow("deadlock victim");
   });
 
   it("asks nothing of the database without a building", async () => {
