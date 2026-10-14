@@ -16,9 +16,21 @@ const sourceFiles = (dir: string): string[] =>
 
 // ── Every route reaches a role gate (SEC-24) ─────────────────────────────────
 
-const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest)\s*\(/;
+// runControllerAction (src/myob-controller-handler.ts) is the CFO-only gate the
+// MYOB admin routes share; the test below keeps it honest.
+const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest|runControllerAction)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
+describe("the shared MYOB controller gate", () => {
+  it("refuses anyone but the MYOB controller before parsing the body or doing any work", () => {
+    const gate = read(join(SRC, "myob-controller-handler.ts"));
+    const check = gate.search(/if \(!isMyobController\(await rolesForRequest\(request\)\)\) return forbiddenResponse\(/);
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(gate.search(/action\.parse\(/));
+    expect(check).toBeLessThan(gate.search(/action\.work\(/));
+  });
+});
+
 const ANONYMOUS_BY_DESIGN: Record<string, string> = {
   corsOptions: "preflight only; returns CORS headers and no data",
   graphNotification: "Graph webhook; authenticated by the constant-time clientState secret",
