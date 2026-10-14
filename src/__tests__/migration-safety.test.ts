@@ -1,11 +1,13 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, scanSql } from "../migrate-files";
 
-// Production applies migrations automatically at startup (src/migrate.ts), and
-// a migration that throws stops the whole API. Migrations for money tables must
-// therefore be additive and safe to run twice: nothing destructive, and every
-// CREATE / ALTER behind an existence check. This is a regex tripwire over the
-// raw files, not a SQL parser.
+// Migrations are applied by hand (`npm run migrate -- --apply`, src/migrate.ts)
+// or at startup when RUN_MIGRATIONS_ON_STARTUP=true, where a migration that
+// throws stops the whole API. Migrations for money tables must therefore be
+// additive and safe to run twice: nothing destructive, and every CREATE /
+// ALTER behind an existence check. This is a regex tripwire over the raw
+// files, not a SQL parser.
 
 const MIGRATIONS = [
   "114_payments_invoice_link.sql",
@@ -115,5 +117,36 @@ describe("migration 115_myob_api_log.sql", () => {
     for (const column of columns) {
       expect(code).toMatch(new RegExp(`\\b${column}\\b`));
     }
+  });
+});
+
+// db-safety-guards reads the raw text, so a destructive statement assembled in
+// dynamic SQL — EXEC(N'DROP ' + N'TABLE …'), sp_executesql, a @sql variable —
+// slipped past it (data-loss audit §6.2). These read the string literals that
+// reach EXEC / sp_executesql / an assignment, fragments joined across `+`.
+describe("dynamic SQL in guarded migrations", () => {
+  const guarded = readdirSync(join(__dirname, "..", "..", "migrations")).filter(
+    (f) => f.endsWith(".sql") && Number.parseInt(f, 10) >= FIRST_GUARDED_MIGRATION,
+  );
+
+  it.each(guarded)("%s has no destructive EXEC / sp_executesql string without an approval header", (file) => {
+    const raw = read(file);
+    const hits = scanSql(raw).dynamic.flatMap((text) => findDestructiveStatements(text));
+    if (hits.length > 0) expect(raw).toMatch(APPROVAL_HEADER);
+  });
+
+  it("actually sees the dynamic SQL (the ledger triggers are built through EXEC)", () => {
+    for (const file of ["094_decision_ledger.sql", "115_myob_api_log.sql"]) {
+      expect(scanSql(read(file)).dynamic.some((text) => /CREATE TRIGGER/.test(text))).toBe(true);
+    }
+  });
+
+  it.each([
+    "EXEC(N'DROP ' + N'TABLE dbo.Old');",
+    "EXEC sp_executesql N'DELETE dbo.Jobs WHERE JobID = @id', N'@id INT', @id = 1;",
+    "DECLARE @sql NVARCHAR(MAX) = N'DISABLE TRIGGER dbo.TR_DecisionLedger_AppendOnly ON dbo.DecisionLedger';\nEXEC(@sql);",
+    "EXEC(N'EXEC(N''TRUNCATE TABLE dbo.Jobs'')');",
+  ])("flags %s", (sql) => {
+    expect(scanSql(sql).dynamic.flatMap((text) => findDestructiveStatements(text))).not.toEqual([]);
   });
 });
