@@ -8,6 +8,9 @@ jest.mock("../db", () => ({
   closeConnection: jest.fn(),
   createServiceRequestConnection: jest.fn().mockResolvedValue({ connection: true }),
 }));
+// runTimer (TimerRuns row, rethrow) has its own tests in __tests__/timerRuns.test.ts;
+// here the registered handler is the timer body itself.
+jest.mock("../timerRuns", () => ({ runTimer: (_name: string, body: unknown) => body }));
 jest.mock("../sentry", () => ({
   Sentry: { captureException: jest.fn(), captureMessage: jest.fn(), flush: jest.fn().mockResolvedValue(true) },
 }));

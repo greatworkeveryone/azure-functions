@@ -6,6 +6,7 @@ import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse,
 import { graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
+import { runTimer } from "../timerRuns";
 
 /** Constant-time string compare. Returns false on length mismatch instead of
  *  leaking timing information about the prefix. */
@@ -154,8 +155,9 @@ async function renewGraphSubscription(
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
 
   if (!mailbox || !notificationUrl || !clientState) {
-    context.error("renewGraphSubscription: env vars not configured");
-    return;
+    throw new Error(
+      "renewGraphSubscription: GRAPH_MAILBOX_DEV, GRAPH_NOTIFICATION_URL and GRAPH_SUBSCRIPTION_CLIENT_STATE must all be set (or disable this timer)",
+    );
   }
 
   let connection;
@@ -203,6 +205,7 @@ async function renewGraphSubscription(
     context.log(`renewGraphSubscription: renewed ${subscriptionId}, expires ${newExpiresAt}`);
   } catch (err: any) {
     context.error("renewGraphSubscription failed:", err.message);
+    throw err;
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -224,5 +227,5 @@ app.http("setupGraphSubscription", {
 // Daily at 02:00 UTC
 app.timer("renewGraphSubscription", {
   schedule: "0 0 2 * * *",
-  handler: renewGraphSubscription,
+  handler: runTimer("renewGraphSubscription", renewGraphSubscription),
 });

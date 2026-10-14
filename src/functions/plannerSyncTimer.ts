@@ -2,6 +2,7 @@ import { app, type InvocationContext, type Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 import {
   syncJobAwaitingAccounts,
   syncJobAwaitingFacilitiesApproval,
@@ -783,5 +784,5 @@ export async function plannerSyncTimer(
 
 app.timer("plannerSyncTimer", {
   schedule: "0 30 2 * * *",
-  handler: plannerSyncTimer,
+  handler: runTimer("plannerSyncTimer", plannerSyncTimer),
 });

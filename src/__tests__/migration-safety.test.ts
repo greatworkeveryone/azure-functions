@@ -12,6 +12,7 @@ import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, sc
 const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
+  "128_timer_runs.sql",
 ];
 
 // The one destructive-looking phrase the money migrations need: the trigger
