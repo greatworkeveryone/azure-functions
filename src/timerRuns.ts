@@ -17,6 +17,7 @@ export const TIMER_NAMES = [
   "digestTimer",
   "escalationSweepTimer",
   "ledgerVerifyTimer",
+  "myobReadbackTimer",
   "parseEmailsDailyRetry",
   "parseEmailsTimer",
   "plannerSyncTimer",

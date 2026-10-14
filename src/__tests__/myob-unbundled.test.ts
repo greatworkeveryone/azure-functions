@@ -29,6 +29,8 @@ const MAY_REACH_PIPELINE = new Set([
   "myob/draft.ts",
   "myob/proposalHttp.ts",
   "myob/propose.ts",
+  // The read-back sync reads Floorplan's own records back (GET only, plan M10).
+  "myob/readback.ts",
   "myob/send.ts",
   "myob/sendSteps.ts",
   "myob/withdraw.ts",
