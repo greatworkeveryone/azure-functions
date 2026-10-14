@@ -7,14 +7,19 @@
 //   notifications         sends keep failing after every retry
 //   sweep                 the last run failed or had failures (ended explicitly by
 //                         the next clean run, so this adapter never auto-clears it)
+//   money_gate            MONEY_ALLOWED_CIDRS is unset (the money-action gate only
+//                         warns, S11) or has entries the gate cannot use; clears
+//                         once it is set and every entry is usable
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../../db";
+import { moneyGateConfig } from "../../moneyGate";
 import { MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "../config";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
 
 export const SYSTEM_SUBJECTS = {
+  moneyGate: "money_gate",
   notificationConfig: "notification_config",
   notifications: "notifications",
   sweep: "sweep",
@@ -44,6 +49,10 @@ export const systemAdapter: EscalationAdapter = {
         return missingNotificationConfig().length > 0;
       case SYSTEM_SUBJECTS.notifications:
         return (await countExhaustedNotifications(connection, MAX_NOTIFICATION_ATTEMPTS)) > 0;
+      case SYSTEM_SUBJECTS.moneyGate: {
+        const gate = moneyGateConfig();
+        return gate.mode === "warn" || gate.invalid.length > 0 || gate.entries === 0;
+      }
       default:
         // sweep: the run that fixed it resolves it, not a condition check.
         return true;
@@ -52,6 +61,7 @@ export const systemAdapter: EscalationAdapter = {
 
   async loadSummary(_connection, subjectId) {
     const names: Record<string, string> = {
+      [SYSTEM_SUBJECTS.moneyGate]: "The money-action gate needs attention: MONEY_ALLOWED_CIDRS is unset or has entries it cannot use",
       [SYSTEM_SUBJECTS.notificationConfig]: "Escalation emails can't be sent: notification settings are missing",
       [SYSTEM_SUBJECTS.notifications]: "Escalation emails keep failing to send",
       [SYSTEM_SUBJECTS.sweep]: "The escalation sweep had a problem",

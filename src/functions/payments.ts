@@ -8,6 +8,7 @@ import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, c
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { requiresDirectorApproval, type ApprovalLimit } from "./invoices";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { MyobWritesDisabledError, userActor } from "../myob-api-log";
 import { applyMyobPayment, createMyobBill } from "../myob-client";
 import { newCorrelationId, record } from "../ledger";
@@ -259,6 +260,9 @@ async function upsertPayment(
     await recordRoleRefusal(request, token, denied, CREATE_PAYMENT_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -572,6 +576,9 @@ async function markPaymentPaid(
     await recordRoleRefusal(request, token, denied, MARK_PAID_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();

@@ -88,6 +88,13 @@ export const LEDGER_ACTIONS = {
   "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
+
+  // Access-pattern monitoring (beta sprint S10, decision 15). The subject is the
+  // person (UserID, or Entra oid when they have no AppUsers row); the actor of an
+  // anomaly is the monitor. A profile change loosens or tightens what counts as
+  // unusual, so it is an exception too.
+  "access.anomaly": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  "access.profile_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
