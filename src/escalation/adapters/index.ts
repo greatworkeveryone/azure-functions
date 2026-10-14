@@ -2,10 +2,12 @@
 // jobs and system health escalatable; other packages register their own from
 // their own modules with registerAdapter.
 
+import { defectsPeriodAdapter } from "./defectsPeriod";
 import { jobAdapter } from "./job";
 import { registerAdapter } from "./registry";
 import { systemAdapter } from "./system";
 
+registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);
 registerAdapter(systemAdapter);
 

@@ -1,0 +1,49 @@
+{
+  "about": "Shared vectors for facilitiesRules (rpcc-functions src/facilitiesRules.ts and command-centre src/helpers/facilitiesRules.ts). The same file sits in both repos; change both or neither.",
+  "today": "2026-10-14",
+  "periods": {
+    "hvacBuilding": { "buildingId": 1, "scope": "building", "levelName": null, "locationId": null, "tenantId": null, "services": ["HVAC / mechanical"], "practicalCompletion": "2026-06-30", "endsOn": "2027-06-30", "archived": false },
+    "allLevel3": { "buildingId": 1, "scope": "level", "levelName": "Level 3", "locationId": 30, "tenantId": null, "services": "all", "practicalCompletion": "2026-01-01", "endsOn": "2026-12-31", "archived": false },
+    "fireTenancy": { "buildingId": 1, "scope": "tenancy", "levelName": null, "locationId": null, "tenantId": 77, "services": ["Fire & life safety"], "practicalCompletion": "2026-09-01", "endsOn": "2027-09-01", "archived": false },
+    "archivedBuilding": { "buildingId": 1, "scope": "building", "levelName": null, "locationId": null, "tenantId": null, "services": "all", "practicalCompletion": "2026-01-01", "endsOn": "2027-01-01", "archived": true },
+    "notStarted": { "buildingId": 1, "scope": "building", "levelName": null, "locationId": null, "tenantId": null, "services": "all", "practicalCompletion": "2026-10-15", "endsOn": "2027-10-15", "archived": false },
+    "endsToday": { "buildingId": 2, "scope": "building", "levelName": null, "locationId": null, "tenantId": null, "services": ["Lifts"], "practicalCompletion": "2025-10-14", "endsOn": "2026-10-14", "archived": false },
+    "ended": { "buildingId": 2, "scope": "building", "levelName": null, "locationId": null, "tenantId": null, "services": ["Lifts"], "practicalCompletion": "2025-10-13", "endsOn": "2026-10-13", "archived": false }
+  },
+  "coverage": [
+    { "name": "maintenance HVAC job in the building", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "maintenance", "category": "HVAC / mechanical", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": true },
+    { "name": "maintenance job in another building", "period": "hvacBuilding", "job": { "buildingId": 9, "kind": "maintenance", "category": "HVAC / mechanical", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "maintenance job of another service", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "maintenance job without a category matches only all", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "maintenance", "category": null, "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "reactive air-conditioning job maps to HVAC", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "facilities", "category": "Common Areas", "type": "Air Conditioning", "levelName": "Level 1", "levelLocationId": null, "tenantId": null }, "covered": true },
+    { "name": "reactive unmapped type does not match a named service", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "facilities", "category": "Common Areas", "type": "Doors", "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "reactive unmapped type matches all", "period": "allLevel3", "job": { "buildingId": 1, "kind": "facilities", "category": "Tenancy Works", "type": "Doors", "levelName": "level 3 ", "levelLocationId": null, "tenantId": 12 }, "covered": true },
+    { "name": "level scope matches by location id before name", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": "Old name", "levelLocationId": 30, "tenantId": null }, "covered": true },
+    { "name": "level scope: a different location id wins over a matching name", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": "Level 3", "levelLocationId": 31, "tenantId": null }, "covered": false },
+    { "name": "level scope does not cover another level", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": "Level 4", "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "level scope does not cover a job with no level", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "tenancy scope covers the same tenant", "period": "fireTenancy", "job": { "buildingId": 1, "kind": "facilities", "category": "Tenancy Works", "type": "Fire Services & Equipment", "levelName": null, "levelLocationId": null, "tenantId": 77 }, "covered": true },
+    { "name": "tenancy scope does not cover another tenant", "period": "fireTenancy", "job": { "buildingId": 1, "kind": "maintenance", "category": "Fire & life safety", "type": null, "levelName": null, "levelLocationId": null, "tenantId": 78 }, "covered": false },
+    { "name": "emergency lights are fire and life safety", "period": "fireTenancy", "job": { "buildingId": 1, "kind": "facilities", "category": "Tenancy Works", "type": "Emergency & Exit Lights", "levelName": null, "levelLocationId": null, "tenantId": 77 }, "covered": true },
+    { "name": "archived period covers nothing", "period": "archivedBuilding", "job": { "buildingId": 1, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "period not started yet covers nothing", "period": "notStarted", "job": { "buildingId": 1, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false },
+    { "name": "the end date is inside the period", "period": "endsToday", "job": { "buildingId": 2, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": true },
+    { "name": "the day after the end is outside", "period": "ended", "job": { "buildingId": 2, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "covered": false }
+  ],
+  "locationChoice": [
+    { "name": "a level period asks a job with no level", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "ask": true },
+    { "name": "a level period does not ask a job on another level", "period": "allLevel3", "job": { "buildingId": 1, "kind": "maintenance", "category": "Hydraulic", "type": null, "levelName": "Level 4", "levelLocationId": null, "tenantId": null }, "ask": false },
+    { "name": "a tenancy period asks a job with no tenant", "period": "fireTenancy", "job": { "buildingId": 1, "kind": "maintenance", "category": "Fire & life safety", "type": null, "levelName": "Level 2", "levelLocationId": null, "tenantId": null }, "ask": true },
+    { "name": "a tenancy period of another service does not ask", "period": "fireTenancy", "job": { "buildingId": 1, "kind": "maintenance", "category": "Lifts", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "ask": false },
+    { "name": "a building period never asks", "period": "hvacBuilding", "job": { "buildingId": 1, "kind": "maintenance", "category": "HVAC / mechanical", "type": null, "levelName": null, "levelLocationId": null, "tenantId": null }, "ask": false }
+  ],
+  "reminders": [
+    { "name": "61 days out: nothing yet", "endsOn": "2026-12-14", "today": "2026-10-14", "archived": false, "stage": null },
+    { "name": "60 days out: the 60-day reminder", "endsOn": "2026-12-13", "today": "2026-10-14", "archived": false, "stage": 60 },
+    { "name": "31 days out: still the 60-day reminder", "endsOn": "2026-11-14", "today": "2026-10-14", "archived": false, "stage": 60 },
+    { "name": "30 days out: the 30-day reminder", "endsOn": "2026-11-13", "today": "2026-10-14", "archived": false, "stage": 30 },
+    { "name": "ends today: the 30-day reminder", "endsOn": "2026-10-14", "today": "2026-10-14", "archived": false, "stage": 30 },
+    { "name": "ended yesterday: nothing", "endsOn": "2026-10-13", "today": "2026-10-14", "archived": false, "stage": null },
+    { "name": "archived: nothing", "endsOn": "2026-11-01", "today": "2026-10-14", "archived": true, "stage": null }
+  ]
+}

@@ -79,6 +79,15 @@ export const LEDGER_ACTIONS = {
   "schedule.sign_off_cleared": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "schedule.sign_off_revoke": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
 
+  // Defects liability periods (sprint F1, LAUNCH-READINESS §5). Booking planned
+  // maintenance inside a blocking period is an exception with a reason: RP may
+  // be paying for work the builder owes.
+  "defects_period.archive": { exception: true, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.create": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.restore": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.update": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "job.defects_override": { exception: true, reasonRequired: true, subjects: ["job"] },
+
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one
   // exception: a person decided the escalation was not needed.

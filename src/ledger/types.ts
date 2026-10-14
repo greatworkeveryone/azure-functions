@@ -19,6 +19,7 @@ export type LedgerSubjectType =
   | "comm_sequence"
   | "comm_template"
   | "correspondence"
+  | "defects_period"
   | "escalation"
   | "incentive"
   | "invoice"

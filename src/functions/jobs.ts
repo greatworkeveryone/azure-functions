@@ -21,6 +21,8 @@ import {
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
+import { todayInDarwin } from "../darwinDate";
+import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -553,7 +555,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 // Body: { JobID?, ...job columns }. Omit JobID to create; include to update.
 // Events are NOT touched by this endpoint — use addJobEvent for those.
 
-async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -644,6 +646,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
 
     connection = await createRequestConnection(token);
 
+    // Defects liability periods (sprint F1, LAUNCH-READINESS §5): new planned
+    // maintenance on a covered scope is refused (409) unless a manager books it
+    // anyway with a reason; anything else covered comes back as a warning.
+    const defects =
+      JobID === undefined
+        ? await guardNewJob(connection, request, body as Record<string, unknown>, fields, todayInDarwin())
+        : null;
+    if (defects?.response) return defects.response;
+
     const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
       params.push({ name: k, type: COLUMN_TYPES[k as JobColumn], value: v ?? null });
@@ -691,6 +702,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           insertParams,
         );
         newJobId = inserted[0].JobID as number;
+
+        if (defects?.override) {
+          await recordDefectsOverride(connection, request, {
+            buildingId: fields.BuildingID as number,
+            callerName: identity.name,
+            jobId: newJobId,
+            override: defects.override,
+          });
+        }
 
         // If the job was created from a Work Request, claim any attachments
         // that arrived with the WR. They were inserted earlier with JobID NULL
@@ -909,7 +929,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       await syncJobActionTriggersStandalone(newJobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { job: { ...stored[0], Events: events } } };
+    return {
+      status: 200,
+      jsonBody: {
+        job: { ...stored[0], Events: events },
+        ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
+      },
+    };
   } catch (error: any) {
     context.error("upsertJob failed:", error.message);
     return errorResponse("Upsert failed", error.message);
