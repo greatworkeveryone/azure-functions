@@ -87,13 +87,17 @@ function defer(observation: AccessObservation): void {
   });
 }
 
-/** requireRole's hook: sampled, and only for callers with a role. */
+/** requireRole's hook: sampled, and only for callers with a role. The sample
+ *  is per person *and* network *and* device, so someone using a stolen session
+ *  from elsewhere gets their own row instead of hiding in the owner's. */
 export function noteAccess(request: HeaderSource, oid: string | null, roles: readonly string[]): void {
   if (!oid || roles.length === 0 || !accessLoggingEnabled()) return;
   const now = Date.now();
   const burst = countForBurst(oid, now);
-  if (!burst && !shouldSampleRequest(oid, now)) return;
-  defer(observationFromRequest(request, oid, "request", { burst }));
+  const observation = observationFromRequest(request, oid, "request", { burst });
+  const sampleKey = `${oid}|${observation.ipHash ?? "-"}|${observation.userAgentHash ?? "-"}`;
+  if (!burst && !shouldSampleRequest(sampleKey, now)) return;
+  defer(observation);
 }
 
 /** registerSelf: every sign-in. */

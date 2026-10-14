@@ -196,6 +196,18 @@ describe("the request-path hooks", () => {
     expect(paramsOf(insertCall() as unknown[]).Kind).toBe("request");
   });
 
+  it("samples a second network or device separately, so a hijacker cannot hide in the owner's sample", async () => {
+    _setAccessLoggingForTests(true);
+    const owner = req({ "user-agent": "Owner/1.0", "x-forwarded-for": "203.0.113.5" });
+    noteAccess(owner, "oid-1", ["accounts"]);
+    noteAccess(owner, "oid-1", ["accounts"]);
+    noteAccess(req({ "user-agent": "Owner/1.0", "x-forwarded-for": "198.51.100.20" }), "oid-1", ["accounts"]);
+    noteAccess(req({ "user-agent": "Thief/2.0", "x-forwarded-for": "203.0.113.5" }), "oid-1", ["accounts"]);
+    await flush();
+    await flush();
+    expect(db.executeQuery.mock.calls.filter((c) => String(c[1]).includes("INSERT INTO dbo.AccessEvents"))).toHaveLength(3);
+  });
+
   it("ignores callers without a role or an oid", async () => {
     _setAccessLoggingForTests(true);
     noteAccess(req({}), "oid-1", []);

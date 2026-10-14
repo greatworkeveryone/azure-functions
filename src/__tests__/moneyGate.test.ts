@@ -73,6 +73,13 @@ describe("moneyGateConfig", () => {
     expect(moneyGateConfig({ MONEY_ALLOWED_CIDRS: "office" })).toMatchObject({ entries: 0, mode: "enforce" });
   });
 
+  it("refuses networks too wide to be a real check, such as 0.0.0.0/0", () => {
+    for (const wide of ["0.0.0.0/0", "10.0.0.0/7", "::/0", "2001:db8::/31"]) {
+      expect(moneyGateConfig({ MONEY_ALLOWED_CIDRS: wide })).toMatchObject({ entries: 0, invalid: [wide], mode: "enforce" });
+    }
+    expect(moneyGateConfig({ MONEY_ALLOWED_CIDRS: "10.0.0.0/8, 2001:db8::/32" })).toMatchObject({ entries: 2, invalid: [] });
+  });
+
   it("takes MONEY_STEP_UP_MINUTES from 1 to 60, else 10", () => {
     expect(moneyGateConfig({ MONEY_STEP_UP_MINUTES: "5" }).stepUpMinutes).toBe(5);
     expect(moneyGateConfig({ MONEY_STEP_UP_MINUTES: "0" }).stepUpMinutes).toBe(10);
@@ -166,6 +173,29 @@ describe("requireMoneyContext — enforcing", () => {
     expect((await requireMoneyContext(makeRequest(FRESH_MFA)))?.status).toBe(403);
   });
 
+  it("refuses everything for 0.0.0.0/0 and raises system.health instead of waving it through", async () => {
+    _setMoneyGateHealthForTests(true);
+    process.env.MONEY_ALLOWED_CIDRS = "0.0.0.0/0";
+    expect((await requireMoneyContext(makeRequest(FRESH_MFA)))?.status).toBe(403);
+    await flush();
+    await flush();
+    expect(escalation.raise).toHaveBeenCalledTimes(1);
+    expect(escalation.raise.mock.calls[0][1]).toMatchObject({
+      subjectId: "money_gate",
+      summary: expect.stringMatching(/ignored 1 MONEY_ALLOWED_CIDRS entry .*no usable network is left/),
+    });
+  });
+
+  it("keeps the usable entries and still warns about the rest", async () => {
+    _setMoneyGateHealthForTests(true);
+    process.env.MONEY_ALLOWED_CIDRS = "203.0.113.0/28, 0.0.0.0/0";
+    expect(await requireMoneyContext(makeRequest(FRESH_MFA))).toBeNull();
+    expect((await requireMoneyContext(makeRequest(FRESH_MFA, HOME)))?.status).toBe(403);
+    await flush();
+    await flush();
+    expect(escalation.raise).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the given oid when the handler has one", async () => {
     await requireMoneyContext(makeRequest(FRESH_MFA), { oid: "oid-from-handler" });
     expect(access.noteMoneyAction.mock.calls[0][1]).toBe("oid-from-handler");
@@ -213,6 +243,22 @@ describe("requireMoneyContext — warn-only (MONEY_ALLOWED_CIDRS unset)", () => 
   });
 });
 
+describe("system.health condition for the gate", () => {
+  it("is active while the list is unset or has unusable entries, and clears when every entry is usable", async () => {
+    const { systemAdapter } = jest.requireActual("../escalation/adapters/system") as typeof import("../escalation/adapters/system");
+    const ref = { policyKey: "system.health", subjectId: "money_gate", subjectType: "system" };
+    const active = () => systemAdapter.isConditionActive({} as never, ref, new Date());
+    delete process.env.MONEY_ALLOWED_CIDRS;
+    await expect(active()).resolves.toBe(true);
+    process.env.MONEY_ALLOWED_CIDRS = "203.0.113.0/28, 0.0.0.0/0";
+    await expect(active()).resolves.toBe(true);
+    process.env.MONEY_ALLOWED_CIDRS = ", ,";
+    await expect(active()).resolves.toBe(true);
+    process.env.MONEY_ALLOWED_CIDRS = "203.0.113.0/28";
+    await expect(active()).resolves.toBe(false);
+  });
+});
+
 describe("the /api/health probe", () => {
   it("logs the header shape and the gate's verdict, never the address", async () => {
     jest.resetModules();
@@ -231,7 +277,7 @@ describe("the /api/health probe", () => {
       { error: jest.fn(), log },
     );
     const line = log.mock.calls.map((c) => String(c[0])).find((m) => m.startsWith("health: client address headers"));
-    expect(line).toBe('health: client address headers {"clientIpHeader":false,"entries":1,"forwardedFor":true,"moneyNetwork":"allowed"}');
+    expect(line).toBe('health: client address headers {"clientIpHeader":false,"entries":1,"forwardedFor":true,"unreadable":0,"moneyNetwork":"allowed"}');
     expect(line).not.toContain(OFFICE);
   });
 });

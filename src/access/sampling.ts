@@ -1,7 +1,8 @@
 // In-memory sampling for the access log, per Functions instance. Recording every
 // request would double the database work of the whole app; decision 15 needs
-// sign-ins, money actions, one request per person per 15 minutes (so the
-// out-of-hours and country rules see ordinary use) and bursts. Bursts are
+// sign-ins, money actions, one request per person, network and device per 15
+// minutes (so the out-of-hours and country rules see ordinary use, and a second
+// network or device is never hidden in the first one's sample) and bursts. Bursts are
 // counted here because sampled rows can't show them. Flex Consumption scales
 // out, so a burst split across instances can go unseen here; the App Insights
 // alert in docs/runbooks/monitoring.md counts across all of them.
@@ -18,18 +19,19 @@ const burstWindows = new Map<string, { count: number; resetAt: number }>();
 
 function sweep(now: number): void {
   if (lastSampled.size > SWEEP_AT) {
-    for (const [oid, at] of lastSampled) if (now - at >= SAMPLE_INTERVAL_MS) lastSampled.delete(oid);
+    for (const [key, at] of lastSampled) if (now - at >= SAMPLE_INTERVAL_MS) lastSampled.delete(key);
   }
   if (burstWindows.size > SWEEP_AT) {
     for (const [oid, w] of burstWindows) if (w.resetAt <= now) burstWindows.delete(oid);
   }
 }
 
-/** True for a person's first request in each 15-minute interval. */
-export function shouldSampleRequest(oid: string, now: number): boolean {
-  const last = lastSampled.get(oid);
+/** True for the first request per key (person + network + device) in each
+ *  15-minute interval. */
+export function shouldSampleRequest(key: string, now: number): boolean {
+  const last = lastSampled.get(key);
   if (last !== undefined && now - last < SAMPLE_INTERVAL_MS) return false;
-  lastSampled.set(oid, now);
+  lastSampled.set(key, now);
   sweep(now);
   return true;
 }

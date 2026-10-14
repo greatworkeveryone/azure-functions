@@ -52,8 +52,11 @@ every request he makes from Denmark is a `new_country` anomaly.
 ## 3. Confirm the platform passes the client address (do this first, from the office)
 
 The access log and the money gate read the client address from
-`X-Forwarded-For` (the rightmost public address, so a caller cannot spoof it by
-sending their own header). Flex Consumption should set it; confirm:
+`X-Forwarded-For`: the rightmost public address, skipping well-formed private
+hops, so a caller cannot spoof it by sending their own header. It fails closed:
+the first entry from the right that is not a readable address (`unknown`, an
+IPv6 with an unbracketed port, an empty slot, a zone id) means "no address",
+and the gate refuses. Flex Consumption should set the header; confirm:
 
 1. From an office desktop, signed in as an admin, open
    `https://<api>/api/health?deep=true` (any admin token; the frontend's System
@@ -67,12 +70,36 @@ sending their own header). Flex Consumption should set it; confirm:
    | project timestamp, message
    ```
 
-3. Expect `{"clientIpHeader":…,"entries":1,"forwardedFor":true,"moneyNetwork":"unconfigured"}`.
+3. Expect `{"clientIpHeader":…,"entries":1,"forwardedFor":true,"unreadable":0,"moneyNetwork":"unconfigured"}`.
    `forwardedFor:false` means the platform does not pass it: stop and tell the
    S11 owner (the money gate would refuse every money action once
    `MONEY_ALLOWED_CIDRS` is set). `entries` of 2 or more is fine; note it.
-4. After setting `MONEY_ALLOWED_CIDRS` (section 5), repeat from the office:
-   `moneyNetwork` must read `allowed`; from a phone on 5G it must read `refused`.
+   `unreadable` above 0 means the platform writes an entry the gate cannot
+   parse: stop and send the S11 owner the raw shape (not the address).
+4. After setting `MONEY_ALLOWED_CIDRS` (section 5), repeat and record all four:
+
+   | From                    | Extra header sent                          | `moneyNetwork` must read |
+   |-------------------------|--------------------------------------------|--------------------------|
+   | office desktop          | none                                       | `allowed`                |
+   | phone on 5G             | none                                       | `refused`                |
+   | phone on 5G             | `X-Forwarded-For: <office IP>` (forged)    | `refused`                |
+   | office desktop          | `X-Forwarded-For: 192.0.2.1` (forged)      | `allowed`                |
+
+   e.g. `curl -s -H "Authorization: Bearer <admin token>" -H "X-Forwarded-For: <office IP>" "https://<api>/api/health?deep=true"`.
+   The two forged rows prove the platform puts its own entry to the right of
+   anything the caller sends. If the forged 5G row reads `allowed`, the
+   platform is passing the caller's header through: do **not** enable the
+   gate; tell the S11 owner.
+5. **Never put an Azure address in `MONEY_ALLOWED_CIDRS`** (Function App
+   outbound IPs, `168.63.129.16`, Front Door or any Azure service range). An
+   Azure hop that appears to the right of the client would then pass every
+   request. Only the office egress and the approved remote-access egress go in.
+6. Rule A below trusts `client_CountryOrRegion` on the `requests` table. Before
+   relying on it, check one office request and one 5G request in App Insights:
+   the country must be the browser's (Australia), not the Azure region of the
+   Function App. If it shows the Azure region for every request, App Insights
+   is geolocating the platform's address: rule A is then meaningless and only
+   the in-app `new_country` rule (browser time-zone claim) applies until fixed.
 
 ## 4. App Insights alert rules
 
@@ -182,7 +209,7 @@ Inspections, keys and jobs are not gated, so phones keep working anywhere.
 
 | Setting                  | Default     | Meaning                                                                                              |
 |--------------------------|-------------|------------------------------------------------------------------------------------------------------|
-| `MONEY_ALLOWED_CIDRS`    | unset       | Comma- or space-separated addresses/CIDRs, IPv4 or IPv6: the office's static egress from Area9 and the approved remote-access egress, e.g. `203.0.113.10/32, 198.51.100.0/29`. **Unset = warn-only**: nothing is refused, each would-be refusal is logged (`[money-gate] warn-only: …`) and `system.health` (subject `money_gate`) tells admin the gate is open; the sweep closes it once the setting exists. Set but unreadable = every money action refused (a typo never opens the gate). |
+| `MONEY_ALLOWED_CIDRS`    | unset       | Comma- or space-separated addresses/CIDRs, IPv4 or IPv6: the office's static egress from Area9 and the approved remote-access egress, e.g. `203.0.113.10/32, 198.51.100.0/29`. **Unset = warn-only**: nothing is refused, each would-be refusal is logged (`[money-gate] warn-only: …`) and `system.health` (subject `money_gate`) tells admin the gate is open; the sweep closes it once the setting exists. Set but unusable — unreadable, or wider than /8 (IPv4) or /32 (IPv6), e.g. `0.0.0.0/0` — the entry is ignored and `system.health` says so; with no usable entry left, every money action is refused (a typo never opens the gate). Never an Azure address (§3 step 5). |
 | `MONEY_STEP_UP_MINUTES`  | `10`        | How recent the sign-in must be, 1–60 minutes.                                                         |
 
 Order of work: Area9 supplies the static egress IP(s) → step 3 above from the

@@ -23,9 +23,16 @@ import { MONEY_GATED_ROUTES } from "./money-gated-routes";
 // With MONEY_ALLOWED_CIDRS unset the gate is in warn mode: every condition is
 // still evaluated and logged, nothing is refused, and system.health tells admin
 // the gate is open. That keeps staging (and production until O7 lands) working.
+// An entry the gate cannot use — unreadable, or wider than /8 (IPv4) or /32
+// (IPv6), such as 0.0.0.0/0, which would be no network check at all — is
+// ignored and also raises system.health; with nothing usable left, every money
+// action is refused.
 
 const DEFAULT_STEP_UP_MINUTES = 10;
 const CLOCK_SKEW_SECONDS = 300;
+// The widest network an office or remote-access egress could need. Anything
+// wider is a mistake (or 0.0.0.0/0) and would make the network check meaningless.
+const MIN_PREFIX = { ipv4: 8, ipv6: 32 } as const;
 
 export const NETWORK_REFUSED_MESSAGE =
   "This money action is allowed only from the office network or the approved remote connection.";
@@ -53,7 +60,7 @@ function addEntry(list: BlockList, raw: string): boolean {
     return true;
   }
   const prefix = Number(prefixText);
-  if (!/^\d{1,3}$/.test(prefixText) || prefix > (family === 4 ? 32 : 128)) return false;
+  if (!/^\d{1,3}$/.test(prefixText) || prefix > (family === 4 ? 32 : 128) || prefix < MIN_PREFIX[type]) return false;
   list.addSubnet(address, prefix, type);
   return true;
 }
@@ -110,7 +117,7 @@ export function evaluateMoneyGate(input: GateInput): { failures: GateOutcome[]; 
   return { failures, outcome: failures[0] ?? "allowed" };
 }
 
-// ── system.health while the gate is open ─────────────────────────────────────
+// ── system.health while the gate is open or misconfigured ───────────────────
 
 let healthRaised = false;
 let healthForced: boolean | null = null;
@@ -121,7 +128,7 @@ export function _setMoneyGateHealthForTests(enabled: boolean | null): void {
   healthRaised = false;
 }
 
-function raiseOpenGateHealthOnce(): void {
+function raiseGateHealthOnce(summary: string): void {
   const enabled = healthForced ?? process.env.NODE_ENV !== "test";
   if (!enabled || healthRaised) return;
   healthRaised = true;
@@ -138,6 +145,7 @@ function raiseOpenGateHealthOnce(): void {
           skipConditionCheck: true,
           subjectId: "money_gate",
           subjectType: "system",
+          summary,
         });
       } finally {
         closeConnection(connection);
@@ -185,11 +193,18 @@ export async function requireMoneyContext(request: HttpRequest, user?: MoneyGate
   const label = MONEY_GATED_ROUTES.find((entry) => entry.route === route)?.label ?? null;
   if (oid) noteMoneyAction(request, oid, { failures, label, mode: config.mode, outcome: recorded, route });
 
-  if (config.invalid.length > 0) console.warn(`[money-gate] ignored unreadable MONEY_ALLOWED_CIDRS entries: ${config.invalid.join(", ")}`);
+  if (config.mode === "enforce" && (config.invalid.length > 0 || config.entries === 0)) {
+    console.warn(`[money-gate] ignored unusable MONEY_ALLOWED_CIDRS entries: ${config.invalid.join(", ") || "(none usable)"}`);
+    raiseGateHealthOnce(
+      `The money-action gate ignored ${config.invalid.length} MONEY_ALLOWED_CIDRS entr${config.invalid.length === 1 ? "y" : "ies"} ` +
+        "(unreadable, or wider than /8 IPv4 or /32 IPv6)" +
+        (config.entries === 0 ? "; no usable network is left, so every money action is refused" : ""),
+    );
+  }
 
   // Warn mode never refuses: requireRole has already decided who the caller is.
   if (config.mode === "warn") {
-    raiseOpenGateHealthOnce();
+    raiseGateHealthOnce("Money actions are not network-restricted: MONEY_ALLOWED_CIDRS is not set");
     if (failures.length > 0) console.warn(`[money-gate] warn-only: ${route} would be refused (${failures.join(", ")})`);
     return null;
   }
