@@ -5,11 +5,15 @@
 //      Card File, Accounts, Banking, Sales or Payroll
 //   2. the period (myob-period.ts) for every company-file write
 //   3. MYOB_WRITES_ENABLED, Will's master switch, for every company-file write
-//   4. an update only to a record Floorplan created: the lookup is injected by
+//   4. the boot guard (myob-controls.ts): no request reaches a company file
+//      whose MyobControls rows have never been set up. The OAuth token call is
+//      exempt, so a link can be made before the controls exist.
+//   5. an update only to a record Floorplan created: the lookup is injected by
 //      the proposals pipeline (MyobProposals, sprint M3) and says no until then
-//   5. company-file credentials (x-myobapi-cftoken) from MYOB_CF_USER and
+//   6. company-file credentials (x-myobapi-cftoken) from MYOB_CF_USER and
 //      MYOB_CF_PASSWORD, unless the caller already chose an approver's
 
+import { assertMyobControlsPresent } from "./myob-controls";
 import { MyobRequestRefusedError, MyobWritesDisabledError } from "./myob-errors";
 import { classifyMyobRequest, type MyobMethod, type MyobOperation } from "./myob-endpoints";
 import { checkMyobPeriod } from "./myob-period";
@@ -67,6 +71,7 @@ export async function guardMyobRequest(
     if (!verdict.ok) throw new MyobRequestRefusedError("outside_period", verdict.reason);
   }
   if (rule.method !== "GET" && process.env.MYOB_WRITES_ENABLED !== "true") throw new MyobWritesDisabledError();
+  await assertMyobControlsPresent(companyFileId);
   if (rule.floorplanRecordOnly) {
     const ours = Boolean(uid && companyFileId && (await floorplanRecordLookup({ companyFileId, operation: rule.operation, uid })));
     if (!ours) {

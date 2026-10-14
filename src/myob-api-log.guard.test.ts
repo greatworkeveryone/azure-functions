@@ -9,6 +9,7 @@ jest.mock("./db", () => ({
   executeQuery: jest.fn(),
 }));
 jest.mock("./sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
+jest.mock("./myob-controls", () => ({ assertMyobControlsPresent: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("./myob-health", () => ({
   MYOB_HEALTH_SUBJECTS: { agreement: "myob_agreement", link: "myob_link" },
   raiseMyobHealth: jest.fn().mockResolvedValue(undefined),
@@ -222,5 +223,30 @@ describe("one retry", () => {
     fetchMock.mockImplementation(async () => reply(429));
     await expect(call({ method: "GET", url: `${API}/Purchase/Order` })).resolves.toMatchObject({ status: 429 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("boot guard: no controls, no MYOB", () => {
+  const { assertMyobControlsPresent } = require("./myob-controls") as { assertMyobControlsPresent: jest.Mock };
+
+  it("refuses a read when the file has no MyobControls rows, logging one error row", async () => {
+    assertMyobControlsPresent.mockRejectedValueOnce(new MyobRequestRefusedError("controls", "no controls"));
+
+    await expect(call({ method: "GET", url: `${API}/Purchase/Order` })).rejects.toMatchObject({ code: "controls" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(1);
+    expect(assertMyobControlsPresent).toHaveBeenCalledWith(CF);
+  });
+
+  it("does not apply to the OAuth token exchange, so a link can be made before controls exist", async () => {
+    await call({ body: new URLSearchParams({ grant_type: "refresh_token" }), url: "https://secure.myob.com/oauth2/v1/authorize/" });
+
+    expect(assertMyobControlsPresent).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the configured file for the file list, which names none", async () => {
+    await call({ method: "GET", url: "https://api.myob.com/accountright/" });
+    expect(assertMyobControlsPresent).toHaveBeenCalledWith(null);
   });
 });
