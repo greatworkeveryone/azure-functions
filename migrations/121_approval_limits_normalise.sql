@@ -1,4 +1,4 @@
--- DESTRUCTIVE: normalise role names in dbo.ApprovalLimits · approved by Connor Randazzo 2026-10-13
+-- DESTRUCTIVE: normalise role names in dbo.ApprovalLimits and seed the admin limit at 50000 (D5) · approved by Connor Randazzo 2026-10-13
 --
 -- Migration 121: approval_limits_normalise (beta sprint J1, LAUNCH-READINESS WP43a-2, JB8)
 --

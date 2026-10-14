@@ -19,7 +19,7 @@ function statement(pattern: RegExp): string {
 describe("migration 121 approval_limits_normalise", () => {
   it("carries Connor's approval, word for word", () => {
     expect(RAW.split("\n")[0]).toBe(
-      "-- DESTRUCTIVE: normalise role names in dbo.ApprovalLimits · approved by Connor Randazzo 2026-10-13",
+      "-- DESTRUCTIVE: normalise role names in dbo.ApprovalLimits and seed the admin limit at 50000 (D5) · approved by Connor Randazzo 2026-10-13",
     );
   });
 
