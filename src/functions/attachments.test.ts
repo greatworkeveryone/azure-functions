@@ -33,7 +33,7 @@ jest.mock("../mybuildings-client", () => ({ uploadAttachment: jest.fn() }));
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ status?: number; jsonBody?: any }>;
 
 const db = require("../db") as { executeQuery: jest.Mock };
-const auth = require("../auth") as { extractToken: jest.Mock; rolesForRequest: jest.Mock };
+const auth = require("../auth") as { extractToken: jest.Mock; rolesForRequest: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
 const blob = require("../blob-storage") as { deleteBlob: jest.Mock; generateReadSasUrl: jest.Mock };
 const { app } = require("@azure/functions") as { app: { http: jest.Mock } };
 require("./attachments");
@@ -46,6 +46,7 @@ const registered = (name: string): Handler => {
 const claimEmailAttachment = registered("claimEmailAttachment");
 const deleteAttachment = registered("deleteAttachment");
 const getAttachments = registered("getAttachments");
+const attachToQuote = registered("attachToQuote");
 
 const UUID = "3f2c9a10-5b7e-4d21-9c8a-0e1f2a3b4c5d";
 const EMAIL_BLOB = `email-attachments/AAMkAGI2_T-VSAAA=/${UUID}.pdf`;
@@ -133,5 +134,21 @@ describe("getAttachments", () => {
       null,
     ]);
     expect(blob.generateReadSasUrl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("attachToQuote (SEC-23)", () => {
+  it("stamps AttachedBy from the verified token and ignores the body", async () => {
+    const res = await attachToQuote(post({ QuoteID: 7, AttachmentID: 5, AttachedBy: "Mallory" }), ctx);
+    expect(res.status).toBe(200);
+    const params = db.executeQuery.mock.calls[0][2] as { name: string; value: unknown }[];
+    expect(params.find((p) => p.name === "AttachedBy")?.value).toBe("Fay");
+  });
+
+  it("returns 401 when the token cannot be verified", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
+    const res = await attachToQuote(post({ QuoteID: 7, AttachmentID: 5 }), ctx);
+    expect(res.status).toBe(401);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });

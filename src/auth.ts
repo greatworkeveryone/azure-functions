@@ -67,10 +67,9 @@ export function serviceUnavailableResponse(): HttpResponseInit {
 // stack for Sentry) or a string (legacy). Either way we capture to Sentry so
 // no 500 escapes silently.
 export function errorResponse(message: string, errorOrDetails?: unknown): HttpResponseInit {
-  // Mirror the same dual-condition gate jwt.ts / rolesForRequest already use —
-  // checking only the env flag would let a Production deployment with the flag
-  // accidentally set leak raw error detail to clients. isDevOverrideEnabled()
-  // additionally requires AZURE_FUNCTIONS_ENVIRONMENT !== "Production".
+  // Same gate jwt.ts / rolesForRequest use — checking only the env flag would
+  // let a deployment with the flag accidentally set leak raw error detail to
+  // clients. isDevOverrideEnabled() also requires local Development.
   const isDev = isDevOverrideEnabled();
 
   if (errorOrDetails instanceof Error) {
@@ -149,42 +148,9 @@ export function nameFromToken(token: string): string | null {
   return typeof name === "string" ? name : null;
 }
 
-/**
- * Reads the caller's app roles from the X-App-Token header.
- *
- * The app token is an Entra ID token whose audience is this app's clientId
- * (acquired with scope `${clientId}/.default`), so it carries the `roles`
- * claim directly — no Graph call needed.
- *
- * We verify the app token's signature against the tenant's JWKS, then
- * cross-check the OID in both tokens to ensure the app token belongs to the
- * same user as the SQL token. Without verification a forged X-App-Token
- * could claim any role.
- */
-export async function rolesFromAppToken(
-  sqlToken: string,
-  appToken: string,
-): Promise<string[]> {
-  const expectedAudience = process.env.APP_CLIENT_ID ?? "";
-  if (!expectedAudience) return [];
-
-  const appPayload = await verifyEntraToken(appToken, expectedAudience);
-  if (!appPayload) return [];
-
-  // The SQL token is only used to cross-check OID — we verify it separately
-  // (with its own audience) in rolesForRequest. Decoding the payload here
-  // without verification is fine because the OID match is a defensive check,
-  // not the trust anchor. The trust anchor is the verified app token above.
-  const sqlPayload = decodeJwtPayload(sqlToken);
-  if (!sqlPayload) return [];
-  if (sqlPayload.oid !== appPayload.oid) return [];
-
-  const roles = appPayload.roles;
-  if (!Array.isArray(roles)) return [];
-  return roles
-    .filter((r): r is string => typeof r === "string")
-    .map((r) => r.toLowerCase());
-}
+// Roles come only from dbo.AppUsers (below). The old X-App-Token path read
+// Entra app-role claims nobody maintains and had no callers (SEC-13); any
+// X-App-Token header an old client still sends is ignored.
 
 // ── Role lookup: cache + in-flight dedup ──────────────────────────────────────
 // Every authorised request resolves the caller's role from dbo.AppUsers over the
@@ -260,11 +226,9 @@ function lookupRolesForOid(oid: string): Promise<string[]> {
 }
 
 export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
-  // Gate the X-Dev-Roles bypass on the same two conditions jwt.ts uses for
-  // signature-skipping — DEV_ROLE_OVERRIDE_ENABLED *and* a non-Production
-  // host. Sharing isDevOverrideEnabled() keeps the two from drifting apart;
-  // previously this checked only the env flag, so a deployment not labelled
-  // Production could have honoured spoofed roles from the header.
+  // Gate the X-Dev-Roles bypass on the same conditions jwt.ts uses for
+  // signature-skipping (switch on, local Development, not Azure-hosted).
+  // Sharing isDevOverrideEnabled() keeps the two from drifting apart.
   if (isDevOverrideEnabled()) {
     const header = request.headers.get("x-dev-roles");
     if (header) {

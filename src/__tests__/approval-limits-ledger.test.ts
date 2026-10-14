@@ -90,7 +90,7 @@ beforeEach(() => {
   db.commitTransaction.mockResolvedValue(undefined);
   db.rollbackTransaction.mockResolvedValue(undefined);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   mockDb([ADA]);
 });
 

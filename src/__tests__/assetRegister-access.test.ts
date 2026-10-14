@@ -150,7 +150,7 @@ describe("asset register: who gets through each gate (real requireRole)", () => 
 
   beforeAll(() => {
     process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-    delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
     jest.spyOn(console, "warn").mockImplementation(() => undefined);
   });
 

@@ -262,12 +262,15 @@ async function attachToParent(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  // AttachedBy is an audit column — stamped from the verified token (SEC-23).
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
     const parentId = body?.[spec.parentParam];
     const attachmentId = body?.AttachmentID;
-    const attachedBy = body?.AttachedBy ?? null;
     if (typeof parentId !== "number" || typeof attachmentId !== "number") {
       return {
         status: 400,
@@ -288,7 +291,7 @@ async function attachToParent(
       [
         { name: "ParentID", type: TYPES.Int, value: parentId },
         { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
-        { name: "AttachedBy", type: TYPES.NVarChar, value: attachedBy },
+        { name: "AttachedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     /* eslint-enable local/no-sql-interpolation */

@@ -169,7 +169,7 @@ beforeEach(() => {
   jest.spyOn(console, "warn").mockImplementation(() => undefined); // the dev-role override warns on every request
   clearRoleCache();
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   db.createRequestConnection.mockResolvedValue({});
   db.createServiceConnection.mockResolvedValue({});
   // resolveLedgerActor's AppUsers lookup: the person for the caller's oid.

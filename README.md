@@ -56,7 +56,7 @@ Email pipeline behaviour:
 
 Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
-- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect.
+- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect. Applies only when `AZURE_FUNCTIONS_ENVIRONMENT` is `Development` (Core Tools sets it locally) and the host is not an Azure app (`WEBSITE_INSTANCE_ID` unset); anywhere else the switch is ignored and startup refuses to boot (SEC-04).
 
 ### 4. Start the local SQL Server (Docker)
 
