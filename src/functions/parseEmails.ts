@@ -35,6 +35,7 @@ import {
 } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { syncMailbox } from "../email/mail-sync";
 import { findPoNumber } from "../email/po-ref";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
@@ -635,6 +636,8 @@ export function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[
   return entries
     .map(storedAttachment)
     .filter((a): a is StoredAttachment => a !== null)
+    // A name the mail sync never minted is skipped, not allowed to fail the parse (SEC-01).
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
     .map(({ blobName, fileName }) => ({ fileName: fileName.slice(0, FIELD_CAPS.attachmentFileName), sasUrl: generateReadSasUrl(blobName, hour) }));
 }
 
