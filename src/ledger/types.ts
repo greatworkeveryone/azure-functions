@@ -27,6 +27,7 @@ export type LedgerSubjectType =
   | "misc_fee"
   | "myob_control"
   | "myob_link"
+  | "myob_proposal"
   | "occupancy"
   | "payment"
   | "purchase_order"

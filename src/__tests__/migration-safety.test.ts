@@ -11,6 +11,8 @@ const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
   "124_myob_controls.sql",
+  "125_myob_reference_cache.sql",
+  "126_myob_proposals.sql",
 ];
 
 // Destructive-looking phrases the money migrations need, none of which changes
