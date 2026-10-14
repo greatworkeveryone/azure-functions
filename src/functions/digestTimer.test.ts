@@ -4,6 +4,7 @@ jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
   return { ...actual, app: { http: jest.fn(), storageQueue: jest.fn(), timer: jest.fn() } };
 });
+jest.mock("../timerRuns", () => ({ runTimer: (_name: string, body: unknown) => body }));
 jest.mock("../db", () => ({
   closeConnection: jest.fn(),
   createServiceRequestConnection: jest.fn().mockResolvedValue({ connection: true }),

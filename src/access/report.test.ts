@@ -98,13 +98,21 @@ describe("accessReportTimer registration", () => {
     jest.resetModules();
   });
 
-  it("is not registered unless ACCESS_REPORT_ENABLED is true", () => {
-    jest.isolateModules(() => {
-      const { app } = jest.requireMock("@azure/functions") as { app: { timer: jest.Mock } };
-      app.timer.mockClear();
-      process.env.ACCESS_REPORT_ENABLED = "yes";
-      require("../functions/accessReportTimer");
-      expect(app.timer).not.toHaveBeenCalled();
+  it("is always registered, and the body sends nothing unless ACCESS_REPORT_ENABLED is exactly true", async () => {
+    await new Promise<void>((resolve, reject) => {
+      jest.isolateModules(() => {
+        (async () => {
+          const { app } = jest.requireMock("@azure/functions") as { app: { timer: jest.Mock } };
+          app.timer.mockClear();
+          process.env.ACCESS_REPORT_ENABLED = "yes";
+          const mod = require("../functions/accessReportTimer") as { accessReportTimer: (t: unknown, c: unknown) => Promise<void> };
+          expect(app.timer).toHaveBeenCalledWith("accessReportTimer", expect.objectContaining({ schedule: "0 30 21 * * *" }));
+          const log = jest.fn();
+          await mod.accessReportTimer({} as never, { log, error: jest.fn() } as never);
+          expect(log).toHaveBeenCalledWith(expect.stringContaining("ACCESS_REPORT_ENABLED=true"));
+          expect(graph.graphSendMail).not.toHaveBeenCalled();
+        })().then(resolve, reject);
+      });
     });
   });
 
