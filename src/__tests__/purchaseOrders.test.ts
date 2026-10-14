@@ -6,7 +6,6 @@
 
 import assert from "node:assert";
 import { AwaitingRole, JobStatus } from "../jobStatusMachine";
-import { purchaseOrderApprovalError } from "../functions/purchaseOrders";
 
 // ── Guard logic mirrors ───────────────────────────────────────────────────────
 // These replicate the exact conditions checked in the handlers so the tests
@@ -160,75 +159,6 @@ describe("deletePurchaseOrder guards", () => {
 // has no approved quote. Every other state is unaffected (a PO on a job in Work
 // is a no-op transition; a PO on an approved job is the legitimate path).
 
-describe("createPurchaseOrder quote-approval guard", () => {
-  test("rejects a PO that would leapfrog an unapproved quote past Awaiting Approval / facilities", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.AWAITING_APPROVAL,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: null,
-    });
-    assert.ok(result !== null, "expected the leapfrog to be rejected");
-    assert.match(result, /quote/i);
-    assert.match(result, /approv/i);
-  });
-
-  test("allows a PO once the quote has been approved (ApprovedQuoteID set)", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.AWAITING_APPROVAL,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: 42,
-    });
-    assert.strictEqual(result, null);
-  });
-
-  test("allows a PO on a job already in Work (transition is a no-op — unchanged)", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.WORK,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: null,
-    });
-    assert.strictEqual(result, null);
-  });
-
-  test("allows a PO on a job in Work even when an approved quote exists", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.WORK,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: 7,
-    });
-    assert.strictEqual(result, null);
-  });
-
-  test("does not block (Awaiting Approval, accounts) — that's the invoice step, not the quote leapfrog", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.AWAITING_APPROVAL,
-      awaitingRole: AwaitingRole.ACCOUNTS,
-      approvedQuoteId: null,
-    });
-    assert.strictEqual(result, null);
-  });
-
-  test("allows a PO on a New job (PO_CREATED is a no-op there — no transition to gate)", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.NEW,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: null,
-    });
-    assert.strictEqual(result, null);
-  });
-
-  // WP10: a standing-contract job reaches Work via WORK_AUTHORIZED (New → Work),
-  // never sitting in (Awaiting Approval, facilities) with no approved quote. So
-  // its optional PO step is allowed (Work is a no-op for PO_CREATED). The guard
-  // is unchanged — it still blocks the leapfrog state for any quoted job, and
-  // every downstream financial control (invoice approval / limits / director
-  // tier) is enforced identically whether or not the job is a contract job.
-  test("allows a PO on a contract job in Work (optional PO step, no quote round)", () => {
-    const result = purchaseOrderApprovalError({
-      status: JobStatus.WORK,
-      awaitingRole: AwaitingRole.FACILITIES,
-      approvedQuoteId: null,
-    });
-    assert.strictEqual(result, null);
-  });
-});
+// The PO quote gate (an approved quote in every job state, contract jobs
+// excepted; J3) is purchaseOrderQuoteRefusal in src/moneyRules.ts, tested in
+// moneyRules.test.ts and through the handler in purchaseOrders.money.test.ts.

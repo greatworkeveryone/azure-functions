@@ -51,6 +51,26 @@ export function amountRefusal(value: unknown, label: string, required: boolean):
   return null;
 }
 
+/**
+ * A purchase order's cost: a cap or an estimate above $0 is required when it
+ * is raised, and any cost sent (on create or edit) must be above $0.
+ */
+export function purchaseOrderCostRefusal(estimated: unknown, cap: unknown, required: boolean): MoneyRefusal | null {
+  const sent = [estimated, cap].filter((value) => value !== undefined);
+  const bad = sent.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0);
+  if (bad || (required && sent.length === 0)) {
+    return refuse("amount_invalid", "A purchase order needs a cost cap or an estimated cost, and every cost must be more than $0.", 422);
+  }
+  return null;
+}
+
+/** A PO rests on an approved quote, except on a standing-contract job. */
+export function purchaseOrderQuoteRefusal(job: { hasApprovedQuote: boolean; isContract: boolean }): MoneyRefusal | null {
+  return job.isContract || job.hasApprovedQuote
+    ? null
+    : refuse("quote_not_approved", "Approve the quote before raising or sending a purchase order (the approval applies the spending limit).", 422);
+}
+
 function nameKey(name: unknown): string {
   return typeof name === "string" ? name.trim().toLowerCase() : "";
 }

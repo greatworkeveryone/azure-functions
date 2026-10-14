@@ -5,6 +5,8 @@ import {
   approvableRefusal,
   creatorRefusal,
   jobMoneyRefusal,
+  purchaseOrderCostRefusal,
+  purchaseOrderQuoteRefusal,
   samePerson,
   stageOneRefusal,
 } from "../moneyRules";
@@ -76,5 +78,21 @@ describe("adminRefusal (decision 4)", () => {
   it("leaves other roles alone", () => {
     expect(adminRefusal(["accounts_manager"], false)).toBeNull();
     expect(adminRefusal(["admin", "accounts_manager"], false)).toBeNull();
+  });
+});
+
+describe("purchase orders", () => {
+  it("rest on an approved quote in every job state, contract jobs excepted", () => {
+    expect(purchaseOrderQuoteRefusal({ hasApprovedQuote: false, isContract: false })?.code).toBe("quote_not_approved");
+    expect(purchaseOrderQuoteRefusal({ hasApprovedQuote: true, isContract: false })).toBeNull();
+    expect(purchaseOrderQuoteRefusal({ hasApprovedQuote: false, isContract: true })).toBeNull();
+  });
+
+  it("need a cost above $0 when raised, and any cost sent must be above $0", () => {
+    expect(purchaseOrderCostRefusal(undefined, undefined, true)?.code).toBe("amount_invalid");
+    expect(purchaseOrderCostRefusal(undefined, 4500, true)).toBeNull();
+    expect(purchaseOrderCostRefusal(0, 4500, true)?.code).toBe("amount_invalid");
+    expect(purchaseOrderCostRefusal(undefined, undefined, false)).toBeNull();
+    expect(purchaseOrderCostRefusal(null, undefined, false)?.code).toBe("amount_invalid");
   });
 });
