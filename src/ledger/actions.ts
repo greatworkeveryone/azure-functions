@@ -88,6 +88,11 @@ export const LEDGER_ACTIONS = {
   "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
+
+  // MYOB link (sprint M0). Link, re-link and unlink share one code; RuleApplied
+  // says which. Always an exception: a change of who Floorplan acts as in MYOB
+  // is the first thing the CFO audits.
+  "myob.link": { exception: true, reasonRequired: false, subjects: ["myob_link"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

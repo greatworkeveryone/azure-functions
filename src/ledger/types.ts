@@ -25,6 +25,7 @@ export type LedgerSubjectType =
   | "job"
   | "lease_event"
   | "misc_fee"
+  | "myob_link"
   | "occupancy"
   | "payment"
   | "purchase_order"

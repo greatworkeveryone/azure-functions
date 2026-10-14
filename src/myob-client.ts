@@ -17,6 +17,14 @@
 //                            (default: https://app.myob.com)
 //   MYOB_WRITES_ENABLED    — must be exactly "true" for any write to reach MYOB
 //                            (see myob-api-log.ts)
+//   MYOB_TOKEN_KEY         — AES-256-GCM key for the stored tokens (myob-token-crypto.ts);
+//                            MYOB_TOKEN_KEY_VERSION / MYOB_TOKEN_KEY_PREVIOUS for rotation
+//   MYOB_CF_USER, MYOB_CF_PASSWORD — the restricted company-file user, sent as
+//                            x-myobapi-cftoken on every company-file call (myob-request-guard.ts)
+//   MYOB_PERIOD_START      — optional lock date (YYYY-MM-DD); writes dated before it are
+//                            refused (myob-period.ts). Default: 1st of the current Darwin month
+//
+// What may be called at all is fixed in myob-endpoints.ts (Purchases only).
 
 import { getValidMyobAccessToken } from "./myob-auth";
 import { myobRequest, type MyobActor } from "./myob-api-log";

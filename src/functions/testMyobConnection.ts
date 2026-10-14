@@ -1,12 +1,15 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
-import { myobRequest, userActor } from "../myob-api-log";
-import { getValidMyobAccessToken, MyobNotLinkedError } from "../myob-auth";
+import { myobRequest, MyobRequestRefusedError, userActor } from "../myob-api-log";
+import { getValidMyobAccessToken, MyobNotLinkedError, MyobRelinkRequiredError } from "../myob-auth";
 
 // Verifies the MYOB integration end-to-end by:
 //   1. Pulling the stored access token (refreshing if expired)
 //   2. Calling GET /accountright/ to list visible company files
-//   3. Reporting whether MYOB_COMPANY_FILE_ID matches one of them
+//   3. Reporting whether MYOB_COMPANY_FILE_ID matches one of them; since 2026
+//      MYOB leaves cloud files out of that list, a configured file that isn't
+//      listed is checked directly with GET /accountright/{file}/
+// Both reads go through myobRequest, so the allowlist and controls apply.
 
 interface MyobCompanyFile {
   Id: string;
@@ -88,10 +91,10 @@ async function testMyobConnection(
   try {
     accessToken = await getValidMyobAccessToken(token, actor);
   } catch (error) {
-    if (error instanceof MyobNotLinkedError) {
+    if (error instanceof MyobNotLinkedError || error instanceof MyobRelinkRequiredError) {
       const body: TestResponse = {
         ok: false,
-        message: "MYOB is not linked yet — click Authorize MYOB above.",
+        message: error instanceof MyobRelinkRequiredError ? error.message : "MYOB is not linked yet — click Authorize MYOB above.",
         configStatus,
         linked: false,
         configuredFileId: companyFileId || null,
@@ -106,20 +109,15 @@ async function testMyobConnection(
     return errorResponse("MYOB token refresh failed", message);
   }
 
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "x-myobapi-key": clientId,
+    "x-myobapi-version": "v2",
+    Accept: "application/json",
+  };
   try {
     context.log("Testing MYOB connection — fetching company files");
-    const response = await myobRequest({
-      actor,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "x-myobapi-key": clientId,
-        "x-myobapi-version": "v2",
-        Accept: "application/json",
-      },
-      method: "GET",
-      purpose: "test-connection",
-      url: `${apiBase}/`,
-    });
+    const response = await myobRequest({ actor, headers, method: "GET", purpose: "test-connection", url: `${apiBase}/` });
 
     if (!response.ok) {
       const body: TestResponse = {
@@ -137,25 +135,44 @@ async function testMyobConnection(
 
     const files = response.json<MyobCompanyFile[]>();
     const configured = companyFileId
-      ? files.find((file) => file.Id === companyFileId) ?? null
+      ? files.find((file) => file.Id.toLowerCase() === companyFileId.toLowerCase()) ?? null
       : null;
+    const reachable =
+      Boolean(configured) ||
+      (companyFileId !== "" &&
+        (await myobRequest({ actor, headers, method: "GET", purpose: "test-connection-file", url: `${apiBase}/${companyFileId}/` })).ok);
 
     const body: TestResponse = {
       ok: true,
       message: companyFileId
         ? configured
           ? `Connected — ${files.length} company file(s), configured file found.`
-          : `Connected — ${files.length} company file(s), but MYOB_COMPANY_FILE_ID was not in the list.`
+          : reachable
+            ? `Connected — the configured file answers (MYOB no longer lists cloud files; ${files.length} listed).`
+            : `Connected — ${files.length} company file(s), but the configured file did not answer.`
         : `Connected — ${files.length} company file(s). MYOB_COMPANY_FILE_ID is not set.`,
       configStatus,
       linked: true,
       configuredFileId: companyFileId || null,
-      configuredFileFound: Boolean(configured),
+      configuredFileFound: reachable,
       configuredFileName: configured?.Name ?? null,
       companyFiles: files,
     };
     return { status: 200, jsonBody: body };
   } catch (error) {
+    if (error instanceof MyobRequestRefusedError) {
+      const body: TestResponse = {
+        ok: false,
+        message: `Refused inside Floorplan: ${error.message}`,
+        configStatus,
+        linked: true,
+        configuredFileId: companyFileId || null,
+        configuredFileFound: false,
+        configuredFileName: null,
+        companyFiles: [],
+      };
+      return { status: 200, jsonBody: body };
+    }
     const message = error instanceof Error ? error.message : String(error);
     context.error("MYOB connection test failed:", message);
     return errorResponse("MYOB connection test failed", message);

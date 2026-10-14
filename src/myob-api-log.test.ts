@@ -6,10 +6,16 @@ jest.mock("./db", () => ({
   executeQuery: jest.fn(),
 }));
 jest.mock("./sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
+jest.mock("./myob-health", () => ({
+  MYOB_HEALTH_SUBJECTS: { agreement: "myob_agreement", link: "myob_link" },
+  raiseMyobHealth: jest.fn().mockResolvedValue(undefined),
+}));
 
+import { todayInDarwin } from "./darwinDate";
 import {
   MAX_LOGGED_RESPONSE_CHARS,
   MyobAuditLogError,
+  MyobRequestRefusedError,
   MyobWritesDisabledError,
   myobRequest,
   redactSecrets,
@@ -25,7 +31,9 @@ const db = require("./db") as {
 const { Sentry } = require("./sentry") as { Sentry: { captureException: jest.Mock } };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const API = "https://api.myob.com/accountright/cf-guid";
+const CF = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
+const API = `https://api.myob.com/accountright/${CF}`;
+const TODAY = todayInDarwin();
 const OAUTH = "https://secure.myob.com/oauth2/v1/authorize/";
 const USER: MyobActor = { kind: "user", name: "Johanne CFO", oid: "cfo-oid", role: "accounts_manager" };
 const SYSTEM: MyobActor = { kind: "system", name: "someTimer" };
@@ -70,6 +78,7 @@ const call = (over: Partial<Parameters<typeof myobRequest>[0]> = {}) =>
     method: "POST",
     purpose: "create-bill",
     url: `${API}/Purchase/Bill/Service`,
+    body: { Date: TODAY },
     ...over,
   });
 
@@ -101,7 +110,7 @@ describe("myobRequest logging", () => {
   it("writes the request row before calling MYOB and the response row after, sharing a CorrelationId", async () => {
     fetchMock.mockResolvedValue(new Response("", { headers: { Location: `${API}/Purchase/Bill/Service/uid-123` }, status: 201 }));
 
-    const res = await call({ body: { Amount: 5 } });
+    const res = await call({ body: { Amount: 5, Date: TODAY } });
 
     const [request, response] = rows();
     expect(db.executeQuery).toHaveBeenCalledTimes(2);
@@ -123,7 +132,7 @@ describe("myobRequest logging", () => {
   });
 
   it("records method, path (no host), purpose, actor and request body", async () => {
-    await call({ body: { Amount: 5 }, url: `${API}/Purchase/Bill/Service?$top=5` });
+    await call({ body: { Amount: 5 }, method: "GET", url: `${API}/Purchase/Bill/Service?$top=5` });
 
     const [request] = rows();
     expect(request).toMatchObject({
@@ -132,8 +141,8 @@ describe("myobRequest logging", () => {
       ActorOid: "cfo-oid",
       ActorRole: "accounts_manager",
       Attempt: 1,
-      Method: "POST",
-      Path: "/accountright/cf-guid/Purchase/Bill/Service?$top=5",
+      Method: "GET",
+      Path: `/accountright/${CF}/Purchase/Bill/Service?$top=5`,
       Purpose: "create-bill",
       RequestBody: '{"Amount":5}',
     });
@@ -170,7 +179,7 @@ describe("myobRequest logging", () => {
   });
 
   it("never logs headers, whatever the caller sends", async () => {
-    await call({ body: { Amount: 5 } });
+    await call({ body: { Amount: 5, Date: TODAY } });
 
     const everything = JSON.stringify(rows());
     expect(everything).not.toContain("super-secret-access-token");
@@ -179,10 +188,10 @@ describe("myobRequest logging", () => {
   });
 
   it("redacts credentials in a JSON request body", async () => {
-    await call({ body: { Lines: [{ Amount: 5 }], refresh_token: "r-1", Number: "PAY-1" } });
+    await call({ body: { Date: TODAY, Lines: [{ Amount: 5 }], refresh_token: "r-1", Number: "PAY-1" } });
 
     const body = JSON.parse(String(rows()[0].RequestBody));
-    expect(body).toEqual({ Lines: [{ Amount: 5 }], Number: "PAY-1", refresh_token: "[redacted]" });
+    expect(body).toEqual({ Date: TODAY, Lines: [{ Amount: 5 }], Number: "PAY-1", refresh_token: "[redacted]" });
   });
 
   it("redacts a form-encoded OAuth body", async () => {
@@ -203,13 +212,13 @@ describe("myobRequest logging", () => {
   });
 
   it("does not store a body it cannot parse", async () => {
-    await call({ body: "plain text with token=abc" });
+    await call({ body: "plain text with token=abc", url: OAUTH });
 
     expect(rows()[0].RequestBody).toBe("[non-JSON body not logged]");
   });
 
   it("redacts credential-looking query parameters in the logged path", async () => {
-    await call({ method: "GET", url: `${API}/Contact?access_token=abc&$filter=Name` });
+    await call({ method: "GET", url: `${API}/Purchase/Order?access_token=abc&$filter=Name` });
 
     const path = String(rows()[0].Path);
     expect(path).not.toContain("abc");
@@ -321,7 +330,7 @@ describe("MYOB_WRITES_ENABLED kill switch", () => {
       if (value === undefined) delete process.env.MYOB_WRITES_ENABLED;
       else process.env.MYOB_WRITES_ENABLED = value;
 
-      await expect(call({ body: { Amount: 5 } })).rejects.toBeInstanceOf(MyobWritesDisabledError);
+      await expect(call({ body: { Amount: 5, Date: TODAY } })).rejects.toBeInstanceOf(MyobWritesDisabledError);
 
       expect(fetchMock).not.toHaveBeenCalled();
       const logged = rows();
@@ -337,10 +346,10 @@ describe("MYOB_WRITES_ENABLED kill switch", () => {
     },
   );
 
-  it.each(["POST", "PUT", "DELETE"] as const)("refuses %s", async (method) => {
+  it.each(["Quote", "Order", "Bill"])("refuses a POST to Purchase/%s/Service", async (entity) => {
     delete process.env.MYOB_WRITES_ENABLED;
 
-    await expect(call({ method })).rejects.toBeInstanceOf(MyobWritesDisabledError);
+    await expect(call({ url: `${API}/Purchase/${entity}/Service` })).rejects.toBeInstanceOf(MyobWritesDisabledError);
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -376,10 +385,10 @@ describe("MYOB_WRITES_ENABLED kill switch", () => {
     delete process.env.MYOB_WRITES_ENABLED;
 
     await expect(call({ url: "https://evil.example.com/oauth2/v1/authorize/" })).rejects.toBeInstanceOf(
-      MyobWritesDisabledError,
+      MyobRequestRefusedError,
     );
-    await expect(call({ url: `${API}/oauth2/v1/authorize/` })).rejects.toBeInstanceOf(MyobWritesDisabledError);
-    await expect(call({ url: "https://secure.myob.com/other/path" })).rejects.toBeInstanceOf(MyobWritesDisabledError);
+    await expect(call({ url: `${API}/oauth2/v1/authorize/` })).rejects.toBeInstanceOf(MyobRequestRefusedError);
+    await expect(call({ url: "https://secure.myob.com/other/path" })).rejects.toBeInstanceOf(MyobRequestRefusedError);
 
     expect(fetchMock).not.toHaveBeenCalled();
   });

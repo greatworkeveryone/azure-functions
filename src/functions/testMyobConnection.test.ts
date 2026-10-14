@@ -17,6 +17,7 @@ jest.mock("../auth", () => {
 });
 jest.mock("../myob-auth", () => ({
   MyobNotLinkedError: class extends Error {},
+  MyobRelinkRequiredError: class extends Error {},
   getValidMyobAccessToken: jest.fn().mockResolvedValue("access-token"),
 }));
 jest.mock("../myob-api-log", () => ({
@@ -79,6 +80,28 @@ describe("testMyobConnection", () => {
 
     expect(res.jsonBody.ok).toBe(false);
     expect(res.jsonBody.message).toContain("MYOB API 401 Unauthorized: token expired");
+  });
+
+  it("checks the configured file directly when MYOB leaves it out of the list (cloud files, 2026)", async () => {
+    myobRequest
+      .mockResolvedValueOnce({ json: () => [], ok: true, status: 200, statusText: "OK", text: "[]" })
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK", text: "{}" });
+
+    const res = await handler(request, ctx);
+
+    expect(res.jsonBody).toMatchObject({ configuredFileFound: true, ok: true });
+    expect(myobRequest.mock.calls[1][0]).toMatchObject({ method: "GET", purpose: "test-connection-file" });
+    expect(myobRequest.mock.calls[1][0].url).toMatch(/\/cf-1\/$/);
+  });
+
+  it("reports a request refused inside Floorplan without a 500", async () => {
+    const { MyobRequestRefusedError } = jest.requireActual("../myob-api-log");
+    myobRequest.mockRejectedValueOnce(new MyobRequestRefusedError("controls", "No MYOB controls for this file"));
+
+    const res = await handler(request, ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ message: "Refused inside Floorplan: No MYOB controls for this file", ok: false });
   });
 
   it("401s when the token has no verified identity", async () => {
