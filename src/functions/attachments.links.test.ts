@@ -219,6 +219,7 @@ describe("detachFromInvoice", () => {
     expect(call?.sql).toMatch(/DELETE FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
     expect(call?.params).toEqual({ AttachmentID: 11, ParentID: 5 });
     expect(sqlCalls().some((c) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql))).toBe(true); // D5: the detach is ledgered
+    expect(sqlCalls().some((c) => /DELETE FROM Attachments/.test(c.sql))).toBe(false); // the file itself stays
   });
 
   it("400s without InvoiceID, 401s without a token, answers the gate's 403", async () => {
