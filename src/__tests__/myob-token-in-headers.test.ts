@@ -7,8 +7,13 @@ import { join, relative } from "node:path";
 // headers factory after the allowlist, period, entity mode and controls say
 // yes. This scans the source so a refresh can't creep in ahead of the guards:
 //   - getValidMyobAccessToken( is called only inside myob-client's
-//     myobHeaders(), or inside a `headers: async () => (...)` factory;
-//   - myobHeaders( is called only as a lazy factory: `() => myobHeaders(`.
+//     myobHeaders(), or inside a `headers: async () => (...)` factory, and
+//     never anywhere in myob-auth.ts but its own definition;
+//   - the stored tokens are opened (openStoredTokens) only inside
+//     getValidMyobAccessToken, so no other wrapper can hand a token out;
+//   - myobHeaders( is called only as a lazy factory: `() => myobHeaders(`;
+//   - nothing but myob-api-log.ts invokes a headers factory (`headers()`),
+//     so a factory can't be run up front and its result passed in.
 
 const SRC = join(__dirname, "..");
 const DEFINES_TOKEN = join(SRC, "myob-auth.ts");
@@ -54,6 +59,8 @@ function spans(code: string, head: RegExp): [number, number][] {
 const callsOf = (code: string, name: string) => [...code.matchAll(new RegExp(`\\b${name}\\s*\\(`, "g"))].map((m) => m.index ?? 0);
 const inside = (at: number, ranges: [number, number][]) => ranges.some(([from, to]) => at >= from && at < to);
 
+const definitionsRemoved = (code: string) => code.replace(/function\s+(getValidMyobAccessToken|openStoredTokens)\s*\(/g, "function DEFINITION_(");
+const all = walk(SRC).map((file) => ({ code: definitionsRemoved(stripComments(readFileSync(file, "utf8"))), file, name: relative(SRC, file) }));
 const files = walk(SRC).filter((file) => file !== DEFINES_TOKEN);
 const sources = files.map((file) => ({ code: stripComments(readFileSync(file, "utf8")), file, name: relative(SRC, file) }));
 
@@ -73,6 +80,29 @@ describe("MYOB tokens are fetched only inside a headers factory", () => {
       for (const at of callsOf(source.code, "getValidMyobAccessToken")) expect(inside(at, allowed)).toBe(true);
     },
   );
+
+  it("myob-auth.ts never calls its own token getter (no wrapper can fetch one ahead of the guards)", () => {
+    const auth = all.find((s) => s.file === DEFINES_TOKEN);
+    expect(auth).toBeDefined();
+    expect(callsOf(auth!.code, "getValidMyobAccessToken")).toEqual([]);
+  });
+
+  it("opens the stored tokens only inside getValidMyobAccessToken", () => {
+    for (const source of all) {
+      const calls = callsOf(source.code, "openStoredTokens");
+      if (calls.length === 0) continue;
+      expect(source.file).toBe(DEFINES_TOKEN);
+      const getter = spans(source.code, /async\s+function\s+DEFINITION_\s*\([^)]*\)\s*:\s*[^{]+/g);
+      for (const at of calls) expect(inside(at, getter)).toBe(true);
+    }
+  });
+
+  it("invokes a headers factory only in myob-api-log.ts, after the guards", () => {
+    const invokers = all
+      .filter((source) => /\bheaders\s*\(\s*\)|\bheaders\s*\.\s*(call|apply)\s*\(/.test(source.code))
+      .map((source) => source.name);
+    expect(invokers).toEqual(["myob-api-log.ts"]);
+  });
 
   it.each(sources.filter((s) => s.file !== DEFINES_HEADERS && callsOf(s.code, "myobHeaders").length > 0).map((s) => [s.name, s]))(
     "%s passes myobHeaders as a lazy factory, never awaits it up front",
