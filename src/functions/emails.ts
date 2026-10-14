@@ -32,6 +32,7 @@ import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
+import { parseMoneyField } from "../money";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -325,7 +326,7 @@ export async function ingestEmail(
 // "promoted". The amount is usually extracted from the email body by the
 // upstream parser; fall back to a user-supplied figure if absent.
 
-async function promoteEmailToQuote(
+export async function promoteEmailToQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -351,10 +352,13 @@ async function promoteEmailToQuote(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Notes } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -667,7 +671,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -678,6 +682,9 @@ export async function promoteEmailToInvoice(
     // (or the operator corrected it to), so it is also the supplier's number.
     const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber ?? InvoiceNumber);
     if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 

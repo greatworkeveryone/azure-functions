@@ -37,6 +37,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { approvalRule, jobScope, quoteFacts, quoteSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
+import { parseMoneyField } from "../money";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -115,7 +116,7 @@ async function getQuotes(
 
 // ── POST /api/upsertQuote ────────────────────────────────────────────────────
 
-async function upsertQuote(
+export async function upsertQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -143,6 +144,8 @@ async function upsertQuote(
       SourceEmailID,
       ReceivedAt,
     } = body ?? {};
+    const amount = parseMoneyField(Amount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
 
     connection = await createRequestConnection(token);
 
@@ -196,7 +199,7 @@ async function upsertQuote(
             { name: "Seq", type: TYPES.Int, value: nextSeq },
             { name: "ContractorID", type: TYPES.Int, value: ContractorID ?? null },
             { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
-            { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+            { name: "Amount", type: TYPES.Decimal, value: amount.value ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "QuotePDFBlobName", type: TYPES.NVarChar, value: QuotePDFBlobName ?? null },
@@ -211,8 +214,8 @@ async function upsertQuote(
         // quote + its creation event land atomically; if the event insert
         // fails we don't ship a ghost quote with no history trail.
         const amountLabel =
-          typeof Amount === "number"
-            ? ` · $${Number(Amount).toLocaleString()}`
+          typeof amount.value === "number"
+            ? ` · $${amount.value.toLocaleString()}`
             : "";
         const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
         await executeQuery(
@@ -272,7 +275,7 @@ async function upsertQuote(
         Notes: TYPES.NVarChar,
         QuotePDFBlobName: TYPES.NVarChar,
       },
-      { Amount, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
+      { Amount: amount.value, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
@@ -300,7 +303,7 @@ async function upsertQuote(
         contractorName: (before.ContractorName as string | null) ?? null,
         status: (before.Status as string | null) ?? null,
       },
-      { amount: Amount, contractorName: ContractorName },
+      { amount: amount.value, contractorName: ContractorName },
     );
 
     await beginTransaction(connection);
