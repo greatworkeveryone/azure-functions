@@ -1,3 +1,4 @@
+import { runTimer } from "../timerRuns";
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { digestMode } from "../digest/config";
@@ -92,6 +93,6 @@ export async function digestTimer(_timer: Timer, context: InvocationContext): Pr
 }
 
 app.timer("digestTimer", {
-  handler: digestTimer,
+  handler: runTimer("digestTimer", digestTimer),
   schedule: DIGEST_CRON,
 });

@@ -1,3 +1,4 @@
+import { runTimer } from "../timerRuns";
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { sendAnomalyReport } from "../access/report";
 import { Sentry } from "../sentry";
@@ -28,5 +29,5 @@ export async function accessReportTimer(_timer: Timer, context: InvocationContex
 }
 
 if (process.env.ACCESS_REPORT_ENABLED === "true") {
-  app.timer("accessReportTimer", { handler: accessReportTimer, schedule: "0 30 21 * * *" });
+  app.timer("accessReportTimer", { handler: runTimer("accessReportTimer", accessReportTimer), schedule: "0 30 21 * * *" });
 }

@@ -12,7 +12,9 @@ import { Sentry } from "./sentry";
 
 /** Every timer the app registers; a guard test keeps this and src in step. */
 export const TIMER_NAMES = [
+  "accessReportTimer",
   "cleanupAttachmentsTimer",
+  "digestTimer",
   "escalationSweepTimer",
   "ledgerVerifyTimer",
   "parseEmailsDailyRetry",
