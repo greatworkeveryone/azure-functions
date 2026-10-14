@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit } from "@azure/functions";
-import { runMigrations } from "../migrate";
+import { pendingMigrations, runMigrations, startupMigrationMode } from "../migrate";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
 import { extractToken, oidFromToken, userInfoFromToken } from "../auth";
@@ -84,20 +84,35 @@ app.hook.postInvocation((hookContext) => {
 });
 
 // Runs once when the function app initialises, before any requests are served.
-// If migrations fail the app refuses to start — better than serving requests
-// against a schema that's out of date.
+// Mode comes from startupMigrationMode: "apply" runs them (and a failure stops
+// the app starting), "check" only reports pending ones — prod applies migrations
+// by hand with `npm run migrate`, since the app's principal has no DDL rights.
 /* eslint-disable no-console -- startup migration diagnostics; the Functions request logger isn't available in the appStart hook, and no request data is logged */
 app.hook.appStart(async (_context) => {
-  const isProduction = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production";
-  const isLocalSql = process.env.LOCAL_SQL === "true";
+  const mode = startupMigrationMode(process.env);
 
-  // Run migrations in production (Azure SQL) and when using the local Docker DB
-  // (SA account has full DDL). Skip otherwise — Azure SQL per-user accounts
-  // don't have DDL permissions in dev.
-  if (!isProduction && !isLocalSql) {
+  if (mode === "skip") {
     console.log("startup: skipping migrations (not Azure and not local Docker DB)");
     return;
   }
+
+  if (mode === "check") {
+    try {
+      const pending = await pendingMigrations();
+      if (pending.length === 0) {
+        console.log("startup: schema up to date");
+      } else {
+        const msg = `startup: ${pending.length} migration(s) pending — run \`npm run migrate\`: ${pending.join(", ")}`;
+        console.warn(msg);
+        Sentry.captureMessage(msg, "warning");
+      }
+    } catch (err) {
+      // Never block startup on the check itself.
+      console.error("startup: pending-migration check failed", err);
+    }
+    return;
+  }
+
   console.log("startup: running migrations");
   await runMigrations((msg) => console.log(msg));
   console.log("startup: migrations complete");

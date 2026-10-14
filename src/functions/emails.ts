@@ -20,6 +20,7 @@ import { generateReadSasUrl } from "../blob-storage";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { jobIdFromText } from "../email/job-ref";
+import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
@@ -1218,8 +1219,8 @@ export async function syncEmailsNow(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
-  if (!process.env.GRAPH_MAILBOX_DEV) {
-    return { status: 500, jsonBody: { error: "GRAPH_MAILBOX_DEV not configured" } };
+  if (!incomingMailbox()) {
+    return { status: 500, jsonBody: { error: mailboxConfigError() } };
   }
 
   enqueueEmailSync(context, "manual");

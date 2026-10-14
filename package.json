@@ -6,7 +6,8 @@
   "scripts": {
     "prestart": "npm run build",
     "start": "npx func start",
-    "build": "tsc && cp src/openapi.json dist/openapi.json",
+    "build": "rm -rf dist && tsc && cp src/openapi.json dist/openapi.json",
+    "migrate": "node scripts/migrate.cjs",
     "watch": "tsc -w",
     "test": "jest",
     "typecheck": "tsc --noEmit",

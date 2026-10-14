@@ -79,8 +79,8 @@ Two things the lever does **not** cover:
 
 `syncAllWorkRequestsTimer`, `parseEmailsDailyRetry` and `graphNotification`
 hand `MYBUILDINGS_BEARER_TOKEN` to a parameter expecting an Entra SQL token.
-`cleanupAttachments.ts` carries a comment from a previous fix of this same bug
-class. Because that key was never a valid SQL token, all three failed at the
+`cleanupAttachments.ts` (since removed) carried a comment from a previous fix
+of this same bug class. Because that key was never a valid SQL token, all three failed at the
 connect handshake inside a try/catch that logs and moves on — they have been
 silently no-ops.
 

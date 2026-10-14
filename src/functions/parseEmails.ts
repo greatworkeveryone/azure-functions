@@ -36,6 +36,8 @@ import {
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
 import { syncMailbox } from "../email/mail-sync";
+import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
+import { domainOf, orgEmailDomains } from "../email/sender-auth";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
@@ -135,10 +137,19 @@ export interface KnownJob {
   awaitingDirectorQuote: AwaitingDirectorQuote | null;
 }
 
+// Toddler withholds money/identity fields for "unknown" senders.
+export type SenderTrust = "internal" | "known-contractor" | "unknown";
+
+export interface WithheldField {
+  field: string;
+  reason: string;
+}
+
 interface ToddlerRequest {
   html: string;
   subject?: string | null;
   fromAddress?: string | null;
+  senderTrust: SenderTrust;
   hints: { poNumber?: string | null; quoteNumber?: string | null };
   attachments: ToddlerAttachmentRef[];
   knownJob?: KnownJob;
@@ -156,6 +167,7 @@ interface ToddlerResponse {
   documentFields?: Record<string, DocumentField> | null;
   suspicious?: boolean;
   suspicionReasons?: string[];
+  withheldFields?: unknown;
   modelVersion: string;
   rawResponse: string | null;
   error: string | null;
@@ -339,6 +351,8 @@ interface ClaimedEmail {
   EmailID: number;
   FromAddress: string | null;
   MatchedJobID: number | null;
+  SenderAuthenticated: boolean | null;
+  Source: string | null;
   Subject: string | null;
 }
 
@@ -384,7 +398,7 @@ async function claimOne(token: string): Promise<ClaimedEmail | null> {
       connection,
       `WITH claimable AS (
          SELECT TOP (1) EmailID, Subject, FromAddress, Body, AttachmentBlobs,
-                MatchedJobID, AIParseAttempts, AIClaimedAt
+                MatchedJobID, Source, SenderAuthenticated, AIParseAttempts, AIClaimedAt
            FROM Emails WITH (ROWLOCK, UPDLOCK, READPAST)
           WHERE AIParsedAt IS NULL
             AND AIParseAttempts < @MaxAttempts
@@ -395,7 +409,8 @@ async function claimOne(token: string): Promise<ClaimedEmail | null> {
           SET AIParseAttempts = AIParseAttempts + 1,
               AIClaimedAt = SYSUTCDATETIME()
        OUTPUT inserted.EmailID, inserted.Subject, inserted.FromAddress,
-              inserted.Body, inserted.AttachmentBlobs, inserted.MatchedJobID`,
+              inserted.Body, inserted.AttachmentBlobs, inserted.MatchedJobID,
+              inserted.Source, inserted.SenderAuthenticated`,
       [
         { name: "MaxAttempts", type: TYPES.Int, value: MAX_ATTEMPTS },
         { name: "LeaseSeconds", type: TYPES.Int, value: CLAIM_LEASE_SECONDS },
@@ -466,6 +481,62 @@ async function loadKnownJob(token: string, jobId: number): Promise<KnownJob | nu
   }
 }
 
+// ── Sender trust ───────────────────────────────────────────────────────────
+// From is spoofable, so trust needs a Graph-sourced, authenticated row first.
+
+async function isActiveContractor(token: string, address: string): Promise<boolean> {
+  const connection = await createRequestConnection(token);
+  try {
+    const rows = await executeQuery(
+      connection,
+      `SELECT TOP (1) 1 AS Found
+         FROM Contractors
+        WHERE LOWER(LTRIM(RTRIM(EmailAddress))) = @Email AND Active = 1 AND Suspended = 0`,
+      [{ name: "Email", type: TYPES.NVarChar, value: address }],
+    );
+    return rows.length > 0;
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+// Best-effort: a lookup failure means "unknown", never a retry.
+export async function resolveSenderTrust(
+  token: string,
+  email: Pick<ClaimedEmail, "FromAddress" | "SenderAuthenticated" | "Source">,
+  context: InvocationContext,
+): Promise<SenderTrust> {
+  if (email.Source !== "graph" || email.SenderAuthenticated !== true || !email.FromAddress) return "unknown";
+  const address = email.FromAddress.trim().toLowerCase();
+  const domain = domainOf(address);
+  if (!domain) return "unknown";
+  if (orgEmailDomains().includes(domain)) return "internal";
+  try {
+    return (await isActiveContractor(token, address)) ? "known-contractor" : "unknown";
+  } catch (err: unknown) {
+    context.warn("sender trust lookup failed:", err instanceof Error ? err.message : String(err));
+    return "unknown";
+  }
+}
+
+const MAX_WITHHELD_FIELDS = 20;
+const MAX_WITHHELD_LENGTH = 200;
+
+// Runtime-validated: well-formed { field, reason } string pairs only, capped.
+function readWithheldFields(result: ToddlerResponse): WithheldField[] {
+  const raw: unknown = result.withheldFields;
+  if (!Array.isArray(raw)) return [];
+  const out: WithheldField[] = [];
+  for (const item of raw) {
+    if (out.length >= MAX_WITHHELD_FIELDS) break;
+    if (typeof item !== "object" || item === null) continue;
+    const { field, reason } = item as { field?: unknown; reason?: unknown };
+    if (typeof field !== "string" || typeof reason !== "string") continue;
+    out.push({ field: field.slice(0, MAX_WITHHELD_LENGTH), reason: reason.slice(0, MAX_WITHHELD_LENGTH) });
+  }
+  return out;
+}
+
 const MAX_SUSPICION_REASONS = 5;
 const MAX_SUSPICION_REASON_LENGTH = 200;
 
@@ -503,9 +574,11 @@ async function writeSuccess(
     documentFields: _modelDocumentFields,
     suspicionReasons: _modelSuspicionReasons,
     suspicious: _modelSuspicious,
+    withheldFields: _modelWithheldFields,
     ...modelData
   } = result.data ?? {};
   const suspicion = readSuspicion(result);
+  const withheld = readWithheldFields(result);
   // Nothing runs on an unknown, so drop any model-written fields.
   const data = result.classification === "unknown" ? {} : modelData;
   const connection = await createRequestConnection(token);
@@ -534,6 +607,7 @@ async function writeSuccess(
             // Toddler sends documentFields beside data; keep it inside AIParsedData.
             ...(result.documentFields ? { documentFields: result.documentFields } : {}),
             ...(suspicion ?? {}),
+            ...(withheld.length > 0 ? { withheldFields: withheld } : {}),
           }),
         },
         { name: "RawResponse", type: TYPES.NVarChar, value: result.rawResponse ?? null },
@@ -680,10 +754,13 @@ async function parseClaimedEmail(
         return null;
       });
     }
+    const senderTrust = await resolveSenderTrust(token, email, context);
+    context.info(`email #${email.EmailID} senderTrust=${senderTrust}`);
     const result = await callToddler({
       attachments: hydrateAttachmentRefs(email.AttachmentBlobs),
       fromAddress: cap(email.FromAddress, FIELD_CAPS.fromAddress),
       hints,
+      senderTrust,
       html: email.Body ?? "",
       subject: cap(email.Subject, FIELD_CAPS.subject),
       ...(knownJob ? { knownJob } : {}),
@@ -835,9 +912,9 @@ export async function processEmailSync(message: unknown, context: InvocationCont
   const deadline = Date.now() + RUN_BUDGET_MS;
   const source = isEmailSyncMessage(message) ? message.source : "unknown";
 
-  const mailbox = process.env.GRAPH_MAILBOX_DEV;
+  const mailbox = incomingMailbox();
   if (!mailbox) {
-    context.error("processEmailSync: GRAPH_MAILBOX_DEV not configured — parsing without a sync");
+    context.error(`processEmailSync: ${mailboxConfigError()} — parsing without a sync`);
   } else {
     try {
       const connection = await createServiceRequestConnection();

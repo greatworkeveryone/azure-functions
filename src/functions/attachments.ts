@@ -27,7 +27,7 @@ const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
 // BlobName is included because callers use it to mint a read SAS URL
 // (see `generateReadSasUrl(r.BlobName)` in the response mapping).
 // MyBuildingsConfirmedAt is included for the same SAS-vs-archived
-// decision in the response mapping.
+// decision in the response mapping (legacy — see the note on getAttachments).
 const ATTACHMENT_COLUMNS = `
   Id, WorkRequestID, JobID, JobCode,
   BlobName, OriginalName, Extension, ContentType, SizeBytes,
@@ -212,9 +212,11 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
           [{ name: "WorkRequestID", type: TYPES.Int, value: workRequestId }],
         );
 
-    // Mint a fresh read SAS for rows whose blob still exists. Once a blob has
-    // been cleaned up (MyBuildingsConfirmedAt set), the SAS would 404 — return
-    // null so the UI can show the row as archived.
+    // Mint a fresh read SAS for rows whose blob still exists. Rows stamped with
+    // MyBuildingsConfirmedAt had their blob deleted by the old cleanupAttachments
+    // timer (removed Oct 2026 — it reaped files that never went to myBuildings).
+    // Nothing sets the column any more; the null-SAS guard stays so those legacy
+    // rows show as archived instead of handing out a 404 link.
     const attachments = rows.map((r: any) => ({
       ...r,
       sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
@@ -405,8 +407,9 @@ async function listParentAttachments(
 // ── POST /api/deleteAttachment ──────────────────────────────────────────────
 // Body: { AttachmentID }. Deletes the local blob + the Attachments row;
 // PurchaseOrderAttachments / QuoteAttachments rows are removed via the
-// cascading FKs (see migration 010). Archived rows (MyBuildingsConfirmedAt
-// set) keep no local blob, so the storage delete is skipped.
+// cascading FKs (see migration 010). Legacy archived rows (MyBuildingsConfirmedAt
+// set by the removed cleanup timer) keep no local blob, so the storage delete
+// is skipped.
 
 async function handleDeleteAttachment(
   request: HttpRequest,

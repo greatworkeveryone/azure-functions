@@ -4,8 +4,6 @@
 // verifiedIdentityFromRequest paths using the dev-override header + an
 // unsigned JWT (same harness as inspections-auth.test.ts).
 import { HttpRequest, InvocationContext } from "@azure/functions";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { clearRoleCache } from "../auth";
 import { _resetRateLimitForTests } from "../rateLimit";
 import {
@@ -616,16 +614,5 @@ describe("getInspections parameter usage (F10)", () => {
       expect(sql).not.toContain("@I0");
       expect(params).toEqual([]);
     }
-  });
-});
-
-// ── F2: cleanupAttachments must not reap shared inspection blobs ─────────────
-// Source-text guard (same style as no-select-star.test.ts): the filter lives
-// in SQL inside a timer whose internals aren't exported.
-
-describe("cleanupAttachments spares inspection blobs (F2)", () => {
-  it("excludes BlobName LIKE 'inspections/%' from the reap SELECT", () => {
-    const src = readFileSync(join(__dirname, "..", "functions", "cleanupAttachments.ts"), "utf8");
-    expect(src).toMatch(/AND\s+BlobName\s+NOT\s+LIKE\s+'inspections\/%'/);
   });
 });
