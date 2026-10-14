@@ -108,7 +108,7 @@ export async function myobCreateServiceOrder(
     actor,
     body: params,
     correlationId,
-    headers: await myobHeaders(sqlToken, actor, correlationId),
+    headers: () => myobHeaders(sqlToken, actor, correlationId),
     method: "POST",
     purpose: "create-service-order",
     url: `${myobBase()}/Purchase/Order/Service`,

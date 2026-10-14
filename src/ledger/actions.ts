@@ -95,6 +95,12 @@ export const LEDGER_ACTIONS = {
   // unusual, so it is an exception too.
   "access.anomaly": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   "access.profile_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  // MYOB link (sprint M0). Link, re-link and unlink share one code; RuleApplied
+  // says which. Always an exception: a change of who Floorplan acts as in MYOB
+  // is the first thing the CFO audits.
+  "myob.link": { exception: true, reasonRequired: false, subjects: ["myob_link"] },
+  // The CFO's switches (sprint M1): set, pause, resume. Her note is the reason.
+  "myob.control_change": { exception: true, reasonRequired: true, subjects: ["myob_control"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

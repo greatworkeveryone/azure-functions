@@ -17,6 +17,14 @@
 //                            (default: https://app.myob.com)
 //   MYOB_WRITES_ENABLED    — must be exactly "true" for any write to reach MYOB
 //                            (see myob-api-log.ts)
+//   MYOB_TOKEN_KEY         — AES-256-GCM key for the stored tokens (myob-token-crypto.ts);
+//                            MYOB_TOKEN_KEY_VERSION / MYOB_TOKEN_KEY_PREVIOUS for rotation
+//   MYOB_CF_USER, MYOB_CF_PASSWORD — the restricted company-file user, sent as
+//                            x-myobapi-cftoken on every company-file call (myob-request-guard.ts)
+//   MYOB_PERIOD_START      — optional lock date (YYYY-MM-DD); writes dated before it are
+//                            refused (myob-period.ts). Default: 1st of the current Darwin month
+//
+// What may be called at all is fixed in myob-endpoints.ts (Purchases only).
 
 import { getValidMyobAccessToken } from "./myob-auth";
 import { myobRequest, type MyobActor } from "./myob-api-log";
@@ -57,7 +65,8 @@ export async function myobFetch(opts: {
     actor: opts.actor,
     body: opts.body,
     correlationId: opts.correlationId,
-    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    // Built only after myobRequest's guards pass, so a refused call never refreshes the token.
+    headers: () => myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
     method: opts.method ?? "GET",
     purpose: opts.purpose,
     url: `${myobBase()}${opts.path}`,
@@ -131,7 +140,8 @@ export async function createMyobBill(opts: {
       // No Supplier yet — see the MYOB_WRITES_ENABLED note above applyMyobPayment.
     },
     correlationId: opts.correlationId,
-    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    // Built only after myobRequest's guards pass, so a refused call never refreshes the token.
+    headers: () => myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
     method: "POST",
     purpose: "create-bill",
     url: `${myobBase()}/Purchase/Bill/Service`,

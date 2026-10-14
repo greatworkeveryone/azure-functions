@@ -10,6 +10,10 @@
 //   money_gate            MONEY_ALLOWED_CIDRS is unset (the money-action gate only
 //                         warns, S11) or has entries the gate cannot use; clears
 //                         once it is set and every entry is usable
+//   myob_link             MYOB was linked or re-linked (src/myob-link.ts)
+//   myob_agreement        a MYOB request reaching a centre the agreement forbids
+//                         was refused (src/myob-request-guard.ts)
+// The two MYOB subjects stay open until a person resolves them.
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../../db";
@@ -20,6 +24,8 @@ import type { EscalationAdapter } from "./registry";
 
 export const SYSTEM_SUBJECTS = {
   moneyGate: "money_gate",
+  myobAgreement: "myob_agreement",
+  myobLink: "myob_link",
   notificationConfig: "notification_config",
   notifications: "notifications",
   sweep: "sweep",
@@ -62,6 +68,8 @@ export const systemAdapter: EscalationAdapter = {
   async loadSummary(_connection, subjectId) {
     const names: Record<string, string> = {
       [SYSTEM_SUBJECTS.moneyGate]: "The money-action gate needs attention: MONEY_ALLOWED_CIDRS is unset or has entries it cannot use",
+      [SYSTEM_SUBJECTS.myobAgreement]: "A MYOB request outside the CFO's agreement was refused",
+      [SYSTEM_SUBJECTS.myobLink]: "MYOB was linked or re-linked: check it was expected",
       [SYSTEM_SUBJECTS.notificationConfig]: "Escalation emails can't be sent: notification settings are missing",
       [SYSTEM_SUBJECTS.notifications]: "Escalation emails keep failing to send",
       [SYSTEM_SUBJECTS.sweep]: "The escalation sweep had a problem",
