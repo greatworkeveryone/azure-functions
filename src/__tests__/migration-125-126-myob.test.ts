@@ -56,7 +56,7 @@ describe("migration 126_myob_proposals.sql", () => {
 
   it("keeps JSON columns valid and one live proposal per record and operation", () => {
     for (const column of ["Payload", "Rendered"]) expect(m126).toMatch(new RegExp(`ISJSON\\(${column}\\) = 1`));
-    expect(m126).toMatch(/UX_MyobProposals_OpenSubject ON dbo\.MyobProposals \(SubjectType, SubjectId, Operation\) WHERE State IN \(N''proposed'', N''approved''\)/);
+    expect(m126).toMatch(/UX_MyobProposals_OpenSubject ON dbo\.MyobProposals \(SubjectType, SubjectId, Operation\) WHERE State IN \(N''proposed'', N''approved'', N''pushed''\)/);
   });
 
   it("versions every row for 409-on-stale writes", () => {

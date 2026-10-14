@@ -35,7 +35,12 @@ describe("withdrawProposal", () => {
     await expect(withdraw(ANA, false)).rejects.toMatchObject({ status: 403 });
   });
 
-  it.each(["approved", "verified", "withdrawn"])("refuses a proposal that is %s", async (state) => {
+  it("lets an approved proposal be withdrawn: approved now means Floorplan's controls held it back, nothing is in flight", async () => {
+    store.getProposal.mockResolvedValue(proposal({ state: "approved" }));
+    await expect(withdraw()).resolves.toMatchObject({ state: "withdrawn" });
+  });
+
+  it.each(["pushed", "verified", "withdrawn"])("refuses a proposal that is %s", async (state) => {
     store.getProposal.mockResolvedValue(proposal({ state: state as ProposalRow["state"] }));
     await expect(withdraw()).rejects.toMatchObject({ status: 409 });
     expect(store.updateProposal).not.toHaveBeenCalled();

@@ -101,3 +101,28 @@ export function diffDocuments(sent: Record<string, unknown>, myob: Record<string
     .filter((field) => JSON.stringify(a[field]) !== JSON.stringify(b[field]))
     .map((field) => ({ field, myob: b[field], sent: a[field] }));
 }
+
+const DRIFT_LABELS: Record<Exclude<keyof ComparableDocument, "date"> | "description", string> = {
+  accountUids: "account",
+  description: "description",
+  number: "number",
+  supplierUid: "supplier",
+  taxCodeUids: "tax code",
+  total: "amount",
+};
+
+const descriptions = (document: Record<string, unknown>) =>
+  (Array.isArray(document.Lines) ? (document.Lines as Record<string, unknown>[]) : []).map((line) => String(line.Description ?? ""));
+
+/**
+ * What differs between the document a person proposed and the one rebuilt at
+ * approval, in plain words. The date and the attribution are left out: a create
+ * is dated the day it is approved, and approval adds the approver's name.
+ */
+export function proposalDrift(proposed: Record<string, unknown>, rebuilt: Record<string, unknown>): string[] {
+  const drift = diffDocuments(proposed, rebuilt)
+    .filter((diff) => diff.field !== "date")
+    .map((diff) => DRIFT_LABELS[diff.field as Exclude<keyof ComparableDocument, "date">]);
+  if (JSON.stringify(descriptions(proposed)) !== JSON.stringify(descriptions(rebuilt))) drift.push(DRIFT_LABELS.description);
+  return drift;
+}

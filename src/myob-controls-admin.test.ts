@@ -114,6 +114,17 @@ describe("changeControl", () => {
     }));
   });
 
+  it("refuses to switch bills.create on while bills are disabled in code (until J3 removes payments.ts's direct MYOB calls)", async () => {
+    world({});
+
+    await expect(change({ changes: { enabled: true }, operation: "bills.create" })).rejects.toMatchObject({
+      message: expect.stringContaining("Bills stay off"),
+      status: 409,
+    });
+    expect(executeQuery).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
   it("409s on a stale version, writing nothing", async () => {
     world({});
 

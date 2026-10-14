@@ -8,6 +8,7 @@
 // Nothing here retries: a failure becomes an exception for a person to look at.
 
 import { MyobRequestRefusedError, MyobWritesDisabledError, type MyobActor } from "../myob-api-log";
+import type { MyobRefusalCode } from "../myob-errors";
 import {
   createPurchase,
   findPurchaseByNumber,
@@ -41,8 +42,13 @@ export type PushResult =
   | { kind: "verified" | "differs"; diff: FieldDiff[]; linked: boolean; readBack: Record<string, unknown>; uid: string }
   | { kind: "not_ours"; message: string; uid: string }
   | { kind: "changed_in_myob"; diff: FieldDiff[]; readBack: Record<string, unknown> }
-  | { kind: "dry_run" | "refused"; message: string }
+  | { kind: "dry_run" | "refused"; message: string; reason: RefusalReason }
   | { kind: "failed"; message: string };
+
+/** Why Floorplan held a request back before it reached MYOB. */
+export type RefusalReason = MyobRefusalCode | "writes_disabled";
+export type HeldBack = Extract<PushResult, { kind: "dry_run" | "refused" }>;
+export const isHeldBack = (result: PushResult): result is HeldBack => result.kind === "dry_run" || result.kind === "refused";
 
 export interface PushInput {
   actor: MyobActor;
@@ -101,8 +107,10 @@ export async function pushApproved(myob: MyobPurchases, input: PushInput): Promi
   try {
     return input.proposal.operation.endsWith(".update") ? await pushUpdate(myob, input) : await pushCreate(myob, input);
   } catch (error) {
-    if (error instanceof MyobRequestRefusedError && error.code === "dry_run") return { kind: "dry_run", message: error.message };
-    if (error instanceof MyobRequestRefusedError || error instanceof MyobWritesDisabledError) return { kind: "refused", message: error.message };
+    if (error instanceof MyobRequestRefusedError) {
+      return { kind: error.code === "dry_run" ? "dry_run" : "refused", message: error.message, reason: error.code };
+    }
+    if (error instanceof MyobWritesDisabledError) return { kind: "refused", message: error.message, reason: "writes_disabled" };
     if (error instanceof MyobPurchaseError) return { kind: "failed", message: error.message };
     const message = error instanceof Error ? error.message : String(error);
     return {

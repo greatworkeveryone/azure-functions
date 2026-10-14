@@ -11,6 +11,12 @@ export class ProposalError extends Error {
   }
 }
 
+/** SQL Server's unique-index and unique-constraint violations. */
+export function isUniqueViolation(error: unknown): boolean {
+  const number = (error as { number?: unknown } | null)?.number;
+  return number === 2601 || number === 2627;
+}
+
 /** A preview is good for 10 minutes: long enough to read, short enough that the record hasn't moved on. */
 export const PREVIEW_TTL_MS = 10 * 60 * 1000;
 const CLOCK_SKEW_MS = 60 * 1000;

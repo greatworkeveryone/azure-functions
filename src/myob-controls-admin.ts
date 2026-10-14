@@ -14,6 +14,7 @@ import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "./db";
 import { record, type LedgerActor } from "./ledger";
+import { BILLS_ENABLED } from "./myob/payloads";
 import {
   CONTROL_COLUMNS,
   CONTROL_OPERATIONS,
@@ -106,6 +107,12 @@ export async function changeControl(
   actor: LedgerActor,
   input: ControlChangeInput,
 ): Promise<{ changed: boolean; row: ControlRow; seeded: boolean }> {
+  if (input.operation === "bills.create" && input.changes.enabled === true && !BILLS_ENABLED) {
+    throw new MyobControlsError(
+      409,
+      "Bills stay off in Floorplan until payments no longer call MYOB directly (J3) and the CFO approves how an order becomes a bill.",
+    );
+  }
   const file = input.companyFileId.toLowerCase();
   const created = await ensureControls(tx, file, actor.name);
   const locked = await executeQuery(

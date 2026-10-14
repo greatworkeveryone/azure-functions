@@ -4,11 +4,12 @@
 // so a record that changed in between is caught by the hash (decision 12).
 //
 //   create  a new Service Quote / Order, dated today in Darwin
-//   update  the Floorplan-created record, keeping its MYOB date; only when
-//           Floorplan holds a verified copy of it to compare with
+//   update  the Floorplan-created record, keeping its MYOB date and its
+//           creator's attribution; only when Floorplan holds a verified copy
+//           of it to compare with
 
 import type { Connection } from "tedious";
-import { journalMemo, orderComment } from "./attribution";
+import { journalMemo, orderComment, updateMemo } from "./attribution";
 import { darwinDisplayDate, myobDocumentDate } from "./darwinClock";
 import { payloadHash, sha256Hex } from "./hash";
 import { resolveMapping, type ResolvedMapping } from "./mappings";
@@ -68,6 +69,7 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
 
   let target: Draft["target"] = null;
   let lastSeen: Record<string, unknown> | null = null;
+  let creatorMemo: string | null = null;
   let date = myobDocumentDate(input.approver?.at ?? input.proposer.at);
   if (isUpdate) {
     const created = (await proposalsForSubject(connection, input.subjectType, input.subjectId)).find(
@@ -78,6 +80,7 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
     target = { myobRowVersion: seen?.myobRowVersion ?? null, uid: created.myobUid };
     lastSeen = seen?.readBack ?? created.readBack ?? created.payload;
     date = String(lastSeen.Date ?? created.payload.Date);
+    creatorMemo = String(created.payload.JournalMemo ?? "");
   }
 
   const attribution = {
@@ -89,10 +92,11 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
     proposedBy: input.proposer.name,
     reference: facts.reference ?? "",
   };
+  const memo = creatorMemo === null ? journalMemo(attribution) : updateMemo(creatorMemo, attribution);
   const payload = buildServiceDocument({
-    comment: orderComment(attribution),
+    comment: orderComment(attribution, memo),
     date,
-    journalMemo: journalMemo(attribution),
+    journalMemo: memo,
     kind: kinds.kind,
     lines: [{ accountUid: mapping.account.uid, description: facts.description, taxCodeUid: mapping.taxCode.uid, total: facts.amount ?? 0 }],
     number: facts.reference ?? "",

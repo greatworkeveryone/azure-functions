@@ -2,7 +2,7 @@
 
 // The MYOB half of "Approve and send", against a fake MYOB.
 
-import { MyobRequestRefusedError, MyobTimeoutError } from "../myob-api-log";
+import { MyobRequestRefusedError, MyobTimeoutError, MyobWritesDisabledError } from "../myob-api-log";
 import { MyobPurchaseError } from "../myob-purchase-order";
 import { canonicalJson } from "./hash";
 import { pushApproved, type MyobPurchases } from "./sendSteps";
@@ -75,11 +75,13 @@ describe("create", () => {
   });
 
   it.each([
-    ["dry_run", new MyobRequestRefusedError("dry_run", "Dry run (CFO control)")],
-    ["refused", new MyobRequestRefusedError("controls", "orders.create is switched off")],
-  ])("reports a %s refusal from inside Floorplan", async (kind, error) => {
+    ["dry_run", "dry_run", new MyobRequestRefusedError("dry_run", "Dry run (CFO control)")],
+    ["refused", "controls", new MyobRequestRefusedError("controls", "orders.create is switched off")],
+    ["refused", "outside_period", new MyobRequestRefusedError("outside_period", "dated outside the current period")],
+    ["refused", "writes_disabled", new MyobWritesDisabledError()],
+  ])("reports a %s refusal from inside Floorplan with its reason (%s)", async (kind, reason, error) => {
     const myob = fakeMyob({ find: jest.fn().mockRejectedValue(error) });
-    expect(await push(myob)).toMatchObject({ kind });
+    expect(await push(myob)).toMatchObject({ kind, reason });
   });
 });
 
