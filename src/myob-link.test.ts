@@ -49,14 +49,17 @@ const TOKENS = {
 };
 const original = process.env.MYOB_COMPANY_FILE_ID;
 
-let registered = true;
+/** The file's mode at each read, in order (the last repeats); null = not registered. */
+let modes: (string | null)[] = ["write"];
 
 beforeEach(() => {
   jest.clearAllMocks();
-  registered = true;
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-    /FROM dbo\.MyobCompanyFiles/.test(sql) ? (registered ? [{ Registered: 1 }] : []) : [{ UserID: 7 }],
-  );
+  modes = ["write"];
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+    if (!/FROM dbo\.MyobCompanyFiles/.test(sql)) return [{ UserID: 7 }];
+    const mode = modes.length > 1 ? modes.shift() : modes[0];
+    return mode === null || mode === undefined ? [] : [{ Mode: mode }];
+  });
   delete process.env.MYOB_COMPANY_FILE_ID;
   consumeAuthState.mockResolvedValue(OWNER);
   exchangeCode.mockResolvedValue(TOKENS);
@@ -104,13 +107,36 @@ describe("completeMyobLink refusals: nothing is exchanged or stored", () => {
   });
 
   it("409 when the approved file isn't registered in Entities (decision 14)", async () => {
-    registered = false;
+    modes = [null];
 
     const outcome = await link();
 
     expect(outcome).toMatchObject({ ok: false, status: 409, title: expect.stringContaining("not registered") });
     expect(exchangeCode).not.toHaveBeenCalled();
     expect(store.saveLinkedTokens).not.toHaveBeenCalled();
+  });
+
+  it("409 when the approved file is registered but switched off, before anything is exchanged", async () => {
+    modes = ["off"];
+
+    const outcome = await link();
+
+    expect(outcome).toMatchObject({ ok: false, status: 409, title: expect.stringContaining("switched off") });
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("409, storing nothing, when the file is switched off between the first check and the token lock", async () => {
+    modes = ["read", "off"];
+
+    const outcome = await link();
+
+    expect(outcome).toMatchObject({ ok: false, status: 409, title: expect.stringContaining("switched off") });
+    expect(exchangeCode).toHaveBeenCalled();
+    expect(store.lockMyobTokens).toHaveBeenCalled();
+    expect(store.saveLinkedTokens).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(raiseMyobHealth).not.toHaveBeenCalled();
   });
 
   it("409 when MYOB grants a scope beyond the agreement", async () => {
