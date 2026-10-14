@@ -1548,7 +1548,8 @@ async function unmarkJobInvoiceMyobCreated(
 
 // ── POST /api/deleteJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID }
-// Refuses to delete approved invoices.
+// Refuses to delete an invoice anyone has relied on (D5): approved, approved by
+// a director, marked in MYOB, or with a payment recorded against it.
 //
 // A deletion leaves nothing behind but its ledger row, so the row carries a
 // snapshot of what was deleted, and the two commit together or not at all.
@@ -1558,6 +1559,33 @@ const DELETE_INVOICE_TARGET: RefusalTarget = {
   idField: "JobInvoiceID",
   subjectType: "invoice",
 };
+
+/** Why this invoice can't be deleted, or null. `payments` are the statuses of
+ *  the payments recorded against it. */
+function deleteInvoiceRefusal(
+  invoice: { MyobCreatedAt?: unknown; Status?: unknown },
+  payments: readonly unknown[],
+): { code: string; error: string } | null {
+  if (invoice.Status === "approved") {
+    return { code: "approved_invoice_protected", error: "Cannot delete an approved invoice. Reject it first." };
+  }
+  if (invoice.Status === "director_approved") {
+    return {
+      code: "approved_invoice_protected",
+      error: "Cannot delete an invoice a director has approved. Undo the director approval first.",
+    };
+  }
+  if (invoice.MyobCreatedAt != null) {
+    return { code: "myob_invoice_protected", error: "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first." };
+  }
+  if (payments.includes("paid")) {
+    return { code: "paid_invoice_protected", error: "Cannot delete an invoice that has been paid." };
+  }
+  if (payments.length > 0) {
+    return { code: "paid_invoice_protected", error: "Cannot delete an invoice with a payment recorded against it." };
+  }
+  return null;
+}
 
 async function deleteJobInvoice(
   request: HttpRequest,
@@ -1597,19 +1625,29 @@ async function deleteJobInvoice(
         return { status: 404, jsonBody: { error: "Invoice not found" } };
       }
       const invoice = rows[0];
-      if (invoice.Status === "approved") {
+      const payments = await executeQuery(
+        connection,
+        "SELECT Status FROM Payments WHERE JobInvoiceID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      const refusal = deleteInvoiceRefusal(invoice, payments.map((p) => p.Status));
+      if (refusal) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.
         await rollbackTransaction(connection).catch(() => {});
-        const error = "Cannot delete an approved invoice. Reject it first.";
         await recordRefusal(
           connection,
           actor,
           { id: JobInvoiceID, type: "invoice" },
-          { attempted: "invoice.delete", code: "approved_invoice_protected", message: error, state: { status: "approved" } },
+          {
+            attempted: "invoice.delete",
+            code: refusal.code,
+            message: refusal.error,
+            state: { status: String(invoice.Status ?? "") },
+          },
           invoice.JobID as number,
         );
-        return { status: 400, jsonBody: { error } };
+        return { status: 400, jsonBody: { error: refusal.error } };
       }
 
       await executeQuery(
