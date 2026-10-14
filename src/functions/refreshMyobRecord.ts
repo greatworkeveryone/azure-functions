@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { forbidden, withCaller } from "../myob/proposalHttp";
 import { proposalsForSubject } from "../myob/proposalsStore";
+import { proposalView } from "../myob/proposalView";
 import { readbackMode, readBackRows } from "../myob/readbackRun";
 import { checkRateLimit } from "../rateLimit";
 
@@ -45,7 +46,7 @@ export async function refreshMyobRecord(request: HttpRequest, context: Invocatio
       });
     }
     return {
-      jsonBody: { checked: counts?.read ?? 0, proposals: await proposalsForSubject(connection, subjectType, subjectId), readback: mode },
+      jsonBody: { checked: counts?.read ?? 0, proposals: (await proposalsForSubject(connection, subjectType, subjectId)).map(proposalView), readback: mode },
       status: 200,
     };
   });

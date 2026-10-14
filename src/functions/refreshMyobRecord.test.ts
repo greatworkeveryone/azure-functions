@@ -35,9 +35,9 @@ beforeEach(() => {
   process.env = { ...saved, MYOB_READBACK_ENABLED: "true" };
   jest.useFakeTimers().setSystemTime(NOW);
   proposalsForSubject.mockResolvedValue([
-    { lastReadBackAt: "2026-10-15T00:00:00Z", myobUid: "a", proposalId: 7, state: "verified" },
-    { lastReadBackAt: "2026-10-15T00:10:00Z", myobUid: "b", proposalId: 6, state: "verified" },
-    { lastReadBackAt: null, myobUid: "a", proposalId: 5, state: "verified" },
+    { lastReadBackAt: "2026-10-15T00:00:00Z", myobSnapshot: { BalanceDueAmount: 0, TotalAmount: 10 }, myobUid: "a", operation: "orders.update", proposalId: 7, state: "verified" },
+    { lastReadBackAt: "2026-10-15T00:10:00Z", myobSnapshot: null, myobUid: "b", operation: "orders.create", proposalId: 6, state: "verified" },
+    { lastReadBackAt: null, myobSnapshot: null, myobUid: "a", operation: "orders.create", proposalId: 5, state: "verified" },
   ]);
   readBackRows.mockResolvedValue({ read: 1 });
 });
@@ -53,6 +53,7 @@ describe("refreshMyobRecord", () => {
     expect(res.status).toBe(200);
     expect(readBackRows.mock.calls[0][1].map((row: { proposalId: number }) => row.proposalId)).toEqual([7]);
     expect(readBackRows.mock.calls[0][2]).toMatchObject({ actors: { myob: { kind: "user", name: "Ray" } }, dryRun: false });
+    expect(res.jsonBody.proposals[0].paid).toEqual({ balanceDue: 0, state: "paid" });
   });
 
   it("reads nothing while the read-back is off, and answers with what Floorplan last saw", async () => {
