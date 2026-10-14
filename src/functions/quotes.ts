@@ -345,11 +345,12 @@ async function upsertQuote(
             WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: QuoteID }],
         );
+        // N2 (J2): the job's status is never changed here. Done stays done,
+        // and a job in Work stays in Work; only the approval is cleared.
         await executeQuery(
           connection,
           `UPDATE Jobs
               SET ApprovedQuoteID = NULL, ApprovedBy = NULL, ApprovedAt = NULL,
-                  Status = 'Awaiting Approval', AwaitingRole = 'facilities',
                   LastModifiedDate = SYSUTCDATETIME()
             WHERE JobID = @JobID AND ApprovedQuoteID = @QuoteID`,
           [
@@ -360,15 +361,16 @@ async function upsertQuote(
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
-           VALUES (@JobID, @CreatedBy, @Text, 'status_change', @QuoteID);`,
+           VALUES (@JobID, @CreatedBy, @Text, @EventType, @QuoteID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `Quote ${quoteNumber} amount changed — approval cleared, awaiting re-review.`,
+              value: `Quote ${quoteNumber} amount changed — approval cleared. The job keeps its status until a quote is approved again.`,
             },
+            { name: "EventType", type: TYPES.NVarChar, value: "quote_approval_cleared" },
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );

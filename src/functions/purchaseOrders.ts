@@ -1394,32 +1394,23 @@ async function unmarkPurchaseOrderComplete(
         ],
       );
 
-      // Fire PO event
+      // N3 (J2): undoing a completion never moves the job. Done stays done
+      // (reopening is a manager's job, with a reason: reopenJob); a job
+      // already with accounts stays there.
       await executeQuery(
         connection,
         `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-         VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
+         VALUES (@JobID, @CreatedBy, @Text, 'po_uncompleted', @PurchaseOrderID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: actor.name },
           { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
           { name: "PurchaseOrderID", type: TYPES.Int, value: id },
         ],
       );
-
-      // Roll back job status
       await executeQuery(
         connection,
-        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-         VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
-        [
-          { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
-        ],
-      );
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
-         WHERE JobID = @JobID`,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: jobId }],
       );
 
