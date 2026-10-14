@@ -83,7 +83,7 @@ it("completing a scheduled job's work stamps its run and moves the schedule on f
   expect(response.status).toBe(200);
   expect(paramsOf(callsMatching(db.executeQuery, STAMP_RUN)[0])).toEqual({ RunId: 7 });
   // 31 Jan anchor, monthly: after 31 Oct comes 30 Nov (from the anchor, clamped).
-  expect(paramsOf(callsMatching(db.executeQuery, ADVANCE)[0])).toMatchObject({ Due: "2026-10-31", Id: 21, JobId: 500, Next: "2026-11-30" });
+  expect(paramsOf(callsMatching(db.executeQuery, ADVANCE)[0])).toMatchObject({ Due: "2026-10-31", Id: 21, JobId: 500, Next: "2026-11-30", UpdatedBy: "Adam (job #500 completed)" });
   expect(db.commitTransaction).toHaveBeenCalledTimes(1);
 });
 

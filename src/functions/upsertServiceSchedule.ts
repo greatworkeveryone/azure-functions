@@ -64,7 +64,7 @@ export async function upsertServiceSchedule(request: HttpRequest, context: Invoc
       const before = scheduleRowToApi(row, today);
       if (before.archived) return txFail(conflict("This schedule is archived. Restore it before editing."));
       if (before.buildingId !== input.buildingId) return txFail(badRequest("A schedule can't move to another building. Archive it and add a new one."));
-      const stale = conflict(`${before.updatedBy ?? "Someone"} changed this schedule since you opened it. Reload to see their change, then edit again.`);
+      const stale = conflict(`${before.updatedBy ?? "Someone"} changed this schedule since you opened it. Load their changes, then make your edit again.`);
       if (before.rowVersion !== input.rowVersion) return txFail(stale);
       const nextDue = planNextDue(input, before, today);
       if (!nextDue.ok) return nextDue;

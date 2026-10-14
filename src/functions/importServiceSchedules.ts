@@ -16,7 +16,9 @@ import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { resolveLedgerActor } from "../ledger/actor";
 import { planNextDue } from "../serviceScheduleRefs";
 import { loadImportLookups, MAX_IMPORT_BYTES, MAX_IMPORT_ROWS, readImportRows, rowToInput } from "../serviceScheduleImport";
+import { insertRun } from "../serviceScheduleRuns";
 import { insertSchedule } from "../serviceScheduleWrite";
+import { XlsxRejectedError } from "../xlsx-safe";
 import type { ScheduleInput } from "../serviceSchedules";
 
 interface FileLike {
@@ -40,7 +42,13 @@ export async function importServiceSchedules(request: HttpRequest, context: Invo
 
   let connection: Connection | undefined;
   try {
-    const rows = await readImportRows(Buffer.from(await file.arrayBuffer()));
+    let rows;
+    try {
+      rows = await readImportRows(Buffer.from(await file.arrayBuffer()));
+    } catch (error) {
+      if (error instanceof XlsxRejectedError) return badRequest(error.message);
+      throw error;
+    }
     if (rows.length === 0) return badRequest("The spreadsheet has no schedules in it");
     if (rows.length > MAX_IMPORT_ROWS) return badRequest(`Import at most ${MAX_IMPORT_ROWS} schedules at a time`);
 
@@ -49,16 +57,16 @@ export async function importServiceSchedules(request: HttpRequest, context: Invo
     const today = todayInDarwin();
     const lookups = await loadImportLookups(conn);
     const errors: Array<{ error: string; row: number }> = [];
-    const valid: Array<{ buildingName: string; input: ScheduleInput; nextDue: string; row: number }> = [];
+    const valid: Array<{ buildingName: string; input: ScheduleInput; lastServiced: string | null; nextDue: string; row: number }> = [];
     for (const row of rows) {
-      const result = rowToInput(row, lookups);
+      const result = rowToInput(row, lookups, today);
       if (!result.ok) {
         errors.push({ error: result.error, row: row.row });
         continue;
       }
       const nextDue = planNextDue(result.value, null, today);
       if (!nextDue.ok) errors.push({ error: String((nextDue.response.jsonBody as { error: string }).error), row: row.row });
-      else valid.push({ buildingName: result.buildingName, input: result.value, nextDue: nextDue.value, row: row.row });
+      else valid.push({ buildingName: result.buildingName, input: result.value, lastServiced: result.lastServiced, nextDue: nextDue.value, row: row.row });
     }
     if (errors.length > 0) return { jsonBody: { error: `${errors.length} row(s) need fixing; nothing was imported`, errors }, status: 400 };
     if (dryRun) {
@@ -69,7 +77,22 @@ export async function importServiceSchedules(request: HttpRequest, context: Invo
     const outcome = await inTransaction(conn, async () => {
       const actor = await resolveLedgerActor(request, conn);
       if (!actor) return txFail(unauthorizedResponse());
-      for (const item of valid) await insertSchedule(conn, item.input, item.nextDue, auth.caller.name, actor, today);
+      for (const item of valid) {
+        const schedule = await insertSchedule(conn, item.input, item.nextDue, auth.caller.name, actor, today);
+        // The last service from the spreadsheet becomes history (UX review E3).
+        if (item.lastServiced) {
+          await insertRun(conn, {
+            actorName: auth.caller.name,
+            completedOn: item.lastServiced,
+            defectsPeriodId: null,
+            due: item.lastServiced,
+            jobId: null,
+            note: "Last service, from the import",
+            outcome: "recorded",
+            scheduleId: schedule.serviceScheduleId,
+          });
+        }
+      }
       return txOk(valid.length);
     });
     if (!outcome.ok) return outcome.response;

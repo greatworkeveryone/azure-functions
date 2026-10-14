@@ -196,7 +196,7 @@ async function generateOne(connection: Connection, schedule: ScheduleApi, option
     const next = nextDueAfter(seriesOf(schedule), due);
     await inTx(connection, async () => {
       await insertRun(connection, { actorName: SCHEDULER_NAME, defectsPeriodId: period.defectsPeriodId, due, jobId: null, outcome: "skipped_defects", scheduleId: id });
-      await advanceNextDue(connection, id, due, next, null);
+      await advanceNextDue(connection, id, due, next, null, SCHEDULER_NAME);
     });
     report.schedules.skippedDefects += 1;
     report.actions += 1;

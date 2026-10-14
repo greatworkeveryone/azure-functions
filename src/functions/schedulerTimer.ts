@@ -1,6 +1,28 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { runFacilitiesScheduler, schedulerMaxActions, schedulerMode, type SchedulerReport } from "../facilitiesScheduler";
+
+/** One flat set of counts, as lane D's runTimer records in TimerRuns. Errors
+ *  are counted because a per-record failure doesn't throw: the wrap should
+ *  not mark a run with failures as clean. */
+export type SchedulerCounts = Record<string, boolean | number | string>;
+
+export function schedulerCounts(report: SchedulerReport, mode: string): SchedulerCounts {
+  return {
+    alreadyDone: report.schedules.alreadyDone,
+    created: report.schedules.created,
+    errors: report.errors.length,
+    escalated: report.overdue.raised,
+    mode,
+    remindersRaised: report.defects.raised,
+    skippedDefects: report.schedules.skippedDefects,
+    truncated: report.truncated,
+    wouldCreate: report.schedules.wouldCreate,
+    wouldEscalate: report.overdue.wouldRaise,
+    wouldRemind: report.defects.wouldRaise,
+    wouldSkip: report.schedules.wouldSkip,
+  };
+}
 import { Sentry } from "../sentry";
 
 // ── Timer trigger: daily at 22:00 UTC (07:30 in Darwin) ──────────────────────
@@ -24,7 +46,7 @@ import { Sentry } from "../sentry";
 export async function runSchedulerTimer(
   context: InvocationContext,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<SchedulerReport | null> {
+): Promise<SchedulerCounts | null> {
   const mode = schedulerMode(env);
   if (mode === "off") {
     context.log("schedulerTimer: off. Set SCHEDULER_DRY_RUN=true to see what it would do, then SCHEDULER_ENABLED=true.");
@@ -47,7 +69,7 @@ export async function runSchedulerTimer(
       for (const error of report.errors) context.warn(`schedulerTimer: ${error}`);
       Sentry.captureMessage(`Facilities scheduler finished with ${report.errors.length} problem(s): ${report.errors[0]}`, "error");
     }
-    return report;
+    return schedulerCounts(report, mode);
   } catch (error: unknown) {
     context.error("schedulerTimer failed:", error instanceof Error ? error.message : String(error));
     Sentry.captureException(error, { tags: { source: "scheduler_timer" } });

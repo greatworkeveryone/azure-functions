@@ -92,7 +92,10 @@ export const LEDGER_ACTIONS = {
   // decision (the schedule was); the run rows record it.
   "service_schedule.archive": { exception: true, reasonRequired: false, subjects: ["service_schedule"] },
   "service_schedule.create": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  // A manager closing out a due date without a Floorplan job (UX review E4).
+  "service_schedule.mark_serviced": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
   "service_schedule.restore": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.skip_due": { exception: true, reasonRequired: true, subjects: ["service_schedule"] },
   "service_schedule.update": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
 
   // Escalations (WP20). The subject is the escalation itself; the row carries

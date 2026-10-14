@@ -12,7 +12,7 @@ import { Sentry } from "./sentry";
 import { serviceJobTitle, nextDueAfter, type IntervalUnit } from "./facilitiesRules";
 import { scheduleTarget, type ScheduleApi } from "./serviceSchedules";
 
-export const RUN_OUTCOMES = ["job_created", "skipped_defects"] as const;
+export const RUN_OUTCOMES = ["job_created", "skipped_defects", "recorded", "skipped"] as const;
 export type RunOutcome = (typeof RUN_OUTCOMES)[number];
 export const SCHEDULED_JOB_EVENT = "scheduled";
 export const SCHEDULED_CREATION_METHOD = "schedule";
@@ -25,6 +25,8 @@ export interface RunApi {
   jobId: number | null;
   jobStatus: string | null;
   jobTitle: string | null;
+  /** Why a manager skipped it, or what they noted when marking it serviced. */
+  note: string | null;
   outcome: RunOutcome;
   serviceScheduleId: number;
 }
@@ -40,7 +42,8 @@ export function runRowToApi(row: SqlRow): RunApi {
     jobId: row.JobId == null ? null : Number(row.JobId),
     jobStatus: row.JobStatus == null ? null : String(row.JobStatus),
     jobTitle: row.JobTitle == null ? null : String(row.JobTitle),
-    outcome: row.Outcome === "skipped_defects" ? "skipped_defects" : "job_created",
+    note: row.Note == null ? null : String(row.Note),
+    outcome: (RUN_OUTCOMES as readonly string[]).includes(String(row.Outcome)) ? (row.Outcome as RunOutcome) : "job_created",
     serviceScheduleId: Number(row.ServiceScheduleId),
   };
 }
@@ -48,7 +51,7 @@ export function runRowToApi(row: SqlRow): RunApi {
 export async function listRuns(connection: Connection, scheduleId: number): Promise<RunApi[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT r.ServiceScheduleId, r.DueDate, r.JobId, r.Outcome, r.DefectsPeriodId, r.CompletedAt, r.CreatedAt,
+    `SELECT r.ServiceScheduleId, r.DueDate, r.JobId, r.Outcome, r.DefectsPeriodId, r.CompletedAt, r.CreatedAt, r.Note,
             j.Title AS JobTitle, j.Status AS JobStatus
        FROM dbo.ServiceScheduleRuns r
        LEFT JOIN dbo.Jobs j ON j.JobID = r.JobId
@@ -111,7 +114,10 @@ export async function createScheduledJob(connection: Connection, schedule: Sched
   if (schedule.assetId !== null) {
     await executeQuery(
       connection,
-      `INSERT INTO dbo.JobAssets (JobId, AssetId, LinkedBy) VALUES (@JobId, @AssetId, @LinkedBy)`,
+      `INSERT INTO dbo.JobAssets (JobId, AssetId, LinkedBy)
+         SELECT @JobId, @AssetId, @LinkedBy
+          WHERE NOT EXISTS (SELECT 1 FROM dbo.JobAssets
+                             WHERE JobId = @JobId AND AssetId = @AssetId AND UnlinkedAt IS NULL)`,
       [
         { name: "JobId", type: TYPES.Int, value: jobId },
         { name: "AssetId", type: TYPES.Int, value: schedule.assetId },
@@ -125,13 +131,24 @@ export async function createScheduledJob(connection: Connection, schedule: Sched
 
 export async function insertRun(
   connection: Connection,
-  run: { actorName: string; defectsPeriodId: number | null; due: string; jobId: number | null; outcome: RunOutcome; scheduleId: number },
+  run: {
+    actorName: string;
+    completedOn?: string | null;
+    defectsPeriodId: number | null;
+    due: string;
+    jobId: number | null;
+    note?: string | null;
+    outcome: RunOutcome;
+    scheduleId: number;
+  },
 ): Promise<void> {
   await executeQuery(
     connection,
-    `INSERT INTO dbo.ServiceScheduleRuns (ServiceScheduleId, DueDate, JobId, Outcome, DefectsPeriodId, CreatedBy)
-     VALUES (@ScheduleId, @DueDate, @JobId, @Outcome, @DefectsPeriodId, @CreatedBy)`,
+    `INSERT INTO dbo.ServiceScheduleRuns (ServiceScheduleId, DueDate, JobId, Outcome, DefectsPeriodId, CompletedAt, Note, CreatedBy)
+     VALUES (@ScheduleId, @DueDate, @JobId, @Outcome, @DefectsPeriodId, @CompletedAt, @Note, @CreatedBy)`,
     [
+      { name: "CompletedAt", type: TYPES.DateTime2, value: run.completedOn ? new Date(`${run.completedOn}T00:00:00Z`) : null },
+      { name: "Note", type: TYPES.NVarChar, value: run.note ?? null },
       { name: "ScheduleId", type: TYPES.Int, value: run.scheduleId },
       { name: "DueDate", type: TYPES.Date, value: run.due },
       { name: "JobId", type: TYPES.Int, value: run.jobId },
@@ -142,12 +159,22 @@ export async function insertRun(
   );
 }
 
-/** Moves a schedule's NextDue from `due` to the next occurrence, only if it is still `due`. */
-export async function advanceNextDue(connection: Connection, scheduleId: number, due: string, next: string, completedJobId: number | null): Promise<boolean> {
+/** Moves a schedule's NextDue from `due` to the next occurrence, only if it is
+ *  still `due`. `updatedBy` names what moved it (the scheduler, a completing
+ *  person, a manager), so a later stale-edit 409 names the real cause. */
+export async function advanceNextDue(
+  connection: Connection,
+  scheduleId: number,
+  due: string,
+  next: string,
+  completedJobId: number | null,
+  updatedBy: string,
+): Promise<boolean> {
   const rows = await executeQuery(
     connection,
     `UPDATE dbo.ServiceSchedules
-        SET NextDue = @Next, LastCompletedJobId = COALESCE(@JobId, LastCompletedJobId), UpdatedAt = SYSUTCDATETIME()
+        SET NextDue = @Next, LastCompletedJobId = COALESCE(@JobId, LastCompletedJobId),
+            UpdatedAt = SYSUTCDATETIME(), UpdatedBy = @UpdatedBy
       OUTPUT INSERTED.ServiceScheduleId
       WHERE ServiceScheduleId = @Id AND NextDue = @Due`,
     [
@@ -155,6 +182,7 @@ export async function advanceNextDue(connection: Connection, scheduleId: number,
       { name: "Due", type: TYPES.Date, value: due },
       { name: "Next", type: TYPES.Date, value: next },
       { name: "JobId", type: TYPES.Int, value: completedJobId },
+      { name: "UpdatedBy", type: TYPES.NVarChar, value: updatedBy.slice(0, 200) },
     ],
   );
   return rows.length > 0;
@@ -177,7 +205,7 @@ export function isWorkCompletion(status: string | null, awaitingRole: string | n
 // surrounding transaction.)
 const MISSING_TABLE = /Invalid object name 'dbo\.(ServiceScheduleRuns|ServiceSchedules)'/i;
 
-export async function markServiceJobCompleted(connection: Connection, jobId: number): Promise<{ advancedTo: string | null }> {
+export async function markServiceJobCompleted(connection: Connection, jobId: number, completedBy: string): Promise<{ advancedTo: string | null }> {
   let runs: SqlRow[];
   try {
     runs = await executeQuery(
@@ -213,6 +241,6 @@ export async function markServiceJobCompleted(connection: Connection, jobId: num
     },
     due,
   );
-  const advanced = await advanceNextDue(connection, Number(run.ServiceScheduleId), due, next, jobId);
+  const advanced = await advanceNextDue(connection, Number(run.ServiceScheduleId), due, next, jobId, `${completedBy} (job #${jobId} completed)`);
   return { advancedTo: advanced ? next : null };
 }

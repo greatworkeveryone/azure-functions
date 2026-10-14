@@ -11,10 +11,14 @@
 --                        (ServiceScheduleId, DueDate) is the idempotency guard:
 --                        a second run for the same due date cannot insert, so
 --                        a job can never be generated twice. Outcome is
---                        job_created (JobId set) or skipped_defects (the due date
+--                        job_created (JobId set), skipped_defects (the due date
 --                        fell inside a blocking defects period; DefectsPeriodId
---                        says which). CompletedAt is stamped when the job's work
---                        is completed, which also advances NextDue.
+--                        says which), recorded (a manager marked it serviced
+--                        without a Floorplan job, or the import brought in the
+--                        last service date) or skipped (a manager skipped this
+--                        due date, with the reason in Note). CompletedAt is
+--                        stamped when the service was done, which also advances
+--                        NextDue.
 --
 -- Rows are archived (ArchivedAt/ArchivedBy), never deleted; Active = 0 pauses a
 -- schedule without archiving it. RowVersion makes a stale edit a 409.
@@ -94,6 +98,7 @@ BEGIN
         Outcome              NVARCHAR(20)   NOT NULL,
         DefectsPeriodId      INT            NULL,
         CompletedAt          DATETIME2      NULL,
+        Note                 NVARCHAR(500)  NULL,
         CreatedAt            DATETIME2      NOT NULL CONSTRAINT DF_ServiceScheduleRuns_CreatedAt DEFAULT SYSUTCDATETIME(),
         CreatedBy            NVARCHAR(200)  NULL,
         CONSTRAINT PK_ServiceScheduleRuns PRIMARY KEY (ServiceScheduleRunId),
@@ -101,10 +106,10 @@ BEGIN
             REFERENCES dbo.ServiceSchedules(ServiceScheduleId),
         CONSTRAINT FK_ServiceScheduleRuns_Jobs FOREIGN KEY (JobId)
             REFERENCES dbo.Jobs(JobID),
-        CONSTRAINT CK_ServiceScheduleRuns_Outcome CHECK (Outcome IN (N'job_created', N'skipped_defects')),
+        CONSTRAINT CK_ServiceScheduleRuns_Outcome CHECK (Outcome IN (N'job_created', N'skipped_defects', N'recorded', N'skipped')),
         CONSTRAINT CK_ServiceScheduleRuns_Shape CHECK (
             (Outcome = N'job_created' AND JobId IS NOT NULL)
-            OR (Outcome = N'skipped_defects' AND JobId IS NULL)
+            OR (Outcome <> N'job_created' AND JobId IS NULL)
         )
     );
 END

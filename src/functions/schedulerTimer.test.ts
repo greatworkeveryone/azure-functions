@@ -66,6 +66,30 @@ it("passes SCHEDULER_MAX_ACTIONS through and warns when the run was cut short", 
   expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/action limit/), "warning");
 });
 
+it("returns one flat set of counts, errors included, for runTimer (integration note)", async () => {
+  scheduler.runFacilitiesScheduler.mockResolvedValue({
+    ...report(["defects period 1: boom"], true),
+    defects: { ...counts, raised: 2 },
+    overdue: { ...counts, raised: 1 },
+    schedules: { alreadyDone: 0, considered: 3, created: 2, skippedDefects: 1, wouldCreate: 0, wouldSkip: 0 },
+  });
+  const result = await runSchedulerTimer(new InvocationContext(), { SCHEDULER_ENABLED: "true" });
+  expect(result).toEqual({
+    alreadyDone: 0,
+    created: 2,
+    errors: 1,
+    escalated: 1,
+    mode: "live",
+    remindersRaised: 2,
+    skippedDefects: 1,
+    truncated: true,
+    wouldCreate: 0,
+    wouldEscalate: 0,
+    wouldRemind: 0,
+    wouldSkip: 0,
+  });
+});
+
 it("fails loudly when the run itself throws", async () => {
   scheduler.runFacilitiesScheduler.mockRejectedValue(new Error("no database"));
   await expect(runSchedulerTimer(new InvocationContext(), { SCHEDULER_ENABLED: "true" })).rejects.toThrow("no database");

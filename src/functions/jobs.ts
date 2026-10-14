@@ -1494,7 +1494,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       // Service schedules (sprint F2, WP50): completing a scheduled job's work
       // moves its schedule on to the next due date of the anchor series.
       if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
-        await markServiceJobCompleted(connection, JobID);
+        await markServiceJobCompleted(connection, JobID, identity.name);
       }
 
       await commitTransaction(connection);

@@ -58,8 +58,8 @@ function upload(buffer: Buffer | null, query: Record<string, string> = {}, size?
   return { formData: async () => ({ get: () => file }), headers: new Headers(), query: new URLSearchParams(query) } as unknown as HttpRequest;
 }
 
-const ROW_CHILLER = ["Tower A", "CH-01", "Six-monthly chiller service", "HVAC / mechanical", "", "Cool Air", "Y", 6, "months", "28/04/2026", 14, ""];
-const ROW_LIGHTS = ["tower a", "", "Monthly exit light test", "Fire & life safety", "All emergency exit lights", "", "N", 1, "months", new Date("2026-01-31T00:00:00Z"), "", "Level 1 to 3"];
+const ROW_CHILLER = ["Tower A", "CH-01", "Six-monthly chiller service", "HVAC / mechanical", "", "Cool Air", "Y", 6, "months", "28/04/2026", 14, "30/04/2026", ""];
+const ROW_LIGHTS = ["tower a", "", "Monthly exit light test", "Fire & life safety", "All emergency exit lights", "", "N", 1, "months", new Date("2026-01-31T00:00:00Z"), "", "", "Level 1 to 3"];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -87,11 +87,16 @@ describe("importServiceSchedules", () => {
     expect(chiller).toMatchObject({ AnchorDate: "2026-04-28", AssetId: 12, BuildingId: 1, ContractorId: 5, IntervalCount: 6, IsContract: true, LeadDays: 14, NextDue: "2026-10-28" });
     expect(lights).toMatchObject({ AnchorDate: "2026-01-31", AssetId: null, IsContract: false, NextDue: "2026-10-31", Notes: "Level 1 to 3", Scope: "All emergency exit lights" });
     expect(ledgerInserts(db.executeQuery).map((row) => row.action)).toEqual(["service_schedule.create", "service_schedule.create"]);
+    // The chiller's last service comes in as history (UX review E3).
+    const [history] = callsMatching(db.executeQuery, /INSERT INTO dbo\.ServiceScheduleRuns/).map(paramsOf);
+    expect(history).toMatchObject({ DueDate: "2026-04-30", JobId: null, Outcome: "recorded", ScheduleId: 41 });
+    expect((history.CompletedAt as Date).toISOString()).toBe("2026-04-30T00:00:00.000Z");
+    expect(callsMatching(db.executeQuery, /INSERT INTO dbo\.ServiceScheduleRuns/)).toHaveLength(1);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("writes nothing when any row is wrong, and says which row and why", async () => {
-    const bad = ["Tower B", "CH-09", "", "Plumbing", "", "Nobody", "maybe", 0, "days", "31/02/2026", -1, ""];
+    const bad = ["Tower B", "CH-09", "", "Plumbing", "", "Nobody", "maybe", 0, "days", "31/02/2026", -1, "", ""];
     const response = await importServiceSchedules(upload(await workbook([ROW_CHILLER, bad])), context);
     expect(response.status).toBe(400);
     const { errors } = response.jsonBody as { errors: Array<{ error: string; row: number }> };
@@ -100,11 +105,12 @@ describe("importServiceSchedules", () => {
   });
 
   it.each([
-    [["Tower A", "XX-99", "Service", "Lifts", "", "", "N", 1, "months", "01/01/2026", "", ""], /Asset tag "XX-99" isn't in Tower A/],
-    [["Tower A", "", "Service", "Lifts", "", "Nobody", "N", 1, "months", "01/01/2026", "", ""], /Contractor "Nobody" not found/],
-    [["Tower A", "", "Service", "Lifts", "", "", "N", 1, "months", "2026-13-01", "", ""], /Anchor date/],
-    [["Tower A", "", "Service", "Lifts", "", "", "perhaps", 1, "months", "01/01/2026", "", ""], /Standing contract/],
-    [["Tower A", "", "Service", "Lifts", "", "", "N", 1, "months", "01/01/2026", "", ""], /Choose the asset/],
+    [["Tower A", "XX-99", "Service", "Lifts", "", "", "N", 1, "months", "01/01/2026", "", "", ""], /Asset tag "XX-99" isn't in Tower A/],
+    [["Tower A", "", "Service", "Lifts", "", "Nobody", "N", 1, "months", "01/01/2026", "", "", ""], /Contractor "Nobody" not found\. Use a name from the template's list\./],
+    [["Tower A", "", "Service", "Lifts", "", "", "N", 1, "months", "2026-13-01", "", "", ""], /Service date/],
+    [["Tower A", "", "Service", "Lifts", "", "", "perhaps", 1, "months", "01/01/2026", "", "", ""], /Standing contract/],
+    [["Tower A", "", "Service", "Lifts", "", "", "N", 1, "months", "01/01/2026", "", "", ""], /Choose the asset/],
+    [["Tower A", "", "Service", "Lifts", "Lift 1", "", "N", 1, "months", "01/01/2026", "", "01/01/2027", ""], /Last serviced can't be after today/],
   ])("explains a bad row: %j", async (row, message) => {
     const response = await importServiceSchedules(upload(await workbook([row])), context);
     expect(response.status).toBe(400);
@@ -125,6 +131,32 @@ describe("importServiceSchedules", () => {
     expect((await importServiceSchedules(upload(await workbook([])), context)).status).toBe(400);
   });
 
+  it("refuses a spreadsheet that unpacks far beyond its size (code review 2)", async () => {
+    const { deflateRawSync } = require("node:zlib") as typeof import("node:zlib");
+    const body = deflateRawSync(Buffer.alloc(60 * 1024 * 1024, 0x20));
+    const name = Buffer.from("xl/worksheets/sheet1.xml");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(body.length, 20);
+    central.writeUInt16LE(name.length, 28);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(1, 8);
+    end.writeUInt16LE(1, 10);
+    end.writeUInt32LE(46 + name.length, 12);
+    end.writeUInt32LE(30 + name.length + body.length, 16);
+    const bomb = Buffer.concat([local, name, body, central, name, end]);
+    const response = await importServiceSchedules(upload(bomb), context);
+    expect(response.status).toBe(400);
+    expect((response.jsonBody as { error: string }).error).toBe("The spreadsheet is too large once unpacked");
+  });
+
   it("is for managers only", async () => {
     auth.requireRole.mockResolvedValueOnce({ jsonBody: { error: "Forbidden" }, status: 403 });
     expect((await importServiceSchedules(upload(await workbook([ROW_CHILLER])), context)).status).toBe(403);
@@ -141,5 +173,6 @@ describe("getServiceScheduleTemplate", () => {
     const header = (wb.getWorksheet("Schedules")?.getRow(1).values as unknown[]).slice(1);
     expect(header).toEqual([...IMPORT_HEADERS]);
     expect(wb.getWorksheet("_Buildings")?.getRow(1).getCell(1).value).toBe("Tower A");
+    expect(wb.getWorksheet("_Contractors")?.getRow(1).getCell(1).value).toBe("Cool Air");
   });
 });

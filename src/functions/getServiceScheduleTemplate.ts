@@ -6,18 +6,13 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import ExcelJS from "exceljs";
-import type { Connection } from "tedious";
+import { TYPES, type Connection } from "tedious";
 import { errorResponse } from "../auth";
 import { authorize, errorMessage } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { DEFAULT_LEAD_DAYS, MAINTENANCE_SERVICES } from "../facilitiesRules";
-import { IMPORT_HEADERS, IMPORT_SHEET } from "../serviceScheduleImport";
-
-/** A name starting =, +, -, @ would run as a formula when the file is opened. */
-function safeCell(value: string): string {
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-}
+import { CONTRACTOR_LIST, IMPORT_HEADERS, IMPORT_SHEET } from "../serviceScheduleImport";
 
 const INFO: Array<[string, string]> = [
   ["Building", "The building's name or code, as in Floorplan."],
@@ -25,11 +20,12 @@ const INFO: Array<[string, string]> = [
   ["Service name", "What the job will be called, e.g. Six-monthly chiller service."],
   ["Category", MAINTENANCE_SERVICES.join(", ")],
   ["What is serviced (no asset)", "Required when there is no asset tag, e.g. All emergency exit lights."],
-  ["Contractor", "Optional; the contractor's name as in Floorplan."],
-  ["Standing contract (Y/N)", "Y: the job needs no quote (billed under the contract)."],
+  ["Contractor", "Optional; choose from the list (contractors in Floorplan)."],
+  ["Standing contract (Y or N)", "Y: the job needs no quote (billed under the contract)."],
   ["Every / Unit", "How often: e.g. 6 and months, or 2 and weeks."],
-  ["Anchor date (DD/MM/YYYY)", "A date the service falls on; every due date counts from it."],
-  ["Lead days", `How many days before the due date the job is created (blank = ${DEFAULT_LEAD_DAYS}).`],
+  ["Service date (DD/MM/YYYY)", "Any date this service was or will be due. Floorplan counts forward from it."],
+  ["Create the job (days before due)", `How many days before the due date the job is made (blank = ${DEFAULT_LEAD_DAYS}).`],
+  ["Last serviced (DD/MM/YYYY)", "Optional; when it was last done. It shows as the asset's last service."],
 ];
 
 export async function getServiceScheduleTemplate(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -41,6 +37,8 @@ export async function getServiceScheduleTemplate(request: HttpRequest, context: 
     connection = await createRequestConnection(auth.token);
     const rows = await executeQuery(connection, `SELECT BuildingID, BuildingName, BuildingCode FROM dbo.Buildings WHERE Active = 1 ORDER BY BuildingName`, []);
     const names = rows.map((row) => String(row.BuildingName ?? ""));
+    const contractorRows = await executeQuery(connection, CONTRACTOR_LIST, [{ name: "Active", type: TYPES.Bit, value: true }]);
+    const contractors = contractorRows.map((row) => String(row.ContractorName ?? "")).filter(Boolean);
 
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet(IMPORT_SHEET);
@@ -49,6 +47,7 @@ export async function getServiceScheduleTemplate(request: HttpRequest, context: 
     const validations = (ws as unknown as { dataValidations: { add: (range: string, rule: unknown) => void } }).dataValidations;
     validations.add("A2:A2000", { allowBlank: false, formulae: [`_Buildings!$A$1:$A$${Math.max(names.length, 1)}`], type: "list" });
     validations.add("D2:D2000", { allowBlank: false, formulae: [`"${MAINTENANCE_SERVICES.join(",")}"`], type: "list" });
+    validations.add("F2:F2000", { allowBlank: true, formulae: [`_Contractors!$A$1:$A$${Math.max(contractors.length, 1)}`], type: "list" });
     validations.add("G2:G2000", { allowBlank: true, formulae: ['"Y,N"'], type: "list" });
     validations.add("I2:I2000", { allowBlank: false, formulae: ['"weeks,months"'], type: "list" });
 
@@ -60,7 +59,9 @@ export async function getServiceScheduleTemplate(request: HttpRequest, context: 
     info.getColumn(2).width = 90;
 
     const buildings = wb.addWorksheet("_Buildings", { state: "veryHidden" });
-    names.forEach((name) => buildings.addRow([safeCell(name)]));
+    names.forEach((name) => buildings.addRow([name]));
+    const contractorSheet = wb.addWorksheet("_Contractors", { state: "veryHidden" });
+    contractors.forEach((name) => contractorSheet.addRow([name]));
 
     return {
       body: Buffer.from(await wb.xlsx.writeBuffer()),

@@ -8,6 +8,7 @@ import ExcelJS from "exceljs";
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "./db";
 import { parseScheduleInput, type ScheduleInput } from "./serviceSchedules";
+import { assertSafeXlsx } from "./xlsx-safe";
 
 export const IMPORT_HEADERS = [
   "Building",
@@ -16,11 +17,12 @@ export const IMPORT_HEADERS = [
   "Category",
   "What is serviced (no asset)",
   "Contractor",
-  "Standing contract (Y/N)",
+  "Standing contract (Y or N)",
   "Every",
   "Unit (weeks or months)",
-  "Anchor date (DD/MM/YYYY)",
-  "Lead days",
+  "Service date (DD/MM/YYYY)",
+  "Create the job (days before due)",
+  "Last serviced (DD/MM/YYYY)",
   "Notes",
 ] as const;
 type Header = (typeof IMPORT_HEADERS)[number];
@@ -45,6 +47,8 @@ function cellValue(value: ExcelJS.CellValue): ImportCell {
 
 /** The data rows of the first non-hidden sheet (row numbers as Excel shows them). */
 export async function readImportRows(buffer: Buffer): Promise<ImportRow[]> {
+  // Throws XlsxRejectedError for a zip bomb or a file that isn't an .xlsx.
+  assertSafeXlsx(buffer);
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
   const ws = wb.getWorksheet(IMPORT_SHEET) ?? wb.worksheets.find((sheet) => !sheet.name.startsWith("_"));
@@ -62,6 +66,8 @@ export async function readImportRows(buffer: Buffer): Promise<ImportRow[]> {
   return rows;
 }
 
+export const CONTRACTOR_LIST = `SELECT ContractorID, ContractorName FROM dbo.Contractors WHERE Active = @Active ORDER BY ContractorName`;
+
 export interface ImportLookups {
   assets: Array<{ assetId: number; buildingId: number; tag: string }>;
   buildings: Array<{ code: string | null; id: number; name: string }>;
@@ -75,7 +81,7 @@ export async function loadImportLookups(connection: Connection): Promise<ImportL
     `SELECT AssetId, BuildingId, AssetTag FROM dbo.Assets WHERE ArchivedAt IS NULL AND AssetTag IS NOT NULL`,
     [],
   );
-  const contractors = await executeQuery(connection, `SELECT ContractorID, ContractorName FROM dbo.Contractors WHERE Active = @Active`, [
+  const contractors = await executeQuery(connection, CONTRACTOR_LIST, [
     { name: "Active", type: TYPES.Bit, value: true },
   ]);
   return {
@@ -99,9 +105,9 @@ export function importDate(cell: ImportCell): string | null {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === iso ? iso : null;
 }
 
-type RowResult = { buildingName: string; ok: true; value: ScheduleInput } | { error: string; ok: false };
+type RowResult = { buildingName: string; lastServiced: string | null; ok: true; value: ScheduleInput } | { error: string; ok: false };
 
-export function rowToInput(row: ImportRow, lookups: ImportLookups): RowResult {
+export function rowToInput(row: ImportRow, lookups: ImportLookups, today: string): RowResult {
   const c = row.cells;
   const fail = (error: string): RowResult => ({ error, ok: false });
   const buildingText = text(c.Building);
@@ -112,13 +118,17 @@ export function rowToInput(row: ImportRow, lookups: ImportLookups): RowResult {
   if (tag && !asset) return fail(`Asset tag "${tag}" isn't in ${building.name}`);
   const contractorText = text(c.Contractor);
   const contractor = contractorText ? lookups.contractors.find((k) => norm(k.name) === norm(contractorText)) : null;
-  if (contractorText && !contractor) return fail(`Contractor "${contractorText}" not found`);
-  const yn = norm(c["Standing contract (Y/N)"]);
+  if (contractorText && !contractor) return fail(`Contractor "${contractorText}" not found. Use a name from the template's list.`);
+  const yn = norm(c["Standing contract (Y or N)"]);
   if (!["", "y", "yes", "n", "no"].includes(yn)) return fail("Standing contract must be Y or N");
-  const anchor = importDate(c["Anchor date (DD/MM/YYYY)"]);
-  if (!anchor) return fail("Anchor date must be a date, DD/MM/YYYY");
+  const anchor = importDate(c["Service date (DD/MM/YYYY)"]);
+  if (!anchor) return fail("Service date must be a date, DD/MM/YYYY");
+  const lastText = text(c["Last serviced (DD/MM/YYYY)"]);
+  const lastServiced = lastText ? importDate(c["Last serviced (DD/MM/YYYY)"]) : null;
+  if (lastText && !lastServiced) return fail("Last serviced must be a date, DD/MM/YYYY, or left blank");
+  if (lastServiced && lastServiced > today) return fail("Last serviced can't be after today");
   const unit = norm(c["Unit (weeks or months)"]).replace(/^(week|month)$/, "$1s");
-  const leadText = text(c["Lead days"]);
+  const leadText = text(c["Create the job (days before due)"]);
   const parsed = parseScheduleInput({
     anchorDate: anchor,
     assetId: asset?.assetId ?? null,
@@ -133,5 +143,5 @@ export function rowToInput(row: ImportRow, lookups: ImportLookups): RowResult {
     notes: text(c.Notes) || null,
     scope: text(c["What is serviced (no asset)"]) || null,
   });
-  return parsed.ok ? { buildingName: building.name, ok: true, value: parsed.value } : fail(parsed.error);
+  return parsed.ok ? { buildingName: building.name, lastServiced, ok: true, value: parsed.value } : fail(parsed.error);
 }

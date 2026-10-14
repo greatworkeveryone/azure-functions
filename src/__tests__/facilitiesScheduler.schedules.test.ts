@@ -95,6 +95,36 @@ describe("service jobs", () => {
     expect(opts.log).toHaveBeenCalledWith(expect.stringMatching(/skipped schedule 21 .* inside the Chiller replacement defects period to 30\/06\/2027: Acme Builders owes it; next due 28\/04\/2027/));
   });
 
+  it("writes nothing in a dry run when a blocking period covers the due date (code review 4)", async () => {
+    given([
+      { match: DUE, rows: [scheduleRow()] },
+      { match: LIVE_PERIODS, rows: [periodRow()] },
+    ]);
+    const opts = options(true);
+    const report = await runFacilitiesScheduler(conn, opts);
+    expect(report.schedules).toMatchObject({ skippedDefects: 0, wouldSkip: 1 });
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(callsMatching(db.executeQuery, /INSERT|UPDATE/)).toHaveLength(0);
+    expect(opts.log).toHaveBeenCalledWith(expect.stringMatching(/would skip schedule 21/));
+  });
+
+  it("names the scheduler as what moved the schedule, so a later stale edit says so (code review 5)", async () => {
+    given([
+      { match: DUE, rows: [scheduleRow()] },
+      { match: LIVE_PERIODS, rows: [periodRow()] },
+    ]);
+    await runFacilitiesScheduler(conn, options());
+    const advance = callsMatching(db.executeQuery, ADVANCE)[0];
+    expect(advance[1]).toMatch(/UpdatedBy = @UpdatedBy/);
+    expect(paramsOf(advance)).toMatchObject({ UpdatedBy: "Floorplan scheduler" });
+  });
+
+  it("links the asset only when no live link exists (code review 1)", async () => {
+    given([{ match: DUE, rows: [scheduleRow()] }]);
+    await runFacilitiesScheduler(conn, options());
+    expect(callsMatching(db.executeQuery, LINK_ASSET)[0][1]).toMatch(/WHERE NOT EXISTS[\s\S]*UnlinkedAt IS NULL/);
+  });
+
   it("still creates the job when the period only warns", async () => {
     given([
       { match: DUE, rows: [scheduleRow()] },
