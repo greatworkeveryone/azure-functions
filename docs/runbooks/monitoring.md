@@ -112,7 +112,8 @@ Any request to a gated money endpoint outside 06:00–20:00 Mon–Sat Darwin.
 Keep the name list in step with `src/money-gated-routes.ts`.
 
 ```kusto
-let gated = dynamic(["setApprovalLimit", "upsertPayment", "markPaymentPaid", "directorApproveJobInvoice", "markPurchaseOrderMyobCreated"]);
+let gated = dynamic(["setApprovalLimit", "upsertPayment", "markPaymentPaid", "directorApproveJobInvoice",
+  "markJobInvoiceMyobCreated", "unmarkJobInvoiceMyobCreated", "markPurchaseOrderMyobCreated", "unmarkPurchaseOrderMyobCreated"]);
 requests
 | where timestamp > ago(15m)
 | where name in (gated)
@@ -161,7 +162,9 @@ traces
 ## 5. The money-action gate (S11, decision 16)
 
 Money endpoints (today: `setApprovalLimit`, `upsertPayment`, `markPaymentPaid`,
-`directorApproveJobInvoice`, `markPurchaseOrderMyobCreated`; lane M adds the
+`directorApproveJobInvoice`, `markJobInvoiceMyobCreated`,
+`unmarkJobInvoiceMyobCreated`, `markPurchaseOrderMyobCreated`,
+`unmarkPurchaseOrderMyobCreated`; lane M adds the
 MYOB proposal, push, update and control routes — the list is
 `src/money-gated-routes.ts`) require all of:
 

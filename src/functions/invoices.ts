@@ -1315,6 +1315,9 @@ async function markJobInvoiceMyobCreated(
     await recordRoleRefusal(request, token, denied, MARK_INVOICE_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1463,6 +1466,9 @@ async function unmarkJobInvoiceMyobCreated(
     await recordRoleRefusal(request, token, denied, UNMARK_INVOICE_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {

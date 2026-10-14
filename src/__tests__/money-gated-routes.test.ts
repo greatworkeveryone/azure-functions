@@ -38,13 +38,16 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe("money-gated routes", () => {
-  it("lists the five money endpoints that exist today", () => {
+  it("lists the eight money endpoints that exist today", () => {
     expect(MONEY_GATED_ROUTES.map((r) => r.route)).toEqual([
       "setApprovalLimit",
       "upsertPayment",
       "markPaymentPaid",
       "directorApproveJobInvoice",
+      "markJobInvoiceMyobCreated",
+      "unmarkJobInvoiceMyobCreated",
       "markPurchaseOrderMyobCreated",
+      "unmarkPurchaseOrderMyobCreated",
     ]);
   });
 

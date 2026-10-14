@@ -1076,6 +1076,9 @@ async function unmarkPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {

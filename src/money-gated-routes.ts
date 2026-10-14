@@ -22,7 +22,10 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   { file: "src/functions/payments.ts", label: "Record or change a payment", route: "upsertPayment" },
   { file: "src/functions/payments.ts", label: "Mark a payment paid", route: "markPaymentPaid" },
   { file: "src/functions/invoices.ts", label: "Director-approve an invoice", route: "directorApproveJobInvoice" },
+  { file: "src/functions/invoices.ts", label: "Mark an invoice created in MYOB", route: "markJobInvoiceMyobCreated" },
+  { file: "src/functions/invoices.ts", label: "Undo an invoice's created-in-MYOB mark", route: "unmarkJobInvoiceMyobCreated" },
   { file: "src/functions/purchaseOrders.ts", label: "Mark a purchase order created in MYOB", route: "markPurchaseOrderMyobCreated" },
+  { file: "src/functions/purchaseOrders.ts", label: "Undo a purchase order's created-in-MYOB mark", route: "unmarkPurchaseOrderMyobCreated" },
 ];
 
 export function isMoneyGatedRoute(route: string): boolean {
