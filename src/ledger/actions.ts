@@ -54,6 +54,10 @@ export const LEDGER_ACTIONS = {
   // whose invoices are all paid is a system decision.
   "job.invoices_paid": { exception: false, reasonRequired: false, subjects: ["job"] },
   "job.reopen": { exception: true, reasonRequired: true, subjects: ["job"] },
+  // Money-record files (D5): a file taken off a quote, purchase order or
+  // invoice. The subject is the record; `before` names the file. An exception,
+  // like the other removals from a money record.
+  "attachment.detach": { exception: true, reasonRequired: false, subjects: ["invoice", "purchase_order", "quote"] },
 
   // Role, limit and attribution decisions (WP19b)
   "approval_limit.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },

@@ -894,6 +894,41 @@ describe("invoice reversals and deletions", () => {
       expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
     });
 
+    // D5: an invoice someone has relied on is never deleted — not only a
+    // plain "approved" one.
+    it.each([
+      [
+        "approved by a director",
+        { DirectorApprovedAt: new Date("2026-10-02T03:04:05Z"), Status: "director_approved" },
+        [],
+        "Cannot delete an invoice a director has approved. Undo the director approval first.",
+        "approved_invoice_protected",
+      ],
+      [
+        "marked in MYOB",
+        { MyobCreatedAt: new Date("2026-10-03T00:00:00Z"), Status: "rejected" },
+        [],
+        "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first.",
+        "myob_invoice_protected",
+      ],
+      ["paid", {}, [{ Status: "paid" }], "Cannot delete an invoice that has been paid.", "paid_invoice_protected"],
+      [
+        "with a payment pending",
+        {},
+        [{ Status: "pending" }],
+        "Cannot delete an invoice with a payment recorded against it.",
+        "paid_invoice_protected",
+      ],
+    ])("an invoice %s is protected: 400, recorded as a refused attempt, nothing deleted", async (_label, over, payments, error, rule) => {
+      mockSql([APP_USER, JOB_BUILDING, { match: /FROM Payments WHERE JobInvoiceID = @Id/, rows: payments }, row(over)]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { error }, status: 400 });
+      expect(calls()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: rule, subjectId: "5" })]);
+      expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
+    });
+
     it("404s an unknown invoice, writing nothing", async () => {
       mockSql([APP_USER, JOB_BUILDING]);
 
