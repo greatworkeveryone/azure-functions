@@ -97,9 +97,13 @@ describe("field officers can check keys out and in", () => {
   });
 
   it("the real role check lets facilities through, along with managers, directors and admin, and nobody else", async () => {
-    const original = { env: process.env.DEV_ROLE_OVERRIDE_ENABLED, host: process.env.AZURE_FUNCTIONS_ENVIRONMENT };
+    // The X-Dev-Roles header only counts when the host positively says it is a
+    // local Development run and is not an Azure-hosted app (src/jwt.ts).
+    const names = ["DEV_ROLE_OVERRIDE_ENABLED", "AZURE_FUNCTIONS_ENVIRONMENT", "WEBSITE_INSTANCE_ID"] as const;
+    const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-    delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+    delete process.env.WEBSITE_INSTANCE_ID;
     jest.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const admitted = async (gate: readonly AppRole[]) => {
@@ -116,9 +120,11 @@ describe("field officers can check keys out and in", () => {
       expect(await admitted(CHECKIN_KEYS_ROLES)).toEqual(expected);
     } finally {
       jest.restoreAllMocks();
-      if (original.env === undefined) delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
-      else process.env.DEV_ROLE_OVERRIDE_ENABLED = original.env;
-      if (original.host !== undefined) process.env.AZURE_FUNCTIONS_ENVIRONMENT = original.host;
+      for (const name of names) {
+        const before = original[name];
+        if (before === undefined) delete process.env[name];
+        else process.env[name] = before;
+      }
     }
   });
 });
