@@ -2,6 +2,10 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, createRequestConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
+import { SUBJECT_ELIGIBLE_ROLES, decideAuthority, toRoleLimits } from "../approvalAuthority";
+import { loadApprovalFacts, parseDirectorThreshold, resolveApprovalAuthority } from "../approvalAuthority-db";
+import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
+import { isTestJob } from "../testRecords";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
@@ -16,57 +20,9 @@ import { approvalRule, invoiceFacts, invoiceSnapshot, jobScope } from "../ledger
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 
-// ── Approval limit helpers ────────────────────────────────────────────────────
-
-export interface ApprovalLimit {
-  RoleName: string;
-  /** null means unlimited authority. Applies to BOTH quotes and invoices. */
-  MaxApprovalAmount: number | null;
-}
-
-/**
- * Pure function — determines whether a user with the given roles can approve an
- * invoice of the given amount, given a set of per-role limits.
- *
- * Rules:
- * - A user's effective limit is the maximum of all their matching role limits.
- * - A null limit for any matching role means unlimited authority (always true).
- * - If no matching role is found, approval is denied.
- */
-export function canApproveAmount(
-  userRoles: string[],
-  limits: ApprovalLimit[],
-  amount: number,
-): boolean {
-  const matching = limits.filter((l) => userRoles.includes(l.RoleName));
-  if (matching.length === 0) return false;
-  // If any matching role has unlimited authority, allow immediately
-  if (matching.some((l) => l.MaxApprovalAmount === null)) return true;
-  const effectiveLimit = Math.max(...matching.map((l) => l.MaxApprovalAmount as number));
-  return amount <= effectiveLimit;
-}
-
-/**
- * Pure function — returns true when the amount exceeds the highest non-director,
- * non-null approval limit, meaning only a director can fully approve it.
- *
- * Rules:
- * - 'director' and unlimited (NULL) roles are excluded from the threshold calc.
- * - With no enforceable non-director limits, returns false (no rule to enforce).
- * - Amount <= 0 returns false.
- */
-export function requiresDirectorApproval(
-  amount: number,
-  limits: ApprovalLimit[],
-): boolean {
-  if (!amount || amount <= 0) return false;
-  const nonDirector = limits.filter(
-    (l) => l.RoleName !== AppRole.DIRECTOR && l.MaxApprovalAmount !== null,
-  );
-  if (nonDirector.length === 0) return false;
-  const threshold = Math.max(...nonDirector.map((l) => l.MaxApprovalAmount as number));
-  return amount > threshold;
-}
+// Approval limits and the director gate live in the approval-authority core
+// (src/approvalAuthority.ts, J1); ApprovalLimit rows in approval-limits-db.ts.
+export type { ApprovalLimit } from "../approval-limits-db";
 
 // ── Body interfaces ───────────────────────────────────────────────────────────
 
@@ -628,13 +584,19 @@ interface InvoiceApproval {
   routesToAwaitingApproval: boolean;
 }
 
-type InvoiceApprovalOutcome = { approval: InvoiceApproval; ok: true } | { ok: false; response: HttpResponseInit };
+type InvoiceApprovalOutcome =
+  | { approval: InvoiceApproval; ok: true }
+  | { ok: false; response: HttpResponseInit }
+  | { jobId: number; ok: false; refusal: { message: string; reason: ApprovalRefusalReason; status: string | null } };
+
+/** Who may press Approve on an invoice: every role the authority core lets approve one (J1). */
+const APPROVE_INVOICE_ROLES = SUBJECT_ELIGIBLE_ROLES.invoice as readonly AppRole[];
 
 async function approveInvoiceInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; invoiceId: number; userRoles: string[] },
+  input: { actor: LedgerActor; approvedBy: string; email: string; invoiceId: number; userRoles: string[] },
 ): Promise<InvoiceApprovalOutcome> {
-  const { actor, approvedBy, invoiceId, userRoles } = input;
+  const { actor, approvedBy, email, invoiceId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Fetch invoice — need Amount for limit check. Locked until commit, so the
@@ -651,19 +613,34 @@ async function approveInvoiceInTransaction(
     const invoice = rows[0];
     const jobId = invoice.JobID as number;
     const invoiceNumber = (invoice.InvoiceNumber as string | null) ?? `#${invoiceId}`;
+    // The director email shows the amount; an unknown one reads as 0.00 there,
+    // but is never treated as $0 by the authority check below.
     const amount = (invoice.Amount as number | null) ?? 0;
 
-    // Three-tier routing (matches approveQuote):
-    //   - user can approve, no director gate    → 'approved' + job→Done
-    //   - user can approve, director gate fires → 'approved' + director email (no job→Done)
-    //   - user can't approve, director gate fires → same as above (anyone may submit)
-    //   - user can't approve, no director gate → 'awaiting_approval' (senior manager picks up)
-    const allLimits = await getCachedApprovalLimits(connection);
-    const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
-
-    const userCanApprove = canApproveAmount(userRoles, limitRows, amount);
-    const directorGateEngaged = requiresDirectorApproval(amount, allLimits);
-    const routesToAwaitingApproval = !userCanApprove && !directorGateEngaged;
+    // The approval-authority core decides (J1), as for quotes. Past the
+    // director threshold (or with no amount) the invoice is approved for stage
+    // 1 and the director approves stage 2; past the caller's limit it waits
+    // for someone further up the route; any other "no" is refused.
+    const scope = await jobScope(connection, jobId);
+    const facts = await loadApprovalFacts(connection, scope.buildingId);
+    const isTest = userRoles.some((role) => role.trim().toLowerCase() === AppRole.ADMIN) && (await isTestJob(connection, jobId));
+    const outcome = approvalOutcome(
+      { email, roles: userRoles, userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
+      { amount: invoice.Amount == null ? NaN : Number(invoice.Amount), buildingId: scope.buildingId ?? 0, jobId, subject: "invoice" },
+      facts,
+      { isTest },
+    );
+    if (outcome.kind === "refused") {
+      await rollbackTransaction(connection).catch(() => {});
+      return {
+        jobId,
+        ok: false,
+        refusal: { message: outcome.message, reason: outcome.reason, status: (invoice.Status as string | null) ?? null },
+      };
+    }
+    const userCanApprove = outcome.kind === "approved";
+    const directorGateEngaged = outcome.kind === "awaiting_director";
+    const routesToAwaitingApproval = outcome.kind === "awaiting_approval";
     const newStatus = routesToAwaitingApproval ? "awaiting_approval" : "approved";
 
     await executeQuery(
@@ -709,7 +686,6 @@ async function approveInvoiceInTransaction(
       [{ name: "JobID", type: TYPES.Int, value: jobId }],
     );
 
-    const scope = await jobScope(connection, jobId);
     await record(connection, {
       action: "invoice.approve",
       actor,
@@ -736,7 +712,7 @@ async function approveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, APPROVE_INVOICE_ROLES);
   if (denied) {
     await recordRoleRefusal(request, token, denied, APPROVE_INVOICE_TARGET);
     return denied;
@@ -760,10 +736,23 @@ async function approveJobInvoice(
     const outcome = await approveInvoiceInTransaction(connection, {
       actor,
       approvedBy: identity.name,
+      email: identity.email,
       invoiceId: JobInvoiceID,
       userRoles: await rolesForRequest(request),
     });
-    if (!outcome.ok) return outcome.response;
+    if (!outcome.ok) {
+      if ("response" in outcome) return outcome.response;
+      const { message, reason, status } = outcome.refusal;
+      // Ledgered in a transaction of its own now that the decision's has rolled back.
+      await recordRefusal(
+        connection,
+        actor,
+        { id: JobInvoiceID, type: "invoice" },
+        { attempted: "invoice.approve", code: reason, message, state: { status } },
+        outcome.jobId,
+      );
+      return { status: 403, jsonBody: { error: message, reason } };
+    }
     const { amount, directorGateEngaged, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
 
     // Director email + job→Done transition both gated on a successful approve
@@ -1157,15 +1146,22 @@ async function getApprovalLimits(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const rows = await getCachedApprovalLimits(connection);
-    const approvalLimits = rows
+    // Role names go out trimmed and lower-cased, as the authority core reads
+    // them, with the director threshold the backend enforces: configured
+    // (DIRECTOR_APPROVAL_THRESHOLD, null when unset) and effective (what
+    // applies once the limits are taken into account). The Roles page and the
+    // frontend mirror build their facts from exactly this.
+    const limits = toRoleLimits(await getCachedApprovalLimits(connection));
+    const approvalLimits = limits
       .slice()
-      .sort((a, b) => a.RoleName.localeCompare(b.RoleName))
-      .map((r) => ({
-        roleName: r.RoleName,
-        maxApprovalAmount: r.MaxApprovalAmount,
-      }));
-    return { status: 200, jsonBody: { approvalLimits } };
+      .sort((a, b) => a.role.localeCompare(b.role))
+      .map((row) => ({ maxApprovalAmount: row.limit, roleName: row.role }));
+    const directorThreshold = parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD);
+    const { effectiveDirectorThreshold } = decideAuthority(
+      { amount: 0, buildingId: 0, subject: "invoice" },
+      { directorThreshold, isResidence: false, limits, residenceApprovers: [], residenceDirectorFallback: true, today: "" },
+    );
+    return { status: 200, jsonBody: { approvalLimits, directorThreshold, effectiveDirectorThreshold } };
   } catch (error: any) {
     context.error("getApprovalLimits failed:", error.message);
     return errorResponse("Failed to fetch approval limits", error.message);
@@ -1345,12 +1341,17 @@ async function markJobInvoiceMyobCreated(
       const jobId = invoice.JobID as number;
       const invoiceNumber = (invoice.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
       const status = (invoice.Status as string) ?? "pending";
-      const amount = (invoice.Amount as number | null) ?? 0;
-
       // Director gate may not have been engaged (e.g. small-amount invoices). Allow
       // MYOB creation when EITHER director_approved OR (approved AND no director was needed).
-      const allLimits = await getCachedApprovalLimits(connection);
-      const directorWasRequired = requiresDirectorApproval(amount, allLimits);
+      // Same gate as approval (J1): an invoice with no amount needs the director.
+      const { buildingId } = await jobScope(connection, jobId);
+      const { result: authority } = await resolveApprovalAuthority(connection, {
+        amount: invoice.Amount == null ? NaN : Number(invoice.Amount),
+        buildingId: buildingId ?? 0,
+        jobId,
+        subject: "invoice",
+      });
+      const directorWasRequired = authority.directorRequired;
       const fullyApproved =
         status === "director_approved" || (status === "approved" && !directorWasRequired);
       if (!fullyApproved) {

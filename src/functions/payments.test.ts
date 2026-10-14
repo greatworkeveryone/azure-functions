@@ -1,4 +1,5 @@
 /// <reference types="jest" />
+import type { AuthorityFacts } from "../approvalAuthority";
 import { HttpRequest, InvocationContext } from "@azure/functions";
 
 jest.mock("@azure/functions", () => {
@@ -84,7 +85,7 @@ interface RefusalInput {
     status: string;
   };
   jobId: number;
-  limits: { MaxApprovalAmount: number | null; RoleName: string }[];
+  facts: AuthorityFacts;
 }
 const { paymentInvoiceError, paymentInvoiceRefusal } = require("./payments") as {
   paymentInvoiceError: (input: RefusalInput) => string | null;
@@ -128,10 +129,18 @@ beforeEach(() => {
 
 // ── Invoice requirement ──────────────────────────────────────────────────────
 
-const LIMITS = [
-  { MaxApprovalAmount: 5000, RoleName: "accounts_manager" },
-  { MaxApprovalAmount: null, RoleName: "director" },
-];
+// The approval facts the handler loads: a $5,000 gate derived from the limits.
+const FACTS: AuthorityFacts = {
+  directorThreshold: null,
+  isResidence: false,
+  limits: [
+    { limit: 5000, role: "accounts_manager" },
+    { limit: null, role: "director" },
+  ],
+  residenceApprovers: [],
+  residenceDirectorFallback: true,
+  today: "2026-10-14",
+};
 const INVOICE = {
   amount: 1000 as number | null,
   directorApprovedAt: null as Date | null,
@@ -141,7 +150,7 @@ const INVOICE = {
   status: "approved",
 };
 const check = (over: Partial<typeof INVOICE> = {}, amount = 100, jobId = 9) =>
-  paymentInvoiceError({ amount, invoice: { ...INVOICE, ...over }, jobId, limits: LIMITS });
+  paymentInvoiceError({ amount, invoice: { ...INVOICE, ...over }, jobId, facts: FACTS });
 
 describe("paymentInvoiceError", () => {
   it("accepts a payment within an approved incoming invoice", () => {
@@ -198,7 +207,7 @@ describe("paymentInvoiceError", () => {
 
 describe("paymentInvoiceRefusal", () => {
   const refusal = (over: Partial<typeof INVOICE> = {}, amount = 100) =>
-    paymentInvoiceRefusal({ amount, invoice: { ...INVOICE, ...over }, jobId: 9, limits: LIMITS });
+    paymentInvoiceRefusal({ amount, invoice: { ...INVOICE, ...over }, jobId: 9, facts: FACTS });
 
   it("gives each refusal a short code, and the same words as paymentInvoiceError", () => {
     expect(refusal()).toBeNull();

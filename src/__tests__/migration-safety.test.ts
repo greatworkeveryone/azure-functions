@@ -117,3 +117,44 @@ describe("migration 115_myob_api_log.sql", () => {
     }
   });
 });
+
+// Destructive migrations approved in writing (database-safety rule 3). Each
+// carries the approval header on its first line, never drops or truncates,
+// copies the table it changes to a dated backup before its first DELETE or
+// UPDATE (creating the backup only once, so a re-run keeps the first copy),
+// and runs in one transaction that rolls back and rethrows.
+const APPROVED_DESTRUCTIVE = ["121_approval_limits_normalise.sql"];
+
+describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) => {
+  const raw = read(file);
+  const code = stripComments(raw);
+
+  it("starts with the DESTRUCTIVE approval header", () => {
+    expect(raw.split("\n")[0]).toMatch(/^-- DESTRUCTIVE: .+ · approved by .+ \d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("never drops, truncates, renames or alters a column", () => {
+    expect(code).not.toMatch(/\b(DROP|TRUNCATE|sp_rename)\b|\bALTER\s+COLUMN\b/i);
+  });
+
+  it("copies to a dated backup table before its first DELETE or UPDATE", () => {
+    const backup = code.search(/\bSELECT\b[^;]*?\bINTO\s+dbo\.\w+_bak_\d{8}\b/i);
+    const firstChange = code.search(/\b(DELETE|UPDATE)\b/i);
+    expect(backup).toBeGreaterThan(-1);
+    expect(firstChange).toBeGreaterThan(backup);
+  });
+
+  it("creates the backup only when it does not exist yet", () => {
+    const table = /\bINTO\s+(dbo\.\w+_bak_\d{8})\b/i.exec(code)?.[1];
+    expect(table).toBeDefined();
+    const guard = code.search(new RegExp(`IF OBJECT_ID\\('${table}', 'U'\\) IS NULL`));
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(code.search(/\bINTO\s+dbo\.\w+_bak_\d{8}\b/i));
+  });
+
+  it("runs in one transaction that rolls back and rethrows", () => {
+    expect(code).toMatch(/BEGIN TRY\s+BEGIN TRANSACTION;/);
+    expect(code).toMatch(/COMMIT TRANSACTION;\s*END TRY/);
+    expect(code).toMatch(/BEGIN CATCH\s+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;\s*END CATCH;/);
+  });
+});

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "@jest/globals";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AppRole } from "../auth";
-import { ApprovalLimit, requiresDirectorApproval } from "../functions/invoices";
 import {
   ApprovalBasis,
   ApprovalDecision,
@@ -23,12 +23,21 @@ import {
   toRoleLimits,
 } from "../approvalAuthority";
 
+/** This repo's copy of the core. */
+const CORE_PATH = join(__dirname, "../approvalAuthority.ts");
+
 // ═══ Shared vectors ══════════════════════════════════════════════════════════
 // This block is identical in rpcc-functions src/__tests__/approvalAuthority.test.ts
 // and in its twin, command-centre src/helpers/approvalAuthority.test.ts.
 // Copy it across whole whenever either side changes.
 
 const TODAY = "2026-10-13";
+
+/**
+ * SHA-256 of approvalAuthority.ts, the same in both repos. A change to one
+ * copy fails here until the other copy gets the same bytes and both pins move.
+ */
+const CORE_SHA256 = "b61233488087dd3cf039ed338ed3fb664377210712968ba6381fb083c7221e51";
 
 /** Production ApprovalLimits on 13 Oct 2026, with the legacy row no current role uses. */
 const PROD: RoleLimit[] = [
@@ -307,6 +316,10 @@ const LADDER_CASES = LADDER_VECTORS.flatMap(([subject, facts, amounts, route, ou
 );
 
 describe("approval authority: shared vectors", () => {
+  it("is byte-identical to its twin in the other repo (pinned SHA-256)", () => {
+    expect(createHash("sha256").update(readFileSync(CORE_PATH)).digest("hex")).toBe(CORE_SHA256);
+  });
+
   it.each(Object.entries(THRESHOLDS))("%s puts the director gate at %p", (name, threshold) => {
     expect(decideAuthority(inputOf("quote", 1), FACTS[name]).effectiveDirectorThreshold).toBe(threshold);
   });
@@ -458,11 +471,22 @@ describe("approval authority: backend only", () => {
   });
 
   it("keeps the core pure: no imports, clock, environment or console", () => {
-    const source = readFileSync(join(__dirname, "../approvalAuthority.ts"), "utf8");
+    const source = readFileSync(CORE_PATH, "utf8");
     expect(source).not.toMatch(/^\s*import\s|\brequire\(|\bDate\b|process\.|console\.|Math\.random/m);
   });
 
-  // Parity with today's gate: every vector with a known amount, with no env
+  // The director gate production ran until J1 (invoices.ts requiresDirectorApproval,
+  // removed when the core went live), kept here as the reference the core was
+  // proven against.
+  type ApprovalLimit = { MaxApprovalAmount: number | null; RoleName: string };
+  function requiresDirectorApproval(amount: number, limits: ApprovalLimit[]): boolean {
+    if (!amount || amount <= 0) return false;
+    const nonDirector = limits.filter((l) => l.RoleName !== "director" && l.MaxApprovalAmount !== null);
+    if (nonDirector.length === 0) return false;
+    return amount > Math.max(...nonDirector.map((l) => l.MaxApprovalAmount as number));
+  }
+
+  // Parity with the old gate: every vector with a known amount, with no env
   // threshold and as a non-residence, must agree with requiresDirectorApproval.
   const parity: [string, Subject, number][] = [
     ...LADDER_CASES.map((row): [string, Subject, number] => [row.facts, row.subject, row.amount]),
