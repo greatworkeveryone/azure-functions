@@ -17,8 +17,9 @@ const sourceFiles = (dir: string): string[] =>
 // ── Every route reaches a role gate (SEC-24) ─────────────────────────────────
 
 // runControllerAction (src/myob-controller-handler.ts) is the CFO-only gate the
-// MYOB admin routes share; the test below keeps it honest.
-const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest|runControllerAction)\s*(?:<[^>]*>)?\s*\(/;
+// MYOB admin routes share, and withCaller (src/myob/proposalHttp.ts) resolves
+// the caller's roles for the MYOB proposal routes; the tests below keep both honest.
+const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {
@@ -28,6 +29,21 @@ describe("the shared MYOB controller gate", () => {
     expect(check).toBeGreaterThan(-1);
     expect(check).toBeLessThan(gate.search(/action\.parse\(/));
     expect(check).toBeLessThan(gate.search(/action\.work\(/));
+  });
+});
+
+describe("the MYOB proposal gate", () => {
+  it("resolves the caller's roles before running any route's work", () => {
+    const gate = read(join(SRC, "myob", "proposalHttp.ts"));
+    const roles = gate.search(/const roles = await rolesForRequest\(request\)/);
+    expect(roles).toBeGreaterThan(-1);
+    expect(roles).toBeLessThan(gate.search(/return await work\(/));
+  });
+
+  it("is used only by routes that refuse a wrong role (forbidden) before acting", () => {
+    const users = sourceFiles(FUNCTIONS).filter((file) => /\bwithCaller\s*\(/.test(read(file)));
+    expect(users.length).toBeGreaterThanOrEqual(5);
+    for (const file of users) expect(read(file)).toMatch(/return forbidden\(/);
   });
 });
 
