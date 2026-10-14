@@ -1,11 +1,12 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { timingSafeEqual } from "crypto";
-import { TYPES } from "tedious";
-import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
+import { createHash, timingSafeEqual } from "crypto";
+import { TYPES, type Connection } from "tedious";
+import { createRequestConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
+import { runTimer } from "../timerRuns";
 
 /** Constant-time string compare. Returns false on length mismatch instead of
  *  leaking timing information about the prefix. */
@@ -71,11 +72,48 @@ export async function graphNotification(
   return { status: 202 };
 }
 
+// ── GraphSubscriptions (migration 123) ───────────────────────────────────────
+// One row per mailbox (unique). ClientStateHash is SHA-256 of the client state
+// the subscription was created with, so a rotated secret shows up as a stale
+// row; the secret itself is never stored.
+
+interface NewSubscription {
+  expiresAt: string;
+  resource: string;
+  subscriptionId: string;
+}
+
+async function storeSubscription(
+  connection: Connection,
+  mailbox: string,
+  clientState: string,
+  sub: NewSubscription,
+): Promise<void> {
+  await executeQuery(
+    connection,
+    `MERGE dbo.GraphSubscriptions WITH (HOLDLOCK) AS target
+     USING (SELECT @Mailbox AS Mailbox) AS src ON target.Mailbox = src.Mailbox
+     WHEN MATCHED THEN
+       UPDATE SET SubscriptionID = @SubscriptionID, ExpiresAt = @ExpiresAt, Resource = @Resource,
+                  ClientStateHash = @ClientStateHash
+     WHEN NOT MATCHED THEN
+       INSERT (SubscriptionID, Mailbox, Resource, ExpiresAt, ClientStateHash)
+       VALUES (@SubscriptionID, @Mailbox, @Resource, @ExpiresAt, @ClientStateHash);`,
+    [
+      { name: "SubscriptionID", type: TYPES.NVarChar, value: sub.subscriptionId },
+      { name: "Mailbox", type: TYPES.NVarChar, value: mailbox },
+      { name: "Resource", type: TYPES.NVarChar, value: sub.resource },
+      { name: "ExpiresAt", type: TYPES.DateTime2, value: new Date(sub.expiresAt) },
+      { name: "ClientStateHash", type: TYPES.NVarChar, value: createHash("sha256").update(clientState).digest("hex") },
+    ],
+  );
+}
+
 // ── POST /api/setupGraphSubscription ────────────────────────────────────────
 // One-time call (or re-run to replace an existing subscription) after deploy.
 // Requires GRAPH_NOTIFICATION_URL and GRAPH_SUBSCRIPTION_CLIENT_STATE to be set.
 
-async function setupGraphSubscription(
+export async function setupGraphSubscription(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -110,27 +148,11 @@ async function setupGraphSubscription(
 
   let connection;
   try {
-    const { subscriptionId, expiresAt } = await graphCreateSubscription(
-      mailbox,
-      notificationUrl,
-      clientState,
-    );
+    const created = await graphCreateSubscription(mailbox, notificationUrl, clientState);
+    const { subscriptionId, expiresAt } = created;
 
     connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `MERGE GraphSubscriptions AS target
-       USING (SELECT @Mailbox AS Mailbox) AS src ON target.Mailbox = src.Mailbox
-       WHEN MATCHED THEN
-         UPDATE SET SubscriptionID = @SubscriptionID, ExpiresAt = @ExpiresAt
-       WHEN NOT MATCHED THEN
-         INSERT (SubscriptionID, Mailbox, ExpiresAt) VALUES (@SubscriptionID, @Mailbox, @ExpiresAt);`,
-      [
-        { name: "SubscriptionID", type: TYPES.NVarChar, value: subscriptionId },
-        { name: "Mailbox", type: TYPES.NVarChar, value: mailbox },
-        { name: "ExpiresAt", type: TYPES.NVarChar, value: expiresAt },
-      ],
-    );
+    await storeSubscription(connection, mailbox, clientState, created);
 
     context.log(`Subscription created: ${subscriptionId}, expires: ${expiresAt}`);
     return { status: 200, jsonBody: { subscriptionId, expiresAt } };
@@ -143,9 +165,11 @@ async function setupGraphSubscription(
 
 // ── Timer: renewGraphSubscription ───────────────────────────────────────────
 // Runs daily to renew the subscription before its 3-day expiry.
-// Self-heals: if no subscription row exists it creates a new one.
+// Self-heals: if no subscription row exists it creates a new one, and if Graph
+// no longer knows the stored one (404: it expired or was deleted) it creates a
+// replacement. Any other failure throws, so runTimer records it (DL-12/13).
 
-async function renewGraphSubscription(
+export async function renewGraphSubscription(
   _myTimer: unknown,
   context: InvocationContext,
 ): Promise<void> {
@@ -154,48 +178,49 @@ async function renewGraphSubscription(
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
 
   if (!mailbox || !notificationUrl || !clientState) {
-    context.error("renewGraphSubscription: env vars not configured");
-    return;
+    throw new Error(
+      "renewGraphSubscription: GRAPH_MAILBOX_DEV, GRAPH_NOTIFICATION_URL and GRAPH_SUBSCRIPTION_CLIENT_STATE must all be set (or disable this timer)",
+    );
   }
 
-  let connection;
+  let connection: Connection | undefined;
   try {
-    connection = await createServiceConnection();
+    // A fresh connection, not the shared singleton (DL-28).
+    const conn = await createServiceRequestConnection();
+    connection = conn;
 
     const rows = await executeQuery(
-      connection,
-      `SELECT SubscriptionID FROM GraphSubscriptions WHERE Mailbox = @Mailbox`,
+      conn,
+      `SELECT SubscriptionID FROM dbo.GraphSubscriptions WHERE Mailbox = @Mailbox`,
       [{ name: "Mailbox", type: TYPES.NVarChar, value: mailbox }],
     );
 
+    const replace = async (why: string) => {
+      const created = await graphCreateSubscription(mailbox, notificationUrl, clientState);
+      await storeSubscription(conn, mailbox, clientState, created);
+      context.log(`renewGraphSubscription: ${why}, created ${created.subscriptionId}`);
+    };
+
     if (!rows[0]) {
-      // No subscription — create one (e.g. after a fresh deploy)
-      const { subscriptionId, expiresAt } = await graphCreateSubscription(
-        mailbox,
-        notificationUrl,
-        clientState,
-      );
-      await executeQuery(
-        connection,
-        `INSERT INTO GraphSubscriptions (SubscriptionID, Mailbox, ExpiresAt) VALUES (@SubscriptionID, @Mailbox, @ExpiresAt)`,
-        [
-          { name: "SubscriptionID", type: TYPES.NVarChar, value: subscriptionId },
-          { name: "Mailbox", type: TYPES.NVarChar, value: mailbox },
-          { name: "ExpiresAt", type: TYPES.NVarChar, value: expiresAt },
-        ],
-      );
-      context.log(`renewGraphSubscription: no subscription found, created ${subscriptionId}`);
+      await replace("no subscription found");
       return;
     }
 
     const subscriptionId = rows[0].SubscriptionID as string;
-    const newExpiresAt = await graphRenewSubscription(subscriptionId);
+    let newExpiresAt: string;
+    try {
+      newExpiresAt = await graphRenewSubscription(subscriptionId);
+    } catch (err: unknown) {
+      if ((err as { status?: unknown } | null)?.status !== 404) throw err;
+      await replace(`Graph no longer has ${subscriptionId}`);
+      return;
+    }
 
     await executeQuery(
-      connection,
-      `UPDATE GraphSubscriptions SET ExpiresAt = @ExpiresAt WHERE SubscriptionID = @SubscriptionID`,
+      conn,
+      `UPDATE dbo.GraphSubscriptions SET ExpiresAt = @ExpiresAt WHERE SubscriptionID = @SubscriptionID`,
       [
-        { name: "ExpiresAt", type: TYPES.NVarChar, value: newExpiresAt },
+        { name: "ExpiresAt", type: TYPES.DateTime2, value: new Date(newExpiresAt) },
         { name: "SubscriptionID", type: TYPES.NVarChar, value: subscriptionId },
       ],
     );
@@ -203,6 +228,7 @@ async function renewGraphSubscription(
     context.log(`renewGraphSubscription: renewed ${subscriptionId}, expires ${newExpiresAt}`);
   } catch (err: any) {
     context.error("renewGraphSubscription failed:", err.message);
+    throw err;
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -224,5 +250,5 @@ app.http("setupGraphSubscription", {
 // Daily at 02:00 UTC
 app.timer("renewGraphSubscription", {
   schedule: "0 0 2 * * *",
-  handler: renewGraphSubscription,
+  handler: runTimer("renewGraphSubscription", renewGraphSubscription),
 });

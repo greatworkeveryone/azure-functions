@@ -14,6 +14,7 @@ import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer, type TimerCounts } from "../timerRuns";
 
 function randomUuid(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -25,7 +26,7 @@ function randomUuid(): string {
 async function tenancyReviewScheduleTimer(
   _timer: Timer,
   context: InvocationContext,
-): Promise<void> {
+): Promise<TimerCounts> {
   context.log("tenancyReviewScheduleTimer: starting");
   let connection;
   try {
@@ -61,6 +62,7 @@ async function tenancyReviewScheduleTimer(
          )`,
     );
     let inserted = 0;
+    let failed = 0;
     for (const row of candidates) {
       try {
         await executeQuery(
@@ -85,6 +87,7 @@ async function tenancyReviewScheduleTimer(
         Sentry.captureException(err, {
           extra: { context: `tenancyReviewScheduleTimer insert TenantId=${row.TenantId}` },
         });
+        failed++;
       }
     }
     context.log(`inserted ${inserted} new RentReviews rows`);
@@ -103,6 +106,9 @@ async function tenancyReviewScheduleTimer(
     context.log(`flipped status on ${flipped.length} RentReviews rows`);
 
     context.log("tenancyReviewScheduleTimer: complete");
+    // Per-tenant failures no longer leave a run that reports success.
+    if (failed > 0) throw new Error(`tenancyReviewScheduleTimer: ${failed} of ${candidates.length} RentReviews inserts failed`);
+    return { backfilled: backfill.length, failed, flipped: flipped.length, inserted };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     context.error("tenancyReviewScheduleTimer: fatal:", message);
@@ -117,5 +123,5 @@ async function tenancyReviewScheduleTimer(
 // Runs daily at 02:00 UTC (~11:30 ACST)
 app.timer("tenancyReviewScheduleTimer", {
   schedule: "0 0 2 * * *",
-  handler: tenancyReviewScheduleTimer,
+  handler: runTimer("tenancyReviewScheduleTimer", tenancyReviewScheduleTimer),
 });

@@ -11,7 +11,8 @@
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
-    "check:routes": "node scripts/check-routes.cjs"
+    "check:routes": "node scripts/check-routes.cjs",
+    "migrate": "tsc && node scripts/migrate.cjs"
   },
   "dependencies": {
     "@azure/functions": "4.12.0",

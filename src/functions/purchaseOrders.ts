@@ -39,6 +39,7 @@ import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope, purchaseOrderFacts, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import { parseMoneyField } from "../money";
 
 /**
  * Quote-approval guard for PO creation (WP8). Returns an error string if
@@ -136,8 +137,9 @@ interface UpsertPurchaseOrderBody {
   ContractorID?: number;
   ContractorName?: string;
   Scope?: string;
-  EstimatedCost?: number;
-  CostNotToExceed?: number;
+  /** Numbers or typed strings such as "1,500.00"; parsed by parseMoneyField. */
+  EstimatedCost?: number | string | null;
+  CostNotToExceed?: number | string | null;
   CostJustification?: string;
   EmailSubject?: string;
   EmailBody?: string;
@@ -181,13 +183,19 @@ export async function upsertPurchaseOrder(
       ContractorID,
       ContractorName,
       Scope,
-      EstimatedCost,
-      CostNotToExceed,
+      EstimatedCost: rawEstimatedCost,
+      CostNotToExceed: rawCostNotToExceed,
       CostJustification,
       EmailSubject,
       EmailBody,
       ChargeCode,
     } = body ?? {};
+    const estimated = parseMoneyField(rawEstimatedCost, "EstimatedCost");
+    if (!estimated.ok) return { status: 400, jsonBody: { error: estimated.error } };
+    const cap = parseMoneyField(rawCostNotToExceed, "CostNotToExceed");
+    if (!cap.ok) return { status: 400, jsonBody: { error: cap.error } };
+    const EstimatedCost = estimated.value;
+    const CostNotToExceed = cap.value;
 
     connection = await createRequestConnection(token);
 

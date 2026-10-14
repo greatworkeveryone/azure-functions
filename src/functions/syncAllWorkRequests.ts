@@ -18,6 +18,7 @@ import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { upsertWorkRequest } from "./workRequests";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
     const message = error instanceof Error ? error.message : String(error);
     context.error("syncAllWorkRequests timer failed:", message);
     Sentry.captureException(error, { extra: { context: "syncAllWorkRequestsTimer failed" } });
+    throw error;
   } finally {
     await Sentry.flush(2000);
   }
@@ -121,7 +123,7 @@ async function syncAllWorkRequestsHttp(request: HttpRequest, context: Invocation
 
 app.timer("syncAllWorkRequestsTimer", {
   schedule: "0 0 2 * * *", // daily at 02:00 UTC
-  handler: syncAllWorkRequestsTimer,
+  handler: runTimer("syncAllWorkRequestsTimer", syncAllWorkRequestsTimer),
 });
 
 app.http("syncAllWorkRequests", {

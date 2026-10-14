@@ -1,16 +1,21 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, scanSql } from "../migrate-files";
 
-// Production applies migrations automatically at startup (src/migrate.ts), and
-// a migration that throws stops the whole API. Migrations for money tables must
-// therefore be additive and safe to run twice: nothing destructive, and every
-// CREATE / ALTER behind an existence check. This is a regex tripwire over the
-// raw files, not a SQL parser.
+// Migrations are applied by hand (`npm run migrate -- --apply`, src/migrate.ts)
+// or at startup when RUN_MIGRATIONS_ON_STARTUP=true, where a migration that
+// throws stops the whole API. Migrations for money tables must therefore be
+// additive and safe to run twice: nothing destructive, and every CREATE /
+// ALTER behind an existence check. This is a regex tripwire over the raw
+// files, not a SQL parser.
 
 const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
   "124_myob_controls.sql",
+  "123_graph_subscriptions.sql",
+  "128_timer_runs.sql",
+  "129_email_intake_watermark.sql",
 ];
 
 // Destructive-looking phrases the money migrations need, none of which changes
@@ -117,5 +122,73 @@ describe("migration 115_myob_api_log.sql", () => {
     for (const column of columns) {
       expect(code).toMatch(new RegExp(`\\b${column}\\b`));
     }
+  });
+});
+
+// The tables 123 and 129 create must hold every column the code writes.
+describe("migrations 123 and 129 match the code that uses them", () => {
+  // Each of these files creates exactly one table.
+  const columnsIn = (sql: string) => {
+    const create = stripComments(sql).match(/CREATE TABLE dbo\.\w+ \(([\s\S]*?)\n  \);/);
+    return (create?.[1] ?? "").split("\n").map((line) => line.trim().split(/\s+/)[0]).filter(Boolean);
+  };
+  // The MERGE's INSERT column list (each source file has one).
+  const inserted = (source: string) =>
+    source.match(/INSERT \(([^)]*)\)\s*VALUES/)?.[1].split(",").map((c) => c.trim()) ?? [];
+
+  it("GraphSubscriptions has every column graphWebhook.ts writes", () => {
+    const source = readFileSync(join(__dirname, "..", "functions", "graphWebhook.ts"), "utf8");
+    const columns = columnsIn(read("123_graph_subscriptions.sql"));
+    expect(inserted(source)).toEqual(["SubscriptionID", "Mailbox", "Resource", "ExpiresAt", "ClientStateHash"]);
+    for (const column of inserted(source)) expect(columns).toContain(column);
+  });
+
+  it("EmailSyncState has every column mail-sync.ts writes", () => {
+    const source = readFileSync(join(__dirname, "..", "email", "mail-sync.ts"), "utf8");
+    const columns = columnsIn(read("129_email_intake_watermark.sql"));
+    expect(inserted(source)).toEqual(["Mailbox", "LastReceivedAt", "LastMessageId"]);
+    for (const column of inserted(source)) expect(columns).toContain(column);
+  });
+
+  it("129 also adds Tenants.ArchivedAt/ArchivedBy (D4) and WorkRequests.SourceHost (D8), nullable", () => {
+    const code = stripComments(read("129_email_intake_watermark.sql"));
+    expect(code).toMatch(/ALTER TABLE dbo\.Tenants ADD ArchivedAt DATETIME2 NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.Tenants ADD ArchivedBy NVARCHAR\(255\) NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.WorkRequests ADD SourceHost NVARCHAR\(255\) NULL;/);
+  });
+
+  it("123 refuses, rather than skips, a unique index it can't build", () => {
+    expect(stripComments(read("123_graph_subscriptions.sql"))).toMatch(/HAVING COUNT\(\*\) > 1\)\s*BEGIN\s*;THROW 51123/);
+  });
+});
+
+// db-safety-guards reads the raw text, so a destructive statement assembled in
+// dynamic SQL — EXEC(N'DROP ' + N'TABLE …'), sp_executesql, a @sql variable —
+// slipped past it (data-loss audit §6.2). These read the string literals that
+// reach EXEC / sp_executesql / an assignment, fragments joined across `+`.
+describe("dynamic SQL in guarded migrations", () => {
+  const guarded = readdirSync(join(__dirname, "..", "..", "migrations")).filter(
+    (f) => f.endsWith(".sql") && Number.parseInt(f, 10) >= FIRST_GUARDED_MIGRATION,
+  );
+
+  it.each(guarded)("%s has no destructive EXEC / sp_executesql string without an approval header", (file) => {
+    const raw = read(file);
+    const hits = scanSql(raw).dynamic.flatMap((text) => findDestructiveStatements(text));
+    if (hits.length > 0) expect(raw).toMatch(APPROVAL_HEADER);
+  });
+
+  it("actually sees the dynamic SQL (the ledger triggers are built through EXEC)", () => {
+    for (const file of ["094_decision_ledger.sql", "115_myob_api_log.sql"]) {
+      expect(scanSql(read(file)).dynamic.some((text) => /CREATE TRIGGER/.test(text))).toBe(true);
+    }
+  });
+
+  it.each([
+    "EXEC(N'DROP ' + N'TABLE dbo.Old');",
+    "EXEC sp_executesql N'DELETE dbo.Jobs WHERE JobID = @id', N'@id INT', @id = 1;",
+    "DECLARE @sql NVARCHAR(MAX) = N'DISABLE TRIGGER dbo.TR_DecisionLedger_AppendOnly ON dbo.DecisionLedger';\nEXEC(@sql);",
+    "EXEC(N'EXEC(N''TRUNCATE TABLE dbo.Jobs'')');",
+  ])("flags %s", (sql) => {
+    expect(scanSql(sql).dynamic.flatMap((text) => findDestructiveStatements(text))).not.toEqual([]);
   });
 });

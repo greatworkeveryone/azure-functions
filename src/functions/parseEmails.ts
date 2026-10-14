@@ -40,6 +40,7 @@ import { findPoNumber } from "../email/po-ref";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -949,7 +950,7 @@ async function getFlaggedEmails(
 // Every 2 minutes. Singleton, so ticks never overlap; the queue check keeps
 // the GPU at zero replicas when nothing is waiting.
 app.timer("parseEmailsTimer", {
-  handler: parseEmailsTimer,
+  handler: runTimer("parseEmailsTimer", parseEmailsTimer),
   schedule: "0 */2 * * * *",
 });
 
@@ -957,7 +958,7 @@ app.timer("parseEmailsTimer", {
 // wakes once for the batch.
 app.timer("parseEmailsDailyRetry", {
   extraOutputs: [emailSyncQueueOutput],
-  handler: parseEmailsDailyRetry,
+  handler: runTimer("parseEmailsDailyRetry", parseEmailsDailyRetry),
   schedule: "0 0 2 * * *",
 });
 

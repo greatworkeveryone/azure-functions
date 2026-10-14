@@ -32,6 +32,7 @@ import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
+import { parseMoneyField } from "../money";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -82,9 +83,12 @@ const EMAIL_COLUMNS = `
 //   page      — 1-based page number (default: 1)
 //   pageSize  — rows per page (default: 50, max: 100)
 //   search    — optional free-text; filters by FromAddress or Subject (LIKE)
-// Flagged rows are always excluded — those live on the admin Flagged page.
+//   flagged   — "true" lists only email the AI couldn't read (AIFlaggedForReview);
+//               otherwise those are left out, as the inbox always has. They are
+//               never hidden from staff altogether (DL-34): Incoming shows them
+//               under "AI couldn't read", and unflagEmail puts one back.
 
-async function getEmails(
+export async function getEmails(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -105,8 +109,8 @@ async function getEmails(
   const offset = (page - 1) * pageSize;
   const search = request.query.get("search")?.trim() || undefined;
 
-  // Flagged rows live on the admin-only Flagged Incoming page.
-  const whereParts: string[] = ["AIFlaggedForReview = 0"];
+  const flaggedOnly = request.query.get("flagged") === "true";
+  const whereParts: string[] = [flaggedOnly ? "AIFlaggedForReview = 1" : "AIFlaggedForReview = 0"];
   const params: { name: string; type: any; value: any }[] = [];
 
   if (search) {
@@ -325,7 +329,7 @@ export async function ingestEmail(
 // "promoted". The amount is usually extracted from the email body by the
 // upstream parser; fall back to a user-supplied figure if absent.
 
-async function promoteEmailToQuote(
+export async function promoteEmailToQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -351,10 +355,13 @@ async function promoteEmailToQuote(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Notes } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -667,7 +674,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -678,6 +685,9 @@ export async function promoteEmailToInvoice(
     // (or the operator corrected it to), so it is also the supplier's number.
     const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber ?? InvoiceNumber);
     if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -1239,6 +1249,13 @@ async function sendEmailReply(
 // SQL unique-index / unique-constraint violations (migration 091).
 const SQL_UNIQUE_VIOLATIONS: readonly number[] = [2601, 2627];
 
+// Column widths (migrations 008, 077). With "advance the watermark only after
+// storing", a value too long for its column would stop the mailbox at that
+// message for good, so text is cut to fit instead (DL-13).
+const SUBJECT_MAX = 500;
+const ADDRESS_MAX = 255;
+const fit = (value: string | null, max: number) => (value === null ? null : value.slice(0, max));
+
 function isUniqueViolation(err: unknown): boolean {
   const number = (err as { number?: unknown } | null)?.number;
   return typeof number === "number" && SQL_UNIQUE_VIOLATIONS.includes(number);
@@ -1271,9 +1288,9 @@ export async function upsertGraphEmails(
          WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL`,
         [
           { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
-          { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
-          { name: "FromName", type: TYPES.NVarChar, value: email.fromName },
-          { name: "Subject", type: TYPES.NVarChar, value: email.subject },
+          { name: "FromAddress", type: TYPES.NVarChar, value: fit(email.fromAddress, ADDRESS_MAX) },
+          { name: "FromName", type: TYPES.NVarChar, value: fit(email.fromName, ADDRESS_MAX) },
+          { name: "Subject", type: TYPES.NVarChar, value: fit(email.subject, SUBJECT_MAX) },
           { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
           { name: "ReceivedAt", type: TYPES.DateTime2, value: email.receivedAt ? new Date(email.receivedAt) : null },
           { name: "MatchedJobID", type: TYPES.Int, value: matchedJobId },

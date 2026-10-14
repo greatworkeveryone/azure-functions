@@ -337,6 +337,17 @@ export function executeQuery(
   });
 }
 
+/**
+ * Runs `sql` as a plain batch (execSqlBatch), not through sp_executesql as
+ * executeQuery does. Needed for session settings such as SET XACT_ABORT,
+ * which sp_executesql would revert when it returns. No parameters.
+ */
+export function executeBatch(connection: Connection, sql: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    connection.execSqlBatch(new Request(sql, (err) => (err ? reject(err) : resolve())));
+  });
+}
+
 export function closeConnection(connection: Connection): void {
   if (connection === _serviceConn) {
     // Don't close — reset the idle timer so the connection stays warm during

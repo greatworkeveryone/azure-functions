@@ -16,6 +16,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { approvalRule, invoiceFacts, invoiceSnapshot, jobScope } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
+import { parseMoneyField } from "../money";
 
 // ── Approval limit helpers ────────────────────────────────────────────────────
 
@@ -76,7 +77,8 @@ interface UpsertJobInvoiceBody {
   JobInvoiceID?: number;
   JobID?: number;
   ContractorName?: string;
-  Amount?: number;
+  /** A number or a typed string such as "1,500.00"; parsed by parseMoneyField. */
+  Amount?: number | string | null;
   Currency?: string;
   /** Per m043 — 'incoming' (contractor → us) or 'outgoing' (us → tenant
    *  for an on-charge recoup). Defaults to 'incoming' for back-compat. */
@@ -377,6 +379,8 @@ export async function upsertJobInvoice(
 
     const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber);
     if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
+    const amount = parseMoneyField(Amount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
 
     connection = await createRequestConnection(token);
 
@@ -418,7 +422,7 @@ export async function upsertJobInvoice(
             { name: "InvoiceNumber", type: TYPES.NVarChar, value: invoiceNumber },
             { name: "Seq", type: TYPES.Int, value: nextSeq },
             { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
-            { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+            { name: "Amount", type: TYPES.Decimal, value: amount.value ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Direction", type: TYPES.NVarChar, value: direction },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
@@ -431,7 +435,7 @@ export async function upsertJobInvoice(
         );
         const newId = inserted[0].JobInvoiceID as number;
 
-        const amountLabel = typeof Amount === "number" ? ` · $${Number(Amount).toLocaleString()}` : "";
+        const amountLabel = typeof amount.value === "number" ? ` · $${amount.value.toLocaleString()}` : "";
         const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
         await executeQuery(
           connection,
@@ -487,7 +491,7 @@ export async function upsertJobInvoice(
         SupplierInvoiceNumber: TYPES.NVarChar,
       },
       {
-        Amount,
+        Amount: amount.value,
         ContractorName,
         Currency,
         Direction,
@@ -524,7 +528,7 @@ export async function upsertJobInvoice(
         contractorName: (before.ContractorName as string | null) ?? null,
         status: (before.Status as string | null) ?? null,
       },
-      { amount: Amount, contractorName: ContractorName },
+      { amount: amount.value, contractorName: ContractorName },
     );
 
     await beginTransaction(connection);
