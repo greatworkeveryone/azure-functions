@@ -229,7 +229,7 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
   }
 }
 
-// ── Join-table helpers (PurchaseOrderAttachments / QuoteAttachments) ────────
+// ── Join-table helpers (PurchaseOrderAttachments / QuoteAttachments / JobInvoiceAttachments)
 // One pair of endpoints per parent. Idempotent attach (NOT EXISTS guard) so
 // the FE can call without first checking; detach is a plain DELETE.
 
@@ -249,6 +249,13 @@ const QUOTE_JOIN: JoinSpec = {
   parentParam: "QuoteID",
   table: "QuoteAttachments",
 };
+// Migration 134 (J9). The frontend sends InvoiceID in the body and invoiceId
+// as the list query param (src/lib/attachments.ts).
+const INVOICE_JOIN: JoinSpec = {
+  parentColumn: "JobInvoiceID",
+  parentParam: "InvoiceID",
+  table: "JobInvoiceAttachments",
+};
 
 async function attachToParent(
   request: HttpRequest,
@@ -261,12 +268,16 @@ async function attachToParent(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  // AttachedBy is the verified caller (J9); a body AttachedBy is ignored.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
     const parentId = body?.[spec.parentParam];
     const attachmentId = body?.AttachmentID;
-    const attachedBy = body?.AttachedBy ?? null;
+    const attachedBy = identity.name;
     if (typeof parentId !== "number" || typeof attachmentId !== "number") {
       return {
         status: 400,
@@ -275,7 +286,7 @@ async function attachToParent(
     }
 
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
       `IF NOT EXISTS (
@@ -324,7 +335,7 @@ async function detachFromParent(
     }
 
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     await executeQuery(
       connection,
       `DELETE FROM ${spec.table}
@@ -378,7 +389,7 @@ async function listParentAttachments(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     const rows = await executeQuery(
       connection,
       `SELECT a.*
@@ -697,5 +708,21 @@ app.http("detachFromQuote", {
 app.http("getQuoteAttachments", {
   authLevel: "anonymous",
   handler: (req, ctx) => listParentAttachments(req, ctx, QUOTE_JOIN, "quoteId"),
+  methods: ["GET"],
+});
+
+app.http("attachToInvoice", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => attachToParent(req, ctx, INVOICE_JOIN),
+  methods: ["POST"],
+});
+app.http("detachFromInvoice", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => detachFromParent(req, ctx, INVOICE_JOIN),
+  methods: ["POST"],
+});
+app.http("getInvoiceAttachments", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => listParentAttachments(req, ctx, INVOICE_JOIN, "invoiceId"),
   methods: ["GET"],
 });

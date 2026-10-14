@@ -10,11 +10,13 @@ import { join } from "node:path";
 const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
+  "134_invoice_attachments.sql",
 ];
 
-// The one destructive-looking phrase the money migrations need: the trigger
-// that makes the append-only log refuse changes. It never changes data itself.
-const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi];
+// Destructive-looking phrases that change no data themselves: the trigger that
+// makes the append-only log refuse changes, and a link table's foreign key
+// removing its own link row when the parent goes (134, as migration 010 does).
+const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi, /\bON\s+DELETE\s+CASCADE\b/gi];
 
 function stripComments(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
