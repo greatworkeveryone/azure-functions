@@ -48,7 +48,7 @@ beforeEach(() => {
   links = [];
   target = { FileName: "quote.pdf", JobID: 42, Linked: 1, LockedBecause: null, Number: "261014-QT-42-ACM-1" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    if (/FROM Attachments a\s+LEFT JOIN Jobs/.test(sql)) return [{ BlobName: "attachments/jobs/42/x.pdf", JobID: 42, MyBuildingsConfirmedAt: null, UploadedBy: "fay-oid" }];
+    if (/FROM Attachments a\s+LEFT JOIN Jobs/.test(sql)) return [{ BlobName: "attachments/jobs/42/3f2b6c1e-8a4d-4f7e-9b21-6c0d5e7a9f10.pdf", JobID: 42, MyBuildingsConfirmedAt: null, UploadedBy: "fay-oid" }];
     if (/AS Kind/.test(sql)) return links;
     if (/FROM dbo\.(Quotes|PurchaseOrders) r WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return target ? [target] : [];
     if (/FROM dbo\.AppUsers WHERE EntraOid/.test(sql)) return [{ UserID: 3 }];
@@ -96,7 +96,7 @@ describe("deleteAttachment", () => {
   it("still deletes a file nothing links, for its uploader", async () => {
     const res = await handler("deleteAttachment")(post({ AttachmentID: 7 }), ctx);
     expect(res.status).toBe(200);
-    expect(blob.deleteBlob).toHaveBeenCalledWith("attachments/jobs/42/x.pdf");
+    expect(blob.deleteBlob).toHaveBeenCalledWith("attachments/jobs/42/3f2b6c1e-8a4d-4f7e-9b21-6c0d5e7a9f10.pdf");
     expect(ran(/DELETE FROM Attachments WHERE Id = @Id/)).toBe(true);
   });
 });
@@ -107,6 +107,8 @@ describe("detach from a quote or purchase order", () => {
     ["detachFromQuote", { QuoteID: 9 }, "approved by a director", "Quote 261014-QT-42-ACM-1 has been approved by a director, so its files stay with it."],
     ["detachFromQuote", { QuoteID: 9 }, "paid", "Quote 261014-QT-42-ACM-1 has been paid, so its files stay with it."],
     ["detachFromPurchaseOrder", { PurchaseOrderID: 4 }, "marked in MYOB", "Purchase order 261014-QT-42-ACM-1 has been marked in MYOB, so its files stay with it."],
+    ["detachFromQuote", { QuoteID: 9 }, "sent to a director for approval", "Quote 261014-QT-42-ACM-1 has been sent to a director for approval, so its files stay with it."],
+    ["detachFromQuote", { QuoteID: 9 }, "sent to MYOB", "Quote 261014-QT-42-ACM-1 has been sent to MYOB, so its files stay with it."],
   ])("%s refuses (422) when the record has been (%#) locked, and writes nothing", async (name, ids, because, message) => {
     target = { ...target, LockedBecause: because };
     const res = await handler(name)(post({ ...ids, AttachmentID: 7 }), ctx);

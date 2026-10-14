@@ -77,39 +77,65 @@ export function linkedFileRefusal(links: MoneyLink[]): string {
   return `This file is attached to ${listOf(links.map(linkLabel))}, so it can't be deleted. Take it off there first.`;
 }
 
-// Why a record's files are fixed, read in the same statement as the link
-// (UPDLOCK on both, inside the caller's transaction). Null: still open.
-const DETACH_SQL: Record<MoneyLinkTable, string> = {
-  JobInvoiceAttachments: `SELECT r.JobID, r.InvoiceNumber AS Number, a.OriginalName AS FileName,
+// Why a record's files are fixed, read in the same batch as the link (UPDLOCK
+// on record and link, inside the caller's transaction). Null: still open.
+// A record pushed to MYOB through the proposal flow (M3, migration 126) never
+// gets MyobCreatedAt, so MyobProposals is read too — only where the table
+// exists, so the rule works before 126 is applied (@MyobState stays NULL).
+export const DETACH_SQL: Record<MoneyLinkTable, string> = {
+  JobInvoiceAttachments: `DECLARE @MyobState NVARCHAR(16) = NULL;
+IF OBJECT_ID(N'dbo.MyobProposals', N'U') IS NOT NULL
+  SELECT TOP 1 @MyobState = mp.State FROM dbo.MyobProposals mp
+   WHERE mp.SubjectType = N'invoice' AND mp.SubjectId = @ParentID AND mp.State IN (N'approved', N'pushed', N'verified')
+   ORDER BY CASE mp.State WHEN N'verified' THEN 0 WHEN N'pushed' THEN 1 ELSE 2 END;
+SELECT r.JobID, r.InvoiceNumber AS Number, a.OriginalName AS FileName,
        CASE WHEN l.AttachmentID IS NULL THEN 0 ELSE 1 END AS Linked,
        CASE WHEN EXISTS (SELECT 1 FROM dbo.Payments p WHERE p.JobInvoiceID = r.JobInvoiceID AND p.Status = N'paid') THEN N'paid'
             WHEN r.MyobCreatedAt IS NOT NULL THEN N'marked in MYOB'
+            WHEN @MyobState IN (N'pushed', N'verified') THEN N'sent to MYOB'
+            WHEN @MyobState = N'approved' THEN N'approved for MYOB'
             WHEN r.Status = N'director_approved' THEN N'approved by a director'
-            WHEN r.Status = N'approved' THEN N'approved' END AS LockedBecause
+            WHEN r.Status = N'approved' THEN N'approved'
+            WHEN r.Status = N'awaiting_approval' THEN N'sent for approval' END AS LockedBecause
   FROM dbo.JobInvoices r WITH (UPDLOCK, HOLDLOCK)
   LEFT JOIN dbo.JobInvoiceAttachments l WITH (UPDLOCK, HOLDLOCK) ON l.JobInvoiceID = r.JobInvoiceID AND l.AttachmentID = @AttachmentID
   LEFT JOIN dbo.Attachments a ON a.Id = @AttachmentID
- WHERE r.JobInvoiceID = @ParentID`,
-  PurchaseOrderAttachments: `SELECT r.JobID, r.PONumber AS Number, a.OriginalName AS FileName,
+ WHERE r.JobInvoiceID = @ParentID;`,
+  PurchaseOrderAttachments: `DECLARE @MyobState NVARCHAR(16) = NULL;
+IF OBJECT_ID(N'dbo.MyobProposals', N'U') IS NOT NULL
+  SELECT TOP 1 @MyobState = mp.State FROM dbo.MyobProposals mp
+   WHERE mp.SubjectType = N'purchase_order' AND mp.SubjectId = @ParentID AND mp.State IN (N'approved', N'pushed', N'verified')
+   ORDER BY CASE mp.State WHEN N'verified' THEN 0 WHEN N'pushed' THEN 1 ELSE 2 END;
+SELECT r.JobID, r.PONumber AS Number, a.OriginalName AS FileName,
        CASE WHEN l.AttachmentID IS NULL THEN 0 ELSE 1 END AS Linked,
        CASE WHEN EXISTS (SELECT 1 FROM dbo.Payments p WHERE p.PurchaseOrderID = r.PurchaseOrderID AND p.Status = N'paid') THEN N'paid'
             WHEN r.MyobCreatedAt IS NOT NULL THEN N'marked in MYOB'
+            WHEN @MyobState IN (N'pushed', N'verified') THEN N'sent to MYOB'
+            WHEN @MyobState = N'approved' THEN N'approved for MYOB'
             WHEN r.CompletedAt IS NOT NULL THEN N'marked complete'
             WHEN r.SentAt IS NOT NULL THEN N'sent to the contractor' END AS LockedBecause
   FROM dbo.PurchaseOrders r WITH (UPDLOCK, HOLDLOCK)
   LEFT JOIN dbo.PurchaseOrderAttachments l WITH (UPDLOCK, HOLDLOCK) ON l.PurchaseOrderID = r.PurchaseOrderID AND l.AttachmentID = @AttachmentID
   LEFT JOIN dbo.Attachments a ON a.Id = @AttachmentID
- WHERE r.PurchaseOrderID = @ParentID`,
-  QuoteAttachments: `SELECT r.JobID, r.QuoteNumber AS Number, a.OriginalName AS FileName,
+ WHERE r.PurchaseOrderID = @ParentID;`,
+  QuoteAttachments: `DECLARE @MyobState NVARCHAR(16) = NULL;
+IF OBJECT_ID(N'dbo.MyobProposals', N'U') IS NOT NULL
+  SELECT TOP 1 @MyobState = mp.State FROM dbo.MyobProposals mp
+   WHERE mp.SubjectType = N'quote' AND mp.SubjectId = @ParentID AND mp.State IN (N'approved', N'pushed', N'verified')
+   ORDER BY CASE mp.State WHEN N'verified' THEN 0 WHEN N'pushed' THEN 1 ELSE 2 END;
+SELECT r.JobID, r.QuoteNumber AS Number, a.OriginalName AS FileName,
        CASE WHEN l.AttachmentID IS NULL THEN 0 ELSE 1 END AS Linked,
        CASE WHEN EXISTS (SELECT 1 FROM dbo.Payments p WHERE p.QuoteID = r.QuoteID AND p.Status = N'paid') THEN N'paid'
+            WHEN @MyobState IN (N'pushed', N'verified') THEN N'sent to MYOB'
+            WHEN @MyobState = N'approved' THEN N'approved for MYOB'
             WHEN r.Status = N'completed' THEN N'completed'
             WHEN r.Status = N'approved' AND r.DirectorApprovedAt IS NOT NULL THEN N'approved by a director'
-            WHEN r.Status = N'approved' THEN N'approved' END AS LockedBecause
+            WHEN r.Status = N'approved' THEN N'approved'
+            WHEN r.Status = N'awaiting_director' THEN N'sent to a director for approval' END AS LockedBecause
   FROM dbo.Quotes r WITH (UPDLOCK, HOLDLOCK)
   LEFT JOIN dbo.QuoteAttachments l WITH (UPDLOCK, HOLDLOCK) ON l.QuoteID = r.QuoteID AND l.AttachmentID = @AttachmentID
   LEFT JOIN dbo.Attachments a ON a.Id = @AttachmentID
- WHERE r.QuoteID = @ParentID`,
+ WHERE r.QuoteID = @ParentID;`,
 };
 
 const RECORD: Record<MoneyLinkTable, { kind: MoneyRecordKind; subject: LedgerSubjectType }> = {
