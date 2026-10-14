@@ -101,3 +101,8 @@ export function adminRefusal(roles: readonly string[], isTestRecord: boolean): M
 export function holdsAdmin(roles: readonly string[]): boolean {
   return roles.some((role) => role.trim().toLowerCase() === "admin");
 }
+
+/** A refusal as the HTTP answer: the code the ledger records and the sentence people see. */
+export function refusalResponse(refusal: MoneyRefusal): { jsonBody: { code: string; error: string }; status: number } {
+  return { jsonBody: { code: refusal.code, error: refusal.message }, status: refusal.status };
+}

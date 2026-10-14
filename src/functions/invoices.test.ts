@@ -121,7 +121,7 @@ beforeEach(() => {
 describe("approveJobInvoice", () => {
   const invoiceRow: SqlRoute = [
     /SELECT JobID, InvoiceNumber, Amount, Direction/,
-    [{ Amount: 500, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9 }],
+    [{ Amount: 500, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9, Status: "pending" }],
   ];
 
   it("records the token's name and ignores ApprovedBy in the body", async () => {
@@ -138,7 +138,7 @@ describe("approveJobInvoice", () => {
   it("stamps the director email trigger and SentBy with the token's name", async () => {
     auth.rolesForRequest.mockResolvedValue(["accounts_manager"]);
     routeSql([
-      [/SELECT JobID, InvoiceNumber, Amount, Direction/, [{ Amount: 5000, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9 }]],
+      [/SELECT JobID, InvoiceNumber, Amount, Direction/, [{ Amount: 5000, Direction: "incoming", InvoiceNumber: "IV-9-1", JobID: 9, Status: "pending" }]],
       storedInvoice,
     ]);
 

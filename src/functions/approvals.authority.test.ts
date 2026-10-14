@@ -351,7 +351,7 @@ describe("approveJobInvoice", () => {
     const res = await approve();
 
     expect(res.status).toBe(403);
-    expect(res.jsonBody).toMatchObject({ reason: "not_eligible" });
+    expect(res.jsonBody).toMatchObject({ code: "not_eligible" });
   });
 });
 

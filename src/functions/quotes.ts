@@ -28,7 +28,7 @@ import { SUBJECT_ELIGIBLE_ROLES } from "../approvalAuthority";
 import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
-import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal } from "../moneyRules";
+import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
 import { loadJobForMoney } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { resolveActivePlannerTasks } from "../planner";
@@ -41,11 +41,6 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { approvalRule, jobScope, quoteFacts, quoteSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
-
-/** A J3 money-rule refusal as the response: the code the ledger records and the sentence people see. */
-function refusalResponse(refusal: MoneyRefusal): HttpResponseInit {
-  return { status: refusal.status, jsonBody: { code: refusal.code, error: refusal.message } };
-}
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
