@@ -198,13 +198,19 @@ describe("approveJobInvoice", () => {
   });
 
   it("beyond the caller's own limit but short of the director's: waits for someone senior, as over_limit", async () => {
-    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    // Facilities managers approve no invoices (J1); accounts approves up to its own row.
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 100, RoleName: "accounts" },
+      { MaxApprovalAmount: 1000, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
     mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 800 }), STORED]);
 
     await approve();
 
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({
-      actorRole: "facilities_manager",
+      actorRole: "accounts",
       after: { status: "awaiting_approval" },
       ruleApplied: "over_limit",
     });

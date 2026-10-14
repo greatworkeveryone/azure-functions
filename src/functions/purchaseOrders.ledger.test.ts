@@ -948,20 +948,33 @@ describe("purchase order transitions", () => {
       });
     });
 
-    it("clears the completion, rolls the job back and writes the ledger row inside one transaction that commits", async () => {
+    it("clears the completion and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, completed, stored]);
 
       await uncomplete();
 
       const begun = db.beginTransaction.mock.invocationCallOrder[0];
       const committed = db.commitTransaction.mock.invocationCallOrder[0];
-      for (const write of [/SET CompletedAt = NULL/, /UPDATE Jobs SET Status = 'Work'/, /INSERT INTO dbo\.DecisionLedger/]) {
+      for (const write of [/SET CompletedAt = NULL/, /INSERT INTO dbo\.DecisionLedger/]) {
         expect(orderOf(write)).toBeGreaterThan(begun);
         expect(orderOf(write)).toBeLessThan(committed);
       }
     });
 
-    it("is rolled back when the ledger write fails: the job is not rolled back without a record of it", async () => {
+    it("J2, N3: never moves the job (a done job stays done), and names who undid it", async () => {
+      mockSql([APP_USER, JOB_BUILDING, completed, stored]);
+
+      await uncomplete();
+
+      const sqls = db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1]));
+      expect(sqls.filter((sql: string) => /UPDATE Jobs/.test(sql)).every((sql: string) => !/\bStatus\b|\bAwaitingRole\b/.test(sql))).toBe(true);
+      expect(sqls.some((sql: string) => /status_changed/.test(sql))).toBe(false);
+      const event = db.executeQuery.mock.calls.find((c: unknown[]) => /'po_uncompleted'/.test(String(c[1])));
+      const params = (event?.[2] as { name: string; value: unknown }[]) ?? [];
+      expect(params.find((p) => p.name === "CreatedBy")?.value).toBe("Fred Facilities");
+    });
+
+    it("is rolled back when the ledger write fails: the completion is not cleared without a record of it", async () => {
       mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, completed, stored]);
 
       const res = await uncomplete();
@@ -969,7 +982,7 @@ describe("purchase order transitions", () => {
       expect(res.status).toBe(500);
       expect(db.commitTransaction).not.toHaveBeenCalled();
       expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
-      expect(orderOf(/UPDATE Jobs SET Status = 'Work'/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+      expect(orderOf(/SET CompletedAt = NULL/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
     });
 
     it("404s a PO that isn't on that job, writing nothing", async () => {

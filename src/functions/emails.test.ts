@@ -342,6 +342,8 @@ describe("recordEmailQuoteDecision", () => {
   const storedQuote = { QuoteID: 7, Status: "approved" };
 
   beforeEach(() => {
+    // These cases exercise reply-to-approve itself, which is off by default.
+    process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
     quoteDecisions.approveDirectorQuote.mockResolvedValue({ jobId: 9, ok: true, quote: storedQuote });
     quoteDecisions.rejectQuote.mockResolvedValue({
       jobId: 9,
@@ -359,26 +361,31 @@ describe("recordEmailQuoteDecision", () => {
       else process.env.EMAIL_REPLY_DECISIONS_ENABLED = original;
     });
 
-    it("OFF: records nothing, warns, and points the user to Floorplan", async () => {
+    // Off by default (decision 2): the reply is filed on the job, never applied.
+    const linkedEmail: SqlRoute = [/SELECT EmailID, FromAddress, Status, MatchedJobID FROM Emails/, [{ EmailID: 42, FromAddress: "carlo@randazzo.properties", MatchedJobID: 9, Status: "new" }]];
+    const linkedQuote: SqlRoute = [/SELECT JobID, QuoteNumber, Status FROM Quotes/, [{ JobID: 9, QuoteNumber: "QT-9-1", Status: "awaiting_director" }]];
+
+    it.each([undefined, "false", "", "0", "TRUE"])(
+      "OFF for %p: files the reply on the job, warns, applies no decision",
+      async (value) => {
+        if (value === undefined) delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+        else process.env.EMAIL_REPLY_DECISIONS_ENABLED = value;
+        routeSql([linkedEmail, linkedQuote, flipOk]);
+
+        const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+        expect(res.status).toBe(403);
+        expect(res.jsonBody).toMatchObject({ code: "EMAIL_REPLY_DECISIONS_DISABLED", jobId: 9, linked: true });
+        expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("reply-to-approve is off"));
+        expect(sqlCalls().some((c) => /'email\.reply_linked'/.test(c.sql))).toBe(true);
+        expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
+        expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
+      },
+    );
+
+    it("OFF files a rejection reply the same way", async () => {
       process.env.EMAIL_REPLY_DECISIONS_ENABLED = "false";
-      routeSql([email, quote("awaiting_director"), director, flipOk]);
-
-      const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
-
-      expect(res.status).toBe(403);
-      expect(res.jsonBody).toEqual({
-        code: "EMAIL_REPLY_DECISIONS_DISABLED",
-        error: "Decisions are made in Floorplan — open the link in the email",
-      });
-      expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("EMAIL_REPLY_DECISIONS_ENABLED=false"));
-      expect(db.executeQuery).not.toHaveBeenCalled();
-      expect(db.beginTransaction).not.toHaveBeenCalled();
-      expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
-      expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
-    });
-
-    it("OFF refuses a rejection as well as an approval", async () => {
-      process.env.EMAIL_REPLY_DECISIONS_ENABLED = "false";
+      routeSql([linkedEmail, linkedQuote, flipOk]);
 
       const res = await recordEmailQuoteDecision(makeRequest({ Decision: "rejected", EmailID: 42, QuoteID: 7 }), ctx);
 
@@ -386,22 +393,18 @@ describe("recordEmailQuoteDecision", () => {
       expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
     });
 
-    it.each([undefined, "true", "", "0", "FALSE"])(
-      "stays ON for %p — only the exact string false switches it off",
-      async (value) => {
-        if (value === undefined) delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
-        else process.env.EMAIL_REPLY_DECISIONS_ENABLED = value;
-        routeSql([email, quote("awaiting_director"), director, flipOk]);
+    it("ON only for the exact string true", async () => {
+      process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
+      routeSql([email, quote("awaiting_director"), director, flipOk]);
 
-        const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+      const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
 
-        expect(res.status).toBe(200);
-        expect(quoteDecisions.approveDirectorQuote).toHaveBeenCalledTimes(1);
-      },
-    );
+      expect(res.status).toBe(200);
+      expect(quoteDecisions.approveDirectorQuote).toHaveBeenCalledTimes(1);
+    });
 
     it("ON: hands the replying address to the helper so the job event can name it", async () => {
-      delete process.env.EMAIL_REPLY_DECISIONS_ENABLED;
+      process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
       routeSql([email, quote("awaiting_director"), director, flipOk]);
 
       await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);

@@ -19,6 +19,9 @@ jest.mock("../db", () => ({
   createServiceRequestConnection: jest.fn(),
   executeQuery: jest.fn(),
 }));
+// runTimer (TimerRuns row, rethrow) has its own tests in __tests__/timerRuns.test.ts;
+// here the registered handler is the timer body itself.
+jest.mock("../timerRuns", () => ({ runTimer: (_name: string, body: unknown) => body }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), flush: jest.fn() } }));
 
 import { AbsCpiError, CpiSeries } from "../cpiAbs";

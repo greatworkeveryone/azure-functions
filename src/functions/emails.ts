@@ -17,6 +17,7 @@ import {
 } from "../db";
 import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { matchJobId } from "../email/job-match";
@@ -32,6 +33,8 @@ import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
+import { parseMoneyField } from "../money";
+import { linkDirectorReply } from "../email/director-reply-link";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -65,8 +68,11 @@ function hydrateAttachments(
       const fileName = typeof n === "string"
         ? (blobName.split("/").pop() ?? blobName)
         : (n as { blobName: string; fileName: string }).fileName;
-      return { blobName, fileName, url: generateReadSasUrl(blobName, hour) };
-    });
+      return { blobName, fileName };
+    })
+    // A stored name that is not minted gets no link (SEC-01) rather than failing the inbox.
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
+    .map((a) => ({ ...a, url: generateReadSasUrl(a.blobName, hour) }));
 }
 
 const EMAIL_COLUMNS = `
@@ -82,16 +88,19 @@ const EMAIL_COLUMNS = `
 //   page      — 1-based page number (default: 1)
 //   pageSize  — rows per page (default: 50, max: 100)
 //   search    — optional free-text; filters by FromAddress or Subject (LIKE)
-// Flagged rows are always excluded — those live on the admin Flagged page.
+//   flagged   — "true" lists only email the AI couldn't read (AIFlaggedForReview);
+//               otherwise those are left out, as the inbox always has. They are
+//               never hidden from staff altogether (DL-34): Incoming shows them
+//               under "AI couldn't read", and unflagEmail puts one back.
 
-async function getEmails(
+export async function getEmails(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const rawStatuses = request.query.get("statuses") ?? "unread,matched";
@@ -105,8 +114,8 @@ async function getEmails(
   const offset = (page - 1) * pageSize;
   const search = request.query.get("search")?.trim() || undefined;
 
-  // Flagged rows live on the admin-only Flagged Incoming page.
-  const whereParts: string[] = ["AIFlaggedForReview = 0"];
+  const flaggedOnly = request.query.get("flagged") === "true";
+  const whereParts: string[] = [flaggedOnly ? "AIFlaggedForReview = 1" : "AIFlaggedForReview = 0"];
   const params: { name: string; type: any; value: any }[] = [];
 
   if (search) {
@@ -173,7 +182,7 @@ async function getEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));
@@ -268,8 +277,8 @@ export async function ingestEmail(
           : (entry && typeof entry === "object" && "blobName" in entry && typeof (entry as { blobName: unknown }).blobName === "string"
             ? (entry as { blobName: string }).blobName
             : null);
-        if (!blobName || !EMAIL_BLOB_PREFIX_RE.test(blobName)) {
-          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must reference emails/{messageId}/..." } };
+        if (!isBlobName(blobName, EMAIL_ATTACHMENT_SHAPE)) {
+          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must be email-attachments/{messageId}/{uuid} names" } };
         }
       }
     }
@@ -325,7 +334,7 @@ export async function ingestEmail(
 // "promoted". The amount is usually extracted from the email body by the
 // upstream parser; fall back to a user-supplied figure if absent.
 
-async function promoteEmailToQuote(
+export async function promoteEmailToQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -351,10 +360,13 @@ async function promoteEmailToQuote(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorID, ContractorName, Notes } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Notes } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -447,7 +459,9 @@ async function promoteEmailToQuote(
 // ── POST /api/archiveEmail ──────────────────────────────────────────────────
 // Body: { EmailID: number }
 // Sets Status = 'archived' and stamps ProcessedAt so the email leaves the
-// active inbox without being tied to a job/quote/invoice.
+// active inbox without being tied to a job/quote/invoice. Who archived it and
+// when are stamped on the row (ArchivedBy/ArchivedAt, migration 133) and
+// ledgered (email.archive), all in one transaction (SEC-05).
 
 async function archiveEmail(
   request: HttpRequest,
@@ -456,7 +470,7 @@ async function archiveEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -481,12 +495,39 @@ async function archiveEmail(
     }
 
     connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
-       WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    await beginTransaction(connection);
+    try {
+      const archived = await executeQuery(
+        connection,
+        `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME(),
+                ArchivedAt = SYSUTCDATETIME(), ArchivedBy = @ArchivedBy
+         OUTPUT INSERTED.EmailID, INSERTED.MatchedJobID, DELETED.Status AS PreviousStatus
+         WHERE EmailID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: EmailID },
+          { name: "ArchivedBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+      if (archived.length === 0) {
+        await rollbackTransaction(connection);
+        return { status: 404, jsonBody: { error: "Email not found" } };
+      }
+      await record(connection, {
+        action: "email.archive",
+        actor,
+        after: { status: "archived" },
+        before: { status: (archived[0].PreviousStatus as string | null) ?? null },
+        jobId: (archived[0].MatchedJobID as number | null) ?? null,
+        subject: { id: EmailID, type: "email" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
@@ -509,7 +550,7 @@ async function flagEmailForReview(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -667,7 +708,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -678,6 +719,9 @@ export async function promoteEmailToInvoice(
     // (or the operator corrected it to), so it is also the supplier's number.
     const supplierNumber = parseSupplierInvoiceNumber(SupplierInvoiceNumber ?? InvoiceNumber);
     if (!supplierNumber.ok) return { status: 400, jsonBody: { error: supplierNumber.error } };
+    const amount = parseMoneyField(rawAmount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
+    const Amount = amount.value;
     // CreatedBy is derived from the verified token; body field is ignored.
     const CreatedBy = callerOid;
 
@@ -913,8 +957,9 @@ export async function promoteEmailToJobUpdate(
 // (SenderAuthenticated = 1, see src/email/sender-auth.ts) — From is spoofable.
 // The actor stamped on the quote is that director's DisplayName, never the
 // body. Helpers + email flip + ledger row are one transaction.
-// EMAIL_REPLY_DECISIONS_ENABLED=false switches the whole path off (403, nothing
-// recorded); the default is on.
+// Reply-to-approve is OFF unless EMAIL_REPLY_DECISIONS_ENABLED is exactly
+// "true" (decision 2, SEC-07): the reply is then only filed on the job
+// (email.reply_linked) and the 403 answer carries the job's link.
 //
 // Ledger (PLAN §3.12): the same quote.director_approve / quote.director_reject
 // as the in-app buttons, ruleApplied "email_reply", the email in `after`. The
@@ -968,20 +1013,8 @@ export async function recordEmailQuoteDecision(
   if (!identity) return unauthorizedResponse();
 
   // Decisions belong in the app, where the approver is a verified sign-in rather
-  // than a reply's From address. Defaults to ON until the email deep link opens
-  // the approval step; read per call so it can be flipped without a redeploy.
-  if (process.env.EMAIL_REPLY_DECISIONS_ENABLED === "false") {
-    context.warn(
-      `recordEmailQuoteDecision: refused for ${identity.oid} — email-reply decisions are disabled (EMAIL_REPLY_DECISIONS_ENABLED=false); nothing recorded`,
-    );
-    return {
-      status: 403,
-      jsonBody: {
-        code: "EMAIL_REPLY_DECISIONS_DISABLED",
-        error: "Decisions are made in Floorplan — open the link in the email",
-      },
-    };
-  }
+  // than a reply's From address. Read per call so it can be flipped without a redeploy.
+  const replyDecisionsOn = process.env.EMAIL_REPLY_DECISIONS_ENABLED === "true";
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
@@ -1012,6 +1045,12 @@ export async function recordEmailQuoteDecision(
   try {
     const conn = await createRequestConnection(token);
     connection = conn;
+    if (!replyDecisionsOn) {
+      context.warn(
+        `recordEmailQuoteDecision: reply-to-approve is off — filing email ${EmailID} on the job for ${identity.oid}; no decision recorded`,
+      );
+      return await linkDirectorReply(conn, { emailId: EmailID, operatorName: identity.name, quoteId: QuoteID });
+    }
     // The signed-in person recording the reply (not who decided it).
     const operator = await resolveLedgerActor(request, conn);
     if (!operator) return unauthorizedResponse();
@@ -1187,7 +1226,7 @@ async function getEmailThread(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));
@@ -1239,6 +1278,13 @@ async function sendEmailReply(
 // SQL unique-index / unique-constraint violations (migration 091).
 const SQL_UNIQUE_VIOLATIONS: readonly number[] = [2601, 2627];
 
+// Column widths (migrations 008, 077). With "advance the watermark only after
+// storing", a value too long for its column would stop the mailbox at that
+// message for good, so text is cut to fit instead (DL-13).
+const SUBJECT_MAX = 500;
+const ADDRESS_MAX = 255;
+const fit = (value: string | null, max: number) => (value === null ? null : value.slice(0, max));
+
 function isUniqueViolation(err: unknown): boolean {
   const number = (err as { number?: unknown } | null)?.number;
   return typeof number === "number" && SQL_UNIQUE_VIOLATIONS.includes(number);
@@ -1271,9 +1317,9 @@ export async function upsertGraphEmails(
          WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL`,
         [
           { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
-          { name: "FromAddress", type: TYPES.NVarChar, value: email.fromAddress },
-          { name: "FromName", type: TYPES.NVarChar, value: email.fromName },
-          { name: "Subject", type: TYPES.NVarChar, value: email.subject },
+          { name: "FromAddress", type: TYPES.NVarChar, value: fit(email.fromAddress, ADDRESS_MAX) },
+          { name: "FromName", type: TYPES.NVarChar, value: fit(email.fromName, ADDRESS_MAX) },
+          { name: "Subject", type: TYPES.NVarChar, value: fit(email.subject, SUBJECT_MAX) },
           { name: "Body", type: TYPES.NVarChar, value: email.bodyContent },
           { name: "ReceivedAt", type: TYPES.DateTime2, value: email.receivedAt ? new Date(email.receivedAt) : null },
           { name: "MatchedJobID", type: TYPES.Int, value: matchedJobId },

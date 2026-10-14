@@ -56,7 +56,7 @@ Email pipeline behaviour:
 
 Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
-- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect.
+- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect. Applies only when `AZURE_FUNCTIONS_ENVIRONMENT` is `Development` (Core Tools sets it locally) and the host is not an Azure app (`WEBSITE_INSTANCE_ID` unset); anywhere else the switch is ignored and startup refuses to boot (SEC-04).
 
 ### 4. Start the local SQL Server (Docker)
 
@@ -110,10 +110,9 @@ curl -X POST http://localhost:7071/api/syncBuildings
 ```
 
 ### 7. Deploy to Azure
-1. Run `npm run build`
-2. In VS Code → Azure panel → right-click **rpcc-functions** → **Deploy to Function App...**
+Deploys run from GitHub Actions, not from a laptop. A push to `dev/launch-readiness` runs `.github/workflows/deploy.yml`: verify (type check, lint, tests, audit, route check), deploy to `rpcc-api-staging`, then wait for the `production` environment's reviewer before deploying the same package to `rpcc-api2`. The one-time Azure and GitHub setup is listed at the top of that workflow. The workflow does not apply database migrations.
 
-All functions deploy together as a single app. To add a new function, create a file in `src/functions/`, register it with `app.http()`, build, and redeploy.
+All functions deploy together as a single app. To add a new function, create a file in `src/functions/`, register it with `app.http()`, and push.
 
 ### 8. Set environment variables in Azure
 In Azure Portal → Function App → Configuration → Application settings. Add:
@@ -129,6 +128,8 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 - `TODDLER_WARMUP_TIMEOUT_MS` (optional, default 240000)
 - `AI_PARSE_BATCH_SIZE` (optional, default 5)
 - `AI_PARSE_SKIP_SENDERS` (optional)
+- `CORS_EXTRA_ORIGINS` (optional, staging only): comma-separated browser origins allowed in addition to the built-in list, e.g. the staging frontend's origin. Exact match; wildcards are ignored. The Function App's own Azure CORS setting must stay empty or include the same origin, otherwise the platform answers preflights first.
+- `BUILD_SHA`, `BUILD_TIME`: set by the deploy workflow, reported by `/api/health?deep=true`.
 
 `AzureWebJobsStorage` must also be set (it hosts the `email-sync` queue). These are NOT deployed from `local.settings.json` — that file is local only.
 

@@ -1,6 +1,7 @@
 /// <reference types="jest" />
 import { HttpRequest } from "@azure/functions";
 import { AppRole, clearRoleCache, requireRole, rolesForRequest } from "./auth";
+import { devOverrideMisconfigured, isDevOverrideEnabled } from "./jwt";
 
 // Mock the DB module so tests don't need a real SQL connection.
 jest.mock("./db", () => ({
@@ -43,7 +44,59 @@ beforeEach(() => {
   // verifyEntraToken skips JWKS lookup and just decodes the payload. The
   // dev-roles-header test below re-asserts the override path explicitly.
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+  delete process.env.WEBSITE_INSTANCE_ID;
+});
+
+// SEC-04: the bypass needs a positive development signal. An unset
+// environment is production, and an Azure-hosted app never qualifies.
+describe("dev override gate", () => {
+  const devRolesOnly = () => makeRequest({ "x-dev-roles": "admin" });
+  const setEnv = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  };
+
+  it.each([
+    ["unset (production)", undefined],
+    ["Production", "Production"],
+    ["Staging", "Staging"],
+    ["development (wrong case)", "development"],
+  ])("ignores X-Dev-Roles when the environment is %s", async (_label, env) => {
+    setEnv("AZURE_FUNCTIONS_ENVIRONMENT", env);
+
+    expect(isDevOverrideEnabled()).toBe(false);
+    expect(await rolesForRequest(devRolesOnly())).toEqual([]);
+    expect(devOverrideMisconfigured()).toBe(true);
+  });
+
+  it("honours X-Dev-Roles in Development with the switch on", async () => {
+    expect(isDevOverrideEnabled()).toBe(true);
+    expect(await rolesForRequest(devRolesOnly())).toEqual(["admin"]);
+    expect(devOverrideMisconfigured()).toBe(false);
+  });
+
+  it.each([["unset", undefined], ["1", "1"], ["TRUE", "TRUE"]])(
+    "ignores X-Dev-Roles in Development when the switch is %s",
+    async (_label, flag) => {
+      setEnv("DEV_ROLE_OVERRIDE_ENABLED", flag);
+
+      expect(isDevOverrideEnabled()).toBe(false);
+      expect(await rolesForRequest(devRolesOnly())).toEqual([]);
+      expect(devOverrideMisconfigured()).toBe(false);
+    },
+  );
+
+  it("ignores X-Dev-Roles on an Azure-hosted app even when labelled Development", async () => {
+    process.env.WEBSITE_INSTANCE_ID = "abc123";
+    try {
+      expect(isDevOverrideEnabled()).toBe(false);
+      expect(await rolesForRequest(devRolesOnly())).toEqual([]);
+      expect(devOverrideMisconfigured()).toBe(true);
+    } finally {
+      delete process.env.WEBSITE_INSTANCE_ID;
+    }
+  });
 });
 
 describe("rolesForRequest", () => {

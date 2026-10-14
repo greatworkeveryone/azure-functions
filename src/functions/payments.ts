@@ -5,9 +5,10 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
 import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
-import { getCachedApprovalLimits } from "../approval-limits-db";
-import { requiresDirectorApproval, type ApprovalLimit } from "./invoices";
+import { decideAuthority, type AuthorityFacts } from "../approvalAuthority";
+import { loadApprovalFacts } from "../approvalAuthority-db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { MyobWritesDisabledError, userActor } from "../myob-api-log";
 import { applyMyobPayment, createMyobBill } from "../myob-client";
 import { newCorrelationId, record } from "../ledger";
@@ -120,9 +121,10 @@ export function paymentInvoiceRefusal(input: {
   amount: number;
   invoice: PaymentInvoiceFacts;
   jobId: number;
-  limits: ApprovalLimit[];
+  /** The approval facts (approvalAuthority-db.ts): the director gate is the one approval used. */
+  facts: AuthorityFacts;
 }): PaymentRefusal | null {
-  const { amount, invoice, jobId, limits } = input;
+  const { amount, invoice, jobId, facts } = input;
   if (invoice.jobId !== jobId) return { code: "different_job", message: "That invoice belongs to a different job." };
   if (invoice.direction !== "incoming") {
     return { code: "not_incoming", message: "Payments can only be recorded against incoming (contractor) invoices." };
@@ -136,7 +138,8 @@ export function paymentInvoiceRefusal(input: {
   if (invoice.amount == null || invoice.amount <= 0) {
     return { code: "no_invoice_amount", message: "The invoice has no amount recorded, so it can't be paid." };
   }
-  if (requiresDirectorApproval(invoice.amount, limits) && !invoice.directorApprovedAt) {
+  const directorRequired = decideAuthority({ amount: invoice.amount, buildingId: 0, subject: "invoice" }, facts).directorRequired;
+  if (directorRequired && !invoice.directorApprovedAt) {
     return {
       code: "director_approval_required",
       message: "This invoice is over the approval limit and needs director approval before it can be paid.",
@@ -259,6 +262,9 @@ async function upsertPayment(
     await recordRoleRefusal(request, token, denied, CREATE_PAYMENT_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -314,7 +320,7 @@ async function upsertPayment(
           amount: create.amount,
           invoice,
           jobId: create.jobId,
-          limits: await getCachedApprovalLimits(connection),
+          facts: await loadApprovalFacts(connection, null),
         });
         if (refusal) {
           await rollbackTransaction(connection).catch(() => {});
@@ -500,7 +506,7 @@ async function upsertPayment(
               amount: Amount as number,
               invoice,
               jobId: existing.JobID as number,
-              limits: await getCachedApprovalLimits(connection),
+              facts: await loadApprovalFacts(connection, null),
             })
           : "The invoice this payment was recorded against no longer exists.";
         if (refusal) {
@@ -572,6 +578,9 @@ async function markPaymentPaid(
     await recordRoleRefusal(request, token, denied, MARK_PAID_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();

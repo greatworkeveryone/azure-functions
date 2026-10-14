@@ -35,11 +35,13 @@ import {
 } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { syncMailbox } from "../email/mail-sync";
 import { findPoNumber } from "../email/po-ref";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -635,6 +637,8 @@ export function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[
   return entries
     .map(storedAttachment)
     .filter((a): a is StoredAttachment => a !== null)
+    // A name the mail sync never minted is skipped, not allowed to fail the parse (SEC-01).
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
     .map(({ blobName, fileName }) => ({ fileName: fileName.slice(0, FIELD_CAPS.attachmentFileName), sasUrl: generateReadSasUrl(blobName, hour) }));
 }
 
@@ -949,7 +953,7 @@ async function getFlaggedEmails(
 // Every 2 minutes. Singleton, so ticks never overlap; the queue check keeps
 // the GPU at zero replicas when nothing is waiting.
 app.timer("parseEmailsTimer", {
-  handler: parseEmailsTimer,
+  handler: runTimer("parseEmailsTimer", parseEmailsTimer),
   schedule: "0 */2 * * * *",
 });
 
@@ -957,7 +961,7 @@ app.timer("parseEmailsTimer", {
 // wakes once for the batch.
 app.timer("parseEmailsDailyRetry", {
   extraOutputs: [emailSyncQueueOutput],
-  handler: parseEmailsDailyRetry,
+  handler: runTimer("parseEmailsDailyRetry", parseEmailsDailyRetry),
   schedule: "0 0 2 * * *",
 });
 

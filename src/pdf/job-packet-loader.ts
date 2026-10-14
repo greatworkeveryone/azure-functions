@@ -11,6 +11,7 @@ import { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "../db";
 import { downloadBlob } from "../blob-storage";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import type {
   PacketInput,
   PacketJob,
@@ -277,8 +278,14 @@ function inferContentType(fileName: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
-async function maybeLoadBlob(blobName: string | null): Promise<Buffer | null> {
+// Stored names (quote/invoice PDFs, claimed attachments) are downloaded with
+// the account key, so only a minted wr-attachments name is ever fetched.
+export async function maybeLoadBlob(blobName: string | null): Promise<Buffer | null> {
   if (!blobName) return null;
+  if (!isBlobName(blobName, WR_ATTACHMENTS_SHAPES)) {
+    console.warn("job packet: skipped a stored blob name that is not a minted attachment name");
+    return null;
+  }
   try {
     return await downloadBlob(blobName);
   } catch {

@@ -26,6 +26,7 @@ import { AbsCpiError, CpiSeries, fetchAllCpiSeries } from "../cpiAbs";
 import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // Exactly "true": "TRUE", "1" and "yes" do not switch anything on.
 function flagOn(name: string): boolean {
@@ -92,5 +93,5 @@ export async function tenancyCpiSyncTimer(
 // 03:00 UTC every day.
 app.timer("tenancyCpiSyncTimer", {
   schedule: "0 0 3 * * *",
-  handler: tenancyCpiSyncTimer,
+  handler: runTimer("tenancyCpiSyncTimer", tenancyCpiSyncTimer),
 });

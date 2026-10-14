@@ -49,6 +49,12 @@ export const LEDGER_ACTIONS = {
   "quote.unapprove": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.uncomplete": { exception: true, reasonRequired: false, subjects: ["quote"] },
 
+  // Job lifecycle decisions (beta sprint J2). Done is final: reopening one is
+  // a manager's exception with a reason. The MYOB read-back closing a job
+  // whose invoices are all paid is a system decision.
+  "job.invoices_paid": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "job.reopen": { exception: true, reasonRequired: true, subjects: ["job"] },
+
   // Role, limit and attribution decisions (WP19b)
   "approval_limit.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },
   "quote.approve_attributed": {
@@ -89,6 +95,12 @@ export const LEDGER_ACTIONS = {
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
 
+  // Access-pattern monitoring (beta sprint S10, decision 15). The subject is the
+  // person (UserID, or Entra oid when they have no AppUsers row); the actor of an
+  // anomaly is the monitor. A profile change loosens or tightens what counts as
+  // unusual, so it is an exception too.
+  "access.anomaly": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  "access.profile_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   // MYOB link (sprint M0). Link, re-link and unlink share one code; RuleApplied
   // says which. Always an exception: a change of who Floorplan acts as in MYOB
   // is the first thing the CFO audits.
@@ -103,6 +115,8 @@ export const LEDGER_ACTIONS = {
   "myob.propose": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
   "myob.push": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
   "myob.withdraw": { exception: true, reasonRequired: true, subjects: ["myob_proposal"] },
+  // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
+  "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

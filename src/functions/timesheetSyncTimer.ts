@@ -1,6 +1,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { createServiceConnection, closeConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Timer trigger: Sunday midnight (UTC) ─────────────────────────────────────
 // Reports approved timesheets not yet in MYOB. Sending them is not built.
@@ -44,5 +45,5 @@ export async function timesheetSyncTimer(
 // Runs at 00:00 UTC every Sunday
 app.timer("timesheetSyncTimer", {
   schedule: "0 0 0 * * 0",
-  handler: timesheetSyncTimer,
+  handler: runTimer("timesheetSyncTimer", timesheetSyncTimer),
 });

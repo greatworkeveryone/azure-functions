@@ -23,10 +23,13 @@ import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
-import { getCachedApprovalLimits } from "../approval-limits-db";
+import { loadApprovalFacts } from "../approvalAuthority-db";
+import { SUBJECT_ELIGIBLE_ROLES } from "../approvalAuthority";
+import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { formatDocNumber } from "../doc-number";
-import { canApproveAmount, requiresDirectorApproval, ApprovalLimit } from "./invoices";
+import { isTestJob } from "../testRecords";
 import { decideApprovalAmountEdit } from "../edit-effects";
+import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { advanceJobStatus } from "../jobStatusHelpers";
@@ -37,6 +40,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { approvalRule, jobScope, quoteFacts, quoteSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
+import { parseMoneyField } from "../money";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -115,7 +119,7 @@ async function getQuotes(
 
 // ── POST /api/upsertQuote ────────────────────────────────────────────────────
 
-async function upsertQuote(
+export async function upsertQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -143,6 +147,8 @@ async function upsertQuote(
       SourceEmailID,
       ReceivedAt,
     } = body ?? {};
+    const amount = parseMoneyField(Amount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
 
     connection = await createRequestConnection(token);
 
@@ -150,6 +156,9 @@ async function upsertQuote(
       // Create — runs in a tx so the SELECT MAX(Seq) + INSERT pair is atomic.
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create a quote" } };
+      }
+      if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, JobID, QuotePDFBlobName))) {
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
       }
 
       await beginTransaction(connection);
@@ -196,7 +205,7 @@ async function upsertQuote(
             { name: "Seq", type: TYPES.Int, value: nextSeq },
             { name: "ContractorID", type: TYPES.Int, value: ContractorID ?? null },
             { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
-            { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+            { name: "Amount", type: TYPES.Decimal, value: amount.value ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "QuotePDFBlobName", type: TYPES.NVarChar, value: QuotePDFBlobName ?? null },
@@ -211,8 +220,8 @@ async function upsertQuote(
         // quote + its creation event land atomically; if the event insert
         // fails we don't ship a ghost quote with no history trail.
         const amountLabel =
-          typeof Amount === "number"
-            ? ` · $${Number(Amount).toLocaleString()}`
+          typeof amount.value === "number"
+            ? ` · $${amount.value.toLocaleString()}`
             : "";
         const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
         await executeQuery(
@@ -272,7 +281,7 @@ async function upsertQuote(
         Notes: TYPES.NVarChar,
         QuotePDFBlobName: TYPES.NVarChar,
       },
-      { Amount, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
+      { Amount: amount.value, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
@@ -291,6 +300,9 @@ async function upsertQuote(
     }
     const before = beforeRows[0];
     const jobId = before.JobID as number;
+    if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, QuotePDFBlobName))) {
+      return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+    }
     const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
 
     const effects = decideApprovalAmountEdit(
@@ -300,7 +312,7 @@ async function upsertQuote(
         contractorName: (before.ContractorName as string | null) ?? null,
         status: (before.Status as string | null) ?? null,
       },
-      { amount: Amount, contractorName: ContractorName },
+      { amount: amount.value, contractorName: ContractorName },
     );
 
     await beginTransaction(connection);
@@ -343,11 +355,12 @@ async function upsertQuote(
             WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: QuoteID }],
         );
+        // N2 (J2): the job's status is never changed here. Done stays done,
+        // and a job in Work stays in Work; only the approval is cleared.
         await executeQuery(
           connection,
           `UPDATE Jobs
               SET ApprovedQuoteID = NULL, ApprovedBy = NULL, ApprovedAt = NULL,
-                  Status = 'Awaiting Approval', AwaitingRole = 'facilities',
                   LastModifiedDate = SYSUTCDATETIME()
             WHERE JobID = @JobID AND ApprovedQuoteID = @QuoteID`,
           [
@@ -358,15 +371,16 @@ async function upsertQuote(
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
-           VALUES (@JobID, @CreatedBy, @Text, 'status_change', @QuoteID);`,
+           VALUES (@JobID, @CreatedBy, @Text, @EventType, @QuoteID);`,
           [
             { name: "JobID", type: TYPES.Int, value: jobId },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `Quote ${quoteNumber} amount changed — approval cleared, awaiting re-review.`,
+              value: `Quote ${quoteNumber} amount changed — approval cleared. The job keeps its status until a quote is approved again.`,
             },
+            { name: "EventType", type: TYPES.NVarChar, value: "quote_approval_cleared" },
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );
@@ -422,13 +436,19 @@ interface QuoteApproval {
   newStatus: string;
 }
 
-type QuoteApprovalOutcome = { approval: QuoteApproval; ok: true } | { ok: false; response: HttpResponseInit };
+type QuoteApprovalOutcome =
+  | { approval: QuoteApproval; ok: true }
+  | { ok: false; response: HttpResponseInit }
+  | { jobId: number; ok: false; refusal: { message: string; reason: ApprovalRefusalReason; status: string | null } };
+
+/** Who may press Approve on a quote: every role the authority core lets approve one (J1). */
+const APPROVE_QUOTE_ROLES = SUBJECT_ELIGIBLE_ROLES.quote as readonly AppRole[];
 
 async function approveQuoteInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; quoteId: number; userRoles: string[] },
+  input: { actor: LedgerActor; approvedBy: string; email: string; quoteId: number; userRoles: string[] },
 ): Promise<QuoteApprovalOutcome> {
-  const { actor, approvedBy, quoteId, userRoles } = input;
+  const { actor, approvedBy, email, quoteId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Locked until commit, so the status we record as replaced is the one we replace.
@@ -445,29 +465,35 @@ async function approveQuoteInTransaction(
     const jobId = quote.JobID as number;
     const quoteNumber = (quote.QuoteNumber as string | null) ?? `#${quoteId}`;
     const contractorName = quote.ContractorName as string | null;
+    // The director email shows the amount; an unknown one reads as 0.00 there,
+    // but is never treated as $0 by the authority check below.
     const amount = Number(quote.Amount ?? 0);
     const currency = quote.Currency as string;
 
-    // Three-tier routing:
-    //   1. user can approve  + amount ≤ all non-director limits → 'approved' direct
-    //   2. user can approve  + amount > all non-director limits → 'awaiting_director'
-    //   3. user can't approve + amount > all non-director limits → 'awaiting_director'
-    //   4. user can't approve + amount ≤ some non-director limit → 'awaiting_approval'
-    // 403 only fires if the amount can't be covered by any role in the system.
-    const allLimits = await getCachedApprovalLimits(connection);
-    const limitRows = allLimits.filter((l) => userRoles.includes(l.RoleName));
-
-    const userCanApprove = canApproveAmount(userRoles, limitRows, amount);
-    const directorNeeded = requiresDirectorApproval(amount, allLimits);
-
-    let newStatus: string;
-    if (userCanApprove && !directorNeeded) {
-      newStatus = "approved";
-    } else if (directorNeeded) {
-      newStatus = "awaiting_director";
-    } else {
-      newStatus = "awaiting_approval";
+    // The approval-authority core decides (J1): approved on the caller's own
+    // authority; past the director threshold (or with no amount) to the
+    // director; past the caller's limit to someone further up the route; any
+    // other "no" is refused with its reason, admin on a real record included.
+    const scope = await jobScope(connection, jobId);
+    const facts = await loadApprovalFacts(connection, scope.buildingId);
+    const isTest = userRoles.some((role) => role.trim().toLowerCase() === AppRole.ADMIN) && (await isTestJob(connection, jobId));
+    const outcome = approvalOutcome(
+      { email, roles: userRoles, userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
+      { amount: quote.Amount == null ? NaN : Number(quote.Amount), buildingId: scope.buildingId ?? 0, jobId, subject: "quote" },
+      facts,
+      { isTest },
+    );
+    if (outcome.kind === "refused") {
+      await rollbackTransaction(connection).catch(() => {});
+      return {
+        jobId,
+        ok: false,
+        refusal: { message: outcome.message, reason: outcome.reason, status: (quote.Status as string | null) ?? null },
+      };
     }
+    const userCanApprove = outcome.kind === "approved";
+    const directorNeeded = outcome.kind === "awaiting_director";
+    const newStatus: string = outcome.kind;
 
     await executeQuery(
       connection,
@@ -544,7 +570,6 @@ async function approveQuoteInTransaction(
       });
     }
 
-    const scope = await jobScope(connection, jobId);
     await record(connection, {
       action: "quote.approve",
       actor,
@@ -571,7 +596,7 @@ async function approveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, APPROVE_QUOTE_ROLES);
   if (denied) {
     await recordRoleRefusal(request, token, denied, APPROVE_QUOTE_TARGET);
     return denied;
@@ -596,10 +621,23 @@ async function approveQuote(
     const outcome = await approveQuoteInTransaction(connection, {
       actor,
       approvedBy,
+      email: identity.email,
       quoteId: QuoteID,
       userRoles: await rolesForRequest(request),
     });
-    if (!outcome.ok) return outcome.response;
+    if (!outcome.ok) {
+      if ("response" in outcome) return outcome.response;
+      const { message, reason, status } = outcome.refusal;
+      // Ledgered in a transaction of its own now that the decision's has rolled back.
+      await recordRefusal(
+        connection,
+        actor,
+        { id: QuoteID, type: "quote" },
+        { attempted: "quote.approve", code: reason, message, state: { status } },
+        outcome.jobId,
+      );
+      return { status: 403, jsonBody: { error: message, reason } };
+    }
     const { amount, currency, directorNeeded, jobId, newStatus } = outcome.approval;
 
     // Fire-and-forget director email: packet build + Graph sendMail can take

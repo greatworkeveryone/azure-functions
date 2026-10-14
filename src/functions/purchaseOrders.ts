@@ -15,6 +15,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
@@ -38,6 +39,7 @@ import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope, purchaseOrderFacts, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import { parseMoneyField } from "../money";
 
 /**
  * Quote-approval guard for PO creation (WP8). Returns an error string if
@@ -135,8 +137,9 @@ interface UpsertPurchaseOrderBody {
   ContractorID?: number;
   ContractorName?: string;
   Scope?: string;
-  EstimatedCost?: number;
-  CostNotToExceed?: number;
+  /** Numbers or typed strings such as "1,500.00"; parsed by parseMoneyField. */
+  EstimatedCost?: number | string | null;
+  CostNotToExceed?: number | string | null;
   CostJustification?: string;
   EmailSubject?: string;
   EmailBody?: string;
@@ -180,13 +183,19 @@ export async function upsertPurchaseOrder(
       ContractorID,
       ContractorName,
       Scope,
-      EstimatedCost,
-      CostNotToExceed,
+      EstimatedCost: rawEstimatedCost,
+      CostNotToExceed: rawCostNotToExceed,
       CostJustification,
       EmailSubject,
       EmailBody,
       ChargeCode,
     } = body ?? {};
+    const estimated = parseMoneyField(rawEstimatedCost, "EstimatedCost");
+    if (!estimated.ok) return { status: 400, jsonBody: { error: estimated.error } };
+    const cap = parseMoneyField(rawCostNotToExceed, "CostNotToExceed");
+    if (!cap.ok) return { status: 400, jsonBody: { error: cap.error } };
+    const EstimatedCost = estimated.value;
+    const CostNotToExceed = cap.value;
 
     connection = await createRequestConnection(token);
 
@@ -951,6 +960,9 @@ async function markPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, MARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1072,6 +1084,9 @@ async function unmarkPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {
@@ -1394,32 +1409,23 @@ async function unmarkPurchaseOrderComplete(
         ],
       );
 
-      // Fire PO event
+      // N3 (J2): undoing a completion never moves the job. Done stays done
+      // (reopening is a manager's job, with a reason: reopenJob); a job
+      // already with accounts stays there.
       await executeQuery(
         connection,
         `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-         VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
+         VALUES (@JobID, @CreatedBy, @Text, 'po_uncompleted', @PurchaseOrderID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: actor.name },
           { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
           { name: "PurchaseOrderID", type: TYPES.Int, value: id },
         ],
       );
-
-      // Roll back job status
       await executeQuery(
         connection,
-        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-         VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
-        [
-          { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
-        ],
-      );
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
-         WHERE JobID = @JobID`,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: jobId }],
       );
 

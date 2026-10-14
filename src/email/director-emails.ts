@@ -1,14 +1,18 @@
 // src/email/director-emails.ts
 //
-// Loads director recipient list from env, builds the packet, and sends a
-// plain-text email with the packet attached. Best-effort — caller decides
-// what to do with failures.
+// Sends the director packet to the active directors in AppUsers
+// (DIRECTOR_APPROVAL_EMAILS only while there are none, reported as
+// system.health), builds the packet, and sends a plain-text email with it
+// attached. Best-effort — caller decides what to do with failures.
 
+import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { buildJobPacket, nonMergeableAttachments } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
 import type { Connection } from "tedious";
+import { resolveRoleRecipients } from "./role-recipients";
 
+/** The fallback list; recipients normally come from AppUsers (resolveRoleRecipients). */
 export function getDirectorEmails(): string[] {
   const raw = process.env.DIRECTOR_APPROVAL_EMAILS ?? "";
   return raw
@@ -44,9 +48,12 @@ export interface SendDirectorApprovalResult {
 export async function sendDirectorApprovalEmail(
   args: SendDirectorApprovalArgs,
 ): Promise<SendDirectorApprovalResult> {
-  const recipients = getDirectorEmails();
+  const { addresses } = await resolveRoleRecipients(args.connection, "director", getDirectorEmails());
+  // DEV_EMAIL_OVERRIDE applies at the send seam: staging runs on a copy of
+  // production's AppUsers and must never mail the real directors.
+  const recipients = [...new Set(addresses.map((a) => resolveRecipient(a).address).filter((a): a is string => !!a))];
   if (recipients.length === 0) {
-    throw new Error("DIRECTOR_APPROVAL_EMAILS env var is empty — no recipients configured");
+    throw new Error("No director to email: no active director in AppUsers and DIRECTOR_APPROVAL_EMAILS is empty");
   }
 
   const input = await loadJobPacketInputs(args.connection, args.jobId);
@@ -60,9 +67,10 @@ export async function sendDirectorApprovalEmail(
     ? `\n${extras.length} additional file${extras.length === 1 ? "" : "s"} attached separately: ${extras.map((e) => e.fileName).join(", ")}.`
     : "";
   const jobUrl = buildJobUrl(args.jobId);
+  // Replies are filed on the job but never count as a decision (SEC-07).
   const linkLine = jobUrl
-    ? `Open in Command Centre: ${jobUrl}`
-    : "Open the job in Command Centre to approve or reject.";
+    ? `Approve or reject in Floorplan: ${jobUrl}\nA reply to this email is filed on the job but does not count as a decision.`
+    : "Open the job in Floorplan to approve or reject. A reply to this email does not count as a decision.";
   const body =
 `Hi,
 

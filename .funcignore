@@ -9,3 +9,4 @@ dist/**/*.map
 dist/**/*.d.ts
 dist/**/*.d.ts.map
 node_modules/.package-lock.json
+scripts/

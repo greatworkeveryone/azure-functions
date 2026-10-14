@@ -42,7 +42,7 @@ beforeEach(() => {
   db.createServiceConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
 });
 
 // Facilities staff are the field inspectors. The frontend grants them the

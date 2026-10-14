@@ -13,6 +13,7 @@ import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { CLEANUP_SELECT, cleanupEnabled } from "../attachmentCleanup";
 import { deleteBlob } from "../blob-storage";
+import { runTimer, type TimerCounts } from "../timerRuns";
 
 // Hours an attachment must age before we consider it safely ingested upstream.
 const GRACE_HOURS = Number(process.env.ATTACHMENT_DELETE_GRACE_HOURS ?? "48");
@@ -50,7 +51,7 @@ async function runCleanup(context: InvocationContext): Promise<{ scanned: number
   }
 }
 
-async function cleanupAttachmentsTimer(timer: Timer, context: InvocationContext): Promise<void> {
+async function cleanupAttachmentsTimer(timer: Timer, context: InvocationContext): Promise<TimerCounts | void> {
   if (!cleanupEnabled()) {
     context.log("cleanupAttachments disabled (ATTACHMENT_CLEANUP_ENABLED is not \"true\") — nothing deleted");
     return;
@@ -62,15 +63,14 @@ async function cleanupAttachmentsTimer(timer: Timer, context: InvocationContext)
   // service connection (managed identity → SQL access token). The previous
   // code mis-used MYBUILDINGS_BEARER_TOKEN — that's a static API key for
   // the myBuildings HTTP service, not an AAD SQL token.
-  try {
-    const { deleted, failed, scanned } = await runCleanup(context);
-    context.log(`cleanupAttachments complete: scanned=${scanned}, deleted=${deleted}, failed=${failed}, graceHours=${GRACE_HOURS}`);
-  } catch (error: any) {
-    context.error("cleanupAttachments failed:", error.message);
-  }
+  // runTimer logs, reports and rethrows; a partial failure fails the run too.
+  const { deleted, failed, scanned } = await runCleanup(context);
+  context.log(`cleanupAttachments complete: scanned=${scanned}, deleted=${deleted}, failed=${failed}, graceHours=${GRACE_HOURS}`);
+  if (failed > 0) throw new Error(`cleanupAttachments: ${failed} of ${scanned} attachments failed (see the log above)`);
+  return { deleted, failed, scanned };
 }
 
 app.timer("cleanupAttachmentsTimer", {
   schedule: "0 0 3 * * *", // daily at 03:00 UTC
-  handler: cleanupAttachmentsTimer,
+  handler: runTimer("cleanupAttachmentsTimer", cleanupAttachmentsTimer),
 });
