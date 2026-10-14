@@ -5,7 +5,7 @@ jest.mock("./db", () => ({
   closeConnection: jest.fn(),
   commitTransaction: jest.fn().mockResolvedValue(undefined),
   createServiceRequestConnection: jest.fn().mockResolvedValue({}),
-  executeQuery: jest.fn().mockResolvedValue([{ UserID: 7 }]),
+  executeQuery: jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("./myob-auth-state", () => ({ consumeAuthState: jest.fn() }));
@@ -49,8 +49,14 @@ const TOKENS = {
 };
 const original = process.env.MYOB_COMPANY_FILE_ID;
 
+let registered = true;
+
 beforeEach(() => {
   jest.clearAllMocks();
+  registered = true;
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+    /FROM dbo\.MyobCompanyFiles/.test(sql) ? (registered ? [{ Registered: 1 }] : []) : [{ UserID: 7 }],
+  );
   delete process.env.MYOB_COMPANY_FILE_ID;
   consumeAuthState.mockResolvedValue(OWNER);
   exchangeCode.mockResolvedValue(TOKENS);
@@ -95,6 +101,16 @@ describe("completeMyobLink refusals: nothing is exchanged or stored", () => {
 
     await expect(link({ businessId: OTHER })).resolves.toMatchObject({ ok: false, status: 409 });
     expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("409 when the approved file isn't registered in Entities (decision 14)", async () => {
+    registered = false;
+
+    const outcome = await link();
+
+    expect(outcome).toMatchObject({ ok: false, status: 409, title: expect.stringContaining("not registered") });
+    expect(exchangeCode).not.toHaveBeenCalled();
+    expect(store.saveLinkedTokens).not.toHaveBeenCalled();
   });
 
   it("409 when MYOB grants a scope beyond the agreement", async () => {

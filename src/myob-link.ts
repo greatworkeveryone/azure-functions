@@ -1,9 +1,10 @@
 // Completing a MYOB link from the OAuth callback (MYOB N3, SEC-15). In order,
 // and nothing is stored unless every step passes:
 //   1. the state is consumed: single use, 10 minutes, names the admin who started
-//   2. businessId (the company file MYOB says was approved) must be the
-//      configured file, MYOB_COMPANY_FILE_ID; with none configured it must be
-//      the file already linked, and a first link records it
+//   2. businessId (the company file MYOB says was approved) must be registered
+//      in Admin → MYOB → Entities (decision 14), and be the configured file,
+//      MYOB_COMPANY_FILE_ID; with none configured it must be the file already
+//      linked, and a first link records it
 //   3. the code is exchanged; a token with any scope beyond the two is dropped
 //   4. in one transaction under the token lock: tokens stored encrypted with the
 //      MYOB user, the file and who linked, and the link ledgered (myob.link)
@@ -82,7 +83,18 @@ export async function completeMyobLink(input: {
   if (!GUID.test(businessId)) {
     return fail(400, "MYOB did not say which company file was approved", "Nothing was linked. Start again from Admin → MYOB.");
   }
-  const expected = expectedFile(await withConnection(readMyobAuthRow));
+  const { registered, row } = await withConnection(async (connection) => ({
+    registered: (
+      await executeQuery(connection, `SELECT 1 AS Registered FROM dbo.MyobCompanyFiles WHERE CompanyFileId = @CompanyFileId`, [
+        { name: "CompanyFileId", type: TYPES.NVarChar, value: businessId },
+      ])
+    ).length > 0,
+    row: await readMyobAuthRow(connection),
+  }));
+  if (!registered) {
+    return fail(409, "That company file is not registered with Floorplan", `Ask the CFO to register ${businessId} in Admin → MYOB → Entities, then link again. Nothing was linked.`);
+  }
+  const expected = expectedFile(row);
   if (expected && expected !== businessId) {
     return fail(409, "That is not the company file Floorplan is set up for", `MYOB approved file ${businessId}; Floorplan expects ${expected}. Nothing was linked.`);
   }

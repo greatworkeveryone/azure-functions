@@ -25,11 +25,16 @@ const control = (Operation: string, over: Row = {}) => ({
   ...over,
 });
 
-/** Controls for the file, then today's write rows from MyobApiLog. */
-function world(controls: ReturnType<typeof control>[], writes: { Method: string; Path: string; Calls: number }[] = []) {
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-    /FROM dbo\.MyobControls/.test(sql) ? controls : /FROM dbo\.MyobApiLog/.test(sql) ? writes : [],
-  );
+/** The file's mode (write unless said), its controls, then today's write rows from MyobApiLog. */
+function world(
+  controls: ReturnType<typeof control>[],
+  writes: { Method: string; Path: string; Calls: number }[] = [],
+  mode: string | null = "write",
+) {
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+    if (/FROM dbo\.MyobCompanyFiles/.test(sql)) return mode === null ? [] : [{ Mode: mode }];
+    return /FROM dbo\.MyobControls/.test(sql) ? controls : /FROM dbo\.MyobApiLog/.test(sql) ? writes : [];
+  });
 }
 
 const allow = (operation: Parameters<typeof assertMyobControlsAllow>[0]["operation"], companyFileId: string | null = CF) =>
@@ -74,6 +79,21 @@ describe("boot guard", () => {
     world([control("purchases.read")]);
     await expect(allow("files.list", null)).resolves.toBeUndefined();
     expect(db.executeQuery.mock.calls[0][2][0].value).toBe(CF);
+  });
+});
+
+describe("entity mode (decision 14)", () => {
+  it("refuses everything for a file set to off, or not registered, whatever its controls say", async () => {
+    world([control("purchases.read"), control("orders.create")], [], "off");
+    await expect(allow("purchases.read")).rejects.toMatchObject({ message: expect.stringContaining("not switched this file on") });
+    world([control("purchases.read"), control("orders.create")], [], null);
+    await expect(allow("orders.create")).rejects.toMatchObject({ code: "controls" });
+  });
+
+  it("allows reads only for a file set to read", async () => {
+    world([control("purchases.read"), control("orders.create")], [], "read");
+    await expect(allow("purchases.read")).resolves.toBeUndefined();
+    await expect(allow("orders.create")).rejects.toMatchObject({ message: expect.stringContaining("read only") });
   });
 });
 
