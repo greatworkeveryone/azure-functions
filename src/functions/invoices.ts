@@ -9,6 +9,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decideApprovalAmountEdit } from "../edit-effects";
+import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
@@ -383,6 +384,9 @@ export async function upsertJobInvoice(
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create an invoice" } };
       }
+      if (InvoicePDFBlobName != null && !(await isJobAttachmentBlob(connection, JobID, InvoicePDFBlobName))) {
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+      }
 
       await beginTransaction(connection);
       try {
@@ -513,6 +517,9 @@ export async function upsertJobInvoice(
     }
     const before = beforeRows[0];
     const jobId = before.JobID as number;
+    if (InvoicePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, InvoicePDFBlobName))) {
+      return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+    }
     const invoiceNumber =
       (before.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
 

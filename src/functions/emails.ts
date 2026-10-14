@@ -17,6 +17,7 @@ import {
 } from "../db";
 import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { matchJobId } from "../email/job-match";
@@ -32,11 +33,6 @@ import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
-
-// Server-generated email-attachment blobs land under emails/{messageId}/...
-// where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
-// claim attempts that point Attachments rows at arbitrary blob paths.
-const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
 // render click-to-open chips without a second round-trip for each file.
@@ -65,8 +61,11 @@ function hydrateAttachments(
       const fileName = typeof n === "string"
         ? (blobName.split("/").pop() ?? blobName)
         : (n as { blobName: string; fileName: string }).fileName;
-      return { blobName, fileName, url: generateReadSasUrl(blobName, hour) };
-    });
+      return { blobName, fileName };
+    })
+    // A stored name that is not minted gets no link (SEC-01) rather than failing the inbox.
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
+    .map((a) => ({ ...a, url: generateReadSasUrl(a.blobName, hour) }));
 }
 
 const EMAIL_COLUMNS = `
@@ -268,8 +267,8 @@ export async function ingestEmail(
           : (entry && typeof entry === "object" && "blobName" in entry && typeof (entry as { blobName: unknown }).blobName === "string"
             ? (entry as { blobName: string }).blobName
             : null);
-        if (!blobName || !EMAIL_BLOB_PREFIX_RE.test(blobName)) {
-          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must reference emails/{messageId}/..." } };
+        if (!isBlobName(blobName, EMAIL_ATTACHMENT_SHAPE)) {
+          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must be email-attachments/{messageId}/{uuid} names" } };
         }
       }
     }

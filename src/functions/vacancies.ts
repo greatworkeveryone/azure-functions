@@ -656,6 +656,11 @@ async function handleDeleteVacancyImage(
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
     const current: string[] = JSON.parse((rows[0].Images as string) ?? "[]");
+    // Only an image this vacancy actually holds may be removed — the URL is the
+    // caller's, and its blob name is what gets deleted (SEC-01 path B).
+    if (!current.includes(body.imageUrl)) {
+      return { status: 404, jsonBody: { error: "Image not found on this vacancy" } };
+    }
     const filtered = current.filter((u) => u !== body.imageUrl);
 
     const updated = await executeQuery(

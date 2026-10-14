@@ -13,15 +13,16 @@ import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { uploadAttachment } from "../mybuildings-client";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
 
-// Server-generated email-attachment blobs land under emails/{messageId}/...
-// where {messageId} is a sanitised, URL-safe slug. Any blob name claimed via
-// handleClaimEmailAttachment must match this pattern — a caller cannot point
-// the Attachments row at an arbitrary blob path.
-const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
+// A stored name that is not a minted wr-attachments name (a legacy row, or
+// one claimed before SEC-01 was fixed) gets no link rather than failing the list.
+function readSasOrNull(blobName: unknown): string | null {
+  return isBlobName(blobName, WR_ATTACHMENTS_SHAPES) ? generateReadSasUrl(blobName) : null;
+}
 
 // Explicit column list — mirrors JOB_COLUMNS pattern in jobs.ts.
 // BlobName is included because callers use it to mint a read SAS URL
@@ -217,7 +218,7 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
     // null so the UI can show the row as archived.
     const attachments = rows.map((r: any) => ({
       ...r,
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
 
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
@@ -391,7 +392,7 @@ async function listParentAttachments(
     /* eslint-enable local/no-sql-interpolation */
     const attachments = rows.map((r: any) => ({
       ...r,
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
   } catch (error: any) {
@@ -469,7 +470,14 @@ async function handleDeleteAttachment(
       return forbiddenResponse("Only the uploader or an admin can delete this attachment.");
     }
 
-    if (!archived) {
+    // Only a file uploaded to this row is the row's to delete. A claimed email
+    // attachment belongs to its email and an inspection photo to its
+    // inspection; both keep their blob, as does any name that is not minted.
+    const ownsBlob = isBlobName(blobName, ATTACHMENT_SHAPE);
+    if (!archived && !ownsBlob) {
+      context.log(`deleteAttachment: row ${attachmentId} removed; its blob is not this row's to delete`);
+    }
+    if (!archived && ownsBlob) {
       try {
         await deleteBlob(blobName);
       } catch (err: any) {
@@ -528,9 +536,9 @@ async function handleClaimEmailAttachment(
     if (!BlobName || typeof BlobName !== "string") {
       return { status: 400, jsonBody: { error: "BlobName (string) required" } };
     }
-    // Only blobs landed by the email-sync pipeline (under emails/{messageId}/)
-    // can be claimed — caller cannot point the row at an arbitrary blob path.
-    if (!EMAIL_BLOB_PREFIX_RE.test(BlobName)) {
+    // Only a blob the mail sync minted (email-attachments/<messageId>/<uuid>[.ext],
+    // anchored at both ends) can be claimed — never an arbitrary or traversal path.
+    if (!isBlobName(BlobName, EMAIL_ATTACHMENT_SHAPE)) {
       return { status: 400, jsonBody: { error: "Invalid attachment reference" } };
     }
     if (!JobID || typeof JobID !== "number") {
@@ -650,7 +658,7 @@ async function handleUpdateAttachmentComment(
       jsonBody: {
         attachment: {
           ...r,
-          sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+          sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
         },
       },
     };

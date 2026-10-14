@@ -295,7 +295,9 @@ async function fetchAndUploadAttachments(
         buffer,
         att.name,
         att.contentType ?? "application/octet-stream",
-        `email-attachments/${graphMessageId}`,
+        // Graph ids are URL-safe base64; map the two standard-base64 characters
+        // anyway so the folder always fits EMAIL_ATTACHMENT_SHAPE (blob-names.ts).
+        `email-attachments/${graphMessageId.replace(/\+/g, "-").replace(/\//g, "_")}`,
       );
       results.push({ blobName, fileName: att.name });
     } catch (err: any) {
