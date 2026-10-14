@@ -39,6 +39,7 @@ async function tenancyReviewScheduleTimer(
          NextReviewDate = DATEADD(month, ReviewIntervalMonths, COALESCE(LastReviewDate, Commencement))
        OUTPUT INSERTED.TenantId
        WHERE NextReviewDate IS NULL
+         AND ArchivedAt IS NULL
          AND ReviewIntervalMonths IS NOT NULL
          AND COALESCE(LastReviewDate, Commencement) IS NOT NULL
          AND Status <> 'vacated'`,
@@ -52,6 +53,7 @@ async function tenancyReviewScheduleTimer(
       `SELECT t.TenantId, t.NextReviewDate, t.ReviewType
        FROM dbo.Tenants t
        WHERE t.NextReviewDate IS NOT NULL
+         AND t.ArchivedAt IS NULL
          AND t.Status <> 'vacated'
          AND t.ReviewType <> 'none'
          AND NOT EXISTS (

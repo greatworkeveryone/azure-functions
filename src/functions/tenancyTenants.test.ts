@@ -777,7 +777,8 @@ describe("deleteRegisterTenant", () => {
   });
 
   it("returns 400 when the tenant is referenced by a job", async () => {
-    db.executeQuery.mockResolvedValueOnce([{ N: 2 }]);
+    // The facts query (D4: jobs, schedule rows, areas, documents under lock).
+    db.executeQuery.mockResolvedValueOnce([{ Documents: 0, Jobs: 2, LegalName: "Acme", Occupancies: 0, ScheduledRateSteps: "[]" }]);
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);
     expect(res.status).toBe(400);
     expect((res.jsonBody as { error: string }).error).toMatch(/Reassign first/);

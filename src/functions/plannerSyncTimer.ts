@@ -125,6 +125,7 @@ export async function plannerSyncTimer(
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
+         AND t.ArchivedAt IS NULL
          AND (t.Expiry IS NOT NULL OR t.NextReviewDate IS NOT NULL)`,
     );
 

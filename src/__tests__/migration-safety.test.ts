@@ -15,6 +15,7 @@ const MIGRATIONS = [
   "123_graph_subscriptions.sql",
   "128_timer_runs.sql",
   "129_email_intake_watermark.sql",
+  "135_attachment_archive.sql",
 ];
 
 // The one destructive-looking phrase the money migrations need: the trigger
@@ -157,6 +158,16 @@ describe("migrations 123 and 129 match the code that uses them", () => {
 
   it("123 refuses, rather than skips, a unique index it can't build", () => {
     expect(stripComments(read("123_graph_subscriptions.sql"))).toMatch(/HAVING COUNT\(\*\) > 1\)\s*BEGIN\s*;THROW 51123/);
+  });
+});
+
+describe("migration 135 matches the code that uses it", () => {
+  it("adds Attachments.ArchivedAt and ArchivedBy, nullable, which archiveTenancyDocument stamps", () => {
+    const code = stripComments(read("135_attachment_archive.sql"));
+    expect(code).toMatch(/ALTER TABLE dbo\.Attachments ADD ArchivedAt DATETIME2 NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.Attachments ADD ArchivedBy NVARCHAR\(255\) NULL;/);
+    const source = readFileSync(join(__dirname, "..", "functions", "archiveTenancyDocument.ts"), "utf8");
+    expect(source).toMatch(/UPDATE dbo\.Attachments SET ArchivedAt = SYSUTCDATETIME\(\), ArchivedBy = @By/);
   });
 });
 

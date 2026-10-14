@@ -102,7 +102,19 @@ async function handleUploadTenancyAttachment(
   }
 }
 
-// ── GET /api/getTenancyAttachments?tenantId=X ────────────────────────────────
+// ── GET /api/getTenancyAttachments?tenantId=X[&includeArchived=true] ─────────
+// Archived documents (D4, migration 135) are left out unless includeArchived.
+
+const LIST_DOCUMENTS_SQL = `SELECT a.*
+   FROM TenancyAttachments ta
+   JOIN Attachments a ON a.Id = ta.AttachmentID
+  WHERE ta.TenantId = @TenantId AND a.ArchivedAt IS NULL
+  ORDER BY ta.AttachedAt DESC`;
+const LIST_DOCUMENTS_WITH_ARCHIVED_SQL = `SELECT a.*
+   FROM TenancyAttachments ta
+   JOIN Attachments a ON a.Id = ta.AttachmentID
+  WHERE ta.TenantId = @TenantId
+  ORDER BY ta.AttachedAt DESC`;
 
 async function handleGetTenancyAttachments(
   request: HttpRequest,
@@ -125,13 +137,10 @@ async function handleGetTenancyAttachments(
   let connection;
   try {
     connection = await createRequestConnection(token);
+    const includeArchived = request.query.get("includeArchived") === "true";
     const rows = await executeQuery(
       connection,
-      `SELECT a.*
-         FROM TenancyAttachments ta
-         JOIN Attachments a ON a.Id = ta.AttachmentID
-        WHERE ta.TenantId = @TenantId
-        ORDER BY ta.AttachedAt DESC`,
+      includeArchived ? LIST_DOCUMENTS_WITH_ARCHIVED_SQL : LIST_DOCUMENTS_SQL,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     const attachments = rows.map((r: any) => ({

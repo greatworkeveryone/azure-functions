@@ -10,7 +10,10 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { deletionRefusal, readTenancyFacts } from "../tenancy-records";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
@@ -50,7 +53,8 @@ async function getTenants(
   const buildingId = request.query.get("buildingId");
   const tenantId = request.query.get("tenantId");
 
-  const whereParts: string[] = [];
+  // Archived tenancies (D4) stay out of the pickers jobs and keys use.
+  const whereParts: string[] = ["t.ArchivedAt IS NULL"];
   const params: { name: string; type: any; value: any }[] = [];
   if (buildingId) {
     whereParts.push("t.BuildingId = @BuildingId");
@@ -237,26 +241,39 @@ async function deleteTenant(
       return { status: 400, jsonBody: { error: "TenantID (number) required" } };
     }
 
+    // Same rule as deleteRegisterTenant (D4): only an empty draft is deleted.
     connection = await createRequestConnection(token);
-    const refCount = await executeQuery(
-      connection,
-      "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: TenantID }],
-    );
-    if ((refCount[0]?.N as number) > 0) {
-      return {
-        status: 400,
-        jsonBody: {
-          error: "Cannot delete — tenant is assigned to at least one job. Reassign first.",
-        },
-      };
-    }
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
-    await executeQuery(
-      connection,
-      "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-      [{ name: "Id", type: TYPES.Int, value: TenantID }],
-    );
+    await beginTransaction(connection);
+    try {
+      const facts = await readTenancyFacts(connection, TenantID);
+      if (!facts) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Tenancy not found" } };
+      }
+      const refusal = deletionRefusal(facts);
+      if (refusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: refusal.status, jsonBody: { error: refusal.error } };
+      }
+      await executeQuery(
+        connection,
+        "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
+        [{ name: "Id", type: TYPES.Int, value: TenantID }],
+      );
+      await record(connection, {
+        action: "tenancy.delete_draft",
+        actor,
+        buildingId: facts.buildingId,
+        subject: { id: TenantID, type: "tenancy" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     invalidateTenant(TenantID);
     return { status: 200, jsonBody: { deleted: true, tenantId: TenantID } };

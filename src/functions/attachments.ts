@@ -19,6 +19,7 @@ import { checkRateLimit } from "../rateLimit";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope } from "../ledger/moneyDecisions";
+import { leaseDocumentRefusal, tenancyOfDocument } from "../tenancy-records";
 import {
   detachRefusal,
   isMoneyLinkTable,
@@ -528,6 +529,12 @@ async function handleDeleteAttachment(
     const links = await moneyLinksOf(connection, attachmentId);
     if (links.length > 0) {
       return { status: 422, jsonBody: { error: linkedFileRefusal(links) } };
+    }
+    // A lease document is archived, never deleted (D4, DL-19): the cascade
+    // would also drop its TenancyAttachments link with no record kept.
+    const tenancy = await tenancyOfDocument(connection, attachmentId);
+    if (tenancy) {
+      return { status: 422, jsonBody: { error: leaseDocumentRefusal(tenancy) } };
     }
 
     if (!archived) {
