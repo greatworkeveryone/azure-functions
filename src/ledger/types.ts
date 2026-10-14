@@ -32,6 +32,7 @@ export type LedgerSubjectType =
   | "quote"
   | "rate_step"
   | "rent_review"
+  | "service_schedule"
   | "tenancy";
 
 export type LedgerActor =

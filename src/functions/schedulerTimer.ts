@@ -1,17 +1,21 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
-import { runFacilitiesScheduler, schedulerMode, type SchedulerReport } from "../facilitiesScheduler";
+import { runFacilitiesScheduler, schedulerMaxActions, schedulerMode, type SchedulerReport } from "../facilitiesScheduler";
 import { Sentry } from "../sentry";
 
 // ── Timer trigger: daily at 22:00 UTC (07:30 in Darwin) ──────────────────────
 // The facilities scheduler (src/facilitiesScheduler.ts, sprint F): defects
-// period reminders 60 and 30 days before the end.
+// period reminders 60 and 30 days before the end (F1); maintenance jobs from
+// service schedules, lead days before they are due, skipping due dates inside a
+// blocking defects period; escalations for overdue servicing (F2).
 //
 // Opt-in, because it writes:
-//   SCHEDULER_ENABLED=true   it raises reminders (through the escalation engine)
+//   SCHEDULER_ENABLED=true   it raises reminders, creates service jobs, raises overdue
+//                            escalations (through the escalation engine)
 //   SCHEDULER_DRY_RUN=true   logs, with counts, what it would do and writes nothing
 //                            (wins over ENABLED)
 //   neither                  it does nothing and does not touch the database
+//   SCHEDULER_MAX_ACTIONS    most writes in one run (default 100)
 // Turn on the dry run first and read the counts in the log.
 //
 // runSchedulerTimer is the plain body so lane D's runTimer (TimerRuns) can wrap
@@ -33,8 +37,12 @@ export async function runSchedulerTimer(
     const report = await runFacilitiesScheduler(connection, {
       dryRun: mode === "dry-run",
       log: (message) => context.log(message),
+      maxActions: schedulerMaxActions(env),
       warn: (message) => context.warn(message),
     });
+    if (report.truncated) {
+      Sentry.captureMessage("Facilities scheduler stopped at its action limit; the rest waits for the next run", "warning");
+    }
     if (report.errors.length > 0) {
       for (const error of report.errors) context.warn(`schedulerTimer: ${error}`);
       Sentry.captureMessage(`Facilities scheduler finished with ${report.errors.length} problem(s): ${report.errors[0]}`, "error");

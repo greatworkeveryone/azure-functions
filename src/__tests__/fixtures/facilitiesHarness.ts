@@ -85,3 +85,41 @@ export function jobRow(overrides: Row = {}): Row {
     ...overrides,
   };
 }
+
+/** A ServiceSchedules row joined with its display names (migration 120). */
+export function scheduleRow(overrides: Row = {}): Row {
+  return {
+    Active: true,
+    AnchorDate: at("2026-04-28"),
+    ArchivedAt: null,
+    ArchivedBy: null,
+    AssetId: 12,
+    AssetName: "Chiller 1",
+    AssetTag: "CH-01",
+    BuildingId: 1,
+    BuildingName: "Tower A",
+    Category: "HVAC / mechanical",
+    ContractorId: 5,
+    ContractorName: "Cool Air Pty Ltd",
+    CreatedAt: at("2026-10-01"),
+    CreatedBy: "Adam",
+    IntervalCount: 6,
+    IntervalUnit: "months",
+    IsContract: true,
+    LastCompletedJobId: null,
+    LeadDays: 14,
+    LevelLocationId: 30,
+    LevelName: "Level 3",
+    LocationId: null,
+    LocationName: "Plant room",
+    Name: "Six-monthly chiller service",
+    NextDue: at("2026-10-28"),
+    Notes: null,
+    RowVersion: ROW_VERSION,
+    Scope: null,
+    ServiceScheduleId: 21,
+    UpdatedAt: at("2026-10-01"),
+    UpdatedBy: "Adam",
+    ...overrides,
+  };
+}

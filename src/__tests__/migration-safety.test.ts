@@ -11,6 +11,7 @@ const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
   "119_defects_periods.sql",
+  "120_service_schedules.sql",
 ];
 
 // The one destructive-looking phrase the money migrations need: the trigger

@@ -2,11 +2,19 @@
 import {
   coveringPeriods,
   defectsReminderStage,
+  firstDueOnOrAfter,
+  isGenerationDue,
   isJobCovered,
+  isServiceOverdue,
+  isUrgentService,
   jobService,
   needsLocationChoice,
+  nextDueAfter,
+  seriesDate,
+  serviceJobTitle,
   type CoverageJob,
   type CoveragePeriod,
+  type ServiceSeries,
 } from "../facilitiesRules";
 import vectors from "./facilities-rules.vectors.json";
 
@@ -57,5 +65,33 @@ describe("jobService", () => {
     expect(jobService({ ...base, category: "Common Areas", kind: "facilities", type: "Plumbing" })).toBe("Hydraulic");
     expect(jobService({ ...base, category: "Common Areas", kind: "facilities", type: "Signage" })).toBeNull();
     expect(jobService({ ...base, category: "Common Areas", kind: null, type: null })).toBeNull();
+  });
+});
+
+describe("service schedules: next-due arithmetic (shared vectors)", () => {
+  it.each(vectors.seriesDate)("seriesDate: $name", ({ expected, n, series }) => {
+    expect(seriesDate(series as ServiceSeries, n)).toBe(expected);
+  });
+
+  it.each(vectors.nextDueAfter)("nextDueAfter: $name", ({ after, expected, series }) => {
+    expect(nextDueAfter(series as ServiceSeries, after)).toBe(expected);
+  });
+
+  it.each(vectors.firstDueOnOrAfter)("firstDueOnOrAfter: $name", ({ date, expected, series }) => {
+    expect(firstDueOnOrAfter(series as ServiceSeries, date)).toBe(expected);
+  });
+
+  it.each(vectors.generation)("generation: $name", ({ due, leadDays, nextDue, overdue, today }) => {
+    expect(isGenerationDue(nextDue, leadDays, today)).toBe(due);
+    expect(isServiceOverdue(nextDue, today)).toBe(overdue);
+  });
+
+  it("is urgent for fire and life safety and lifts only", () => {
+    for (const [category, urgent] of Object.entries(vectors.urgent)) expect(isUrgentService(category)).toBe(urgent);
+  });
+
+  it("names a generated job '{Name} — {asset or scope} — due DD/MM/YYYY'", () => {
+    expect(serviceJobTitle("Six-monthly chiller service", "Chiller 1", "2027-02-28")).toBe("Six-monthly chiller service — Chiller 1 — due 28/02/2027");
+    expect(serviceJobTitle("Monthly fire test", null, "2026-11-01")).toBe("Monthly fire test — due 01/11/2026");
   });
 });

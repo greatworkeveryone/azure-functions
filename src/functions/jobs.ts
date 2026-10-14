@@ -23,6 +23,7 @@ import { checkRateLimit } from "../rateLimit";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
 import { todayInDarwin } from "../darwinDate";
 import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
+import { isWorkCompletion, markServiceJobCompleted } from "../serviceScheduleRuns";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -1182,7 +1183,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
 //   NewAssignee           → Jobs.AssignedTo
 // Always bumps Jobs.LastModifiedDate.
 
-async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -1489,6 +1490,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
         `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
         updateParams,
       );
+
+      // Service schedules (sprint F2, WP50): completing a scheduled job's work
+      // moves its schedule on to the next due date of the anchor series.
+      if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
+        await markServiceJobCompleted(connection, JobID);
+      }
 
       await commitTransaction(connection);
     } catch (err) {

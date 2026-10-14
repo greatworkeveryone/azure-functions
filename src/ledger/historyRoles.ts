@@ -53,6 +53,7 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["payment", PAYMENT_READ],
   ["purchase_order", INVOICE_AND_PO_READ],
   ["quote", QUOTE_READ],
+  ["service_schedule", FACILITIES_READ],
   ["tenancy", TENANCY_READ],
 ]);
 

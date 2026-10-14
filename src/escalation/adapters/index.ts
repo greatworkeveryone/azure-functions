@@ -5,10 +5,12 @@
 import { defectsPeriodAdapter } from "./defectsPeriod";
 import { jobAdapter } from "./job";
 import { registerAdapter } from "./registry";
+import { serviceScheduleAdapter } from "./serviceSchedule";
 import { systemAdapter } from "./system";
 
 registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);
+registerAdapter(serviceScheduleAdapter);
 registerAdapter(systemAdapter);
 
 export { getAdapter, registerAdapter, registeredSubjectTypes, requireAdapter, unregisterAdapter } from "./registry";

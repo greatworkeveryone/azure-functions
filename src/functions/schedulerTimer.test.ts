@@ -21,7 +21,15 @@ const { Sentry } = require("../sentry") as { Sentry: { captureException: jest.Mo
 
 const registrations = [...app.timer.mock.calls];
 
-const report = (errors: string[] = []) => ({ defects: { alreadyOpen: 0, considered: 0, raised: 0, skippedAlreadySent: 0, wouldRaise: 0 }, errors });
+const counts = { alreadyOpen: 0, considered: 0, raised: 0, skippedAlreadySent: 0, wouldRaise: 0 };
+const report = (errors: string[] = [], truncated = false) => ({
+  actions: 0,
+  defects: counts,
+  errors,
+  overdue: counts,
+  schedules: { alreadyDone: 0, considered: 0, created: 0, skippedDefects: 0, wouldCreate: 0, wouldSkip: 0 },
+  truncated,
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -49,6 +57,13 @@ it("runs live and reports per-record failures to Sentry", async () => {
   await runSchedulerTimer(new InvocationContext(), { SCHEDULER_ENABLED: "true" });
   expect(scheduler.runFacilitiesScheduler).toHaveBeenCalledWith({ id: "conn" }, expect.objectContaining({ dryRun: false }));
   expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/1 problem/), "error");
+});
+
+it("passes SCHEDULER_MAX_ACTIONS through and warns when the run was cut short", async () => {
+  scheduler.runFacilitiesScheduler.mockResolvedValue(report([], true));
+  await runSchedulerTimer(new InvocationContext(), { SCHEDULER_ENABLED: "true", SCHEDULER_MAX_ACTIONS: "25" });
+  expect(scheduler.runFacilitiesScheduler).toHaveBeenCalledWith({ id: "conn" }, expect.objectContaining({ maxActions: 25 }));
+  expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/action limit/), "warning");
 });
 
 it("fails loudly when the run itself throws", async () => {

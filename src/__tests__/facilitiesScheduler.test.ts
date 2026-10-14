@@ -68,7 +68,7 @@ describe("defects reminders", () => {
     expect(engine.raise).toHaveBeenCalledTimes(1);
     expect(report.defects.skippedAlreadySent).toBe(1);
     const [check] = callsMatching(db.executeQuery, EVER_RAISED);
-    expect(check[1]).toMatch(/JSON_VALUE\(Context, '\$\.endsOn'\) = @EndsOn/);
+    expect(check[1]).toMatch(/JSON_VALUE\(Context, '\$\.endsOn'\) = @Date/);
   });
 
   it("writes nothing in a dry run and says what it would raise", async () => {

@@ -88,6 +88,13 @@ export const LEDGER_ACTIONS = {
   "defects_period.update": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
   "job.defects_override": { exception: true, reasonRequired: true, subjects: ["job"] },
 
+  // Service schedules (sprint F2, WP50). Job generation itself is not a
+  // decision (the schedule was); the run rows record it.
+  "service_schedule.archive": { exception: true, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.create": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.restore": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.update": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one
   // exception: a person decided the escalation was not needed.
