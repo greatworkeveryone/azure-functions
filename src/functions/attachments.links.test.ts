@@ -65,6 +65,42 @@ const sqlCalls = () =>
     sql: String(c[1]),
   }));
 
+// A small stand-in for the database, enough to answer the two statements the
+// join handlers send: the guarded attach and the list. It applies SQL's rule
+// that a NULL JobID equals nothing, and it only checks jobs when the statement
+// itself joins the parent table and compares a.JobID = p.JobID, so a handler
+// that forgets the check links and lists across jobs here as it would in SQL.
+// Job 9 owns PO 4, quote 7, invoice 5 and file 11; file 21 is on job 8; file
+// 31 has no job (a tenancy lease or a key signature).
+const FILE_JOB: Record<number, number | null> = { 11: 9, 21: 8, 31: null };
+const PARENT_JOB: Record<string, Record<number, number>> = {
+  JobInvoices: { 5: 9 },
+  PurchaseOrders: { 4: 9 },
+  Quotes: { 7: 9 },
+};
+const LINKS: Record<string, number[]> = { JobInvoiceAttachments: [11, 21, 31], PurchaseOrderAttachments: [11, 21, 31], QuoteAttachments: [11, 21, 31] };
+
+function sameJob(sql: string, parentId: number, attachmentId: number): boolean {
+  const parent = /JOIN (\w+) p ON p\.\w+ = (?:@ParentID|j\.\w+)/.exec(sql)?.[1];
+  if (!parent || !/\ba\.JobID = p\.JobID\b/.test(sql)) return true;
+  const fileJob = FILE_JOB[attachmentId];
+  return fileJob !== null && fileJob !== undefined && fileJob === PARENT_JOB[parent]?.[parentId];
+}
+
+async function fakeDb(_connection: unknown, sql: string, params: { name: string; value: unknown }[] = []): Promise<Record<string, unknown>[]> {
+  const value = (name: string) => params.find((p) => p.name === name)?.value as number;
+  if (/INSERT INTO \w+Attachments/.test(sql)) {
+    return [{ Linked: sameJob(sql, value("ParentID"), value("AttachmentID")) ? 1 : 0 }];
+  }
+  const list = /FROM (\w+Attachments) j\s+JOIN Attachments a/.exec(sql);
+  if (list) {
+    return (LINKS[list[1]] ?? [])
+      .filter((id) => sameJob(sql, value("ParentID"), id))
+      .map((id) => ({ BlobName: `files/${id}.pdf`, Id: id, JobID: FILE_JOB[id], MyBuildingsConfirmedAt: null }));
+  }
+  return [];
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   _resetRateLimitForTests();
@@ -72,7 +108,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "abby@example.com", name: "Abby Accounts", oid: "abby-oid" });
   db.createRequestConnection.mockResolvedValue({ id: "connection" });
-  db.executeQuery.mockResolvedValue([]);
+  db.executeQuery.mockImplementation(fakeDb);
 });
 
 describe("invoice attachment routes", () => {
@@ -174,7 +210,7 @@ describe("getInvoiceAttachments", () => {
       count: 2,
     });
     const [call] = sqlCalls();
-    expect(call.sql).toMatch(/FROM JobInvoiceAttachments j\s+JOIN Attachments a ON a\.Id = j\.AttachmentID\s+WHERE j\.JobInvoiceID = @ParentID/);
+    expect(call.sql).toMatch(/FROM JobInvoiceAttachments j\s+JOIN Attachments a ON a\.Id = j\.AttachmentID[\s\S]*WHERE j\.JobInvoiceID = @ParentID/);
     expect(call.params).toEqual({ ParentID: 5 });
   });
 
@@ -201,5 +237,36 @@ describe("the purchase-order and quote trios share the token-stamped AttachedBy"
     const [call] = sqlCalls();
     expect(call.sql).toMatch(insert);
     expect(call.params.AttachedBy).toBe("Abby Accounts");
+  });
+});
+
+// J9 review: a file can be linked to a PO, quote or invoice only when it is on
+// that parent's job. Files with no job (tenancy leases, key signatures) are
+// never linkable, so their own accounts-only read routes can't be walked round
+// through getXxxAttachments. Links made before this check stop listing.
+describe.each([
+  ["attachToPurchaseOrder", "getPurchaseOrderAttachments", { PurchaseOrderID: 4 }, { purchaseOrderId: "4" }, "PurchaseOrders"],
+  ["attachToQuote", "getQuoteAttachments", { QuoteID: 7 }, { quoteId: "7" }, "Quotes"],
+  ["attachToInvoice", "getInvoiceAttachments", { InvoiceID: 5 }, { invoiceId: "5" }, "JobInvoices"],
+])("%s only links files on the parent's job", (attachRoute, listRoute, ids, query, parentTable) => {
+  const attach = (attachmentId: number) => handler(attachRoute)(post({ ...ids, AttachmentID: attachmentId }), ctx);
+
+  it("links a file on the same job", async () => {
+    expect(await attach(11)).toEqual({ jsonBody: { ok: true }, status: 200 });
+    expect(sqlCalls()[0].sql).toMatch(new RegExp(`JOIN ${parentTable} p ON p\\.\\w+ = @ParentID`));
+  });
+
+  it("refuses a file from another job with 422", async () => {
+    expect(await attach(21)).toEqual({ jsonBody: { error: "That file isn't on this job." }, status: 422 });
+  });
+
+  it("refuses a file with no job (a lease or a key signature) with 422", async () => {
+    expect(await attach(31)).toEqual({ jsonBody: { error: "That file isn't on this job." }, status: 422 });
+  });
+
+  it("leaves out links made across jobs before this check, so no read link is minted for them", async () => {
+    const res = await handler(listRoute)(get(query), ctx);
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ attachments: [{ Id: 11, sasUrl: "https://blob/files/11.pdf?sas" }], count: 1 });
   });
 });
