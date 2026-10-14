@@ -33,6 +33,7 @@ jest.mock("../jobPlannerSync", () => ({ syncJobActionTriggersStandalone: jest.fn
 jest.mock("../pdf/job-packet", () => ({ buildJobPacket: jest.fn() }));
 jest.mock("../pdf/job-packet-loader", () => ({ loadJobPacketInputs: jest.fn() }));
 jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn() }));
+jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn(), flush: jest.fn() } }));
 
 import { addJobEvent } from "./jobs";
 import { at, callsMatching, paramsOf, post, routeQueries } from "../__tests__/fixtures/facilitiesHarness";
@@ -91,6 +92,18 @@ it("does not move a schedule that has already moved on (idempotent)", async () =
   await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);
   expect(callsMatching(db.executeQuery, STAMP_RUN)).toHaveLength(0);
   expect(callsMatching(db.executeQuery, ADVANCE)).toHaveLength(0);
+});
+
+it("still completes the job, loudly, on a database without migration 120", async () => {
+  given({ Status: "Work" }, []);
+  routeQueries(db.executeQuery, [
+    { match: CURRENT, rows: [{ AwaitingRole: "facilities", IsContract: true, IsInternal: false, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: RUN_FOR_JOB, throws: new Error("Invalid object name 'dbo.ServiceScheduleRuns'.") },
+    { match: /INSERT INTO JobEvents/, rows: [{ JobEventID: 1 }] },
+  ]);
+  const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);
+  expect(response.status).toBe(200);
+  expect(db.commitTransaction).toHaveBeenCalledTimes(1);
 });
 
 it("leaves jobs that didn't come from a schedule alone", async () => {

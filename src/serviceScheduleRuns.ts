@@ -8,6 +8,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlRow } from "./db";
+import { Sentry } from "./sentry";
 import { serviceJobTitle, nextDueAfter, type IntervalUnit } from "./facilitiesRules";
 import { scheduleTarget, type ScheduleApi } from "./serviceSchedules";
 
@@ -170,16 +171,29 @@ export function isWorkCompletion(status: string | null, awaitingRole: string | n
  * still waiting on that due date, moves NextDue to the next occurrence after it
  * (from the anchor series, never from today). Idempotent; a no-op for other jobs.
  */
+// Migration 120 is applied by hand. If this code reaches a database without
+// it, completing a job must still work: no table means no schedule to move,
+// said loudly to Sentry. (A missing object fails only the statement, not the
+// surrounding transaction.)
+const MISSING_TABLE = /Invalid object name 'dbo\.(ServiceScheduleRuns|ServiceSchedules)'/i;
+
 export async function markServiceJobCompleted(connection: Connection, jobId: number): Promise<{ advancedTo: string | null }> {
-  const runs = await executeQuery(
-    connection,
-    `SELECT r.ServiceScheduleRunId, r.ServiceScheduleId, r.DueDate, r.CompletedAt,
-            s.NextDue, s.AnchorDate, s.IntervalCount, s.IntervalUnit
-       FROM dbo.ServiceScheduleRuns r
-       JOIN dbo.ServiceSchedules s ON s.ServiceScheduleId = r.ServiceScheduleId
-      WHERE r.JobId = @JobId`,
-    [{ name: "JobId", type: TYPES.Int, value: jobId }],
-  );
+  let runs: SqlRow[];
+  try {
+    runs = await executeQuery(
+      connection,
+      `SELECT r.ServiceScheduleRunId, r.ServiceScheduleId, r.DueDate, r.CompletedAt,
+              s.NextDue, s.AnchorDate, s.IntervalCount, s.IntervalUnit
+         FROM dbo.ServiceScheduleRuns r
+         JOIN dbo.ServiceSchedules s ON s.ServiceScheduleId = r.ServiceScheduleId
+        WHERE r.JobId = @JobId`,
+      [{ name: "JobId", type: TYPES.Int, value: jobId }],
+    );
+  } catch (error) {
+    if (!(error instanceof Error) || !MISSING_TABLE.test(error.message)) throw error;
+    Sentry.captureMessage("dbo.ServiceScheduleRuns is missing: apply migration 120. Job completion did not check schedules.", "error");
+    return { advancedTo: null };
+  }
   const run = runs[0];
   if (!run) return { advancedTo: null };
   if (!run.CompletedAt) {
