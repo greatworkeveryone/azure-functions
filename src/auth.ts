@@ -1,5 +1,6 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES } from "tedious";
+import { noteAccess } from "./access/accessEvents";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { isDevOverrideEnabled, verifyEntraToken } from "./jwt";
 import { Sentry } from "./sentry";
@@ -365,6 +366,12 @@ export async function requireRole(
     Sentry.captureException(err, { extra: { context: "requireRole role lookup" } });
     return serviceUnavailableResponse();
   }
+
+  // Access log (S10): sampled and deferred, never awaited. Roles are non-empty
+  // only for a token rolesForRequest verified (or the dev override, which
+  // cannot run in Production), so the decoded oid is trusted.
+  const bearer = extractToken(request);
+  noteAccess(request, bearer ? oidFromToken(bearer) : null, roles);
 
   if (roles.includes(AppRole.ADMIN)) return null;
 

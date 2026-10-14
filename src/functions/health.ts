@@ -1,4 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { forwardedSummary } from "../access/clientIp";
 import { AppRole, requireRole } from "../auth";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
 
@@ -24,6 +25,10 @@ async function health(request: HttpRequest, context: InvocationContext): Promise
 
   const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
+
+  // S10/S11 probe: does the platform pass the client address? Shape only, never
+  // the address. Will reads this from the office (docs/runbooks/monitoring.md).
+  context.log(`health: client address headers ${JSON.stringify(forwardedSummary(request))}`);
 
   const base = {
     ok: true,

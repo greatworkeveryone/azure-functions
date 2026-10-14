@@ -18,6 +18,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { noteSignIn } from "../access/accessEvents";
 import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
 import { checkRateLimit } from "../rateLimit";
@@ -390,6 +391,9 @@ export async function registerSelf(
     return { status: 400, jsonBody: { error: "invalid email" } };
   }
 
+  // Every sign-in goes to the access log (S10); deferred, never awaited.
+  noteSignIn(request, oid);
+
   let connection;
   try {
     connection = await createServiceRequestConnection();
@@ -410,7 +414,7 @@ export async function registerSelf(
           { name: "UserID", type: TYPES.Int,      value: UserID },
         ],
       );
-      return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
+      return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
     // Step 2: pre-invited user matched by email (first login after admin invite).
@@ -463,7 +467,7 @@ export async function registerSelf(
           ],
         );
       }
-      return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
+      return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
     // Step 3: completely new user — create pending record (no role yet).
@@ -480,7 +484,7 @@ export async function registerSelf(
     );
     return {
       status: 200,
-      jsonBody: { userId: inserted[0].UserID as number, role: null },
+      jsonBody: { accessHints: true, userId: inserted[0].UserID as number, role: null },
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

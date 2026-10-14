@@ -15,7 +15,10 @@ export function corsHeaders(origin: string): Record<string, string> {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Token",
+    // X-Fp-Country: the browser's country hint for the access log (S10). The
+    // frontend sends it only after registerSelf advertises accessHints, so a
+    // frontend deployed ahead of this backend never fails a preflight.
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Token, X-Fp-Country",
     // The header varies per caller — without this, a shared cache can serve
     // one origin's response to another.
     Vary: "Origin",
