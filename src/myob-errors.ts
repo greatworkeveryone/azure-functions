@@ -31,6 +31,7 @@ export type MyobRefusalCode =
   | "outside_period" // a write dated outside the current period
   | "not_floorplan_record" // an update to a record Floorplan did not create
   | "controls" // Johanne's controls are missing or say no
+  | "dry_run" // the operation is in dry run: logged with its payload, not sent
   | "config"; // a MYOB setting is missing or malformed
 
 /** Refused inside Floorplan before anything was sent to MYOB. */

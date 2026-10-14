@@ -156,8 +156,16 @@ async function send(url: string, init: RequestInit): Promise<{ response: Respons
   }
 }
 
-async function refuse(base: Omit<LogRow, "phase">, err: unknown): Promise<never> {
-  await insertOutcomeRow({ ...base, errorMessage: err instanceof Error ? err.message : String(err), phase: "error" });
+// A dry run keeps the exact payload it would have sent (redacted), so the CFO
+// can read what Floorplan was about to do. Other refusals log no body.
+async function refuse(base: Omit<LogRow, "phase">, err: unknown, body: unknown): Promise<never> {
+  const dryRun = err instanceof MyobRequestRefusedError && err.code === "dry_run";
+  await insertOutcomeRow({
+    ...base,
+    errorMessage: err instanceof Error ? err.message : String(err),
+    phase: "error",
+    requestBody: dryRun ? serialiseBody(body).loggable : null,
+  });
   if (err instanceof MyobRequestRefusedError && err.forbiddenCentre) {
     await raiseMyobHealth(MYOB_HEALTH_SUBJECTS.agreement, `Refused ${base.method} ${base.path}: ${err.message}`, {
       actor: base.actor.name,
@@ -192,7 +200,7 @@ export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse
     const guarded = await guardMyobRequest({ body: input.body, headers: input.headers, method, url });
     headers = { ...input.headers, ...guarded.extraHeaders };
   } catch (err) {
-    return refuse(base, err);
+    return refuse(base, err, input.body);
   }
 
   const { loggable, wire } = serialiseBody(input.body);

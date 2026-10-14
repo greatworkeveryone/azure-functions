@@ -9,7 +9,7 @@ jest.mock("./db", () => ({
   executeQuery: jest.fn(),
 }));
 jest.mock("./sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
-jest.mock("./myob-controls", () => ({ assertMyobControlsPresent: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("./myob-controls", () => ({ assertMyobControlsAllow: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("./myob-health", () => ({
   MYOB_HEALTH_SUBJECTS: { agreement: "myob_agreement", link: "myob_link" },
   raiseMyobHealth: jest.fn().mockResolvedValue(undefined),
@@ -227,7 +227,7 @@ describe("one retry", () => {
 });
 
 describe("boot guard: no controls, no MYOB", () => {
-  const { assertMyobControlsPresent } = require("./myob-controls") as { assertMyobControlsPresent: jest.Mock };
+  const { assertMyobControlsAllow: assertMyobControlsPresent } = require("./myob-controls") as { assertMyobControlsAllow: jest.Mock };
 
   it("refuses a read when the file has no MyobControls rows, logging one error row", async () => {
     assertMyobControlsPresent.mockRejectedValueOnce(new MyobRequestRefusedError("controls", "no controls"));
@@ -235,7 +235,7 @@ describe("boot guard: no controls, no MYOB", () => {
     await expect(call({ method: "GET", url: `${API}/Purchase/Order` })).rejects.toMatchObject({ code: "controls" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(1);
-    expect(assertMyobControlsPresent).toHaveBeenCalledWith(CF);
+    expect(assertMyobControlsPresent).toHaveBeenCalledWith({ companyFileId: CF, operation: "purchases.read" }, expect.any(Date));
   });
 
   it("does not apply to the OAuth token exchange, so a link can be made before controls exist", async () => {
@@ -247,6 +247,36 @@ describe("boot guard: no controls, no MYOB", () => {
 
   it("checks the configured file for the file list, which names none", async () => {
     await call({ method: "GET", url: "https://api.myob.com/accountright/" });
-    expect(assertMyobControlsPresent).toHaveBeenCalledWith(null);
+    expect(assertMyobControlsPresent).toHaveBeenCalledWith({ companyFileId: null, operation: "files.list" }, expect.any(Date));
+  });
+});
+
+describe("CFO controls inside myobRequest", () => {
+  const { assertMyobControlsAllow } = require("./myob-controls") as { assertMyobControlsAllow: jest.Mock };
+
+  it("logs a refused write as an error row naming the control, and sends nothing", async () => {
+    assertMyobControlsAllow.mockRejectedValueOnce(
+      new MyobRequestRefusedError("controls", "Refused by the CFO's controls: orders.create is switched off for company file x"),
+    );
+
+    await expect(call({ body: { Date: TODAY, Number: "66Sm261014" } })).rejects.toMatchObject({ code: "controls" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ ErrorMessage: expect.stringContaining("switched off"), Phase: "error", RequestBody: null });
+  });
+
+  it("keeps the payload of a dry run, redacted, without sending it", async () => {
+    assertMyobControlsAllow.mockRejectedValueOnce(new MyobRequestRefusedError("dry_run", "Dry run (CFO control)"));
+
+    await expect(call({ body: { Date: TODAY, Number: "66Sm261014", refresh_token: "x" } })).rejects.toMatchObject({ code: "dry_run" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.parse(String(rows()[0].RequestBody))).toEqual({ Date: TODAY, Number: "66Sm261014", refresh_token: "[redacted]" });
+  });
+
+  it("is asked about the operation and file of every company-file call", async () => {
+    await call();
+    expect(assertMyobControlsAllow).toHaveBeenCalledWith({ companyFileId: CF, operation: "orders.create" }, expect.any(Date));
   });
 });

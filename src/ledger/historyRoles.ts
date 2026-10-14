@@ -38,6 +38,9 @@ const INVOICE_AND_PO_READ = [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILIT
 // getPayments in functions/payments.ts
 const PAYMENT_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR] as const;
 
+// getMyobControls in functions/getMyobControls.ts (the CFO's MYOB switches and link)
+const MYOB_CONTROL_READ = [AppRole.CFO] as const;
+
 const DEFAULT_READ = [AppRole.DIRECTOR] as const;
 
 // A Map, not an object: subjectType comes from the query string and a plain
@@ -45,6 +48,8 @@ const DEFAULT_READ = [AppRole.DIRECTOR] as const;
 const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["invoice", INVOICE_AND_PO_READ],
   ["job", JOB_READ],
+  ["myob_control", MYOB_CONTROL_READ],
+  ["myob_link", MYOB_CONTROL_READ],
   ["payment", PAYMENT_READ],
   ["purchase_order", INVOICE_AND_PO_READ],
   ["quote", QUOTE_READ],

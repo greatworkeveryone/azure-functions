@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-jest.mock("../myob-controls", () => ({ assertMyobControlsPresent: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../myob-controls", () => ({ assertMyobControlsAllow: jest.fn().mockResolvedValue(undefined) }));
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";

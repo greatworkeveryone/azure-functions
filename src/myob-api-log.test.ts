@@ -6,7 +6,7 @@ jest.mock("./db", () => ({
   executeQuery: jest.fn(),
 }));
 jest.mock("./sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
-jest.mock("./myob-controls", () => ({ assertMyobControlsPresent: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("./myob-controls", () => ({ assertMyobControlsAllow: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("./myob-health", () => ({
   MYOB_HEALTH_SUBJECTS: { agreement: "myob_agreement", link: "myob_link" },
   raiseMyobHealth: jest.fn().mockResolvedValue(undefined),
