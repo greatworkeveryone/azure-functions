@@ -34,6 +34,10 @@ export enum JobEvent {
   // Standing-contract fast path (WP10): authorise work directly from New,
   // skipping the quote round. Legal ONLY for contract jobs (isContract = true).
   WORK_AUTHORIZED = "WORK_AUTHORIZED",
+  // System edge (beta sprint J2): the MYOB read-back (M10) saw every invoice on
+  // the job paid. Raised by the system only, never by a person; the transition
+  // guard (jobTransitionGuard.ts) refuses it from anyone else.
+  INVOICE_PAID = "INVOICE_PAID",
 }
 
 export interface JobState {
@@ -58,6 +62,7 @@ const TRANSITIONS: Transition[] = [
   { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: F }, event: JobEvent.PO_CREATED, to: { status: JobStatus.WORK, awaitingRole: F } },
   { from: { status: JobStatus.WORK, awaitingRole: F }, event: JobEvent.WORK_COMPLETED, to: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A } },
   { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A }, event: JobEvent.INVOICE_APPROVED, to: { status: JobStatus.DONE, awaitingRole: A } },
+  { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A }, event: JobEvent.INVOICE_PAID, to: { status: JobStatus.DONE, awaitingRole: A } },
 ];
 
 function statesEqual(a: JobState, b: JobState): boolean {

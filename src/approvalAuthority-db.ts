@@ -35,8 +35,8 @@ export function darwinToday(now: Date = new Date()): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
-/** Everything decideAuthority / canApprove need to know about one building. */
-export async function loadApprovalFacts(conn: Connection, buildingId: number): Promise<AuthorityFacts> {
+/** Everything decideAuthority / canApprove need to know about one building (null: not known). */
+export async function loadApprovalFacts(conn: Connection, buildingId: number | null): Promise<AuthorityFacts> {
   const rows = await getCachedApprovalLimits(conn);
   return {
     directorThreshold: parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD),

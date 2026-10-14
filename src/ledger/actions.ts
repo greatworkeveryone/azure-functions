@@ -49,6 +49,12 @@ export const LEDGER_ACTIONS = {
   "quote.unapprove": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.uncomplete": { exception: true, reasonRequired: false, subjects: ["quote"] },
 
+  // Job lifecycle decisions (beta sprint J2). Done is final: reopening one is
+  // a manager's exception with a reason. The MYOB read-back closing a job
+  // whose invoices are all paid is a system decision.
+  "job.invoices_paid": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "job.reopen": { exception: true, reasonRequired: true, subjects: ["job"] },
+
   // Role, limit and attribution decisions (WP19b)
   "approval_limit.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },
   "quote.approve_attributed": {

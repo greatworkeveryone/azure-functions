@@ -5,7 +5,9 @@
 //   rpcc-functions  src/approvalAuthority.ts          enforces
 //   command-centre  src/helpers/approvalAuthority.ts  explains (buttons, hints)
 // Change both copies together, along with the shared vectors in
-// src/__tests__/approvalAuthority.test.ts and src/helpers/approvalAuthority.test.ts.
+// src/__tests__/approvalAuthority.test.ts and src/helpers/approvalAuthority.test.ts
+// and the SHA-256 of this file pinned there (CORE_SHA256), which fails the
+// tests in whichever repo was changed alone.
 //
 // Pure: no I/O, no clock, no environment. The backend loads the facts in
 // src/approvalAuthority-db.ts.
@@ -162,7 +164,7 @@ export function toRoleLimits(rows: readonly ApprovalLimitRow[]): RoleLimit[] {
  * effectiveDirectorThreshold: facts.directorThreshold when it is a finite
  * number > 0; otherwise the highest non-null limit over every non-director
  * row, including roles that cannot approve this subject and legacy roles
- * nobody holds (parity with requiresDirectorApproval in invoices.ts); null
+ * nobody holds (parity with the requiresDirectorApproval rule it replaced); null
  * when there is none. Role names compare trimmed and lower-cased. Reported on
  * residences too, where it does not apply.
  *
