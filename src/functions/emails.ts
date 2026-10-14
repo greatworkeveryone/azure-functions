@@ -33,6 +33,7 @@ import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
 import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
+import { linkDirectorReply } from "../email/director-reply-link";
 
 // Shape returned next to the raw AttachmentBlobs string so the frontend can
 // render click-to-open chips without a second round-trip for each file.
@@ -936,8 +937,9 @@ export async function promoteEmailToJobUpdate(
 // (SenderAuthenticated = 1, see src/email/sender-auth.ts) — From is spoofable.
 // The actor stamped on the quote is that director's DisplayName, never the
 // body. Helpers + email flip + ledger row are one transaction.
-// EMAIL_REPLY_DECISIONS_ENABLED=false switches the whole path off (403, nothing
-// recorded); the default is on.
+// Reply-to-approve is OFF unless EMAIL_REPLY_DECISIONS_ENABLED is exactly
+// "true" (decision 2, SEC-07): the reply is then only filed on the job
+// (email.reply_linked) and the 403 answer carries the job's link.
 //
 // Ledger (PLAN §3.12): the same quote.director_approve / quote.director_reject
 // as the in-app buttons, ruleApplied "email_reply", the email in `after`. The
@@ -991,20 +993,8 @@ export async function recordEmailQuoteDecision(
   if (!identity) return unauthorizedResponse();
 
   // Decisions belong in the app, where the approver is a verified sign-in rather
-  // than a reply's From address. Defaults to ON until the email deep link opens
-  // the approval step; read per call so it can be flipped without a redeploy.
-  if (process.env.EMAIL_REPLY_DECISIONS_ENABLED === "false") {
-    context.warn(
-      `recordEmailQuoteDecision: refused for ${identity.oid} — email-reply decisions are disabled (EMAIL_REPLY_DECISIONS_ENABLED=false); nothing recorded`,
-    );
-    return {
-      status: 403,
-      jsonBody: {
-        code: "EMAIL_REPLY_DECISIONS_DISABLED",
-        error: "Decisions are made in Floorplan — open the link in the email",
-      },
-    };
-  }
+  // than a reply's From address. Read per call so it can be flipped without a redeploy.
+  const replyDecisionsOn = process.env.EMAIL_REPLY_DECISIONS_ENABLED === "true";
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
@@ -1035,6 +1025,12 @@ export async function recordEmailQuoteDecision(
   try {
     const conn = await createRequestConnection(token);
     connection = conn;
+    if (!replyDecisionsOn) {
+      context.warn(
+        `recordEmailQuoteDecision: reply-to-approve is off — filing email ${EmailID} on the job for ${identity.oid}; no decision recorded`,
+      );
+      return await linkDirectorReply(conn, { emailId: EmailID, operatorName: identity.name, quoteId: QuoteID });
+    }
     // The signed-in person recording the reply (not who decided it).
     const operator = await resolveLedgerActor(request, conn);
     if (!operator) return unauthorizedResponse();

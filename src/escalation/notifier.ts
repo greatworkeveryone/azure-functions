@@ -14,6 +14,7 @@
 
 import type { Connection } from "tedious";
 import { resolveRecipient } from "../email-recipient";
+import { reportSystemHealth } from "../email/role-recipients";
 import { graphSendMail } from "../graph";
 import { formatDarwinDateTime } from "../ledger/darwinTime";
 import { getAdapter } from "./adapters/registry";
@@ -83,6 +84,7 @@ export function targetAddresses(row: EscalationRow, users: readonly DirectoryUse
   let real = targetUsers(row, users).map((user) => user.email);
   if (real.every((address) => !address) && normaliseRole(row.targetRole) === ROLES.facilitiesManager && !row.noIndependentTarget) {
     // No active facilities manager to tell: the env list stands in, minus the raiser.
+    reportSystemHealth("no active facilities_manager in AppUsers; escalations go to FACILITIES_MANAGER_EMAILS");
     const raiserEmail = users.find((user) => user.userId === row.raisedByUserId)?.email?.toLowerCase();
     real = (fallbackEmailsByRole(env)[ROLES.facilitiesManager] ?? []).filter((address) => address.toLowerCase() !== raiserEmail);
   }
