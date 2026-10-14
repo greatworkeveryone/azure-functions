@@ -335,6 +335,18 @@ export async function verifiedIdentityFromRequest(
 }
 
 /**
+ * The caller's bearer token claims after full verification (signature, expiry,
+ * issuer, audience), or null. The money gate (src/moneyGate.ts) reads
+ * `auth_time`/`iat` and `amr` from here; keep it on the same audience as
+ * rolesForRequest when the token audience changes.
+ */
+export async function verifiedRequestClaims(request: HttpRequest): Promise<Record<string, unknown> | null> {
+  const token = extractToken(request);
+  if (!token) return null;
+  return verifyEntraToken(token, SQL_AUDIENCE);
+}
+
+/**
  * Returns null if the caller has at least one of the required roles,
  * or a 403 HttpResponseInit otherwise. Callers should early-return on the
  * non-null result.

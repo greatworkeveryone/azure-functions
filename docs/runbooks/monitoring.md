@@ -1,5 +1,9 @@
 # Monitoring: access patterns and the money-action gate
 
+Contents: 1 what the app records · 2 settings (access log) · 3 confirm the
+client address · 4 App Insights alert rules · 5 the money-action gate ·
+6 Conditional Access (O7)
+
 Owner: Will (Azure). Sprint packages S10 (access monitoring, decision 15) and
 S11 (money-action gate, decision 16); the Azure side is O4/O7. Every change in
 Azure below needs Connor's yes first.
@@ -63,10 +67,12 @@ sending their own header). Flex Consumption should set it; confirm:
    | project timestamp, message
    ```
 
-3. Expect `{"clientIpHeader":…,"entries":1,"forwardedFor":true,…}`. `forwardedFor:false`
-   means the platform does not pass it: stop and tell the S11 owner (the money
-   gate would refuse every money action once `MONEY_ALLOWED_CIDRS` is set).
-   `entries` of 2 or more is fine; note it in the evidence.
+3. Expect `{"clientIpHeader":…,"entries":1,"forwardedFor":true,"moneyNetwork":"unconfigured"}`.
+   `forwardedFor:false` means the platform does not pass it: stop and tell the
+   S11 owner (the money gate would refuse every money action once
+   `MONEY_ALLOWED_CIDRS` is set). `entries` of 2 or more is fine; note it.
+4. After setting `MONEY_ALLOWED_CIDRS` (section 5), repeat from the office:
+   `moneyNetwork` must read `allowed`; from a phone on 5G it must read `refused`.
 
 ## 4. App Insights alert rules
 
@@ -151,3 +157,99 @@ traces
 | where tostring(a.anomaly) == "new_device" or set_has_element(todynamic(a.alsoFlagged), "new_device")
 | summarize events = count() by userId = toint(a.userId), role = tostring(a.role)
 ```
+
+## 5. The money-action gate (S11, decision 16)
+
+Money endpoints (today: `setApprovalLimit`, `upsertPayment`, `markPaymentPaid`,
+`directorApproveJobInvoice`, `markPurchaseOrderMyobCreated`; lane M adds the
+MYOB proposal, push, update and control routes — the list is
+`src/money-gated-routes.ts`) require all of:
+
+1. the request comes from an address in `MONEY_ALLOWED_CIDRS` → else **403
+   `money_network_required`**; the frontend shows "Sending to MYOB is allowed
+   only from the office network or the approved remote connection";
+2. the sign-in is fresh: the token's `auth_time` (else `iat`) within
+   `MONEY_STEP_UP_MINUTES` → else **428 `step_up_required`** and the frontend
+   asks "Confirm it's you to send to MYOB", signs the person in again
+   (`prompt=login`) and retries once;
+3. MFA ran: the token's `amr` contains `mfa` → else 428 as above;
+4. every attempt and its outcome is in the access log (`Kind = money`).
+
+Inspections, keys and jobs are not gated, so phones keep working anywhere.
+
+| Setting                  | Default     | Meaning                                                                                              |
+|--------------------------|-------------|------------------------------------------------------------------------------------------------------|
+| `MONEY_ALLOWED_CIDRS`    | unset       | Comma- or space-separated addresses/CIDRs, IPv4 or IPv6: the office's static egress from Area9 and the approved remote-access egress, e.g. `203.0.113.10/32, 198.51.100.0/29`. **Unset = warn-only**: nothing is refused, each would-be refusal is logged (`[money-gate] warn-only: …`) and `system.health` (subject `money_gate`) tells admin the gate is open; the sweep closes it once the setting exists. Set but unreadable = every money action refused (a typo never opens the gate). |
+| `MONEY_STEP_UP_MINUTES`  | `10`        | How recent the sign-in must be, 1–60 minutes.                                                         |
+
+Order of work: Area9 supplies the static egress IP(s) → step 3 above from the
+office shows `forwardedFor:true` → set `MONEY_ALLOWED_CIDRS` on staging, test
+(office desktop can, 5G phone cannot, a sign-in older than 10 minutes is asked
+to confirm) → production.
+
+Freshness caveat: the gate reads the SQL-scoped access token. Azure SQL tokens
+carry `iat` and `amr` but not `auth_time`, and MSAL can mint a new token from
+its refresh token without the person signing in, so `iat` proves a fresh
+*token*, not a fresh *sign-in*. Within the 10 minutes after any silent
+refresh the step-up is skipped (network and MFA still apply). The proper fix
+is a Conditional Access **authentication context** for money actions with
+sign-in frequency "every time" (section 6, step 6), after which the gate can
+require the context's `acrs` claim; until then this is the documented gap.
+
+Trace lines for alerts and evidence:
+
+```kusto
+traces
+| where timestamp > ago(1d)
+| where message startswith "[money-gate]"
+| project timestamp, message
+```
+
+## 6. Conditional Access (O7) — policy spec
+
+Licence check first: Conditional Access needs Entra ID P1 (included in
+Microsoft 365 Business Premium). Everything below is created in report-only
+mode first, checked in the sign-in logs for a day, then switched on. Each
+switch-on needs Connor's yes.
+
+**Named locations**
+
+- `RP office` — the office static egress IP(s) from Area9, marked trusted.
+- `RP remote access` — the egress of the approved remote-access service, if
+  Area9 provides one. The same addresses go into `MONEY_ALLOWED_CIDRS`.
+
+**Groups**
+
+- `Floorplan-MYOB` — Johanne and whoever may approve or push to MYOB.
+- `Floorplan-BreakGlass` — one cloud-only emergency admin account, long random
+  password in the safe, FIDO2 key, excluded from every policy below, sign-ins
+  alerted to Will and Connor. Never used day to day.
+
+**Policies** (target: the Floorplan app registration(s); exclude
+`Floorplan-BreakGlass` from all)
+
+1. `FP-01 Require MFA` — all users → grant: require MFA. No exclusions other
+   than break-glass. Connor included.
+2. `FP-02 Block legacy authentication` — all users, client apps: Exchange
+   ActiveSync and other clients → block.
+3. `FP-03 Block risky sign-ins` — all users, sign-in risk medium and high →
+   block (or require MFA + password change if P2 is available).
+4. `FP-04 Australia only` — all users **except Connor's account**, locations:
+   any location except Australia (country named location) and `RP office` →
+   block. Connor is exempt from geography only; FP-01 still applies to him.
+5. `FP-05 MYOB group: office or compliant device` — group `Floorplan-MYOB`,
+   locations: any location except `RP office` and `RP remote access` → grant:
+   require device to be marked compliant (Intune). Off-site without a managed
+   device, a member can still sign in for field work only if this policy is
+   scoped to an authentication context (step 6); otherwise they cannot sign
+   in off-site at all. Pick one with Connor before switching on.
+6. (Hardening, after the pilot) `FP-06 Money actions need a fresh sign-in` —
+   authentication context `c1 Money action`, grant: require MFA, session:
+   sign-in frequency every time. The frontend then requests the context on
+   step-up and the gate checks `acrs` contains `c1`.
+
+**Evidence** (one page for the audit pack): policy names and states, and the
+results of: a phone on 5G cannot send to MYOB (403, banner shown); an office
+desktop can; Connor in Denmark can sign in but cannot send (network refused);
+a sign-in older than 10 minutes is asked to confirm; the break-glass account
+signs in and raises the alert.

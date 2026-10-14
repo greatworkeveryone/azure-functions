@@ -1,7 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { forwardedSummary } from "../access/clientIp";
+import { clientAddress, forwardedSummary } from "../access/clientIp";
 import { AppRole, requireRole } from "../auth";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
+import { isAllowedNetwork, moneyGateConfig } from "../moneyGate";
 
 // Captured once at module load so the value reflects when the worker started.
 const startedAt = new Date().toISOString();
@@ -26,9 +27,12 @@ async function health(request: HttpRequest, context: InvocationContext): Promise
   const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
-  // S10/S11 probe: does the platform pass the client address? Shape only, never
-  // the address. Will reads this from the office (docs/runbooks/monitoring.md).
-  context.log(`health: client address headers ${JSON.stringify(forwardedSummary(request))}`);
+  // S10/S11 probe: does the platform pass the client address, and would the
+  // money gate accept this network? Shape and verdict only, never the address.
+  // Will reads this from the office (docs/runbooks/monitoring.md).
+  const gate = moneyGateConfig();
+  const moneyNetwork = gate.mode === "warn" ? "unconfigured" : isAllowedNetwork(clientAddress(request), gate) ? "allowed" : "refused";
+  context.log(`health: client address headers ${JSON.stringify({ ...forwardedSummary(request), moneyNetwork })}`);
 
   const base = {
     ok: true,

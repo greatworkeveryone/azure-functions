@@ -7,14 +7,18 @@
 //   notifications         sends keep failing after every retry
 //   sweep                 the last run failed or had failures (ended explicitly by
 //                         the next clean run, so this adapter never auto-clears it)
+//   money_gate            MONEY_ALLOWED_CIDRS is unset, so the money-action gate
+//                         only warns (S11); clears once it is set
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../../db";
+import { moneyGateConfig } from "../../moneyGate";
 import { MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "../config";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
 
 export const SYSTEM_SUBJECTS = {
+  moneyGate: "money_gate",
   notificationConfig: "notification_config",
   notifications: "notifications",
   sweep: "sweep",
@@ -44,6 +48,8 @@ export const systemAdapter: EscalationAdapter = {
         return missingNotificationConfig().length > 0;
       case SYSTEM_SUBJECTS.notifications:
         return (await countExhaustedNotifications(connection, MAX_NOTIFICATION_ATTEMPTS)) > 0;
+      case SYSTEM_SUBJECTS.moneyGate:
+        return moneyGateConfig().mode === "warn";
       default:
         // sweep: the run that fixed it resolves it, not a condition check.
         return true;
@@ -52,6 +58,7 @@ export const systemAdapter: EscalationAdapter = {
 
   async loadSummary(_connection, subjectId) {
     const names: Record<string, string> = {
+      [SYSTEM_SUBJECTS.moneyGate]: "Money actions are not network-restricted: MONEY_ALLOWED_CIDRS is not set",
       [SYSTEM_SUBJECTS.notificationConfig]: "Escalation emails can't be sent: notification settings are missing",
       [SYSTEM_SUBJECTS.notifications]: "Escalation emails keep failing to send",
       [SYSTEM_SUBJECTS.sweep]: "The escalation sweep had a problem",
