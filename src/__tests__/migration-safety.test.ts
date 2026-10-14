@@ -12,7 +12,9 @@ import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, sc
 const MIGRATIONS = [
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
+  "123_graph_subscriptions.sql",
   "128_timer_runs.sql",
+  "129_email_intake_watermark.sql",
 ];
 
 // The one destructive-looking phrase the money migrations need: the trigger
@@ -118,6 +120,43 @@ describe("migration 115_myob_api_log.sql", () => {
     for (const column of columns) {
       expect(code).toMatch(new RegExp(`\\b${column}\\b`));
     }
+  });
+});
+
+// The tables 123 and 129 create must hold every column the code writes.
+describe("migrations 123 and 129 match the code that uses them", () => {
+  // Each of these files creates exactly one table.
+  const columnsIn = (sql: string) => {
+    const create = stripComments(sql).match(/CREATE TABLE dbo\.\w+ \(([\s\S]*?)\n  \);/);
+    return (create?.[1] ?? "").split("\n").map((line) => line.trim().split(/\s+/)[0]).filter(Boolean);
+  };
+  // The MERGE's INSERT column list (each source file has one).
+  const inserted = (source: string) =>
+    source.match(/INSERT \(([^)]*)\)\s*VALUES/)?.[1].split(",").map((c) => c.trim()) ?? [];
+
+  it("GraphSubscriptions has every column graphWebhook.ts writes", () => {
+    const source = readFileSync(join(__dirname, "..", "functions", "graphWebhook.ts"), "utf8");
+    const columns = columnsIn(read("123_graph_subscriptions.sql"));
+    expect(inserted(source)).toEqual(["SubscriptionID", "Mailbox", "Resource", "ExpiresAt", "ClientStateHash"]);
+    for (const column of inserted(source)) expect(columns).toContain(column);
+  });
+
+  it("EmailSyncState has every column mail-sync.ts writes", () => {
+    const source = readFileSync(join(__dirname, "..", "email", "mail-sync.ts"), "utf8");
+    const columns = columnsIn(read("129_email_intake_watermark.sql"));
+    expect(inserted(source)).toEqual(["Mailbox", "LastReceivedAt", "LastMessageId"]);
+    for (const column of inserted(source)) expect(columns).toContain(column);
+  });
+
+  it("129 also adds Tenants.ArchivedAt/ArchivedBy (D4) and WorkRequests.SourceHost (D8), nullable", () => {
+    const code = stripComments(read("129_email_intake_watermark.sql"));
+    expect(code).toMatch(/ALTER TABLE dbo\.Tenants ADD ArchivedAt DATETIME2 NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.Tenants ADD ArchivedBy NVARCHAR\(255\) NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.WorkRequests ADD SourceHost NVARCHAR\(255\) NULL;/);
+  });
+
+  it("123 refuses, rather than skips, a unique index it can't build", () => {
+    expect(stripComments(read("123_graph_subscriptions.sql"))).toMatch(/HAVING COUNT\(\*\) > 1\)\s*BEGIN\s*;THROW 51123/);
   });
 });
 
