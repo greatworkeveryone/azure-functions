@@ -40,8 +40,15 @@ export function serialiseBody(body: unknown): { loggable: string | null; wire: s
   return { loggable: redactedJson(wire) ?? "[non-JSON body not logged]", wire };
 }
 
-export function redactedResponse(text: string): string {
-  const shown = redactedJson(text) ?? text;
+/**
+ * A response as it may be stored. A body that isn't JSON is kept as text for
+ * company-file calls (MYOB's gateway errors are HTML or plain text), but never
+ * for the OAuth token call, where it could be the tokens themselves.
+ */
+export function redactedResponse(text: string, options: { rawAllowed: boolean } = { rawAllowed: true }): string {
+  const json = redactedJson(text);
+  if (json === null && !options.rawAllowed) return text ? "[non-JSON token response not logged]" : "";
+  const shown = json ?? text;
   if (shown.length <= MAX_LOGGED_RESPONSE_CHARS) return shown;
   return shown.slice(0, MAX_LOGGED_RESPONSE_CHARS - TRUNCATED_MARKER.length) + TRUNCATED_MARKER;
 }

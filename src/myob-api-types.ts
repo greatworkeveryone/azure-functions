@@ -30,8 +30,12 @@ export interface MyobRequestInput {
   url: string;
   /** Objects are sent as JSON, URLSearchParams as form-encoded, strings as-is. */
   body?: unknown;
-  /** Sent, never logged. */
-  headers: Record<string, string>;
+  /**
+   * Sent, never logged. Pass a function to build them (e.g. one that may
+   * refresh the OAuth token): it runs only after the request has passed every
+   * guard, so a refused or paused call never triggers a refresh.
+   */
+  headers: Record<string, string> | (() => Promise<Record<string, string>>);
   actor: MyobActor;
   /** Short reason for the call, e.g. "create-bill". Stored in MyobApiLog.Purpose. */
   purpose: string;

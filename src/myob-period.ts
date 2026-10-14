@@ -5,7 +5,11 @@
 //   - nothing may be dated before the period start: MYOB_PERIOD_START
 //     (YYYY-MM-DD, Johanne's lock date when she gives one), else the first day
 //     of the current Darwin month.
-// Anything unreadable is refused: this guard fails closed.
+// myobRequest passes the serialised bytes it will send, not the caller's
+// object, so toJSON can't show the guard one date and MYOB another; and since
+// MYOB reads JSON names without regard to case (last value wins), any other
+// spelling of "Date" is refused. Anything unreadable is refused: this guard
+// fails closed.
 
 import { isIsoDate, todayInDarwin } from "./darwinDate";
 
@@ -41,6 +45,10 @@ function readBody(body: unknown): Record<string, unknown> | null {
 export function checkMyobPeriod(rule: "today" | "period", body: unknown, now: Date = new Date()): PeriodVerdict {
   const record = readBody(body);
   if (!record) return { ok: false, reason: "The MYOB write has no readable body, so its date can't be checked" };
+  const stray = Object.keys(record).find((key) => /^date$/i.test(key) && key !== "Date");
+  if (stray) {
+    return { ok: false, reason: `The MYOB write carries "${stray}" beside Date; MYOB would read either, so it is refused` };
+  }
   const raw = record.Date;
   const match = typeof raw === "string" ? MYOB_DATE.exec(raw) : null;
   if (!match || !isIsoDate(match[1])) {

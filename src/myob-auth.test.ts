@@ -92,7 +92,8 @@ describe("authorize URL and scopes", () => {
 
   it("refuses a token that carries any other scope", () => {
     expect(() => assertGrantedScope("sme-company-file sme-purchases")).not.toThrow();
-    expect(() => assertGrantedScope(undefined)).not.toThrow();
+    expect(() => assertGrantedScope(undefined)).toThrow("MYOB did not say which access it granted");
+    expect(() => assertGrantedScope("  ")).toThrow(MyobScopeError);
     expect(() => assertGrantedScope("sme-company-file sme-purchases sme-banking")).toThrow(MyobScopeError);
     expect(() => assertGrantedScope("CompanyFile")).toThrow("CompanyFile");
   });

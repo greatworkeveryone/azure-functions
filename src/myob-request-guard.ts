@@ -10,8 +10,11 @@
 //      OAuth token call is exempt, so a link can be made before controls exist.
 //   5. an update only to a record Floorplan created: the lookup is injected by
 //      the proposals pipeline (MyobProposals, sprint M3) and says no until then
-//   6. company-file credentials (x-myobapi-cftoken) from MYOB_CF_USER and
-//      MYOB_CF_PASSWORD, unless the caller already chose an approver's
+// After that, myob-api-log.ts builds the caller's headers (which may refresh
+// the token) and adds company-file credentials (x-myobapi-cftoken) from
+// MYOB_CF_USER and MYOB_CF_PASSWORD unless the caller chose an approver's.
+// The period check reads `body` as given: myobRequest passes the serialised
+// bytes it is about to send.
 
 import { assertMyobControlsAllow } from "./myob-controls";
 import { MyobRequestRefusedError, MyobWritesDisabledError } from "./myob-errors";
@@ -37,33 +40,36 @@ export function setFloorplanRecordLookup(lookup: FloorplanRecordLookup | null): 
 
 const CFTOKEN_HEADER = "x-myobapi-cftoken";
 
-function companyFileCredentials(headers: Record<string, string>): Record<string, string> {
-  if (Object.keys(headers).some((name) => name.toLowerCase() === CFTOKEN_HEADER)) return {};
+/** Adds x-myobapi-cftoken to a company-file call. Throws (config) when only half is set. */
+export function withCompanyFileCredentials(
+  headers: Record<string, string>,
+  operation: GuardedRequest["operation"],
+): Record<string, string> {
+  if (operation === "oauth.token") return headers;
+  if (Object.keys(headers).some((name) => name.toLowerCase() === CFTOKEN_HEADER)) return headers;
   const user = process.env.MYOB_CF_USER?.trim();
   const password = process.env.MYOB_CF_PASSWORD ?? "";
-  if (!user && !password) return {};
+  if (!user && !password) return headers;
   if (!user || !password) {
     throw new MyobRequestRefusedError("config", "MYOB_CF_USER and MYOB_CF_PASSWORD must be set together");
   }
-  return { [CFTOKEN_HEADER]: Buffer.from(`${user}:${password}`, "utf8").toString("base64") };
+  return { ...headers, [CFTOKEN_HEADER]: Buffer.from(`${user}:${password}`, "utf8").toString("base64") };
 }
 
 export interface GuardedRequest {
-  /** Headers to add to the caller's (company-file credentials). Never logged. */
-  extraHeaders: Record<string, string>;
   operation: MyobOperation | "oauth.token";
   companyFileId: string | null;
 }
 
 export async function guardMyobRequest(
-  input: { body?: unknown; headers: Record<string, string>; method: MyobMethod; url: string },
+  input: { body?: unknown; method: MyobMethod; url: string },
   now: Date = new Date(),
 ): Promise<GuardedRequest> {
   const classified = classifyMyobRequest(input.method, input.url);
   if (classified.kind === "refused") {
     throw new MyobRequestRefusedError("not_allowed", classified.reason, classified.forbiddenCentre);
   }
-  if (classified.kind === "oauth") return { companyFileId: null, extraHeaders: {}, operation: "oauth.token" };
+  if (classified.kind === "oauth") return { companyFileId: null, operation: "oauth.token" };
 
   const { companyFileId, rule, uid } = classified;
   if (rule.dateRule) {
@@ -73,7 +79,11 @@ export async function guardMyobRequest(
   if (rule.method !== "GET" && process.env.MYOB_WRITES_ENABLED !== "true") throw new MyobWritesDisabledError();
   await assertMyobControlsAllow({ companyFileId, operation: rule.operation }, now);
   if (rule.floorplanRecordOnly) {
-    const ours = Boolean(uid && companyFileId && (await floorplanRecordLookup({ companyFileId, operation: rule.operation, uid })));
+    // Exactly true: a lookup that answers anything else ("yes", 1, a row) is a no.
+    const ours =
+      uid !== null &&
+      companyFileId !== null &&
+      (await floorplanRecordLookup({ companyFileId, operation: rule.operation, uid })) === true;
     if (!ours) {
       throw new MyobRequestRefusedError(
         "not_floorplan_record",
@@ -81,5 +91,5 @@ export async function guardMyobRequest(
       );
     }
   }
-  return { companyFileId, extraHeaders: companyFileCredentials(input.headers), operation: rule.operation };
+  return { companyFileId, operation: rule.operation };
 }

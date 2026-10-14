@@ -65,7 +65,8 @@ export async function myobFetch(opts: {
     actor: opts.actor,
     body: opts.body,
     correlationId: opts.correlationId,
-    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    // Built only after myobRequest's guards pass, so a refused call never refreshes the token.
+    headers: () => myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
     method: opts.method ?? "GET",
     purpose: opts.purpose,
     url: `${myobBase()}${opts.path}`,
@@ -139,7 +140,8 @@ export async function createMyobBill(opts: {
       // No Supplier yet — see the MYOB_WRITES_ENABLED note above applyMyobPayment.
     },
     correlationId: opts.correlationId,
-    headers: await myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
+    // Built only after myobRequest's guards pass, so a refused call never refreshes the token.
+    headers: () => myobHeaders(opts.sqlToken, opts.actor, opts.correlationId),
     method: "POST",
     purpose: "create-bill",
     url: `${myobBase()}/Purchase/Bill/Service`,

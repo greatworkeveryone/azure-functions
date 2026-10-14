@@ -70,7 +70,20 @@ describe("testMyobConnection", () => {
     expect(myobRequest).toHaveBeenCalledWith(
       expect.objectContaining({ actor, method: "GET", purpose: "test-connection" }),
     );
+    // The token is fetched only through the headers myobRequest builds after its guards.
+    expect(myobAuth.getValidMyobAccessToken).not.toHaveBeenCalled();
+    const headers = await myobRequest.mock.calls[0][0].headers();
+    expect(headers).toMatchObject({ Authorization: "Bearer access-token" });
     expect(myobAuth.getValidMyobAccessToken).toHaveBeenCalledWith("mock-token", actor);
+  });
+
+  it("reports not linked when building the headers finds no link", async () => {
+    const { MyobNotLinkedError } = jest.requireMock("../myob-auth") as { MyobNotLinkedError: new () => Error };
+    myobRequest.mockRejectedValueOnce(new MyobNotLinkedError());
+
+    const res = await handler(request, ctx);
+
+    expect(res.jsonBody).toMatchObject({ linked: false, ok: false });
   });
 
   it("reports a non-2xx from MYOB without throwing", async () => {

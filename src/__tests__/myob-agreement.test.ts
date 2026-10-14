@@ -1,5 +1,14 @@
 /// <reference types="jest" />
 jest.mock("../myob-controls", () => ({ assertMyobControlsAllow: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../db", () => ({
+  closeConnection: jest.fn(),
+  createServiceRequestConnection: jest.fn().mockResolvedValue({}),
+  executeQuery: jest.fn().mockResolvedValue([]),
+}));
+jest.mock("../myob-health", () => ({
+  MYOB_HEALTH_SUBJECTS: { agreement: "myob_agreement", link: "myob_link" },
+  raiseMyobHealth: jest.fn().mockResolvedValue(undefined),
+}));
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -11,6 +20,8 @@ import {
   MYOB_SCOPE_STRING,
   MYOB_SCOPES,
 } from "../myob-endpoints";
+import { todayInDarwin } from "../darwinDate";
+import { myobRequest } from "../myob-api-log";
 import { checkMyobPeriod } from "../myob-period";
 import { guardMyobRequest, setFloorplanRecordLookup } from "../myob-request-guard";
 
@@ -69,7 +80,7 @@ describe("term 1: nothing already in MYOB is amended or deleted", () => {
     setFloorplanRecordLookup(null);
     process.env.MYOB_WRITES_ENABLED = "true";
     await expect(
-      guardMyobRequest({ body: { Date: "2026-10-14" }, headers: {}, method: "PUT", url: `${API}/Purchase/Order/Service/${UID}` }, NOW),
+      guardMyobRequest({ body: { Date: "2026-10-14" }, method: "PUT", url: `${API}/Purchase/Order/Service/${UID}` }, NOW),
     ).rejects.toMatchObject({ code: "not_floorplan_record" });
   });
 });
@@ -83,6 +94,36 @@ describe("term 2: no new data in prior periods", () => {
   it("refuses a backdated create", () => {
     expect(checkMyobPeriod("today", { Date: "2026-09-30" }, NOW).ok).toBe(false);
     expect(checkMyobPeriod("today", { Date: "2026-10-14" }, NOW).ok).toBe(true);
+  });
+
+  // MYOB reads JSON names without regard to case and the last value wins, so
+  // a second "date" key would be the date MYOB records.
+  it("refuses a second date key in another case", () => {
+    expect(checkMyobPeriod("today", { Date: "2026-10-14", date: "2026-09-01" }, NOW).ok).toBe(false);
+    expect(checkMyobPeriod("today", JSON.stringify({ DATE: "2026-09-01", Date: "2026-10-14" }), NOW).ok).toBe(false);
+  });
+
+  it("checks the bytes actually sent: last duplicate wins, and toJSON can't hide a backdate", async () => {
+    const fetchMock = jest.fn(async () => new Response("{}", { status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    process.env.MYOB_WRITES_ENABLED = "true";
+    const today = todayInDarwin();
+    const send = (body: unknown) =>
+      myobRequest({
+        actor: { kind: "system", name: "agreement-test" },
+        body,
+        headers: {},
+        method: "POST",
+        purpose: "create-order",
+        url: `${API}/Purchase/Order/Service`,
+      });
+    const disguised = { Date: today, toJSON: () => ({ Date: "2026-09-01" }) };
+
+    await expect(send(disguised)).rejects.toMatchObject({ code: "outside_period" });
+    await expect(send(`{"Date":"${today}","Date":"2026-09-01"}`)).rejects.toMatchObject({ code: "outside_period" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await send({ Date: today });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

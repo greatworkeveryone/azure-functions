@@ -25,7 +25,7 @@ import { extractMyobUid, loggablePath, redactedResponse, serialiseBody } from ".
 import { MYOB_TIMEOUT_MS, MyobAuditLogError, MyobRequestRefusedError, MyobTimeoutError } from "./myob-errors";
 import { MYOB_HEALTH_SUBJECTS, raiseMyobHealth } from "./myob-health";
 import type { MyobActor, MyobRequestInput, MyobResponse } from "./myob-api-types";
-import { guardMyobRequest } from "./myob-request-guard";
+import { guardMyobRequest, withCompanyFileCredentials, type GuardedRequest } from "./myob-request-guard";
 import { Sentry } from "./sentry";
 
 export { userActor, type MyobActor, type MyobRequestInput, type MyobResponse } from "./myob-api-types";
@@ -158,13 +158,13 @@ async function send(url: string, init: RequestInit): Promise<{ response: Respons
 
 // A dry run keeps the exact payload it would have sent (redacted), so the CFO
 // can read what Floorplan was about to do. Other refusals log no body.
-async function refuse(base: Omit<LogRow, "phase">, err: unknown, body: unknown): Promise<never> {
+async function refuse(base: Omit<LogRow, "phase">, err: unknown, loggableBody: string | null): Promise<never> {
   const dryRun = err instanceof MyobRequestRefusedError && err.code === "dry_run";
   await insertOutcomeRow({
     ...base,
     errorMessage: err instanceof Error ? err.message : String(err),
     phase: "error",
-    requestBody: dryRun ? serialiseBody(body).loggable : null,
+    requestBody: dryRun ? loggableBody : null,
   });
   if (err instanceof MyobRequestRefusedError && err.forbiddenCentre) {
     await raiseMyobHealth(MYOB_HEALTH_SUBJECTS.agreement, `Refused ${base.method} ${base.path}: ${err.message}`, {
@@ -195,15 +195,28 @@ export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse
   const correlationId = input.correlationId ?? randomUUID();
   const base = { actor, attempt: input.attempt ?? 1, correlationId, method, path: loggablePath(url), purpose };
 
+  // Guard the bytes that will be sent, not the caller's object: toJSON and
+  // duplicate keys can't show the guard one thing and MYOB another.
+  const { loggable, wire } = serialiseBody(input.body);
+  let guarded: GuardedRequest;
+  try {
+    guarded = await guardMyobRequest({ body: wire, method, url });
+  } catch (err) {
+    return refuse(base, err, loggable);
+  }
+  const isTokenCall = guarded.operation === "oauth.token";
+
+  // Only now may headers be built: a function here may refresh the token, and
+  // a refused or paused call must never cause a refresh.
   let headers: Record<string, string>;
   try {
-    const guarded = await guardMyobRequest({ body: input.body, headers: input.headers, method, url });
-    headers = { ...input.headers, ...guarded.extraHeaders };
+    const callerHeaders = typeof input.headers === "function" ? await input.headers() : input.headers;
+    headers = withCompanyFileCredentials(callerHeaders, guarded.operation);
   } catch (err) {
-    return refuse(base, err, input.body);
+    if (err instanceof MyobRequestRefusedError) return refuse(base, err, loggable);
+    throw err;
   }
 
-  const { loggable, wire } = serialiseBody(input.body);
   for (let tries = 1; ; tries += 1) {
     const attempt = base.attempt + tries - 1;
     try {
@@ -237,7 +250,7 @@ export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse
       httpStatus: response.status,
       myobUid,
       phase: "response",
-      responseBody: redactedResponse(text),
+      responseBody: redactedResponse(text, { rawAllowed: !isTokenCall }),
     });
 
     if (tries < MAX_TRIES && shouldRetry(method, response.status)) {

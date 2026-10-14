@@ -280,3 +280,49 @@ describe("CFO controls inside myobRequest", () => {
     expect(assertMyobControlsAllow).toHaveBeenCalledWith({ companyFileId: CF, operation: "orders.create" }, expect.any(Date));
   });
 });
+
+describe("review hardening (R1 and notes)", () => {
+  const { assertMyobControlsAllow } = require("./myob-controls") as { assertMyobControlsAllow: jest.Mock };
+
+  it("builds lazy headers (and so refreshes the token) only after the guards pass", async () => {
+    const headers = jest.fn(async () => ({ Authorization: "Bearer fresh" }));
+    assertMyobControlsAllow.mockRejectedValueOnce(new MyobRequestRefusedError("controls", "MYOB is paused"));
+
+    await expect(call({ headers, method: "GET", url: `${API}/Purchase/Order` })).rejects.toMatchObject({ code: "controls" });
+    await expect(call({ headers, method: "GET", url: `${API}/Contact/Supplier` })).rejects.toMatchObject({ code: "not_allowed" });
+    expect(headers).not.toHaveBeenCalled();
+
+    await call({ headers, method: "GET", url: `${API}/Purchase/Order` });
+    expect(headers).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: "Bearer fresh" });
+  });
+
+  it("guards the serialised body: a toJSON that backdates is refused", async () => {
+    await expect(call({ body: { Date: TODAY, toJSON: () => ({ Date: "2026-01-05" }) } })).rejects.toMatchObject({
+      code: "outside_period",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never stores a non-JSON token response as text", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("access_token=leak&refresh_token=leak2", { status: 200 }));
+
+    await call({ body: new URLSearchParams({ grant_type: "refresh_token" }), url: "https://secure.myob.com/oauth2/v1/authorize/" });
+
+    expect(JSON.stringify(rows())).not.toContain("leak");
+    expect(rows()[1].ResponseBody).toBe("[non-JSON token response not logged]");
+  });
+
+  it("keeps a non-JSON company-file error as text for the CFO to read", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("Bad gateway", { status: 400 }));
+    await call({ method: "GET", url: `${API}/Purchase/Order` });
+    expect(rows()[1].ResponseBody).toBe("Bad gateway");
+  });
+
+  it("treats only an exact true from the Floorplan-record lookup as yes", async () => {
+    setFloorplanRecordLookup((async () => "yes") as unknown as Parameters<typeof setFloorplanRecordLookup>[0] & object);
+    await expect(
+      call({ method: "PUT", url: `${API}/Purchase/Order/Service/${UID}` }),
+    ).rejects.toMatchObject({ code: "not_floorplan_record" });
+  });
+});

@@ -57,7 +57,11 @@ export class MyobNotLinkedError extends Error {
 
 export class MyobScopeError extends Error {
   constructor(extra: string[]) {
-    super(`MYOB granted access Floorplan did not ask for (${extra.join(", ")}); nothing was stored`);
+    super(
+      extra.length
+        ? `MYOB granted access Floorplan did not ask for (${extra.join(", ")}); nothing was stored`
+        : "MYOB did not say which access it granted; nothing was stored",
+    );
     this.name = "MyobScopeError";
   }
 }
@@ -80,10 +84,15 @@ export function buildAuthorizeUrl(state: string): string {
   return `${MYOB_AUTHORIZE_URL}?${params.toString()}`;
 }
 
-/** Refuses a token that carries any scope beyond the two the agreement allows. */
+/**
+ * Refuses a token that carries any scope beyond the two the agreement allows,
+ * or that doesn't say what it grants: unknown access is treated as too much.
+ */
 export function assertGrantedScope(scope: string | undefined): void {
+  const granted = (scope ?? "").split(/[\s,]+/).filter(Boolean);
+  if (granted.length === 0) throw new MyobScopeError([]);
   const allowed = new Set<string>(MYOB_SCOPES);
-  const extra = (scope ?? "").split(/[\s,]+/).filter((s) => s && !allowed.has(s));
+  const extra = granted.filter((s) => !allowed.has(s));
   if (extra.length) throw new MyobScopeError(extra);
 }
 
