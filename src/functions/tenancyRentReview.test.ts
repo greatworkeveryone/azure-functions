@@ -415,6 +415,72 @@ describe("getReviewsDue", () => {
     expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue"]);
   });
 
+  describe("lease events", () => {
+    const { addDaysIso, todayInDarwin } = require("../darwinDate") as {
+      addDaysIso: (iso: string, days: number) => string;
+      todayInDarwin: () => string;
+    };
+    const inDays = (days: number) => new Date(`${addDaysIso(todayInDarwin(), days)}T00:00:00Z`);
+
+    it("also asks the database for expiries and option deadlines in the next 90 days", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+      await handlers.getReviewsDue(makeRequest(null), ctx);
+      const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+      expect(sql).toContain("NextReviewDate");
+      expect(sql).toContain("Expiry");
+      expect(sql).toContain("OptionNoticeMonths");
+      expect(sql).toContain("DATEADD(month");
+      expect(sql).toContain("Status <> 'vacated'");
+    });
+
+    it("keeps the building filter in front of the lease-event conditions", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+      await handlers.getReviewsDue(makeRequest(null, { buildingId: "9" }), ctx);
+      const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+      expect(sql).toContain("WHERE BuildingId = @BuildingId AND");
+    });
+
+    it("returns a lease that expires in 45 days although its next review is a year away", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 1, BuildingId: 5, LegalName: "Expiring Soon", Status: "current", Expiry: inDays(45), NextReviewDate: inDays(365) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string; daysToExpiry: number }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Expiring Soon"]);
+      expect(tenants[0].daysToExpiry).toBe(45);
+    });
+
+    it("returns a lease whose option deadline is 20 days away", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        {
+          TenantId: 2, BuildingId: 5, LegalName: "Option Deadline", Status: "current",
+          Expiry: inDays(20 + 91), OptionNoticeMonths: 3, NextReviewDate: inDays(400),
+        },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Option Deadline"]);
+    });
+
+    it("leaves out a lease with nothing due in the window", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 3, BuildingId: 5, LegalName: "Far Off", Status: "current", Expiry: inDays(400), NextReviewDate: inDays(400) },
+        { TenantId: 4, BuildingId: 5, LegalName: "Expired Long Ago", Status: "holdover", Expiry: inDays(-200), NextReviewDate: inDays(400) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      expect((res.jsonBody as { tenants: unknown[] }).tenants).toEqual([]);
+    });
+
+    it("still returns an overdue review that has no expiry", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 5, BuildingId: 5, LegalName: "Overdue Review", Status: "current", NextReviewDate: inDays(-10) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue Review"]);
+    });
+  });
+
   it("returns an empty list when no tenants are due", async () => {
     db.executeQuery.mockResolvedValueOnce([]);
     const res = await handlers.getReviewsDue(makeRequest(null), ctx);

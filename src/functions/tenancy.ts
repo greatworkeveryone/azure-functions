@@ -77,6 +77,7 @@ import {
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
+import { hasLeaseEventWithin } from "../tenancyLeaseEvents";
 import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import {
@@ -2248,7 +2249,8 @@ async function applyRentReview(
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
-// Returns amber+red tenants for the dashboard widget. Same shape as
+// Returns amber+red tenants for the dashboard widget, plus any lease that
+// expires or reaches its option deadline within 90 days. Same shape as
 // getRegisterTenants but filtered to ones needing attention.
 
 async function getReviewsDue(
@@ -2276,21 +2278,39 @@ async function getReviewsDue(
         ]
       : [];
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
+    // Also expiries and option deadlines from yesterday to 91 days ahead: a
+    // wider net than the Darwin-day filter below, which is exact.
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} NextReviewDate IS NOT NULL
-        AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE))
+       ${where} ${where ? "AND" : "WHERE"} (
+         (NextReviewDate IS NOT NULL
+           AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
+         OR (Expiry IS NOT NULL
+           AND Expiry BETWEEN DATEADD(day, -1, CAST(SYSUTCDATETIME() AS DATE))
+                          AND DATEADD(day, 91, CAST(SYSUTCDATETIME() AS DATE)))
+         OR (Expiry IS NOT NULL AND OptionNoticeMonths IS NOT NULL
+           AND DATEADD(month, -OptionNoticeMonths, Expiry)
+               BETWEEN DATEADD(day, -1, CAST(SYSUTCDATETIME() AS DATE))
+                   AND DATEADD(day, 91, CAST(SYSUTCDATETIME() AS DATE)))
+       )
         AND Status <> 'vacated'
        ORDER BY NextReviewDate`,
       params,
     );
     /* eslint-enable local/no-sql-interpolation */
     // The SQL reads the stored date; a keyed review whose date has since passed
-    // has moved on, so keep only what is still due or overdue today.
+    // has moved on, so keep only what is still due or overdue today, plus any
+    // lease that expires or reaches its option deadline within 90 days.
+    const today = todayInDarwin();
     const tenants = rows
       .map((row) => tenantRowToApi(row, [], {}))
-      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red");
+      .filter(
+        (tenant) =>
+          tenant.reviewState === "amber" ||
+          tenant.reviewState === "red" ||
+          hasLeaseEventWithin(tenant, today),
+      );
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {
     context.error("getReviewsDue failed:", error.message);
