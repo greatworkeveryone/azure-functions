@@ -99,6 +99,15 @@ import {
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
 import {
+  CLEAR_SIGN_OFF_SQL,
+  readSignOffClearReason,
+  recordSignOffCleared,
+  type ScheduleSignOff,
+  scheduleSignOffFromRow,
+  SIGN_OFF_COLUMNS,
+  signOffReasonRequiredResponse,
+} from "../scheduleSignOff";
+import {
   deleteInfoSheetRow,
   deleteInfoSheetSection,
   InfoSheetRow as InfoSheetRowApi,
@@ -293,6 +302,8 @@ interface RegisterTenantApi {
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
   scheduleVersion: number;
+  /** Who signed this tenancy's schedule off as verified, and when; null = not signed off (m097). */
+  scheduleSignOff: ScheduleSignOff | null;
   // Free-form per m038: e.g. "CPI Darwin (June)", "Fixed 3%", "Market".
   reviewType: string;
   securityDepositHeld?: number;
@@ -552,6 +563,7 @@ function tenantRowToApi(
     reviewType: asStr(row.ReviewType) ?? "none",
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
+    scheduleSignOff: scheduleSignOffFromRow(row),
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),
     securityDepositRequired: asStr(row.SecurityDepositRequired),
@@ -659,6 +671,7 @@ const TENANT_COLUMNS = `
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
+  ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
@@ -1168,6 +1181,7 @@ const LOCKED_TENANT_COLUMNS = `
   CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
+  ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
@@ -1323,7 +1337,16 @@ async function updateRegisterTenantRow(
       return null;
     }
     const termsChanged = Object.keys(termsAfter).length > 0;
+    // A change to what the schedule is computed from clears a sign-off, and the
+    // person says why (PLAN WP24). Asked before anything is written.
+    const priorSignOff = termsChanged ? scheduleSignOffFromRow(current) : null;
+    const clearReason = readSignOffClearReason(body);
+    if (priorSignOff && !clearReason) {
+      await rollbackQuietly(connection);
+      return signOffReasonRequiredResponse(priorSignOff);
+    }
     if (termsChanged) setParts.push("ScheduleVersion = ScheduleVersion + 1");
+    if (priorSignOff) setParts.push(CLEAR_SIGN_OFF_SQL);
     setParts.push("UpdatedAt = SYSUTCDATETIME()", "UpdatedById = @UpdatedById", "UpdatedByName = @UpdatedByName");
     updateParams.push(
       { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
@@ -1347,6 +1370,9 @@ async function updateRegisterTenantRow(
         ? withNextReviewDate([{ after: termsAfter, before: termsBefore }], nextReview.before, nextReview.after)
         : [{ after: termsAfter, before: termsBefore }];
       await ledger.record(connection, { ...scope, action: "schedule.terms_edit", ...terms });
+    }
+    if (priorSignOff && clearReason) {
+      await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
     }
     await commitTransaction(connection);
     return null;
@@ -2066,6 +2092,9 @@ function reviewDueProjection(tenant: ReturnType<typeof tenantRowToApi>) {
     optionPeriods: tenant.optionPeriods,
     reviewState: tenant.reviewState,
     reviewType: tenant.reviewType,
+    // Whether the schedule is signed off, so the feed can hold back alerts on
+    // unverified figures (PLAN D7). The signer's note stays out.
+    scheduleSignOff: tenant.scheduleSignOff ? { ...tenant.scheduleSignOff, note: null } : null,
     tenantId: tenant.tenantId,
   };
 }
@@ -2167,6 +2196,9 @@ async function getPortfolioOccupancy(
               SUM(CASE WHEN t.Status IN ('current','holdover')
                        THEN 1 ELSE 0 END) AS ActiveTenantCount,
               SUM(CASE WHEN t.Status IN ('current','holdover')
+                            AND t.ScheduleSignedOffAt IS NULL
+                       THEN 1 ELSE 0 END) AS UnsignedTenantCount,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
                             AND t.Expiry IS NOT NULL
                        THEN occ.TenantSqm
                             * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
@@ -2200,6 +2232,8 @@ async function getPortfolioOccupancy(
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
         totalSqm,
+        // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
+        unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
         waleExpirySqm: waleDenominator,
         waleYears,
       };
@@ -2281,7 +2315,7 @@ async function upsertTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentive.id) ?? null;
@@ -2361,7 +2395,7 @@ async function deleteTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentiveId);
@@ -2508,7 +2542,7 @@ async function upsertScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
@@ -2608,7 +2642,7 @@ async function deleteScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const deletedStep = existing.find((s) => s.id === stepId);
@@ -3097,7 +3131,7 @@ async function upsertCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === group.id) ?? null;
@@ -3163,7 +3197,7 @@ async function deleteCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === groupId);
@@ -3597,7 +3631,7 @@ async function upsertMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === fee.id) ?? null;
@@ -3660,7 +3694,7 @@ async function deleteMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === feeId);

@@ -16,6 +16,7 @@ import {
   graphCreatePlannerTask,
   graphGetGroupMembers,
   graphGetPlannerTask,
+  resolveActivePlannerTasks,
 } from "../planner";
 import { plannerSyncEnabled } from "../plannerFlag";
 import {
@@ -25,6 +26,7 @@ import {
   computeEventDate,
   groupPlannerTasksByKey,
   isInWindow,
+  leaseTaskPlan,
   LEAD_TIMES,
   plannerTaskKey,
   toIsoDateString,
@@ -126,7 +128,8 @@ export async function plannerSyncTimer(
          CONVERT(VARCHAR(10), t.Expiry, 120) AS Expiry,
          t.OptionNoticeMonths,
          CONVERT(VARCHAR(10), t.NextReviewDate, 120) AS NextReviewDate,
-         t.ReviewType
+         t.ReviewType,
+         t.ScheduleSignedOffAt
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
@@ -143,6 +146,7 @@ export async function plannerSyncTimer(
       optionNoticeMonths: (r.OptionNoticeMonths as number | null) ?? null,
       nextReviewDate: (r.NextReviewDate as string | null) ?? null,
       reviewType: (r.ReviewType as string | null) ?? null,
+      scheduleSignedOff: Boolean(r.ScheduleSignedOffAt),
     }));
 
     let created = 0;
@@ -170,7 +174,21 @@ export async function plannerSyncTimer(
         );
     const tenantTaskByKey = groupPlannerTasksByKey(tenantTaskRows as PlannerTaskRowShape[]);
 
-    for (const tenant of tenants) {
+    // A schedule nobody has signed off is unverified: raise no lease tasks for
+    // it and take down any that are open (PLAN D7, D21).
+    const plan = leaseTaskPlan(tenants, tenantTaskRows as PlannerTaskRowShape[]);
+    for (const tenantId of plan.removeFor) {
+      try {
+        await resolveActivePlannerTasks("tenant", tenantId, TENANT_TRIGGER_TYPES);
+      } catch (err: unknown) {
+        context.warn(
+          `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
+    for (const tenant of plan.eligible) {
       for (const triggerType of TENANT_TRIGGER_TYPES) {
         const eventDate = computeEventDate(tenant, triggerType);
         if (!eventDate) continue;
