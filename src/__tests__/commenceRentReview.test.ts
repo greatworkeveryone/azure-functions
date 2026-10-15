@@ -50,6 +50,8 @@ let updateMoves: boolean;
 function serve() {
   routeSql(db.executeQuery, [
     [/INSERT INTO dbo\.DecisionLedger/, () => []],
+    // After the commit: the review's live escalations, to end E1 (none here).
+    [/FROM dbo\.Escalations/, () => []],
     [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
     [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],
     [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (tenancy ? [tenancy] : [])],
@@ -505,6 +507,32 @@ describe("the ledger", () => {
     expect((res.jsonBody as { error: string }).error).toMatch(/role/);
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("after the commit, E1 ends (WP26)", () => {
+  it("looks up the review's live escalations to end E1 with the code commenced, once the commence has committed", async () => {
+    await commence();
+    const lookups = callsMatching(db.executeQuery, /FROM dbo\.Escalations/);
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0].params).toMatchObject({ SubjectId: "rev-1", SubjectType: "rent_review" });
+    const lookupOrder = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.findIndex((c: unknown[]) => /FROM dbo\.Escalations/.test(String(c[1])))];
+    expect(lookupOrder).toBeGreaterThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("still answers 200 when ending the escalation fails", async () => {
+    routeSql(db.executeQuery, [
+      [/FROM dbo\.Escalations/, () => Promise.reject(new Error("escalations unavailable"))],
+      [/INSERT INTO dbo\.DecisionLedger/, () => []],
+      [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
+      [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],
+      [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (tenancy ? [tenancy] : [])],
+      [/SELECT TOP 1 ReviewId FROM dbo\.RentReviews/, () => otherOpen],
+      [/UPDATE dbo\.RentReviews/, (params: Param[]) => [{ ReviewId: params.find((p) => p.name === "ReviewId")?.value }]],
+    ]);
+    const res = await commence();
+    expect(res.status).toBe(200);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 });
 

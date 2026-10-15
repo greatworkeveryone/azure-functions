@@ -217,14 +217,15 @@ describe("dbo.EscalationPolicies and its seed", () => {
   });
 });
 
-describe("the CFO role needs no migration 099", () => {
+describe("the CFO role needs no migration", () => {
   it("is not enumerated by any CHECK constraint or seed table in the schema", () => {
     // AppUsers.Role is NVARCHAR(50) NULL with no CHECK; FeatureFlags and
-    // ApprovalLimits take any role name. Number 099 stays reserved and unused.
+    // ApprovalLimits take any role name. Number 099, freed when WP20 needed no
+    // cfo migration, went to WP26's rent review policies (PLAN §7) and nothing else.
     const dir = join(__dirname, "..", "..", "migrations");
     const { readdirSync } = require("node:fs") as typeof import("node:fs");
     const files = readdirSync(dir).filter((f) => f.endsWith(".sql"));
-    expect(files.some((f) => f.startsWith("099_"))).toBe(false);
+    expect(files.filter((f) => f.startsWith("099_"))).toEqual(["099_rent_review_policies.sql"]);
     for (const f of files) {
       const sql = stripComments(readFileSync(join(dir, f), "utf8"));
       expect(sql).not.toMatch(/CHECK\s*\([^)]*\bRole(Name)?\b[^)]*\bIN\s*\(/i);

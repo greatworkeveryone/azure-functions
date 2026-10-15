@@ -6,15 +6,27 @@
 //   registerAdapter({ subjectType: "quote", deepLink, isConditionActive, loadSummary, visibleTo, ... })
 //   await raise(connection, { actor, policyKey: "quote.over_limit", subjectType: "quote", subjectId, ... })
 //
-// An authority escalation ends with the domain's decision, which is WP21's
-// to wire up (it will resolve the escalation in the decision's own transaction).
-// The engine never decides for the domain, and its resolve refuses authority
-// escalations from the inbox.
+// An authority escalation ends with the domain's decision: once the decision
+// has committed, the domain calls concludeForSubject (WP26's rent reviews do;
+// WP21 wires quotes, invoices and POs the same way). The engine never decides
+// for the domain, and its resolve refuses authority escalations from the inbox.
 
-export { acknowledge, autoResolve, escalateFurther, hasNextLevel, previewTarget, raise, resolve, SWEEP_ACTOR, withdraw } from "./engine";
+export {
+  acknowledge,
+  autoResolve,
+  concludeForSubject,
+  escalateFurther,
+  hasNextLevel,
+  previewTarget,
+  raise,
+  resolve,
+  SWEEP_ACTOR,
+  withdraw,
+} from "./engine";
 export type {
   AcknowledgeInput,
   AutoResolveInput,
+  ConcludeInput,
   EscalateFurtherInput,
   EscalateFurtherResult,
   RaiseInput,
