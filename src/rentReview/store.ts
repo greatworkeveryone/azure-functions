@@ -35,11 +35,32 @@ const REVIEW_COLUMNS = `
   r.OldRentPerAnnum, r.NewRentPerAnnum, r.IncreasePercent,
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
   t.ArchivedAt AS TenantArchivedAt,
-  u.DisplayName AS OwnerName`;
+  u.DisplayName AS OwnerName,
+  lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote`;
+
+// The last RETURN of a review that is back in progress and hasn't been
+// submitted since (WP26): the latest rent_review.return row in the decision
+// ledger with no rent_review.submit after it. RETURN clears SubmittedAt, so the
+// ledger is the only record that the review came back, and from whom, with
+// what note. Read for in-progress reviews only; IX_DecisionLedger_Subject
+// (SubjectType, SubjectId, ...) serves both lookups, a handful of rows each.
+const LAST_RETURN = `
+  OUTER APPLY (
+    SELECT TOP 1 l.OccurredAt AS ReturnedAt, l.ActorName AS ReturnedByName, l.Reason AS ReturnNote
+    FROM dbo.DecisionLedger l
+    WHERE r.State = 'in_progress'
+      AND l.SubjectType = N'rent_review' AND l.SubjectId = r.ReviewId AND l.Action = N'rent_review.return'
+      AND NOT EXISTS (
+        SELECT 1 FROM dbo.DecisionLedger s
+        WHERE s.SubjectType = N'rent_review' AND s.SubjectId = r.ReviewId
+          AND s.Action = N'rent_review.submit' AND s.LedgerId > l.LedgerId)
+    ORDER BY l.LedgerId DESC
+  ) lr`;
 
 const REVIEW_JOINS = `
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
-  LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId`;
+  LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
+  ${LAST_RETURN}`;
 
 const REVIEW_BY_ID = `SELECT ${REVIEW_COLUMNS} FROM dbo.RentReviews r ${REVIEW_JOINS}
   WHERE r.ReviewId = @ReviewId AND r.State IS NOT NULL`;
@@ -100,7 +121,8 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
 const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
     t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
-    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, b.BuildingName
+    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, b.BuildingName,
+    t.ScheduleSignedOffAt, t.ScheduleSignedOffByName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
   WHERE t.TenantId = @TenantId`;

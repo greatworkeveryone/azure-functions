@@ -102,10 +102,20 @@ export class ReviewWorld {
     return dates.length ? dates.join(",") : null;
   }
 
+  /** The review queries' LAST_RETURN: the latest rent_review.return with no submit after it, in progress only. */
+  private lastReturn(review: Row): Row {
+    if (review.State !== "in_progress") return {};
+    const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId);
+    const ret = rows.filter((l) => l.Action === "rent_review.return").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    if (!ret || rows.some((l) => l.Action === "rent_review.submit" && Number(l.LedgerId) > Number(ret.LedgerId))) return {};
+    return { ReturnNote: ret.Reason, ReturnedAt: new Date(String(ret.OccurredAt)), ReturnedByName: ret.ActorName };
+  }
+
   private joined(review: Row): Row {
     const tenant = this.tenant(Number(review.TenantId));
     return {
       ...review,
+      ...this.lastReturn(review),
       LegalName: tenant.LegalName,
       OwnerName: review.OwnerUserId ? `User ${review.OwnerUserId}` : null,
       TenantArchivedAt: tenant.ArchivedAt ?? null,
@@ -153,12 +163,12 @@ export class ReviewWorld {
     const p = Object.fromEntries(list.map((x) => [x.name, x.value]));
 
     if (/INSERT INTO dbo\.DecisionLedger/.test(sql)) {
-      const row = { ...p, LedgerId: this.ledgerId++ };
+      const row = { ...p, LedgerId: this.ledgerId++, OccurredAt: new Date().toISOString() };
       if (this.failLedger?.(row)) throw new Error("ledger unavailable (injected)");
       this.state.ledger.push(row);
       return [];
     }
-    if (/FROM dbo\.DecisionLedger/.test(sql)) {
+    if (/^SELECT TOP 1 \[Before\], \[After\]\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
       const found = this.state.ledger
         .filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId && r.Action === "rent_review.apply")
         .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
@@ -185,6 +195,11 @@ export class ReviewWorld {
     if (/FROM dbo\.TenantOccupancies/.test(sql)) return [{ Sqm: this.state.occupancySqm[Number(p.TenantId)] ?? 0 }];
 
     // Reviews
+    if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.RentReviews r/.test(sql.trim())) {
+      return this.state.reviews
+        .filter((r) => r.State !== null && r.State !== undefined && (p.TenantId === undefined || r.TenantId === p.TenantId))
+        .map((r) => this.joined(r));
+    }
     if (/FROM dbo\.RentReviews r[\s\S]*WHERE r\.ReviewId = @ReviewId/.test(sql)) {
       const row = this.state.reviews.find((r) => r.ReviewId === p.ReviewId && r.State !== null && r.State !== undefined);
       return row ? [this.joined(row)] : [];

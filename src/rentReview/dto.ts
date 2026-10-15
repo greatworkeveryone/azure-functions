@@ -13,6 +13,7 @@ import {
   type RentReviewState,
 } from "../rentReviewMachine";
 import { parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
+import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { isoTimestamp, rowVersionHex } from "../tenancyScheduleWrite";
 import { parseBasis, type RentReviewBasis } from "./basis";
 
@@ -52,6 +53,11 @@ export interface RentReviewDto {
   ownerName: string | null;
   ownerUserId: number | null;
   prepared: PersonStamp | null;
+  /** The last RETURN while the review is back in progress and not yet submitted
+   *  again (WP26): when, by whom, and the approver's note. Null otherwise. Read
+   *  from the decision ledger; RETURN clears SubmittedAt, so nothing on the review
+   *  row says it came back. */
+  returned: { at: string | null; byName: string; note: string | null } | null;
   reviewId: string;
   scheduledFor: string;
   state: RentReviewState;
@@ -106,6 +112,11 @@ function outcomeOf(row: SqlRow, state: RentReviewState, scheduledFor: string): R
   };
 }
 
+function returnedOf(row: SqlRow, state: RentReviewState): RentReviewDto["returned"] {
+  if (state !== "in_progress" || row.ReturnedAt === null || row.ReturnedAt === undefined) return null;
+  return { at: isoTimestamp(row.ReturnedAt), byName: text(row.ReturnedByName) ?? "someone", note: text(row.ReturnNote) };
+}
+
 function stamp(userId: unknown, name: unknown, at: unknown): PersonStamp | null {
   const result: PersonStamp = { at: isoTimestamp(at), name: text(name), userId: whole(userId) };
   return result.at === null && result.name === null && result.userId === null ? null : result;
@@ -140,6 +151,7 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
     ownerName: text(row.OwnerName),
     ownerUserId: whole(row.OwnerUserId),
     prepared: stamp(row.PreparedById, row.PreparedByName, row.PreparedAt),
+    returned: returnedOf(row, state),
     reviewId: String(row.ReviewId),
     rowVersion: rowVersionHex(row.Version),
     scheduledFor,
@@ -176,6 +188,9 @@ export interface TenancySummaryDto {
   reviewRatchet: boolean;
   /** Tenants.ReviewType as typed on the lease. */
   reviewType: string | null;
+  /** The schedule's sign-off (PLAN WP24, migration 097), so the review's checks can
+   *  show C3 before submit; null when it isn't signed off. */
+  scheduleSignOff: { at: string; byName: string } | null;
   scheduleVersion: number;
   /** Tenants.Status as stored. */
   status: string;
@@ -188,6 +203,11 @@ const decimalOrNull = (value: unknown): number | null => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
+
+function signOffOf(row: SqlRow): TenancySummaryDto["scheduleSignOff"] {
+  const signOff = scheduleSignOffFromRow(row);
+  return signOff ? { at: signOff.at, byName: signOff.by } : null;
+}
 
 /** A tenancy row as store.loadTenancyForReview returns it, and the tenancy's total area. */
 export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): TenancySummaryDto {
@@ -215,6 +235,7 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
     reviewIntervalMonths: whole(row.ReviewIntervalMonths),
     reviewRatchet,
     reviewType: text(row.ReviewType),
+    scheduleSignOff: signOffOf(row),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     status: String(row.Status ?? ""),
     tenantId: Number(row.TenantId),

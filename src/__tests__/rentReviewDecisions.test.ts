@@ -10,12 +10,14 @@ import { clearRoleCache } from "../auth";
 import { approveRentReview } from "../functions/approveRentReview";
 import { calculateRentReview } from "../functions/calculateRentReview";
 import { cancelRentReview } from "../functions/cancelRentReview";
+import { getRentReview } from "../functions/getRentReview";
+import { getRentReviews } from "../functions/getRentReviews";
 import { returnRentReview } from "../functions/returnRentReview";
 import { revertRentReview } from "../functions/revertRentReview";
 import { submitRentReview } from "../functions/submitRentReview";
 import { waiveRentReview } from "../functions/waiveRentReview";
 import { parseSteps } from "../scheduledRateStepLogic";
-import { postRequest } from "./fixtures/rentReviewFakes";
+import { getRequest, postRequest } from "./fixtures/rentReviewFakes";
 import {
   basis,
   LAST_YEAR,
@@ -120,6 +122,27 @@ describe("returnRentReview", () => {
       expect.anything(),
       expect.objectContaining({ code: "returned", note: "Use the Darwin index, not Australia", state: "in_progress" }),
     );
+  });
+
+  it("says the review came back, on the response, getRentReview and the list, until it is submitted again", async () => {
+    await waiting();
+    as(PEOPLE.bo);
+    const res = await call(returnRentReview, { note: "Use the Darwin index" });
+    const returned = { at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), byName: "Bo Manager", note: "Use the Darwin index" };
+    expect(reviewOf(res).returned).toEqual(returned);
+    const detail = await getRentReview(getRequest({ reviewId: "rev-1" }, "accounts"), ctx);
+    expect((detail.jsonBody as { review: Record<string, unknown> }).review.returned).toEqual(returned);
+    const list = await getRentReviews(getRequest({ tenantId: "7" }, "accounts"), ctx);
+    expect((list.jsonBody as { reviews: Array<Record<string, unknown>> }).reviews[0].returned).toEqual(returned);
+
+    // Recalculating keeps it; submitting again clears it.
+    as(PEOPLE.ann);
+    expect(reviewOf(await call(calculateRentReview)).returned).toEqual(returned);
+    expect(reviewOf(await call(submitRentReview)).returned).toBeNull();
+
+    // A second return shows the newer note; the first one no longer counts.
+    as(PEOPLE.bo);
+    expect(reviewOf(await call(returnRentReview, { note: "Now check the floor" })).returned).toMatchObject({ note: "Now check the floor" });
   });
 
   it("needs a note", async () => {

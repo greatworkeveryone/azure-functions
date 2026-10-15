@@ -188,6 +188,22 @@ describe("what comes back", () => {
     expect(byId["future-open"].rowVersion).toBe("0000000000000a01");
   });
 
+  it("carries the last return on each review, as getRentReview does, from the same ledger lookup (WP26)", async () => {
+    routeSql(db.executeQuery, [
+      [
+        /FROM dbo\.RentReviews/,
+        () => [
+          reviewRow({ ReturnNote: "Use the Darwin index", ReturnedAt: new Date("2026-10-14T03:00:00Z"), ReturnedByName: "Bo Manager", ReviewId: "back", State: "in_progress" }),
+          reviewRow({ ReviewId: "fresh", State: "in_progress" }),
+        ],
+      ],
+    ]);
+    const { reviews } = (await ask("tenantId=7")).jsonBody as Body;
+    expect(reviews.find((r) => r.reviewId === "back")?.returned).toEqual({ at: "2026-10-14T03:00:00.000Z", byName: "Bo Manager", note: "Use the Darwin index" });
+    expect(reviews.find((r) => r.reviewId === "fresh")?.returned).toBeNull();
+    expect(lastSelect().sql.replace(/\s+/g, " ")).toContain("OUTER APPLY ( SELECT TOP 1 l.OccurredAt AS ReturnedAt");
+  });
+
   it("returns an empty list as 200", async () => {
     const res = await ask("tenantId=7");
     expect(res.status).toBe(200);
