@@ -12,6 +12,8 @@
 //   expiry           every active tenancy's expiry, not only those with a review due
 //   option_deadline  the last day to give notice of an option (leaseOptions.ts)
 //
+// Vacated and archived tenancies (D4) are left out of all three kinds.
+//
 // Overdue rows come first, then by date. Rows carry names and dates and nothing
 // else: no rent, ABN, contacts or notes. That is the fix for the leak
 // LAUNCH-READINESS §4.4 notes in getReviewsDue, which sends whole tenancies to
@@ -45,14 +47,14 @@ const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).joi
 const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Expiry,
     t.OptionPeriods, t.OptionNoticeMonths
   FROM dbo.Tenants t
-  WHERE t.Status <> 'vacated' AND t.Expiry IS NOT NULL`;
+  WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.Expiry IS NOT NULL`;
 
 const REVIEWS_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method, r.OwnerUserId,
     t.BuildingId, t.LegalName, t.TradingName, u.DisplayName AS OwnerName
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
-  WHERE r.State IN (${OPEN_STATE_LIST}) AND r.ScheduledFor <= @Until AND t.Status <> 'vacated'`;
+  WHERE r.State IN (${OPEN_STATE_LIST}) AND r.ScheduledFor <= @Until AND t.Status <> 'vacated' AND t.ArchivedAt IS NULL`;
 
 const BUILDING_FILTER = " AND t.BuildingId = @BuildingId";
 

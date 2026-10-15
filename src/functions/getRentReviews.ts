@@ -2,9 +2,12 @@
 //
 // Review instances (PLAN WP25), newest review date first. Filters combine with
 // AND; give at least one:
-//   tenantId    one tenancy's reviews, history included
+//   tenantId    one tenancy's reviews, history included, archived tenancy or not
 //   buildingId  every review in a building
 //   state       one state, or several: state=due,in_progress or state=due&state=in_progress
+// A list by building or state leaves out the reviews of archived tenancies (D4);
+// name the tenancy with tenantId and its reviews come back, so its page can show
+// the history. getRentReview returns any review.
 // 200 { asOf, reviews: RentReviewDto[], truncated? }. `asOf` is the Darwin date
 // `overdue` was worked out for. Rows written before the workflow (no State) are
 // not reviews and are not listed; the tenancy's own reviews list still has them.

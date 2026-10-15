@@ -11,8 +11,8 @@
 // Checks, in the transaction, under an update lock on the review:
 //   rowVersion  must be the one the caller read, else 409 { code: "stale", current }
 //   state       scheduled or due, else 409 { code: "invalid_state" }
-//   C1          the tenancy isn't vacated (422 tenancy_vacated) and has no other
-//               open review (422 open_review_exists)
+//   C1          the tenancy isn't archived (422 tenancy_archived) or vacated (422
+//               tenancy_vacated) and has no other open review (422 open_review_exists)
 //   C2          the method resolves: the step's methodKind, else the tenancy's
 //               review type read with mapMethodKind, else "other"
 //
@@ -42,6 +42,7 @@ import {
   resolveCaller,
   staleReview,
   TENANCY_EDIT_ROLES,
+  tenancyArchived,
 } from "../rentReview/http";
 import { METHOD_RULE_APPLIED, resolveReviewMethod, stepOnDate } from "../rentReview/method";
 import {
@@ -95,7 +96,8 @@ export async function commenceRentReview(request: HttpRequest, context: Invocati
       const tenancy = await loadTenancyForReview(db, tenantId);
       if (!tenancy) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
 
-      // C1: the tenancy hasn't been vacated, and no other review of it is open.
+      // C1: the tenancy hasn't been archived or vacated, and no other review of it is open.
+      if (tenancy.ArchivedAt !== null && tenancy.ArchivedAt !== undefined) throw tenancyArchived();
       if (tenancy.Status === "vacated") {
         throw new RentReviewError("tenancy_vacated", "This tenancy has been vacated, so its review can't be commenced");
       }

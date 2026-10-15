@@ -157,6 +157,21 @@ describe("what it reads: names and dates only", () => {
     expect(reviewSql).toContain("r.ScheduledFor <= @Until");
   });
 
+  it("leaves archived tenancies out of all three kinds (D4): the tenancy query feeds expiries and option deadlines, the review query feeds reviews", async () => {
+    await ask();
+    expect(sqlOf(/FROM dbo\.Tenants t/).sql).toContain("t.Status <> 'vacated' AND t.ArchivedAt IS NULL");
+    expect(sqlOf(/FROM dbo\.RentReviews r/).sql).toContain("t.Status <> 'vacated' AND t.ArchivedAt IS NULL");
+  });
+
+  it("keeps that exclusion when it narrows to a building", async () => {
+    await ask("buildingId=5");
+    for (const pattern of [/FROM dbo\.RentReviews r/, /FROM dbo\.Tenants t/]) {
+      const { sql } = sqlOf(pattern);
+      expect(sql).toContain("t.ArchivedAt IS NULL");
+      expect(sql).toContain("AND t.BuildingId = @BuildingId");
+    }
+  });
+
   it("returns rows that hold nothing beyond names, ids and dates, even if the database were to give more", async () => {
     tenancies = [
       tenancyRow(1, {

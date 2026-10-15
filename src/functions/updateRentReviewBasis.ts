@@ -10,6 +10,8 @@
 // edited here (rentReview/basis.ts lists the keys per method).
 //
 //   state      in_progress or awaiting_index, else 409 { code: "invalid_state" }
+//   tenancy    not archived, else 422 { code: "tenancy_archived" } (D4: an archived
+//              tenancy's reviews are history until it is restored)
 //   who        the review's owner, or an accounts manager and up (cfo, director,
 //              admin), else 403 { code: "forbidden" }
 //   reason     required: a plain sentence on why, ledgered
@@ -42,6 +44,7 @@ import {
   resolveCaller,
   staleReview,
   TENANCY_EDIT_ROLES,
+  tenancyArchived,
 } from "../rentReview/http";
 import { inTransaction, loadReview, reviewForUpdate, saveBasis } from "../rentReview/store";
 
@@ -82,6 +85,7 @@ export async function updateRentReviewBasis(request: HttpRequest, context: Invoc
           { state },
         );
       }
+      if (review.TenantArchivedAt !== null && review.TenantArchivedAt !== undefined) throw tenancyArchived();
 
       const ownerUserId = review.OwnerUserId === null || review.OwnerUserId === undefined ? null : Number(review.OwnerUserId);
       const isOwner = ownerUserId !== null && ownerUserId === caller.actor.userId;

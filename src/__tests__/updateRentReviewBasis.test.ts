@@ -189,6 +189,35 @@ describe("when the basis can be changed", () => {
     },
   );
 
+  it("not in a review of an archived tenancy: 422 with a plain sentence, nothing written, even for the owner and an admin", async () => {
+    for (const role of ["accounts", "admin"]) {
+      jest.clearAllMocks();
+      stored = inProgress({ OwnerUserId: 7, TenantArchivedAt: new Date("2026-10-01T00:00:00Z") });
+      const res = await update(BODY, role);
+      expect(res.status).toBe(422);
+      expect(res.jsonBody).toMatchObject({
+        code: "tenancy_archived",
+        error: "This tenancy has been archived, so its rent review can't be changed.",
+      });
+      expect(saves()).toHaveLength(0);
+      expect(ledgerRowsOf(db.executeQuery)).toHaveLength(0);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reads the tenancy's archive stamp with the review, under the same lock", async () => {
+    await update();
+    const [{ sql }] = callsMatching(db.executeQuery, /RentReviews r WITH \(UPDLOCK, ROWLOCK\)/);
+    expect(sql).toContain("t.ArchivedAt AS TenantArchivedAt");
+  });
+
+  it("changes the basis again once the tenancy is restored", async () => {
+    stored = inProgress({ TenantArchivedAt: null });
+    expect((await update()).status).toBe(200);
+  });
+
   it("is a 404 for a review that doesn't exist", async () => {
     routeSql(db.executeQuery, [[/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => []]]);
     expect((await update()).status).toBe(404);

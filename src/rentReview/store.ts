@@ -31,6 +31,7 @@ const REVIEW_COLUMNS = `
   r.BillingConfirmedAt, r.BillingConfirmedBy,
   r.WaiveReason, r.ExpectedIndexAt, r.CreatedAt, r.UpdatedAt, r.Version,
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
+  t.ArchivedAt AS TenantArchivedAt,
   u.DisplayName AS OwnerName`;
 
 const REVIEW_JOINS = `
@@ -62,7 +63,10 @@ export interface ReviewFilters {
   tenantId?: number;
 }
 
-/** Reviews matching every filter given, newest review date first. */
+/** Reviews matching every filter given, newest review date first. A list across
+ *  tenancies (a building, a state) leaves out the reviews of archived tenancies
+ *  (D4); naming one tenancy by id still returns its reviews, so its page can show
+ *  the history. */
 export async function loadReviews(connection: Connection, filters: ReviewFilters): Promise<SqlRow[]> {
   const whereParts: string[] = ["r.State IS NOT NULL"];
   const params: SqlParam[] = [{ name: "Limit", type: TYPES.Int, value: REVIEW_LIST_LIMIT }];
@@ -79,6 +83,7 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
     whereParts.push(`r.State IN (${placeholders})`);
     filters.states.forEach((state, index) => params.push({ name: `State${index}`, type: TYPES.NVarChar, value: state }));
   }
+  if (filters.tenantId === undefined) whereParts.push("t.ArchivedAt IS NULL");
   const whereSql = whereParts.join(" AND ");
   return executeQuery(
     connection,
@@ -89,7 +94,7 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
   );
 }
 
-const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status,
+const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
     t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
     t.ScheduledRateSteps, b.BuildingName

@@ -99,7 +99,9 @@ describe("what it asks for", () => {
   it("combines filters with AND", async () => {
     await ask("buildingId=5&state=due,in_progress");
     const { sql } = lastSelect();
-    expect(sql).toMatch(/WHERE r\.State IS NOT NULL AND t\.BuildingId = @BuildingId AND r\.State IN \(@State0, @State1\)/);
+    expect(sql).toMatch(
+      /WHERE r\.State IS NOT NULL AND t\.BuildingId = @BuildingId AND r\.State IN \(@State0, @State1\) AND t\.ArchivedAt IS NULL\s+ORDER BY/,
+    );
   });
 
   it("leaves out rows written before the workflow, which have no State", async () => {
@@ -112,6 +114,38 @@ describe("what it asks for", () => {
     const { params, sql } = lastSelect();
     expect(sql).toContain("SELECT TOP (@Limit)");
     expect(params.Limit).toBe(5000);
+  });
+});
+
+describe("archived tenancies (D4)", () => {
+  it.each(["buildingId=5", "state=due", "buildingId=5&state=due,in_progress"])(
+    "leaves their reviews out of a list by %s",
+    async (query) => {
+      await ask(query);
+      expect(lastSelect().sql).toContain("t.ArchivedAt IS NULL");
+    },
+  );
+
+  it.each(["tenantId=7", "tenantId=7&state=due", "tenantId=7&buildingId=5&state=completed,waived"])(
+    "still returns an archived tenancy's reviews when the tenancy is named, so its page can show the history: %s",
+    async (query) => {
+      await ask(query);
+      expect(lastSelect().sql).not.toContain("ArchivedAt IS NULL");
+    },
+  );
+
+  it("passes through what the database returns for a named, archived tenancy, with the review as it was left", async () => {
+    routeSql(db.executeQuery, [
+      [
+        /FROM dbo\.RentReviews/,
+        () => [reviewRow({ ReviewId: "old", ScheduledFor: asDate(DAY(-200)), State: "completed", Status: "completed", TenantArchivedAt: asDate(DAY(-20)), TenantStatus: "vacated" })],
+      ],
+    ]);
+
+    const res = await ask("tenantId=7");
+
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as Body).reviews).toEqual([expect.objectContaining({ overdue: false, reviewId: "old", state: "completed", tenantId: 7 })]);
   });
 });
 

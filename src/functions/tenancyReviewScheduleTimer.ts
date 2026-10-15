@@ -6,10 +6,12 @@ import { runTimer, type TimerCounts } from "../timerRuns";
 
 // ── Timer trigger: daily, 02:00 UTC (11:30 in Darwin) ────────────────────────
 // The rent review generator (PLAN WP25, src/rentReview/generator.ts): keeps one
-// open review per tenancy that hasn't been vacated, for its next review date
-// (scheduled, then due once inside REVIEW_WINDOW_DAYS, default 60). It replaces
-// the old housekeeping timer, whose inserts always failed the RentReviews
-// ReviewType check and which has been off in production.
+// open review per live tenancy (not vacated, not archived), for its next review
+// date (scheduled, then due once inside REVIEW_WINDOW_DAYS, default 60). A lease
+// marked "no review clause" (ReviewType 'none') gets none, unless a schedule step
+// on the date names a method. It replaces the old housekeeping timer, whose
+// inserts always failed the RentReviews ReviewType check and which has been off
+// in production.
 //
 // Opt-in, because it writes in bulk:
 //   RENT_REVIEW_GENERATOR_ENABLED=true   the generator writes
@@ -18,8 +20,8 @@ import { runTimer, type TimerCounts } from "../timerRuns";
 //   neither                              it does nothing and does not touch the database
 //   REVIEW_WINDOW_DAYS                   days before a review's date it becomes due (default 60)
 // Turn the dry run on first and read the counts in the log: the first live run
-// schedules one review for every tenancy, and those already past their date
-// start out due and overdue.
+// schedules one review for every tenancy that has a review clause, and those
+// already past their date start out due and overdue.
 //
 // WEBSITE_TIME_ZONE is not set in production, so the schedule runs in UTC; the
 // generator works on the Darwin date (todayInDarwin) itself. runTimer records

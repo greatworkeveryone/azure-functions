@@ -233,6 +233,39 @@ describe("C1: the tenancy is live and has no other open review", () => {
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses an archived tenancy with a plain sentence, and writes nothing", async () => {
+    tenancy = tenancyRow({ ArchivedAt: new Date("2026-10-01T00:00:00Z") });
+    const res = await commence();
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({
+      code: "tenancy_archived",
+      error: "This tenancy has been archived, so its rent review can't be changed.",
+    });
+    expect(writes()).toHaveLength(0);
+    expect(ledgerRowsOf(db.executeQuery)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
+  });
+
+  it("calls a tenancy that is both archived and vacated archived, whoever asks", async () => {
+    tenancy = tenancyRow({ ArchivedAt: new Date("2026-10-01T00:00:00Z"), Status: "vacated" });
+    for (const role of ["accounts", "director", "admin"]) {
+      expect((await commence(BODY, role)).jsonBody).toMatchObject({ code: "tenancy_archived" });
+    }
+  });
+
+  it("reads the tenancy's archive stamp from the database, in the same query as its status", async () => {
+    await commence();
+    const [{ sql }] = callsMatching(db.executeQuery, /FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/);
+    expect(sql).toContain("t.ArchivedAt");
+  });
+
+  it("commences a restored tenancy, whose archive stamp is clear again", async () => {
+    tenancy = tenancyRow({ ArchivedAt: null });
+    expect((await commence()).status).toBe(200);
+  });
+
   it("commences a tenancy that is in holdover or pending", async () => {
     for (const status of ["holdover", "pending", "current"]) {
       tenancy = tenancyRow({ Status: status });

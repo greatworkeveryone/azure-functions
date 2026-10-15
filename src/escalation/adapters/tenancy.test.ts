@@ -18,6 +18,7 @@ const viewer = (...roles: string[]) => ({ name: "Ann", roles, userId: 7 });
 const ref = (subjectId: string) => ({ policyKey: "any.manual", subjectId, subjectType: "tenancy" });
 
 const row = (over: Record<string, unknown> = {}) => ({
+  ArchivedAt: null,
   BuildingId: 5,
   BuildingName: "Tower A",
   LegalName: "Acme Pty Ltd",
@@ -120,6 +121,29 @@ describe("whether there is still something to escalate", () => {
     db.executeQuery.mockResolvedValue([]);
     expect(await tenancyAdapter.isConditionActive(conn, ref("42"), new Date())).toBe(false);
     expect(await tenancyAdapter.isConditionActive(conn, ref("nope"), new Date())).toBe(false);
+  });
+
+  it("is false once the tenancy is archived (D4), whatever its status, so a new escalation is refused and an open one clears", async () => {
+    const archivedAt = new Date("2026-10-01T00:00:00Z");
+    for (const status of ["current", "holdover", "pending", "vacated"]) {
+      db.executeQuery.mockResolvedValue([row({ ArchivedAt: archivedAt, Status: status })]);
+      expect(await tenancyAdapter.isConditionActive(conn, ref("42"), new Date())).toBe(false);
+    }
+  });
+
+  it("is true again once an archived tenancy is restored", async () => {
+    db.executeQuery.mockResolvedValue([row({ ArchivedAt: new Date("2026-10-01T00:00:00Z") })]);
+    expect(await tenancyAdapter.isConditionActive(conn, ref("42"), new Date())).toBe(false);
+    db.executeQuery.mockResolvedValue([row({ ArchivedAt: null })]);
+    expect(await tenancyAdapter.isConditionActive(conn, ref("42"), new Date())).toBe(true);
+  });
+
+  it("reads the archive stamp from the tenancy, by parameter", async () => {
+    db.executeQuery.mockResolvedValue([row()]);
+    await tenancyAdapter.isConditionActive(conn, ref("42"), new Date());
+    const [, sql, params] = db.executeQuery.mock.calls[0];
+    expect(sql).toContain("t.ArchivedAt");
+    expect(params).toEqual([{ name: "TenantId", type: TYPES.Int, value: 42 }]);
   });
 });
 

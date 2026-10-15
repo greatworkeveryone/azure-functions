@@ -1,7 +1,7 @@
 // The tenancy adapter (WP25): lets a person escalate a tenancy by hand with the
 // any.manual policy (PLAN §3.7), from the tenancy page. It describes the tenancy
-// to the engine, says when the problem has cleared (the tenancy was vacated),
-// links to /tenancy/{tenantId}, and limits who may see and raise these to the
+// to the engine, says when the problem has cleared (the tenancy was vacated or
+// archived), links to /tenancy/{tenantId}, and limits who may see and raise these to the
 // roles that may read a tenancy. The review adapter (WP26) is separate.
 
 import { type Connection, TYPES } from "tedious";
@@ -23,7 +23,7 @@ const TENANCY_VIEW_ROLES: ReadonlySet<string> = new Set([
 
 const SUMMARY_PARTS_MAX = 160;
 
-const TENANCY_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, b.BuildingName
+const TENANCY_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt, b.BuildingName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
   WHERE t.TenantId = @TenantId`;
@@ -43,13 +43,14 @@ export const tenancyAdapter: EscalationAdapter = {
 
   deepLink: (subjectId) => `/tenancy/${encodeURIComponent(subjectId)}`,
 
-  // A manual escalation lasts while the tenancy does: once it is vacated there
-  // is nothing left to push.
+  // A manual escalation lasts while the tenancy does: once it is vacated or
+  // archived (D4) there is nothing left to push, so a new one is refused and an
+  // open one clears. Restoring an archived tenancy makes it escalatable again.
   async isConditionActive(connection, ref) {
     const id = tenantId(ref.subjectId);
     if (id === null) return false;
     const row = await loadTenancy(connection, id);
-    return row !== null && row.Status !== "vacated";
+    return row !== null && row.Status !== "vacated" && (row.ArchivedAt === null || row.ArchivedAt === undefined);
   },
 
   ledgerScope: (escalation) => ({ tenantId: tenantId(escalation.subjectId) }),

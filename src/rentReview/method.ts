@@ -39,6 +39,13 @@ export function resolveReviewMethod(input: {
   return { method: "other", source: "fallback" };
 }
 
+/** The lease says it has no review clause: Tenants.ReviewType is 'none', the
+ *  register's default for a new tenancy. A blank or unrecognised type is not
+ *  this: nobody has classified that lease yet. */
+export function hasNoReviewClause(reviewType: string | null | undefined): boolean {
+  return (reviewType ?? "").trim().toLowerCase() === "none";
+}
+
 /** The schedule step a review of `scheduledFor` is about: a review step dated
  *  that day. The first one wins if the schedule (wrongly) holds two. */
 export function stepOnDate(

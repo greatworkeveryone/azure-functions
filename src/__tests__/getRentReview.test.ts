@@ -140,6 +140,20 @@ describe("the review and its tenancy", () => {
     serve({ tenancy: null });
     expect((await ask("reviewId=rev-1")).status).toBe(404);
   });
+
+  it("still returns a review whose tenancy has been archived (D4): the history stays readable by id", async () => {
+    const archivedAt = new Date("2026-10-01T00:00:00Z");
+    serve({ review: { State: "completed", Status: "completed", TenantArchivedAt: archivedAt }, tenancy: { ArchivedAt: archivedAt } });
+
+    const res = await ask("reviewId=rev-1");
+
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as Body).review).toMatchObject({ reviewId: "rev-1", state: "completed", tenantId: 7 });
+    expect((res.jsonBody as Body).tenancy).toMatchObject({ tenantId: 7 });
+    for (const { sql } of [...callsMatching(db.executeQuery, /FROM dbo\.RentReviews r/), ...callsMatching(db.executeQuery, /FROM dbo\.Tenants t/)]) {
+      expect(sql).not.toContain("ArchivedAt IS NULL");
+    }
+  });
 });
 
 describe("the linked step", () => {

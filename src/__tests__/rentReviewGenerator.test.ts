@@ -1,6 +1,7 @@
 /// <reference types="jest" />
-// The review generator: one open review per tenancy that hasn't been vacated, for
-// the next review date derived for today; scheduled, then due once inside the
+// The review generator: one open review per live tenancy (not vacated, not
+// archived, and not a lease with no review clause), for the next review date
+// derived for today; scheduled, then due once inside the
 // window; idempotent; a dry run writes nothing. The database is an in-memory
 // fake that enforces the filtered unique index, so "a re-run changes nothing"
 // is checked against what was actually stored. The ledger is the real one: its
@@ -14,6 +15,7 @@ import {
   DEFAULT_REVIEW_WINDOW_DAYS,
   GENERATOR_ACTOR,
   generatorMode,
+  nextReviewFor,
   planGenerator,
   reviewWindowDays,
   runReviewGenerator,
@@ -45,6 +47,14 @@ const asDate = (iso: string): Date => new Date(`${iso}T00:00:00Z`);
 
 type Param = { name: string; value: unknown };
 const CONNECTION = {} as Connection;
+
+/** A schedule whose step on `review` names `kind` (a commencement row a year earlier, then the review step). */
+function stepsFor(review: string, kind: string | undefined): string {
+  return JSON.stringify([
+    { baseRentPerAnnum: 100000, effectiveFrom: addMonthsClamped(review, -12), id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+    { effectiveFrom: review, id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ...(kind ? { methodKind: kind } : {}), ratePercent: 3 },
+  ]);
+}
 
 /** A tenancy whose next review derives to `review`: its lease began a review interval earlier. */
 function tenancy(id: number, review: string | null, over: SqlRow = {}): SqlRow {
@@ -118,7 +128,10 @@ function fakeSql(_connection: unknown, sql: string, params: Param[] = []): Promi
     return Promise.resolve([]);
   }
   if (/FROM dbo\.Tenants t\s+WHERE t\.Status <> 'vacated'/.test(sql)) {
-    return Promise.resolve(tenants.filter((row) => row.Status !== "vacated"));
+    // The fake honours the archive filter only if the SQL asks for it, so the
+    // tests below fail if the clause is dropped.
+    const leavesOutArchived = /AND t\.ArchivedAt IS NULL/.test(sql);
+    return Promise.resolve(tenants.filter((row) => row.Status !== "vacated" && !(leavesOutArchived && row.ArchivedAt)));
   }
   if (/FROM dbo\.RentReviews\s+WHERE State IN/.test(sql)) {
     return Promise.resolve(stored.filter((r) => OPEN.includes(r.State)).map((r) => ({ ...r })));
@@ -244,17 +257,103 @@ describe("planGenerator", () => {
     expect(plan.actions[0]).toMatchObject({ method: "fixed", methodSource: "step", scheduledFor: review });
   });
 
-  it("falls back to other for a review type nothing recognises, and for none", () => {
+  it("falls back to other for a review type nothing recognises, and for a blank one, because someone has to classify the lease", () => {
     const plan = planGenerator(
-      facts([tenancy(1, DAY(90), { ReviewType: "Special arrangement" }), tenancy(2, DAY(90), { ReviewType: "none" })]),
+      facts([tenancy(1, DAY(90), { ReviewType: "Special arrangement" }), tenancy(2, DAY(90), { ReviewType: "" }), tenancy(3, DAY(90), { ReviewType: "   " })]),
       open([]),
       TODAY,
       60,
     );
-    expect(plan.actions.map((a) => a.kind === "schedule" && [a.method, a.methodSource])).toEqual([
-      ["other", "fallback"],
-      ["other", "fallback"],
+    expect(plan.skipped).toEqual([]);
+    expect(plan.actions.map((a) => a.kind === "schedule" && [a.tenantId, a.method, a.methodSource])).toEqual([
+      [1, "other", "fallback"],
+      [2, "other", "fallback"],
+      [3, "other", "fallback"],
     ]);
+  });
+
+  describe("a lease with no review clause (ReviewType none)", () => {
+    it.each(["none", "None", " NONE "])("is skipped as no_review_clause, not given an other review: %j", (reviewType) => {
+      const plan = planGenerator(facts([tenancy(1, DAY(90), { ReviewType: reviewType })]), open([]), TODAY, 60);
+      expect(plan.actions).toEqual([]);
+      expect(plan.skipped).toEqual([{ reason: "no_review_clause", tenantId: 1 }]);
+      expect(plan.unchanged).toBe(0);
+    });
+
+    it("still gets the review a step on the date names: a fixed step schedules a fixed review", () => {
+      const review = DAY(90);
+      const plan = planGenerator(facts([tenancy(1, review, { ReviewType: "none", ScheduledRateSteps: stepsFor(review, "fixed") })]), open([]), TODAY, 60);
+      expect(plan.skipped).toEqual([]);
+      expect(plan.actions).toEqual([expect.objectContaining({ kind: "schedule", method: "fixed", methodSource: "step", scheduledFor: review, tenantId: 1 })]);
+    });
+
+    it("counts a step that names other: that is a method somebody chose", () => {
+      const review = DAY(90);
+      const plan = planGenerator(facts([tenancy(1, review, { ReviewType: "none", ScheduledRateSteps: stepsFor(review, "other") })]), open([]), TODAY, 60);
+      expect(plan.actions).toEqual([expect.objectContaining({ kind: "schedule", method: "other", methodSource: "step" })]);
+    });
+
+    it("is not rescued by a step on the date that names no method, or by a step on an earlier date", () => {
+      const review = DAY(90);
+      // Last year's review was a fixed step, now settled; this year's date has no step.
+      const lastYearsStep = JSON.stringify([
+        { baseRentPerAnnum: 100000, effectiveFrom: addMonthsClamped(review, -24), id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+        { effectiveFrom: addMonthsClamped(review, -12), id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "fixed", ratePercent: 3 },
+      ]);
+      expect(nextReviewFor(tenancy(2, review, { ScheduledRateSteps: lastYearsStep }), TODAY)).toBe(review);
+
+      const plan = planGenerator(
+        facts([
+          tenancy(1, review, { ReviewType: "none", ScheduledRateSteps: stepsFor(review, undefined) }),
+          tenancy(2, review, { ReviewType: "none", ScheduledRateSteps: lastYearsStep }),
+          // The same schedule on a lease nobody has classified is scheduled for the same date: it is the clause that skips tenancy 2.
+          tenancy(3, review, { ReviewType: "", ScheduledRateSteps: lastYearsStep }),
+        ]),
+        open([]),
+        TODAY,
+        60,
+      );
+      expect(plan.skipped).toEqual([
+        { reason: "no_review_clause", tenantId: 1 },
+        { reason: "no_review_clause", tenantId: 2 },
+      ]);
+      expect(plan.actions).toEqual([expect.objectContaining({ kind: "schedule", method: "other", scheduledFor: review, tenantId: 3 })]);
+    });
+
+    it("does not touch a tenancy that already has an open review: that review runs on as usual", () => {
+      const plan = planGenerator(
+        facts([tenancy(1, DAY(45), { ReviewType: "none" })]),
+        open([[1, { method: "other", reviewId: "r1", scheduledFor: DAY(45), state: "scheduled" }]]),
+        TODAY,
+        60,
+      );
+      expect(plan.skipped).toEqual([]);
+      expect(plan.actions).toEqual([expect.objectContaining({ kind: "open_window", reviewId: "r1", tenantId: 1 })]);
+    });
+  });
+
+  it("skips an archived tenancy like a vacated one, with or without an open review", () => {
+    const archivedAt = asDate(DAY(-30));
+    const plan = planGenerator(
+      facts([tenancy(1, DAY(10), { ArchivedAt: archivedAt }), tenancy(2, DAY(10), { ArchivedAt: archivedAt }), tenancy(3, DAY(10))]),
+      open([[2, { method: "cpi", reviewId: "r2", scheduledFor: DAY(10), state: "scheduled" }]]),
+      TODAY,
+      60,
+    );
+    expect(plan.skipped).toEqual([
+      { reason: "archived", tenantId: 1 },
+      { reason: "archived", tenantId: 2 },
+    ]);
+    // Only the live tenancy is scheduled; the archived one's open review is left exactly as it is.
+    expect(plan.actions).toEqual([expect.objectContaining({ kind: "schedule", tenantId: 3 })]);
+    expect(plan.drift).toEqual([]);
+    expect(plan.unchanged).toBe(0);
+  });
+
+  it("reads a tenancy as archived only when its ArchivedAt is set, so a restored one is live again", () => {
+    expect(toTenancyFacts(tenancy(1, DAY(10))).archived).toBe(false);
+    expect(toTenancyFacts(tenancy(1, DAY(10), { ArchivedAt: null })).archived).toBe(false);
+    expect(toTenancyFacts(tenancy(1, DAY(10), { ArchivedAt: asDate(DAY(-1)) })).archived).toBe(true);
   });
 
   it("derives the date for today instead of reading the stored NextReviewDate", () => {
@@ -526,6 +625,67 @@ describe("runReviewGenerator, live", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("left as it is"));
     expect(stored.filter((r) => r.TenantId === 1)).toHaveLength(1);
     expect(stored.find((r) => r.ReviewId === "existing-review")?.ScheduledFor).toEqual(asDate(DAY(500)));
+  });
+});
+
+describe("runReviewGenerator, tenancies out of scope", () => {
+  const tenanciesSql = () =>
+    (db.executeQuery.mock.calls as Array<[unknown, string]>).map(([, sql]) => sql).find((sql) => /FROM dbo\.Tenants t/.test(sql)) as string;
+
+  beforeEach(() => {
+    tenants = [
+      tenancy(1, DAY(120)),
+      tenancy(2, DAY(30), { ArchivedAt: asDate(DAY(-5)) }),
+      tenancy(3, DAY(30), { ReviewType: "none" }),
+      tenancy(4, DAY(30), { ReviewType: "none", ScheduledRateSteps: stepsFor(DAY(30), "fixed") }),
+    ];
+  });
+
+  it("leaves archived tenancies out in the SQL, so they are not even read or counted", async () => {
+    const { report } = await run();
+
+    expect(tenanciesSql()).toMatch(/WHERE t\.Status <> 'vacated' AND t\.ArchivedAt IS NULL/);
+    expect(report.tenancies).toBe(3); // 1, 3 and 4: tenancy 2 never left the database
+    expect(report.skipped.map((skip) => skip.tenantId)).not.toContain(2);
+  });
+
+  it("writes nothing for an archived tenancy or a lease with no review clause, and still schedules the method a step names", async () => {
+    const { report } = await run();
+
+    expect(report).toMatchObject({ errors: [], scheduled: 2 });
+    expect(report.skipped).toEqual([{ reason: "no_review_clause", tenantId: 3 }]);
+    expect(stored.map((review) => review.TenantId).sort()).toEqual([1, 4]);
+    expect(stored.find((review) => review.TenantId === 4)).toMatchObject({ Method: "fixed", ReviewType: "fixedPercent", State: "due" });
+    const ledgered = ledgerRows().map((row) => row.tenantId);
+    expect(ledgered).not.toContain(2);
+    expect(ledgered).not.toContain(3);
+  });
+
+  it("leaves an archived tenancy's open review exactly as it is, and picks it up again once the tenancy is restored", async () => {
+    stored.push({
+      BuildingId: 5,
+      Method: "cpi",
+      ReviewId: "kept",
+      ReviewType: "cpi",
+      ScheduledFor: asDate(DAY(30)),
+      State: "scheduled",
+      Status: "upcoming",
+      TenantId: 2,
+    });
+
+    await run();
+    expect(stored.find((review) => review.ReviewId === "kept")?.State).toBe("scheduled"); // inside the window, but out of scope
+
+    tenants[1] = tenancy(2, DAY(30)); // restored: ArchivedAt cleared
+    const { report } = await run();
+    expect(stored.find((review) => review.ReviewId === "kept")?.State).toBe("due");
+    expect(report).toMatchObject({ errors: [], scheduled: 0, windowsOpened: 1 });
+  });
+
+  it("counts the lease with no review clause among the skipped in a dry run too", async () => {
+    const { log } = await run({ dryRun: true });
+    expect(log.mock.calls.at(-1)?.[0]).toMatch(/3 tenancies checked on 2026-10-14 .*, 1 skipped,/);
+    expect(stored).toEqual([]);
   });
 });
 

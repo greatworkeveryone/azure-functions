@@ -65,6 +65,7 @@ export type RentReviewErrorCode =
   | "open_review_exists"
   | "reason_required"
   | "stale"
+  | "tenancy_archived"
   | "tenancy_vacated";
 
 const STATUS: Record<RentReviewErrorCode, number> = {
@@ -77,6 +78,7 @@ const STATUS: Record<RentReviewErrorCode, number> = {
   open_review_exists: 422,
   reason_required: 400,
   stale: 409,
+  tenancy_archived: 422,
   tenancy_vacated: 422,
 };
 
@@ -93,6 +95,12 @@ export class RentReviewError extends Error {
     this.details = details;
     this.status = STATUS[code];
   }
+}
+
+/** The 422 for a change to a review of an archived tenancy (D4): its reviews are
+ *  history until the tenancy is restored. */
+export function tenancyArchived(): RentReviewError {
+  return new RentReviewError("tenancy_archived", "This tenancy has been archived, so its rent review can't be changed.");
 }
 
 /** The 409 for a write made on a stale read: the current review rides along so the screen can refresh. */

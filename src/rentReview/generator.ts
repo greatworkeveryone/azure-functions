@@ -1,12 +1,19 @@
 // The review generator (PLAN WP25, §3.1 SCHEDULE and OPEN_WINDOW): keeps exactly
-// one open review instance per tenancy that hasn't been vacated, for the tenancy's
-// next review date.
+// one open review instance per live tenancy (not vacated, not archived), for the
+// tenancy's next review date.
 //
 // The date is the one WP23b derives for today (deriveNextReviewDate), read the
 // way the screens and getReviewsDue read it, never the stored NextReviewDate
 // column, which only moves on a write or a recompute. A tenancy with nothing to
 // derive from keeps its stored date (as tenantRowToApi does); one with neither
 // is skipped.
+//
+// A lease that says it has no review clause (Tenants.ReviewType 'none') gets no
+// new review, unless a schedule step dated on the derived date names a method:
+// that step still wins, so a fixed step still schedules a fixed review. A blank
+// or unrecognised review type still becomes an `other` review, because someone
+// has to classify the lease. (A tenancy that already has an open review is not
+// touched by this: the review runs on as below.)
 //
 //   no open review          -> SCHEDULE: a new instance, `scheduled`
 //   scheduled, inside the   -> OPEN_WINDOW: scheduled -> due
@@ -44,7 +51,7 @@ import {
 } from "../rentReviewMachine";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
-import { type MethodSource, resolveReviewMethod, stepOnDate } from "./method";
+import { hasNoReviewClause, type MethodSource, resolveReviewMethod, stepOnDate } from "./method";
 import { inTransaction, insertScheduledReview, markWindowOpen } from "./store";
 
 export const DEFAULT_REVIEW_WINDOW_DAYS = 60;
@@ -68,6 +75,8 @@ export function generatorMode(env: NodeJS.ProcessEnv = process.env): "dry-run" |
 // ── Planning (pure) ─────────────────────────────────────────────────────────
 
 export interface TenancyFacts {
+  /** Tenants.ArchivedAt is set (D4): out of scope, like a vacated tenancy. */
+  archived: boolean;
   buildingId: number;
   /** Tenants.Status as stored. */
   status: string;
@@ -114,11 +123,15 @@ export interface DriftedReview {
   tenantId: number;
 }
 
+/** Why a tenancy was left out: archived or vacated; a lease with no review clause
+ *  (ReviewType 'none', and no step naming a method); or no date to review. */
+export type SkipReason = "archived" | "no_review_clause" | "no_review_date" | "vacated";
+
 export interface GeneratorPlan {
   actions: GeneratorAction[];
   drift: DriftedReview[];
   /** Tenancies with nothing to do. */
-  skipped: Array<{ reason: "no_review_date" | "vacated"; tenantId: number }>;
+  skipped: Array<{ reason: SkipReason; tenantId: number }>;
   unchanged: number;
 }
 
@@ -147,6 +160,10 @@ export function planGenerator(
       plan.skipped.push({ reason: "vacated", tenantId: tenancy.tenantId });
       continue;
     }
+    if (tenancy.archived) {
+      plan.skipped.push({ reason: "archived", tenantId: tenancy.tenantId });
+      continue;
+    }
     const derived = nextReviewFor(tenancy.row, today);
     if (derived === null) {
       plan.skipped.push({ reason: "no_review_date", tenantId: tenancy.tenantId });
@@ -157,10 +174,15 @@ export function planGenerator(
     if (!open) {
       if (!canTransition(null, "SCHEDULE")) continue;
       const steps = parseSteps(tenancy.row.ScheduledRateSteps as string | null | undefined);
-      const { method, source } = resolveReviewMethod({
-        reviewType: typeof tenancy.row.ReviewType === "string" ? tenancy.row.ReviewType : null,
-        step: stepOnDate(steps, derived),
-      });
+      const reviewType = typeof tenancy.row.ReviewType === "string" ? tenancy.row.ReviewType : null;
+      const { method, source } = resolveReviewMethod({ reviewType, step: stepOnDate(steps, derived) });
+      // "No review clause" and no step on that date naming a method: nothing to review,
+      // rather than an `other` review every year. A step that names a method got a
+      // source other than "fallback" above and is scheduled as usual.
+      if (source === "fallback" && hasNoReviewClause(reviewType)) {
+        plan.skipped.push({ reason: "no_review_clause", tenantId: tenancy.tenantId });
+        continue;
+      }
       plan.actions.push({
         buildingId: tenancy.buildingId,
         daysUntil: daysBetweenIso(today, derived),
@@ -205,11 +227,11 @@ export function planGenerator(
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
-const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status,
+const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.LastReviewDate, t.ReviewIntervalMonths, t.NextReviewDate, t.ReviewType,
     t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
   FROM dbo.Tenants t
-  WHERE t.Status <> 'vacated'
+  WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL
   ORDER BY t.TenantId`;
 
 const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).join(", ");
@@ -222,6 +244,7 @@ export function toTenancyFacts(row: SqlRow): TenancyFacts {
   const trading = typeof row.TradingName === "string" ? row.TradingName.trim() : "";
   const legal = typeof row.LegalName === "string" ? row.LegalName.trim() : "";
   return {
+    archived: row.ArchivedAt !== null && row.ArchivedAt !== undefined,
     buildingId: Number(row.BuildingId),
     row,
     status: String(row.Status),
@@ -395,7 +418,7 @@ function describeAction(action: GeneratorAction): string {
 }
 
 /**
- * One run. Reads every non-vacated tenancy and every open review, plans, and
+ * One run. Reads every live (not vacated, not archived) tenancy and every open review, plans, and
  * (unless `dryRun`) carries the plan out one action at a time: a failure on one
  * tenancy is reported and the rest carry on. A dry run reads only.
  */

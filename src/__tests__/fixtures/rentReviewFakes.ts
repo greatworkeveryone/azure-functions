@@ -82,6 +82,7 @@ export function reviewRow(over: Row = {}): Row {
     Status: "due",
     StepId: null,
     SubmittedAt: null,
+    TenantArchivedAt: null,
     TenantBuildingId: 5,
     TenantId: 7,
     TenantStatus: "current",
@@ -96,6 +97,7 @@ export function reviewRow(over: Row = {}): Row {
 /** A tenancy as store.loadTenancyForReview returns it: a Darwin CPI lease with a cap, a floor and a ratchet. */
 export function tenancyRow(over: Row = {}): Row {
   return {
+    ArchivedAt: null,
     BuildingId: 5,
     BuildingName: "Tower A",
     Commencement: asDate(addMonthsClamped(DAY(10), -24)),

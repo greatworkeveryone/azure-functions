@@ -4,7 +4,8 @@
 //
 //   review           every open review whose date falls inside the window or has
 //                    already passed (overdue)
-//   expiry           the expiry of every active tenancy, whether or not a review
+//   expiry           the expiry of every active tenancy (not vacated, not archived),
+//                    whether or not a review
 //                    is due (F18c: expiries used to surface only with a review);
 //                    a lease already past its expiry that hasn't been vacated is
 //                    overdue

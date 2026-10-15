@@ -1,7 +1,7 @@
 /// <reference types="jest" />
 // C2: the method comes from the schedule step's methodKind, else the tenancy's
 // free-text review type read with mapMethodKind, else "other".
-import { METHOD_RULE_APPLIED, resolveReviewMethod, stepOnDate } from "../rentReview/method";
+import { hasNoReviewClause, METHOD_RULE_APPLIED, resolveReviewMethod, stepOnDate } from "../rentReview/method";
 import type { ScheduledRateStep } from "../scheduledRateStepLogic";
 
 const step = (over: Partial<ScheduledRateStep> = {}): ScheduledRateStep => ({
@@ -68,6 +68,18 @@ describe("resolveReviewMethod", () => {
       step: "method_from_step",
     });
     for (const rule of Object.values(METHOD_RULE_APPLIED)) expect(rule.length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("hasNoReviewClause", () => {
+  it.each(["none", "None", "NONE", "  none  "])("reads %j as a lease with no review clause", (reviewType) => {
+    expect(hasNoReviewClause(reviewType)).toBe(true);
+  });
+
+  it("does not read a blank, an unrecognised or a real review type that way: someone has to classify those", () => {
+    for (const reviewType of ["", "   ", null, undefined, "Special arrangement", "CPI Darwin (June)", "Fixed 3%", "none of the above", "no review", "n/a"]) {
+      expect(hasNoReviewClause(reviewType)).toBe(false);
+    }
   });
 });
 
