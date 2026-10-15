@@ -20,11 +20,18 @@
 //
 // Daily rather than monthly because the daily run is a no-op unless ABS has
 // published a new quarter or rebased, and a new quarter then lands within a day.
+//
+// After a sync has committed, every CPI rent review waiting for its index whose
+// quarters are now published goes back to in progress (INDEX_AVAILABLE, WP26,
+// rentReview/indexResume.ts), ledgered as this timer. The dry run says which
+// would. A failure there fails the invocation under its own stage; the CPI rows
+// are already committed and the next run tries the reviews again.
 
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { AbsCpiError, CpiSeries, fetchAllCpiSeries } from "../cpiAbs";
 import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
 import { closeConnection, createServiceRequestConnection } from "../db";
+import { resumeAwaitingIndex } from "../rentReview/indexResume";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
 
@@ -83,6 +90,24 @@ export async function tenancyCpiSyncTimer(
       else await syncCpiIndex(connection, series, context);
     } catch (error) {
       return fail(context, dryRun ? "database dry run" : "database sync", error);
+    }
+
+    let resumed;
+    try {
+      resumed = await resumeAwaitingIndex(connection, {
+        dryRun,
+        log: (message) => context.log(message),
+        warn: (message) => context.warn(message),
+      });
+    } catch (error) {
+      return fail(context, "index resume", error);
+    }
+    if (resumed.errors.length > 0) {
+      return fail(
+        context,
+        "index resume",
+        new Error(`${resumed.errors.length} rent review(s) couldn't go back to in progress; first: ${resumed.errors[0].message}`),
+      );
     }
   } finally {
     if (connection) closeConnection(connection);

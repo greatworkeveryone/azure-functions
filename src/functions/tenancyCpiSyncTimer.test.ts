@@ -12,6 +12,8 @@ jest.mock("../cpiAbs", () => ({
   fetchAllCpiSeries: jest.fn(),
 }));
 jest.mock("../cpiIndexSync", () => ({ planCpiSync: jest.fn(), syncCpiIndex: jest.fn() }));
+// INDEX_AVAILABLE has its own tests (__tests__/rentReviewIndexResume.test.ts); here only its place in the run.
+jest.mock("../rentReview/indexResume", () => ({ resumeAwaitingIndex: jest.fn() }));
 jest.mock("../db", () => ({
   beginTransaction: jest.fn(),
   closeConnection: jest.fn(),
@@ -32,6 +34,7 @@ const registrations = [...app.timer.mock.calls];
 
 const abs = require("../cpiAbs") as { fetchAllCpiSeries: jest.Mock };
 const sync = require("../cpiIndexSync") as { planCpiSync: jest.Mock; syncCpiIndex: jest.Mock };
+const resume = require("../rentReview/indexResume") as { resumeAwaitingIndex: jest.Mock };
 const db = require("../db") as {
   beginTransaction: jest.Mock;
   closeConnection: jest.Mock;
@@ -83,6 +86,7 @@ beforeEach(() => {
   db.createServiceRequestConnection.mockResolvedValue(connection);
   sync.syncCpiIndex.mockResolvedValue({ regions: [] });
   sync.planCpiSync.mockResolvedValue({ regions: [] });
+  resume.resumeAwaitingIndex.mockResolvedValue({ errors: [], resumed: 0, waiting: 0 });
   Sentry.flush.mockResolvedValue(true);
 });
 
@@ -100,6 +104,33 @@ describe("tenancyCpiSyncTimer registration", () => {
       .map((match) => match[1])
       .filter((name) => /cpi/i.test(name));
     expect(names).toEqual(["tenancyCpiSyncTimer"]);
+  });
+});
+
+describe("tenancyCpiSyncTimer: rent reviews waiting for the index (WP26 INDEX_AVAILABLE)", () => {
+  it("returns them to in progress after the sync has committed, on the same connection", async () => {
+    await tenancyCpiSyncTimer(timer, ctx);
+    expect(resume.resumeAwaitingIndex).toHaveBeenCalledWith(connection, expect.objectContaining({ dryRun: false }));
+    expect(sync.syncCpiIndex.mock.invocationCallOrder[0]).toBeLessThan(resume.resumeAwaitingIndex.mock.invocationCallOrder[0]);
+  });
+
+  it("only says which would go back in a dry run", async () => {
+    setFlags({ dryRun: "true" });
+    await tenancyCpiSyncTimer(timer, ctx);
+    expect(resume.resumeAwaitingIndex).toHaveBeenCalledWith(connection, expect.objectContaining({ dryRun: true }));
+  });
+
+  it("doesn't run when the sync failed", async () => {
+    sync.syncCpiIndex.mockRejectedValue(new Error("deadlock victim"));
+    await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toThrow("deadlock victim");
+    expect(resume.resumeAwaitingIndex).not.toHaveBeenCalled();
+  });
+
+  it("fails the invocation under its own stage when a review couldn't go back, the CPI rows already committed", async () => {
+    resume.resumeAwaitingIndex.mockResolvedValue({ errors: [{ message: "ledger down", reviewId: "rev-1" }], resumed: 0, waiting: 0 });
+    await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toThrow("1 rent review(s) couldn't go back to in progress; first: ledger down");
+    expect(Sentry.captureException).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ extra: expect.objectContaining({ context: "tenancyCpiSyncTimer index resume" }) }));
+    expect(db.closeConnection).toHaveBeenCalledWith(connection);
   });
 });
 
