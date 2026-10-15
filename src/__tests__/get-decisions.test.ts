@@ -111,6 +111,10 @@ describe("filters", () => {
       { to: "2026-02-30" },
       { from: "2026-10-14", to: "2026-10-13" },
       { actorUserId: "x" },
+      { jobId: "x" },
+      { jobId: "0" },
+      { contractorId: "1.5" },
+      { contractorId: "3;--" },
       { action: "A B" },
       { sort: "amount" },
       { format: "xml" },
@@ -148,6 +152,23 @@ describe("filters", () => {
     expect(byName.BuildingId).toMatchObject({ type: TYPES.Int, value: 5 });
     expect(byName.TenantId).toMatchObject({ type: TYPES.Int, value: 42 });
     expect(byName.Action).toMatchObject({ type: TYPES.NVarChar, value: "quote.approve" });
+  });
+
+  it("filters by job and by contractor, binding both", async () => {
+    await get({ contractorId: "31337", jobId: "90210" });
+
+    const [, sql, params] = dataQuery();
+    expect(sql).toMatch(/WHERE JobId = @JobId AND \(TRY_CAST\(JSON_VALUE\(\[After\], '\$\.contractorId'\) AS INT\) = @ContractorId OR TRY_CAST\(JSON_VALUE\(\[Before\], '\$\.contractorId'\) AS INT\) = @ContractorId\)/);
+    expect(sql).not.toMatch(/90210|31337/);
+    const byName = Object.fromEntries(params.map((p) => [p.name, p]));
+    expect(byName.JobId).toMatchObject({ type: TYPES.Int, value: 90210 });
+    expect(byName.ContractorId).toMatchObject({ type: TYPES.Int, value: 31337 });
+  });
+
+  it("joins the job and contractor to the other filters with AND", async () => {
+    await get({ buildingId: "5", contractorId: "3", exceptionsOnly: "true", jobId: "9" });
+
+    expect(dataQuery()[1]).toMatch(/WHERE BuildingId = @BuildingId AND JobId = @JobId AND \(TRY_CAST.*@ContractorId\) AND IsException = 1/);
   });
 
   it("reads from and to as whole Darwin days, whatever the server clock says", async () => {
@@ -192,6 +213,15 @@ describe("paging", () => {
     expect(dataQuery()[1]).toMatch(/OFFSET 50 ROWS FETCH NEXT 25 ROWS ONLY/);
     expect(dataQuery()[1]).not.toMatch(/\bTOP\b/);
     expect(calls()[1][1]).toMatch(/SELECT COUNT\(\*\) AS Total FROM dbo\.DecisionLedger/);
+  });
+
+  it("counts with the job and contractor filters too", async () => {
+    db.executeQuery.mockResolvedValueOnce([]).mockResolvedValueOnce([{ Total: 0 }]);
+
+    await get({ contractorId: "3", jobId: "9", page: "1", pageSize: "10" });
+
+    expect(calls()[1][1]).toMatch(/WHERE JobId = @JobId AND \(TRY_CAST.*@ContractorId\)/);
+    expect(calls()[1][2]).toEqual(dataQuery()[2]);
   });
 
   it("counts with the same filters as the page", async () => {
@@ -302,6 +332,23 @@ describe("CSV export", () => {
     expect(sql).toMatch(/WHERE OccurredAt >= @From AND TenantId = @TenantId/);
     expect(sql).toMatch(/ORDER BY FinancialImpact DESC/);
     expect(params.map((p) => p.name)).toEqual(["From", "TenantId"]);
+  });
+
+  it("applies the job and contractor filters to the export, the same as the screen", async () => {
+    await get({ contractorId: "3", format: "csv", jobId: "9" });
+
+    const [, sql, params] = dataQuery();
+    expect(sql).toMatch(/WHERE JobId = @JobId AND \(TRY_CAST\(JSON_VALUE\(\[After\].*\[Before\].*@ContractorId\)/);
+    expect(params).toEqual([
+      { name: "JobId", type: TYPES.Int, value: 9 },
+      { name: "ContractorId", type: TYPES.Int, value: 3 },
+    ]);
+  });
+
+  it("refuses a bad job or contractor for the export before querying, like the screen", async () => {
+    expect((await get({ format: "csv", jobId: "x" })).status).toBe(400);
+    expect((await get({ contractorId: "-1", format: "csv" })).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
   it("exports every matching row: paging parameters are ignored", async () => {

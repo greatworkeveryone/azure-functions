@@ -8,6 +8,7 @@ import { join } from "node:path";
 // raw files, not a SQL parser.
 
 const MIGRATIONS = [
+  "112_job_invoices_contractor_id.sql",
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
 ];

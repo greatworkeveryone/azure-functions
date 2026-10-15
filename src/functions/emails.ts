@@ -22,6 +22,7 @@ import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { matchJobId } from "../email/job-match";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
+import { resolveInvoiceContractor } from "../invoice-contractor";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
@@ -30,7 +31,7 @@ import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
 import { record } from "../ledger";
 import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
-import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
+import { contractorFacts, jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
 
@@ -639,8 +640,11 @@ async function promoteEmailToJob(
 }
 
 // ── POST /api/promoteEmailToInvoice ─────────────────────────────────────────
-// Body: { EmailID, JobID, Amount?, Description?, CreatedBy?, InvoiceNumber?, SupplierInvoiceNumber? }
+// Body: { EmailID, JobID, Amount?, ContractorID?, ContractorName?, Description?, CreatedBy?,
+//         InvoiceNumber?, SupplierInvoiceNumber? }
 // Creates an Invoice row linked to the job, marks the email as 'promoted'.
+// ContractorID is stored when the request has it (the picker, or the quote or
+// order the invoice answers); a name on its own is never matched to a contractor.
 
 export async function promoteEmailToInvoice(
   request: HttpRequest,
@@ -668,7 +672,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount, ContractorID, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -684,16 +688,21 @@ export async function promoteEmailToInvoice(
 
     connection = await createRequestConnection(token);
 
+    // The contractor by id, when the request names one; otherwise just the name.
+    const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
+    if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
+
     const inserted = await executeQuery(
       connection,
       `INSERT INTO JobInvoices
-         (JobID, Amount, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+         (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
        OUTPUT INSERTED.JobInvoiceID
-       VALUES (@JobID, @Amount, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
+       VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
-        { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+        { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
+        { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
         { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
         { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
         { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
@@ -1148,7 +1157,7 @@ export async function recordEmailQuoteDecision(
         status: Decision === "approved" ? "approved" : "rejected",
         ...quoteFacts(outcome.quote),
       },
-      before: { status: "awaiting_director" },
+      before: { status: "awaiting_director", ...contractorFacts(outcome.quote) },
       buildingId: scope.buildingId,
       jobId: scope.jobId,
       reason: ledgerReason(Note),
