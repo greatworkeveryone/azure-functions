@@ -13,8 +13,8 @@ export interface ActionDefinition {
 
 // Every decision code, `domain.verb`. Each package adds its codes in its own
 // block so parallel branches don't collide. Packages still to add theirs:
-// WP25–WP26 (rent reviews), WP26b (billing holds), WP29b (billing runs), WP32
-// (lease events), WP60–WP62 (comms).
+// WP26 (the rest of the rent review transitions), WP26b (billing holds), WP29b
+// (billing runs), WP32 (lease events), WP60–WP62 (comms).
 export const LEDGER_ACTIONS = {
   // Refusals, any subject (WP19b)
   denied: { exception: true, reasonRequired: false, subjects: "any" },
@@ -78,6 +78,16 @@ export const LEDGER_ACTIONS = {
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.sign_off_cleared": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "schedule.sign_off_revoke": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+
+  // Rent reviews (WP25). The subject is the review; the row carries the tenancy
+  // and building in its scope columns. The generator records schedule and
+  // open_window as the system actor (tenancyReviewScheduleTimer). A basis update
+  // is a person departing from the lease-derived snapshot, so it asks for a reason
+  // and shows by default in Decisions & exceptions, as every reasoned code does.
+  "rent_review.basis_update": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.commence": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.open_window": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.schedule": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
 
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one

@@ -20,7 +20,6 @@ import {
   commitTransaction,
   createRequestConnection,
   executeQuery,
-  rollbackTransaction,
   SqlParam,
   SqlRow,
 } from "../db";
@@ -81,7 +80,6 @@ import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import {
   deriveNextReviewDate,
-  nextAnniversary,
   nextReviewInputFromRow,
   RESOLVED_REVIEW_DATES_SQL,
   sqlDateToIso,
@@ -2048,205 +2046,6 @@ async function deleteRegisterTenant(
   }
 }
 
-// ── POST /api/applyRentReview ────────────────────────────────────────────────
-// Atomically: completes the RentReviews row, updates Tenants.RentPerAnnum,
-// LastReviewDate (the review's own date), LastReviewIncreasePercent and
-// NextReviewDate — derived from the schedule and the lease anniversary, so a
-// review processed late doesn't move the next one (WP23b). Legacy: WP25
-// replaces this with the review workflow.
-
-async function applyRentReview(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
-  if (roleCheck) return roleCheck;
-  const caller = callerFromToken(token);
-
-  let connection;
-  try {
-    const body = (await request.json()) as Record<string, any>;
-    const {
-      ReviewId,
-      NewRentPerAnnum,
-      IncreasePercent,
-      Source,
-      CpiBaseValue,
-      CpiCurrentValue,
-      CpiIndexUsed,
-    } = body;
-    if (typeof ReviewId !== "string" || !ReviewId) {
-      return { status: 400, jsonBody: { error: "ReviewId required" } };
-    }
-    if (
-      typeof NewRentPerAnnum !== "number" ||
-      !Number.isFinite(NewRentPerAnnum)
-    ) {
-      return { status: 400, jsonBody: { error: "NewRentPerAnnum required" } };
-    }
-
-    connection = await createRequestConnection(token);
-    const reviewRows = await executeQuery(
-      connection,
-      `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, t.RentPerAnnum, t.ReviewIntervalMonths,
-              t.Commencement, t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
-       FROM dbo.RentReviews r
-       INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
-       WHERE r.ReviewId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: ReviewId }],
-    );
-    if (reviewRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Review not found" } };
-    }
-    const r = reviewRows[0];
-    const tenantId = r.TenantId as number;
-    const oldRent = (r.RentPerAnnum as number | null) ?? 0;
-    const computedIncrease =
-      typeof IncreasePercent === "number"
-        ? IncreasePercent
-        : oldRent > 0
-          ? Math.round(((NewRentPerAnnum - oldRent) / oldRent) * 10000) / 100
-          : 0;
-    const intervalMonths = (r.ReviewIntervalMonths as number | null) ?? 12;
-    // The review settles its own date; the next one follows the schedule or
-    // the anniversary after it, however late this one is processed.
-    const reviewDate = sqlDateToIso(r.ScheduledFor) ?? todayInDarwin();
-    const steps = parseSteps(r.ScheduledRateSteps as string | null | undefined);
-    const settled = nextReviewInputFromRow({ ...r, LastReviewDate: reviewDate, NextReviewDate: null }, steps);
-    const nextReviewIso =
-      (steps.length > 0
-        ? deriveNextReviewDate({
-            ...settled,
-            resolvedReviewDates: new Set([...settled.resolvedReviewDates, reviewDate]),
-          })
-        : nextAnniversary(settled.commencement ?? reviewDate, intervalMonths > 0 ? intervalMonths : 12, reviewDate)) ??
-      reviewDate;
-
-    await beginTransaction(connection);
-    try {
-      await executeQuery(
-        connection,
-        `UPDATE dbo.RentReviews SET
-           Status = 'completed',
-           OldRentPerAnnum = @OldRent,
-           NewRentPerAnnum = @NewRent,
-           IncreasePercent = @IncreasePercent,
-           CpiIndexUsed = @CpiIndexUsed,
-           CpiBaseValue = @CpiBaseValue,
-           CpiCurrentValue = @CpiCurrentValue,
-           CompletedAt = SYSUTCDATETIME(),
-           CompletedById = @CompletedById,
-           CompletedByName = @CompletedByName,
-           Notes = @Notes
-         WHERE ReviewId = @Id`,
-        [
-          { name: "Id", type: TYPES.NVarChar, value: ReviewId },
-          {
-            name: "OldRent",
-            type: TYPES.Decimal,
-            value: oldRent,
-            options: DECIMAL_OPTS.OldRentPerAnnum,
-          },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          {
-            name: "CpiIndexUsed",
-            type: TYPES.NVarChar,
-            value: CpiIndexUsed ?? null,
-          },
-          {
-            name: "CpiBaseValue",
-            type: TYPES.Decimal,
-            value: CpiBaseValue ?? null,
-            options: DECIMAL_OPTS.CpiBaseValue,
-          },
-          {
-            name: "CpiCurrentValue",
-            type: TYPES.Decimal,
-            value: CpiCurrentValue ?? null,
-            options: DECIMAL_OPTS.CpiCurrentValue,
-          },
-          { name: "CompletedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
-          {
-            name: "Notes",
-            type: TYPES.NVarChar,
-            value: Source ? `Applied via ${Source}` : null,
-          },
-        ],
-      );
-
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Tenants SET
-           RentPerAnnum = @NewRent,
-           LastReviewDate = @LastReview,
-           LastReviewIncreasePercent = @IncreasePercent,
-           NextReviewDate = @NextReview,
-           UpdatedAt = SYSUTCDATETIME(),
-           UpdatedById = @UpdatedById,
-           UpdatedByName = @UpdatedByName
-         WHERE TenantId = @TenantId`,
-        [
-          { name: "TenantId", type: TYPES.Int, value: tenantId },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          { name: "LastReview", type: TYPES.Date, value: reviewDate },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          { name: "NextReview", type: TYPES.Date, value: nextReviewIso },
-          { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        ],
-      );
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection);
-      throw err;
-    }
-
-    invalidateTenant(tenantId);
-    resolveActivePlannerTasks("tenant", tenantId, ["rent_review"]).catch(
-      (err: unknown) => context.warn("plannerResolve (applyRentReview):", err instanceof Error ? err.message : String(err)),
-    );
-    return {
-      status: 200,
-      jsonBody: {
-        applied: true,
-        increasePercent: computedIncrease,
-        nextReviewDate: nextReviewIso,
-        reviewId: ReviewId,
-        tenantId,
-      },
-    };
-  } catch (error: any) {
-    context.error("applyRentReview failed:", error.message);
-    return errorResponse("Apply rent review failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
-}
-
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
 // Returns amber+red tenants for the dashboard widget. Same shape as
 // getRegisterTenants but filtered to ones needing attention.
@@ -3892,11 +3691,6 @@ app.http("deleteRegisterTenant", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deleteRegisterTenant,
-});
-app.http("applyRentReview", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: applyRentReview,
 });
 app.http("getReviewsDue", {
   methods: ["GET"],
