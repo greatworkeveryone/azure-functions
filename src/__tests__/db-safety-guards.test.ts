@@ -78,7 +78,6 @@ describe("the migration scan, on crafted text", () => {
 const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: number; deleteOther?: number }> = {
   "src/blob-storage.ts": { deleteBlob: 1 },
   "src/functions/attachments.ts": { deleteBlob: 1, deleteFrom: 2 },
-  "src/functions/cleanupAttachments.ts": { deleteBlob: 1 },
   // deleteOther: the four alias-form deletes (removeRoom, removePoint,
   // removeAttachment, the linkRooms fold), invisible to the FROM-only count
   // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.

@@ -5,6 +5,7 @@
 // is asserted is the INSERT record() really sends.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -47,6 +48,7 @@ const auth = require("../auth") as {
 };
 const db = require("../db") as {
   beginTransaction: jest.Mock;
+  buildUpdateSet: jest.Mock;
   closeConnection: jest.Mock;
   commitTransaction: jest.Mock;
   createRequestConnection: jest.Mock;
@@ -68,6 +70,8 @@ const registered = (name: string): Handler => {
   return (hit[1] as { handler: Handler }).handler;
 };
 const approveJobInvoice = registered("approveJobInvoice");
+const resendDirectorInvoiceEmail = registered("resendDirectorInvoiceEmail");
+const { upsertJobInvoice } = require("./invoices") as { upsertJobInvoice: Handler };
 const directorApproveJobInvoice = registered("directorApproveJobInvoice");
 const rejectJobInvoice = registered("rejectJobInvoice");
 const markJobInvoiceMyobCreated = registered("markJobInvoiceMyobCreated");
@@ -77,10 +81,13 @@ const deleteJobInvoice = registered("deleteJobInvoice");
 
 type Route = { match: RegExp; reject?: Error; rows?: Record<string, unknown>[] };
 
+// An invoice keeps the contractor's name and no id; the ledger looks the id up.
+const CONTRACTOR: Route = { match: /FROM dbo\.Contractors WHERE ContractorName/, rows: [{ ContractorID: 3 }] };
+
 /** Answers each statement by shape; the first matching route wins, anything else returns no rows. */
 function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    const hit = routes.find((r) => r.match.test(sql));
+    const hit = [...routes, CONTRACTOR].find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
     return hit?.rows ?? [];
   });
@@ -122,6 +129,7 @@ const FIRST_SELECT = /FROM JobInvoices WITH \(UPDLOCK, HOLDLOCK\) WHERE JobInvoi
 const invoiceRow = (over: Record<string, unknown> = {}): Route => ({ match: FIRST_SELECT, rows: [invoice(over)] });
 const FACTS = {
   amount: 500,
+  contractorId: 3,
   contractorName: "Acme",
   direction: "incoming",
   invoiceNumber: "IV-9-1",
@@ -148,6 +156,9 @@ beforeEach(() => {
   mockSql([APP_USER, JOB_BUILDING, STORED]);
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
+afterEach(() => moneyShape.checkInvoiceReads(db.executeQuery.mock.calls));
 afterEach(() => jest.restoreAllMocks());
 
 describe("approveJobInvoice", () => {
@@ -674,6 +685,21 @@ describe("invoice reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, and what the approvals being undone covered", async () => {
+      mockSql([APP_USER, JOB_BUILDING, row({ Amount: 5000, Status: "director_approved" }), STORED]);
+
+      await undo();
+
+      expect(calls()[0].after).toMatchObject({
+        amount: 5000,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 5000,
+        originalApprovedAmount: 5000,
+        previousAmount: 5000,
+      });
+    });
+
     it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, row({ Status: "director_approved" }), STORED]);
 
@@ -774,6 +800,21 @@ describe("invoice reversals and deletions", () => {
       });
     });
 
+    it("says the amount did not move, measured against the invoice's approval", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
+
+      await unmark();
+
+      expect(calls()[0].after).toMatchObject({
+        amount: 500,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 500,
+        originalApprovedAmount: 500,
+        previousAmount: 500,
+      });
+    });
+
     it("clears the marking and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, marked, STORED]);
 
@@ -831,7 +872,17 @@ describe("invoice reversals and deletions", () => {
         actorName: "Casey Controller",
         actorRole: "accounts_manager",
         actorUserId: 21,
-        after: null,
+        after: {
+          amount: 0,
+          contractorId: 3,
+          contractorName: "Acme",
+          deleted: true,
+          delta: -750,
+          deltaPercent: -100,
+          newAmount: 0,
+          originalApprovedAmount: 750,
+          previousAmount: 750,
+        },
         before: { ...SNAPSHOT, amount: 750, status: "rejected" },
         buildingId: 5,
         isException: true,
@@ -958,4 +1009,638 @@ describe("invoice reversals and deletions", () => {
       expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
     });
   });
+});
+
+// ── Approval resets and director requests ───────────────────────────────────
+
+describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
+  const APPROVED_AT = new Date("2026-10-01T02:03:04Z");
+  const DIRECTOR_AT = new Date("2026-10-02T05:06:07Z");
+  const approved = (over: Record<string, unknown> = {}): Route =>
+    invoiceRow({
+      ApprovedAt: APPROVED_AT,
+      ApprovedBy: "Pat Approver",
+      Currency: "AUD",
+      DirectorApprovedAt: DIRECTOR_AT,
+      DirectorApprovedBy: "Dana Director",
+      Status: "approved",
+      ...over,
+    });
+  const reloaded: Route = {
+    match: /SELECT\s+JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq/,
+    rows: [{ JobInvoiceID: 5, Status: "pending" }],
+  };
+  const edit = (body: Record<string, unknown> = {}) => upsertJobInvoice(makeRequest({ Amount: 9000, JobInvoiceID: 5, ...body }), ctx);
+  const resets = () => ledgerInserts(db.executeQuery).filter((r) => r.action === "invoice.approval_reset");
+  const CLEAR = /UPDATE JobInvoices\s+SET Status = 'pending'/;
+
+  beforeEach(() => {
+    db.buildUpdateSet.mockReturnValue({ params: [], setClause: "Amount = @Amount" });
+    mockSql([APP_USER, JOB_BUILDING, approved(), reloaded]);
+  });
+
+  it("writes one invoice.approval_reset exception: the old amount, status and approval stamps before, the new amount after", async () => {
+    const res = await edit();
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(1);
+    const [row] = resets();
+    expect(row).toMatchObject({
+      action: "invoice.approval_reset",
+      actorKind: "user",
+      actorName: "Casey Controller",
+      actorRole: "accounts_manager",
+      actorUserId: 21,
+      buildingId: 5,
+      isException: true,
+      jobId: 9,
+      subjectId: "5",
+      subjectType: "invoice",
+    });
+    expect(row.before).toEqual({
+      amount: 500,
+      approvedAt: "2026-10-01T02:03:04.000Z",
+      approvedBy: "Pat Approver",
+      contractorId: 3,
+      contractorName: "Acme",
+      directorApprovedAt: "2026-10-02T05:06:07.000Z",
+      directorApprovedBy: "Dana Director",
+      status: "approved",
+    });
+    expect(row.after).toEqual({
+      ...FACTS,
+      amount: 9000,
+      delta: 8500,
+      deltaPercent: 1700,
+      newAmount: 9000,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
+      status: "pending",
+    });
+  });
+
+  it("says how far an edit moved the amount, down as well as up, measured against what was approved", async () => {
+    await edit({ Amount: 380 });
+
+    expect(resets()[0].after).toMatchObject({
+      amount: 380,
+      delta: -120,
+      deltaPercent: -24,
+      newAmount: 380,
+      originalApprovedAmount: 500,
+      previousAmount: 500,
+    });
+  });
+
+  it("a contractor swapped by id: `before` has the id the invoice recorded, `after` the one the edit gave, with no name lookups", async () => {
+    const routes = [APP_USER, JOB_BUILDING, approved({ ContractorID: 3 }), reloaded, { match: /FROM dbo\.Contractors WHERE ContractorID/, rows: [{ ContractorName: "Beta Pty" }] }];
+    mockSql(routes);
+
+    await edit({ ContractorID: 8 });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
+    expect(db.executeQuery.mock.calls.filter((c: unknown[]) => /WHERE ContractorName/.test(String(c[1])))).toHaveLength(0);
+  });
+
+  it("a new name with no id clears the one the invoice had: `after` falls back to looking the new name up", async () => {
+    const routes = [APP_USER, JOB_BUILDING, approved({ ContractorID: 3 }), reloaded];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
+      if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 99 }];
+      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+    });
+
+    await edit({ ContractorName: "Beta Pty" });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
+  });
+
+  it("a contractor swapped in the same edit: `before` names the one the approval was for, `after` looks up the new one", async () => {
+    // Each name leads to its own contractor.
+    const routes = [APP_USER, JOB_BUILDING, approved(), reloaded];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
+      if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 3 }];
+      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+    });
+
+    await edit({ ContractorName: "Beta Pty" });
+
+    expect(resets()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(resets()[0].after).toMatchObject({ contractorId: 8, contractorName: "Beta Pty" });
+  });
+
+  it("shows the edit as a whole in `after`: the new supplier number and direction come with the new amount", async () => {
+    await edit({ Direction: "outgoing", SupplierInvoiceNumber: "INV-0099" });
+
+    expect(resets()[0].after).toMatchObject({ amount: 9000, direction: "outgoing", supplierInvoiceNumber: "INV-0099", status: "pending" });
+    expect(resets()[0].before).toMatchObject({ amount: 500 });
+  });
+
+  it("an invoice that was waiting for its second approval still shows what it held", async () => {
+    mockSql([APP_USER, JOB_BUILDING, approved({ DirectorApprovedAt: null, DirectorApprovedBy: null }), reloaded]);
+
+    await edit();
+
+    expect(resets()[0].before).toMatchObject({ directorApprovedAt: null, directorApprovedBy: null, status: "approved" });
+  });
+
+  it("writes no row for an invoice that was never approved: there was no approval to tear down", async () => {
+    mockSql([
+      APP_USER,
+      JOB_BUILDING,
+      invoiceRow({ ApprovedAt: null, ApprovedBy: null, DirectorApprovedAt: null, DirectorApprovedBy: null, Status: "pending" }),
+      reloaded,
+    ]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ran(CLEAR)).toBe(false);
+  });
+
+  it("writes no row when the amount is sent back unchanged", async () => {
+    const res = await edit({ Amount: 500 });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ran(CLEAR)).toBe(false);
+  });
+
+  it("a contractor-only edit leaves the approval alone, writes no row and doesn't look up who is editing", async () => {
+    const res = await edit({ Amount: undefined, ContractorName: "Beta Pty" });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ran(/FROM dbo\.AppUsers WHERE EntraOid/)).toBe(false);
+    expect(ran(CLEAR)).toBe(false);
+  });
+
+  it("clears the approval and writes the ledger row inside one transaction that commits", async () => {
+    await edit();
+
+    const begun = db.beginTransaction.mock.invocationCallOrder[0];
+    const committed = db.commitTransaction.mock.invocationCallOrder[0];
+    expect(orderOf(FIRST_SELECT)).toBeGreaterThan(begun);
+    for (const write of [/UPDATE JobInvoices SET Amount/, CLEAR, /INSERT INTO dbo\.DecisionLedger/]) {
+      expect(orderOf(write)).toBeGreaterThan(orderOf(FIRST_SELECT));
+      expect(orderOf(write)).toBeLessThan(committed);
+    }
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(CLEAR));
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it("finds who is editing before anything is written", async () => {
+    await edit();
+
+    expect(orderOf(/FROM dbo\.AppUsers WHERE EntraOid/)).toBeLessThan(db.beginTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("rolls the edit back when the ledger write fails: the approval is not torn down without its record", async () => {
+    mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, approved(), reloaded]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(orderOf(CLEAR)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    expect(db.closeConnection).toHaveBeenCalled();
+  });
+
+  it("answers 401 and starts nothing when the ledger can't name who is editing", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(CALLER).mockResolvedValueOnce(null);
+
+    const res = await edit();
+
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(ran(/UPDATE JobInvoices/)).toBe(false);
+  });
+
+  it("404s an unknown invoice inside the transaction, writing nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(404);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+  });
+});
+
+describe("the contractor id on invoice rows: an invoice keeps the contractor's name and no id", () => {
+  const approve = () => approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+  const lookups = () => db.executeQuery.mock.calls.filter((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  it("looks the id up from the name, as the one contractor holding it, binding the name", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(1);
+    expect(String(lookups()[0][1])).toBe("SELECT TOP 2 ContractorID FROM dbo.Contractors WHERE ContractorName = @Name");
+    expect(lookups()[0][2]).toEqual([expect.objectContaining({ name: "Name", value: "Acme" })]);
+    expect(rows()[0].after).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+    expect(rows()[0].before).toMatchObject({ contractorId: 3, contractorName: "Acme" });
+  });
+
+  it("looks it up inside the decision's transaction, before the row is written", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED]);
+
+    await approve();
+
+    const lookedUp = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.indexOf(lookups()[0])];
+    expect(lookedUp).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+    expect(lookedUp).toBeLessThan(rows()[0].order);
+  });
+
+  it("uses the id the invoice recorded when it was made, and doesn't look the name up", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorID: 8 }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(0);
+    expect(rows()[0].after).toMatchObject({ contractorId: 8, contractorName: "Acme" });
+    expect(rows()[0].before).toMatchObject({ contractorId: 8, contractorName: "Acme" });
+  });
+
+  it("looks the name up only when the invoice has no id of its own", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorID: null }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(1);
+    expect(rows()[0].after).toMatchObject({ contractorId: 3 });
+  });
+
+  it("leaves the id null, rather than guessing, when no contractor has that name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, rows: [] }]);
+
+    await approve();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme" });
+  });
+
+  it("leaves the id null, rather than guessing, when several contractors have that name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, rows: [{ ContractorID: 3 }, { ContractorID: 8 }] }]);
+
+    await approve();
+
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme" });
+  });
+
+  it("asks nothing, and records null, for an invoice with no contractor name", async () => {
+    moneyShape.recordHasNo("contractor");
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ ContractorName: null }), STORED]);
+
+    await approve();
+
+    expect(lookups()).toHaveLength(0);
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: null });
+  });
+
+  it("does not lose the approval when the lookup fails: the id is left null and the decision goes on", async () => {
+    moneyShape.recordHasNo("contractor");
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED, { match: /FROM dbo\.Contractors/, reject: new Error("permission denied") }]);
+
+    const res = await approve();
+
+    expect(res.status).toBe(200);
+    expect(rows()[0].after).toMatchObject({ contractorId: null, contractorName: "Acme", status: "approved" });
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("the director request that follows an invoice approval", () => {
+  const SENT_AT = new Date("2026-10-13T00:00:00Z");
+  const PACKET = { attachments: 1, sections: ["job summary", "quote QT-9-1", "invoice IV-9-1"], separateFiles: 0 };
+  const NAMES: Route = { match: /SELECT DisplayName FROM dbo\.AppUsers WHERE Email IN/, rows: [{ DisplayName: "Dana Director" }, { DisplayName: "Bo Boss" }] };
+  const STAMP = /UPDATE JobInvoices\s+SET DirectorEmailSentAt/;
+  const overEveryLimit = invoiceRow({ Amount: 5000 });
+  const approve = async () => {
+    const res = await approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+    await flush();
+    return res;
+  };
+  const byAction = (action: string) => ledgerInserts(db.executeQuery).filter((r) => r.action === action);
+
+  beforeEach(() => {
+    directorEmails.sendDirectorApprovalEmail.mockResolvedValue({
+      packet: PACKET,
+      sentAt: SENT_AT,
+      sentTo: ["dana@example.com", "boss@example.com"],
+    });
+    mockSql([APP_USER, JOB_BUILDING, overEveryLimit, STORED, NAMES]);
+  });
+
+  it("writes one invoice.director_request_sent row once the mail has gone: who it went to, that it was not a resend, what the packet held", async () => {
+    const res = await approve();
+
+    expect(res.status).toBe(200);
+    expect(byAction("invoice.director_request_sent")).toHaveLength(1);
+    const [row] = byAction("invoice.director_request_sent");
+    expect(row).toMatchObject({
+      actorKind: "user",
+      actorName: "Casey Controller",
+      actorRole: "accounts_manager",
+      actorUserId: 21,
+      before: null,
+      buildingId: 5,
+      isException: false,
+      jobId: 9,
+      subjectId: "5",
+      subjectType: "invoice",
+    });
+    expect(row.after).toEqual({
+      amount: 5000,
+      contractorId: 3,
+      contractorName: "Acme",
+      currency: "AUD",
+      direction: "incoming",
+      invoiceNumber: "IV-9-1",
+      packet: PACKET,
+      recipients: ["Bo Boss", "Dana Director"],
+      resend: false,
+      supplierInvoiceNumber: "INV-0042",
+      unnamedRecipients: 0,
+    });
+  });
+
+  it("keeps every email address out of every row it writes", async () => {
+    await approve();
+
+    expect(JSON.stringify(ledgerInserts(db.executeQuery))).not.toMatch(/@example\.com/);
+  });
+
+  it("shares one correlation id with the approval that triggered it", async () => {
+    await approve();
+
+    const [approval] = byAction("invoice.approve");
+    const [request] = byAction("invoice.director_request_sent");
+    expect(String(approval.correlationId)).toMatch(GUID);
+    expect(request.correlationId).toBe(approval.correlationId);
+  });
+
+  it("stamps the invoice and writes the row in one transaction of its own that commits, after the mail has gone", async () => {
+    await approve();
+
+    const mailed = directorEmails.sendDirectorApprovalEmail.mock.invocationCallOrder[0];
+    const begun = db.beginTransaction.mock.invocationCallOrder[1];
+    const committed = db.commitTransaction.mock.invocationCallOrder[1];
+    expect(db.beginTransaction).toHaveBeenCalledTimes(2);
+    expect(begun).toBeGreaterThan(mailed);
+    expect(orderOf(STAMP)).toBeGreaterThan(begun);
+    const requestRow = byAction("invoice.director_request_sent")[0];
+    expect(requestRow.order).toBeGreaterThan(orderOf(STAMP));
+    expect(requestRow.order).toBeLessThan(committed);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it("still stamps who it went to and who sent it, as the e-mail decision check expects", async () => {
+    await approve();
+
+    const stamp = db.executeQuery.mock.calls.find((c: unknown[]) => STAMP.test(String(c[1])));
+    const params = Object.fromEntries((stamp?.[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]));
+    expect(params).toMatchObject({
+      Id: 5,
+      SentAt: SENT_AT,
+      SentBy: "Casey Controller",
+      SentTo: JSON.stringify(["dana@example.com", "boss@example.com"]),
+    });
+  });
+
+  it("a send that fails leaves the invoice unstamped and writes a invoice.director_request_failed exception row of its own", async () => {
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValue(new Error("Graph is down for dana@example.com"));
+
+    const res = await approve();
+
+    expect(res.status).toBe(200);
+    expect(byAction("invoice.director_request_sent")).toHaveLength(0);
+    expect(ran(STAMP)).toBe(false);
+    const [row] = byAction("invoice.director_request_failed");
+    expect(row).toMatchObject({
+      actorName: "Casey Controller",
+      actorRole: "accounts_manager",
+      after: { amount: 5000, currency: "AUD", resend: false },
+      buildingId: 5,
+      isException: true,
+      jobId: 9,
+      reason: "The director approval email could not be sent",
+      ruleApplied: "send_failed",
+      subjectId: "5",
+      subjectType: "invoice",
+    });
+    expect(row.correlationId).toBe(byAction("invoice.approve")[0].correlationId);
+    expect(byAction("invoice.approve")).toHaveLength(1);
+    expect(JSON.stringify(ledgerInserts(db.executeQuery))).not.toMatch(/Graph is down|@example\.com/);
+    expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("Director email failed for invoice 5"));
+  });
+
+  it("rolls the stamp back when the row for the send can't be written: never a stamp without its record", async () => {
+    let inserts = 0;
+    const routes = [APP_USER, JOB_BUILDING, overEveryLimit, STORED, NAMES, CONTRACTOR];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/INSERT INTO dbo\.DecisionLedger/.test(sql) && ++inserts >= 2) throw new Error("ledger unavailable");
+      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+    });
+
+    const res = await approve();
+
+    expect(res.status).toBe(200);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(orderOf(STAMP)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("Director email failed for invoice 5"));
+  });
+
+  it("sends nothing and records no request for an invoice the caller's own limit covers", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 500 }), STORED, NAMES]);
+
+    await approve();
+
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+    expect(byAction("invoice.director_request_sent")).toHaveLength(0);
+    expect(byAction("invoice.director_request_failed")).toHaveLength(0);
+  });
+});
+
+describe("resendDirectorInvoiceEmail", () => {
+  const SENT_AT = new Date("2026-10-13T00:00:00Z");
+  const awaiting = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT JobID, Amount, Status, InvoiceNumber/,
+    rows: [
+      {
+        Amount: 5000,
+        ContractorName: "Acme",
+        Direction: "incoming",
+        InvoiceNumber: "IV-9-1",
+        JobID: 9,
+        Status: "approved",
+        SupplierInvoiceNumber: "INV-0042",
+        ...over,
+      },
+    ],
+  });
+  const NAMES: Route = { match: /SELECT DisplayName FROM dbo\.AppUsers WHERE Email IN/, rows: [{ DisplayName: "Dana Director" }] };
+  const STAMP = /UPDATE JobInvoices\s+SET DirectorEmailSentAt/;
+  const resend = () => resendDirectorInvoiceEmail(makeRequest({ JobInvoiceID: 5 }), ctx);
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  beforeEach(() => {
+    auth.rolesForRequest.mockResolvedValue(["facilities"]);
+    directorEmails.sendDirectorApprovalEmail.mockResolvedValue({
+      packet: { attachments: 0, sections: ["job summary", "invoice IV-9-1"], separateFiles: 0 },
+      sentAt: SENT_AT,
+      sentTo: ["dana@example.com"],
+    });
+    mockSql([APP_USER, JOB_BUILDING, awaiting(), STORED, NAMES]);
+  });
+
+  it("writes one invoice.director_request_sent row marked as a resend, by whoever pressed the button", async () => {
+    const res = await resend();
+
+    expect(res.status).toBe(200);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({
+      action: "invoice.director_request_sent",
+      actorName: "Casey Controller",
+      actorRole: "facilities",
+      after: {
+        amount: 5000,
+        contractorId: 3,
+        contractorName: "Acme",
+        currency: "AUD",
+        direction: "incoming",
+        invoiceNumber: "IV-9-1",
+        packet: { attachments: 0, sections: ["job summary", "invoice IV-9-1"], separateFiles: 0 },
+        recipients: ["Dana Director"],
+        resend: true,
+        supplierInvoiceNumber: "INV-0042",
+        unnamedRecipients: 0,
+      },
+      buildingId: 5,
+      isException: false,
+      jobId: 9,
+      subjectId: "5",
+      subjectType: "invoice",
+    });
+    expect(JSON.stringify(rows())).not.toContain("dana@example.com");
+  });
+
+  it("stamps the invoice and writes the row in one transaction that commits, after the mail has gone", async () => {
+    await resend();
+
+    const begun = db.beginTransaction.mock.invocationCallOrder[0];
+    const committed = db.commitTransaction.mock.invocationCallOrder[0];
+    expect(begun).toBeGreaterThan(directorEmails.sendDirectorApprovalEmail.mock.invocationCallOrder[0]);
+    expect(orderOf(STAMP)).toBeGreaterThan(begun);
+    expect(rows()[0].order).toBeGreaterThan(orderOf(STAMP));
+    expect(rows()[0].order).toBeLessThan(committed);
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("a send that fails writes a invoice.director_request_failed row marked as a resend, and answers as it always did", async () => {
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValue(new Error("Graph is down"));
+
+    const res = await resend();
+
+    expect(res.status).toBe(500);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({
+      action: "invoice.director_request_failed",
+      after: { amount: 5000, contractorId: 3, contractorName: "Acme", currency: "AUD", invoiceNumber: "IV-9-1", resend: true },
+      isException: true,
+      ruleApplied: "send_failed",
+      subjectId: "5",
+    });
+    expect(ran(STAMP)).toBe(false);
+  });
+
+  it("answers the same 500 when the failure can't be recorded either", async () => {
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValue(new Error("Graph is down"));
+    mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, awaiting(), STORED, NAMES]);
+
+    const res = await resend();
+
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rolls the stamp back when the row for the send can't be written", async () => {
+    mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, awaiting(), STORED, NAMES]);
+
+    const res = await resend();
+
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(orderOf(STAMP)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("an invoice that isn't awaiting the director is the same 400: nothing sent, nothing recorded", async () => {
+    mockSql([APP_USER, JOB_BUILDING, awaiting({ Status: "pending" }), STORED]);
+
+    const res = await resend();
+
+    expect(res).toEqual({ jsonBody: { error: "Invoice is not in the awaiting-director state" }, status: 400 });
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("404s an unknown invoice, sending nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING]);
+
+    const res = await resend();
+
+    expect(res.status).toBe(404);
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+  });
+
+  it("answers 401 and sends nothing when the ledger can't name who pressed resend", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(CALLER).mockResolvedValueOnce(null);
+
+    const res = await resend();
+
+    expect(res.status).toBe(401);
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+  });
+
+  it("records a refused role as `denied`, answers with the gate's own 403 and sends nothing", async () => {
+    const gate = { jsonBody: { details: "Required role: accounts | director | facilities. Have: user", error: "Forbidden" }, status: 403 };
+    auth.requireRole.mockResolvedValue(gate);
+    auth.rolesForRequest.mockResolvedValue(["user"]);
+    mockSql([APP_USER, INVOICE_SCOPE]);
+
+    const res = await resend();
+
+    expect(res).toBe(gate);
+    expect(rows()).toEqual([
+      expect.objectContaining({
+        action: "denied",
+        actorRole: "user",
+        before: { attempted: "invoice.director_request_sent" },
+        buildingId: 5,
+        isException: true,
+        jobId: 9,
+        ruleApplied: "role_not_permitted",
+        subjectId: "5",
+        subjectType: "invoice",
+      }),
+    ]);
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+  });
+});
+
+it("wrote every invoice money code in this file, each checked against the shape trend reports read", () => {
+  moneyShape.expectEveryCodeWritten("invoice.");
 });

@@ -2,8 +2,9 @@
 -- Links uploaded documents (leases, schedules) to a tenant record.
 -- Follows the same pattern as PurchaseOrderAttachments / QuoteAttachments
 -- (migration 010). Deleting an Attachment cascades to remove the join row;
--- deleting a Tenant cascades to remove all join rows (blobs remain until
--- the cleanupAttachments timer runs).
+-- deleting a Tenant cascades to remove all join rows. The Attachments row and
+-- its blob are kept (no job reaps them — the cleanupAttachments timer this
+-- comment once pointed at was removed in Oct 2026).
 
 IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE object_id = OBJECT_ID('dbo.TenancyAttachments'))
 BEGIN

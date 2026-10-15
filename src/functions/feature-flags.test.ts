@@ -40,6 +40,7 @@ const FRONTEND_FEATURE_KEYS = [
   "activity",
   "assets",
   "escalations",
+  "finance",
   "incoming",
   "inspections",
   "jobs",

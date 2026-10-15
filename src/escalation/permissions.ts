@@ -2,15 +2,17 @@
 //
 // Visibility: the people it goes to, the person who raised it, and every role
 // above the target. A team view belongs to managers and the CFO, everything to
-// directors and admin. Acting: the people it goes to, plus directors and admin
-// as oversight; never the raiser (an escalation is never its own target), who
-// can still withdraw it or push it further up.
+// directors and admin. The CFO also sees every escalation whose policy key starts
+// with finance., whoever it goes to; seeing grants no action. Acting: the people
+// it goes to, plus directors and admin as oversight; never the raiser (an
+// escalation is never its own target), who can still withdraw it or push it
+// further up.
 //
 // The inbox query (store.ts buildListWhere) expresses the same visibility in
 // SQL; keep the two in step.
 
 import { EscalationError } from "./errors";
-import { isAbove, normaliseRole, ROLES, teamRolesOfAll } from "./roles";
+import { isAbove, normaliseRole, ROLES, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { EscalationRow, Viewer } from "./types";
 
 const OVERSIGHT: ReadonlySet<string> = new Set([ROLES.director, ROLES.admin]);
@@ -50,6 +52,10 @@ export function canSee(viewer: Viewer, row: EscalationRow, raiserRole?: string |
   const target = normaliseRole(row.targetRole);
   if (target !== "" && roles.includes(target)) return true;
   if (roles.some((role) => isAbove(role, row.targetRole))) return true;
+  // Oversight of a policy domain (the CFO and finance.). Keys are lower case; the
+  // database compares them case-insensitively, so this does too.
+  const policyKey = row.policyKey.toLowerCase();
+  if (seenPolicyPrefixesOfAll(roles).some((prefix) => policyKey.startsWith(prefix))) return true;
   const team = teamRolesOfAll(roles);
   const raiser = normaliseRole(raiserRole);
   return team !== null && raiser !== "" && team.includes(raiser);

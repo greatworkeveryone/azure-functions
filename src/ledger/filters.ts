@@ -10,10 +10,15 @@ export interface DecisionFilters {
   action?: { exact: string } | { prefix: string };
   actorUserId?: number;
   buildingId?: number;
+  /** The contractor a money row is for, as the id it carries in `after` or in
+   *  `before` (a deletion written before `after` was filled in has it only
+   *  there). */
+  contractorId?: number;
   exceptionsOnly: boolean;
   format: DecisionFormat;
   /** Inclusive: the instant the `from` day begins in Darwin. */
   from?: Date;
+  jobId?: number;
   sort: DecisionSort;
   tenantId?: number;
   /** Exclusive: the instant the day after `to` begins in Darwin. */
@@ -71,6 +76,14 @@ export function parseDecisionFilters(query: URLSearchParams): ParsedDecisionFilt
   const tenantId = idParam(query, "tenantId");
   if (tenantId === null) return fail("tenantId must be a whole number");
   if (tenantId !== undefined) filters.tenantId = tenantId;
+
+  const jobId = idParam(query, "jobId");
+  if (jobId === null) return fail("jobId must be a whole number");
+  if (jobId !== undefined) filters.jobId = jobId;
+
+  const contractorId = idParam(query, "contractorId");
+  if (contractorId === null) return fail("contractorId must be a whole number");
+  if (contractorId !== undefined) filters.contractorId = contractorId;
 
   const action = query.get("action")?.trim();
   if (action) {
@@ -140,6 +153,19 @@ export function buildDecisionWhere(f: DecisionFilters): { params: SqlParam[]; wh
   if (f.tenantId !== undefined) {
     parts.push("TenantId = @TenantId");
     params.push({ name: "TenantId", type: TYPES.Int, value: f.tenantId });
+  }
+  if (f.jobId !== undefined) {
+    parts.push("JobId = @JobId");
+    params.push({ name: "JobId", type: TYPES.Int, value: f.jobId });
+  }
+  if (f.contractorId !== undefined) {
+    // A money row carries the contractor's id in `after`, and in `before` where it
+    // has one: a deletion written before `after` was filled in has it only there.
+    // TRY_CAST so a row whose value isn't a whole number is skipped, not an error.
+    parts.push(
+      "(TRY_CAST(JSON_VALUE([After], '$.contractorId') AS INT) = @ContractorId OR TRY_CAST(JSON_VALUE([Before], '$.contractorId') AS INT) = @ContractorId)",
+    );
+    params.push({ name: "ContractorId", type: TYPES.Int, value: f.contractorId });
   }
   if (f.exceptionsOnly) parts.push("IsException = 1");
 
