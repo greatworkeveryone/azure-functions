@@ -4,7 +4,6 @@
 // verifiedIdentityFromRequest paths using the dev-override header + an
 // unsigned JWT (same harness as inspections-auth.test.ts).
 import { HttpRequest, InvocationContext } from "@azure/functions";
-import { CLEANUP_SELECT } from "../attachmentCleanup";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { clearRoleCache } from "../auth";
@@ -920,9 +919,3 @@ describe("applyInspectionOps addLevel op with a free-text name (IN3)", () => {
   });
 });
 
-// ── F2: cleanupAttachments must not reap shared inspection blobs ─────────────
-describe("cleanupAttachments spares inspection blobs (F2)", () => {
-  it("excludes BlobName LIKE 'inspections/%' from the reap SELECT", () => {
-    expect(CLEANUP_SELECT).toMatch(/AND\s+BlobName\s+NOT\s+LIKE\s+'inspections\/%'/);
-  });
-});

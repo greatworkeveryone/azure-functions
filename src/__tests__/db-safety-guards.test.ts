@@ -48,7 +48,6 @@ describe("migrations are additive unless explicitly approved", () => {
 const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: number }> = {
   "src/blob-storage.ts": { deleteBlob: 1 },
   "src/functions/attachments.ts": { deleteBlob: 1, deleteFrom: 2 },
-  "src/functions/cleanupAttachments.ts": { deleteBlob: 1 },
   "src/functions/inspections.ts": { deleteBlob: 1, deleteFrom: 6 },
   "src/functions/invoices.ts": { deleteFrom: 1 },
   "src/functions/jobRequestedContractors.ts": { deleteFrom: 1 },

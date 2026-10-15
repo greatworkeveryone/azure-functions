@@ -45,7 +45,8 @@ Update the values in `local.settings.json`:
 - `TODDLER_WARMUP_TIMEOUT_MS` — budget for `POST /warmup` before each parse run (default `240000`; covers a cold GPU replica; capped by the run's 540 s deadline)
 - `AI_PARSE_BATCH_SIZE` — upper bound on emails per parse run (default `5`); the deadline usually stops a run first
 - `AI_PARSE_SKIP_SENDERS` — optional comma list of sender substrings (e.g. `no-reply@,notifications@mybuildings`), matched case-insensitively against the From address; include the `@` to avoid broad matches. Matching mail is classified `unknown` without a model call
-- `GRAPH_MAILBOX_DEV` — the mailbox Graph sync reads (also required by `syncEmailsNow`)
+- `GRAPH_MAILBOX_ACTIVE` — `dev` (default) or `prod`: which of `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD` the Graph sync, subscription and `syncEmailsNow` use. After switching, the renew timer subscribes the new mailbox on its next run; mail older than the newest synced email isn't back-filled
+- `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD` — the two mailbox addresses
 - `AzureWebJobsStorage` — hosts the `email-sync` queue (webhook / manual sync / admin trigger -> `processEmailSync`) and `email-sync-poison`; no extra setting. Locally, run Azurite.
 
 Email pipeline behaviour:
@@ -85,9 +86,19 @@ docker compose up -d
 The `local.settings.json` is already configured for Docker (`LOCAL_SQL=true`, `SQL_SERVER=localhost`). To switch back to Azure SQL temporarily, set `LOCAL_SQL=false` and restore the `SQL_SERVER` / `SQL_DATABASE` values.
 
 ### 5. Apply database migrations
-The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. The function host applies them automatically on startup via `runMigrations()`. For a brand-new Docker DB, just start the app and all migrations will run.
+The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. Against the local Docker DB (`LOCAL_SQL=true`) the function host applies them on startup, so for a brand-new Docker DB just start the app.
 
-Email-pipeline migrations `089_job_events_source_email.sql` → `092_email_provenance_auth.sql` apply on startup like the rest. `getEmails` / `getEmail` / `ingestEmail` select 092's columns, so the host must start (and migrate) cleanly before serving. `091_emails_messageid_unique.sql` skips the unique index with a PRINT if duplicate `MessageID`s exist but is still recorded in `schema_migrations`; after resolving the duplicates, delete its row there and restart to create the index.
+**Production applies them by hand.** The app's service principal has no DDL rights, so startup only logs pending migrations (and warns Sentry):
+
+```bash
+npm run build
+npm run migrate              # list pending (read-only), as your `az login`
+npm run migrate -- --apply   # apply them — your account needs DDL rights
+```
+
+It targets the prod DB by default; override with `SQL_SERVER` / `SQL_DATABASE`. Setting `RUN_MIGRATIONS_ON_STARTUP=true` re-enables applying on startup, which only works with a DDL-capable identity.
+
+Email-pipeline migrations `089_job_events_source_email.sql` → `092_email_provenance_auth.sql` apply like the rest (by hand in prod). `getEmails` / `getEmail` / `ingestEmail` select 092's columns, so apply them before deploying code that reads them. `091_emails_messageid_unique.sql` skips the unique index with a PRINT if duplicate `MessageID`s exist but is still recorded in `schema_migrations`; after resolving the duplicates, delete its row there and re-run `npm run migrate -- --apply` to create the index.
 
 To apply manually (e.g. to inspect state):
 ```bash
@@ -124,7 +135,8 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 - `TODDLER_URL`
 - `TODDLER_SERVICE_KEY`
 - `ORG_EMAIL_DOMAINS`
-- `GRAPH_MAILBOX_DEV`
+- `GRAPH_MAILBOX_ACTIVE` (optional, `dev` | `prod`, default `dev`)
+- `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD`
 - `TODDLER_TIMEOUT_MS` (optional, default 180000)
 - `TODDLER_WARMUP_TIMEOUT_MS` (optional, default 240000)
 - `AI_PARSE_BATCH_SIZE` (optional, default 5)

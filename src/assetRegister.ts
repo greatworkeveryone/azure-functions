@@ -115,7 +115,7 @@ export type AssetStatus = (typeof ASSET_STATUSES)[number];
 export type AssetCriticality = (typeof ASSET_CRITICALITIES)[number];
 export type AssetSource = (typeof ASSET_SOURCES)[number];
 
-/** Blob key prefix for asset files. cleanupAttachments only reaps work-request rows, which asset files never are. */
+/** Blob key prefix for asset files. The attachment cleanup timer was removed in Oct 2026; nothing reaps asset files. */
 export const ASSET_BLOB_PREFIX = "asset-";
 
 /** Unique index names the handlers translate into 409s. Must match migration 113. */
