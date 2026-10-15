@@ -16,6 +16,7 @@ import {
   graphGetGroupMembers,
   graphGetPlannerTask,
 } from "../planner";
+import { plannerSyncEnabled } from "../plannerFlag";
 import {
   buildJobTaskDescription,
   buildTaskTitle,
@@ -70,6 +71,10 @@ export async function plannerSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
+  // Planner is being retired: unless PLANNER_SYNC_ENABLED is "true" this run does
+  // nothing, whatever else (APP_BASE_URL, the PLANNER_* ids) is set.
+  if (!plannerSyncEnabled()) return;
+
   context.log("plannerSyncTimer: starting");
 
   const {
