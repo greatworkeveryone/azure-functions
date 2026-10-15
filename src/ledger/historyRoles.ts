@@ -20,7 +20,7 @@ const JOB_READ = [
   AppRole.ACCOUNTS_APPROVAL,
 ] as const;
 
-// getRegisterTenant in functions/tenancy.ts
+// getRegisterTenant in functions/tenancy.ts; getRentReview and getRentReviews share it (rentReview/http.ts)
 const TENANCY_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR] as const;
 
 // getQuotes in functions/quotes.ts
@@ -54,6 +54,8 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["payment", PAYMENT_READ],
   ["purchase_order", INVOICE_AND_PO_READ],
   ["quote", QUOTE_READ],
+  // A review is read through getRentReview, which has the tenancy's own gate.
+  ["rent_review", TENANCY_READ],
   ["tenancy", TENANCY_READ],
 ]);
 

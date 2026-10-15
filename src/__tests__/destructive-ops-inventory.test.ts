@@ -40,7 +40,7 @@ const REVIEWED_TIMERS: Record<string, string> = {
   parseEmailsDailyRetry: "parseEmails.ts — Graph mail sync + AI parse retry",
   tenancyCpiSyncTimer: "tenancyCpiSyncTimer.ts — CPI rows it owns",
   timesheetSyncTimer: "timesheetSyncTimer.ts — stamps Timesheets.SentToMyobDate",
-  tenancyReviewScheduleTimer: "tenancyReviewScheduleTimer.ts — review schedule rows it owns",
+  tenancyReviewScheduleTimer: "tenancyReviewScheduleTimer.ts — writes only its own RentReviews workflow rows, and only when RENT_REVIEW_GENERATOR_ENABLED is \"true\"",
   syncAllWorkRequestsTimer: "syncAllWorkRequests.ts — MERGE into WorkRequests (local edits live in WorkRequestOverrides)",
   plannerSyncTimer: "plannerSyncTimer.ts — PlannerTasks + Graph Planner; shared with jobPlannerSync",
   renewGraphSubscription: "graphWebhook.ts — Graph subscription only",
