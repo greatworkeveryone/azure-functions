@@ -37,6 +37,7 @@ export const REVIEW_DECISION_CODES = {
   cancelled: "cancelled",
   commenced: "commenced",
   returned: "returned",
+  reverted: "reverted",
   waived: "waived",
 } as const;
 

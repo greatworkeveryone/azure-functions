@@ -13,8 +13,8 @@ export interface ActionDefinition {
 
 // Every decision code, `domain.verb`. Each package adds its codes in its own
 // block so parallel branches don't collide. Packages still to add theirs:
-// WP26 (the rest of the rent review transitions), WP26b (billing holds), WP29b
-// (billing runs), WP32 (lease events), WP60–WP62 (comms).
+// WP26b (billing holds), WP29b (billing runs), WP32 (lease events), WP60–WP62
+// (comms).
 export const LEDGER_ACTIONS = {
   // Refusals, any subject (WP19b)
   denied: { exception: true, reasonRequired: false, subjects: "any" },
@@ -107,6 +107,26 @@ export const LEDGER_ACTIONS = {
   "rent_review.commence": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.open_window": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.schedule": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+
+  // Rent reviews (WP26): calculate -> submit -> approve -> apply, and return,
+  // waive, cancel, revert. The subject is the review; scope columns carry the
+  // tenancy and building. index_pending is recorded with the person whose
+  // calculation found the quarter unpublished; index_available by the CPI timer
+  // (system). A submit that departs from the computed rent writes a second row,
+  // rent_review.override, with computed vs chosen and the $ difference: that row
+  // is the exception and carries the reason (PLAN §3.12 names the code). Waive,
+  // cancel and revert are exceptions with a reason; return needs its note.
+  "rent_review.apply": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.approve": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.calculate": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.cancel": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.index_available": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.index_pending": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.override": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.return": { exception: false, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.revert": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.submit": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.waive": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
 
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one

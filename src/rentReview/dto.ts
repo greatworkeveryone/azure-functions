@@ -2,8 +2,10 @@
 // endpoints) and the row it comes from. The frontend's src/types/rentReview.ts
 // mirrors RentReviewDto.
 
+import { todayInDarwin } from "../darwinDate";
 import type { SqlRow } from "../db";
 import { sqlDateToIso } from "../nextReviewDate";
+import { computeArrears, parseCalc, type ArrearsLine, type RentReviewCalc } from "../rentReviewCalc";
 import {
   isOverdue,
   RENT_REVIEW_STATES,
@@ -20,18 +22,31 @@ export interface PersonStamp {
   userId: number | null;
 }
 
+/** What an applied review did (approved and completed reviews), from the review's
+ *  own columns. The arrears line runs from the review date to the day it was
+ *  applied (Darwin), unbilled until a billing run confirms it. */
+export interface RentReviewOutcome {
+  appliedPercent: number;
+  arrears: (ArrearsLine & { billed: boolean }) | null;
+  newAnnual: number;
+  oldAnnual: number;
+}
+
 export interface RentReviewDto {
   approval: (PersonStamp & { basis: string | null }) | null;
   basis: RentReviewBasis | null;
   billingConfirmed: { at: string | null; by: string | null } | null;
   /** The tenancy's building (from the tenancy, so a moved tenancy reads right). */
   buildingId: number | null;
-  calc: RentReviewBasis | null;
+  /** The receipt (rentReviewCalc.ts), set by calculate; the override rides in it after submit. */
+  calc: RentReviewCalc | null;
   createdAt: string | null;
   /** Set while a CPI review waits for the index (WP26). */
   expectedIndexAt: string | null;
   method: RentReviewMethod | null;
   notice: { at: string | null; by: string | null; method: string | null } | null;
+  /** Approved and completed reviews: what was applied (WP26). */
+  outcome: RentReviewOutcome | null;
   /** Derived: open and the date has passed (Darwin). */
   overdue: boolean;
   ownerName: string | null;
@@ -66,6 +81,31 @@ export function tenantDisplayName(row: SqlRow): string {
   return text(row.TradingName)?.trim() ?? text(row.LegalName)?.trim() ?? `Tenancy ${row.TenantId}`;
 }
 
+const decimal = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+const r2 = (n: number): number => Math.round(n * 100) / 100;
+const r4 = (n: number): number => Math.round(n * 10000) / 10000 || 0;
+
+function outcomeOf(row: SqlRow, state: RentReviewState, scheduledFor: string): RentReviewOutcome | null {
+  if (state !== "approved" && state !== "completed") return null;
+  const oldAnnual = decimal(row.OldRentPerAnnum);
+  const newAnnual = decimal(row.NewRentPerAnnum);
+  if (oldAnnual === null || newAnnual === null) return null;
+  const appliedAt = row.ApprovedAt instanceof Date ? todayInDarwin(row.ApprovedAt) : null;
+  const arrears = appliedAt ? computeArrears(scheduledFor, appliedAt, oldAnnual, newAnnual) : null;
+  const billed = row.BillingConfirmedAt !== null && row.BillingConfirmedAt !== undefined;
+  return {
+    appliedPercent: r4(decimal(row.IncreasePercent) ?? 0),
+    arrears: arrears ? { ...arrears, billed } : null,
+    newAnnual: r2(newAnnual),
+    oldAnnual: r2(oldAnnual),
+  };
+}
+
 function stamp(userId: unknown, name: unknown, at: unknown): PersonStamp | null {
   const result: PersonStamp = { at: isoTimestamp(at), name: text(name), userId: whole(userId) };
   return result.at === null && result.name === null && result.userId === null ? null : result;
@@ -87,7 +127,7 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
     basis: parseBasis(row.Basis),
     billingConfirmed: billingAt === null && billingBy === null ? null : { at: billingAt, by: billingBy },
     buildingId: whole(row.TenantBuildingId) ?? whole(row.BuildingId),
-    calc: parseBasis(row.Calc),
+    calc: parseCalc(row.Calc),
     createdAt: isoTimestamp(row.CreatedAt),
     expectedIndexAt: sqlDateToIso(row.ExpectedIndexAt),
     method: METHODS.has(String(row.Method)) ? (row.Method as RentReviewMethod) : null,
@@ -95,6 +135,7 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
       noticeAt === null && noticeBy === null && noticeMethod === null
         ? null
         : { at: noticeAt, by: noticeBy, method: noticeMethod },
+    outcome: outcomeOf(row, state, scheduledFor),
     overdue: isOverdue(state, scheduledFor, today),
     ownerName: text(row.OwnerName),
     ownerUserId: whole(row.OwnerUserId),

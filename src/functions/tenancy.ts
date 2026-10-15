@@ -98,6 +98,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import {
   CLEAR_SIGN_OFF_SQL,
   readSignOffClearReason,
@@ -2438,54 +2439,7 @@ async function deleteTenantIncentive(
   }
 }
 
-// ── Rent schedule change log helpers ─────────────────────────────────────────
-
-interface ChangeLogOpts {
-  tenantId: number;
-  buildingId: number;
-  stepId: string;
-  changeKind: "added" | "updated" | "deleted";
-  changedById: string;
-  changedByName: string;
-  stepSnapshot: ScheduledRateStep;
-  diff: StepDiff | null;
-}
-
-async function insertRentScheduleChangeLog(
-  connection: Connection,
-  opts: ChangeLogOpts,
-): Promise<string> {
-  const changeId = randomUuid();
-  await executeQuery(
-    connection,
-    `INSERT INTO dbo.RentScheduleChangeLog
-       (ChangeId, TenantId, BuildingId, StepId, ChangeKind,
-        ChangedAt, ChangedById, ChangedByName, StepSnapshot, Diff)
-     VALUES
-       (@ChangeId, @TenantId, @BuildingId, @StepId, @ChangeKind,
-        SYSUTCDATETIME(), @ChangedById, @ChangedByName, @StepSnapshot, @Diff)`,
-    [
-      { name: "ChangeId", type: TYPES.NVarChar, value: changeId },
-      { name: "TenantId", type: TYPES.Int, value: opts.tenantId },
-      { name: "BuildingId", type: TYPES.Int, value: opts.buildingId },
-      { name: "StepId", type: TYPES.NVarChar, value: opts.stepId },
-      { name: "ChangeKind", type: TYPES.NVarChar, value: opts.changeKind },
-      { name: "ChangedById", type: TYPES.NVarChar, value: opts.changedById },
-      { name: "ChangedByName", type: TYPES.NVarChar, value: opts.changedByName },
-      {
-        name: "StepSnapshot",
-        type: TYPES.NVarChar,
-        value: JSON.stringify(opts.stepSnapshot),
-      },
-      {
-        name: "Diff",
-        type: TYPES.NVarChar,
-        value: opts.diff ? JSON.stringify(opts.diff) : null,
-      },
-    ],
-  );
-  return changeId;
-}
+// ── Rent schedule change log (writer: rentScheduleChangeLog.ts) ──────────────
 
 function changeLogRowToApi(row: SqlRow) {
   return {

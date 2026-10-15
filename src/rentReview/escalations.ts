@@ -350,3 +350,27 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
   );
   return result;
 }
+
+// ── C7: the level E3 has reached ─────────────────────────────────────────────
+
+const LIVE_APPROVAL_SQL = `SELECT TOP 1 e.TargetRole, e.NoIndependentTarget, e.[Level]
+  FROM dbo.Escalations e
+  WHERE e.SubjectType = N'rent_review' AND e.SubjectId = @ReviewId AND e.PolicyKey = @Approval
+    AND e.Status IN ('open', 'acknowledged')
+  ORDER BY e.EscalationId DESC`;
+
+/** The role an approver must hold (at least) to approve the review now (C7): the
+ *  role E3 has reached on its ladder, the directors when nobody independent was
+ *  left, and the ladder's first rung (an accounts manager) when there is no live
+ *  E3 (it wasn't raised, or its policy is off). */
+export async function requiredApprovalRole(connection: Connection, reviewId: string): Promise<string> {
+  const rows = await executeQuery(connection, LIVE_APPROVAL_SQL, [
+    { name: "ReviewId", type: TYPES.NVarChar, value: reviewId },
+    { name: "Approval", type: TYPES.NVarChar, value: REVIEW_POLICIES.approval },
+  ]);
+  const live = rows[0];
+  if (!live) return "accounts_manager";
+  if (live.NoIndependentTarget === true || live.NoIndependentTarget === 1) return "director";
+  const role = typeof live.TargetRole === "string" ? live.TargetRole.trim().toLowerCase() : "";
+  return role === "accounts_manager" || role === "cfo" || role === "director" ? role : "director";
+}

@@ -40,7 +40,21 @@ describe("applyRentReview is gone", () => {
 });
 
 describe("the review endpoints are registered", () => {
-  it.each(["getRentReviews", "getRentReview", "commenceRentReview", "updateRentReviewBasis", "getUpcomingLeaseEvents"])(
+  it.each([
+    "getRentReviews",
+    "getRentReview",
+    "commenceRentReview",
+    "updateRentReviewBasis",
+    "getUpcomingLeaseEvents",
+    // WP26
+    "calculateRentReview",
+    "submitRentReview",
+    "approveRentReview",
+    "returnRentReview",
+    "waiveRentReview",
+    "cancelRentReview",
+    "revertRentReview",
+  ])(
     "%s, one function in one file",
     (name) => {
       const source = read(`src/functions/${name}.ts`);
@@ -75,9 +89,25 @@ describe("nothing the workflow adds can delete a review", () => {
     join(ROOT, "src", "leaseMethod.ts"),
     join(ROOT, "src", "leaseOptions.ts"),
     join(ROOT, "src", "escalation", "adapters", "tenancy.ts"),
-    ...["getRentReviews", "getRentReview", "commenceRentReview", "updateRentReviewBasis", "getUpcomingLeaseEvents", "tenancyReviewScheduleTimer"].map(
-      (name) => join(ROOT, "src", "functions", `${name}.ts`),
-    ),
+    // WP26
+    join(ROOT, "src", "rentReviewCalc.ts"),
+    join(ROOT, "src", "rentScheduleChangeLog.ts"),
+    join(ROOT, "src", "escalation", "adapters", "rentReview.ts"),
+    ...[
+      "getRentReviews",
+      "getRentReview",
+      "commenceRentReview",
+      "updateRentReviewBasis",
+      "getUpcomingLeaseEvents",
+      "tenancyReviewScheduleTimer",
+      "calculateRentReview",
+      "submitRentReview",
+      "approveRentReview",
+      "returnRentReview",
+      "waiveRentReview",
+      "cancelRentReview",
+      "revertRentReview",
+    ].map((name) => join(ROOT, "src", "functions", `${name}.ts`)),
   ];
 
   it.each(added.map((file) => relative(ROOT, file)))("%s has no hard delete, comments included", (file) => {

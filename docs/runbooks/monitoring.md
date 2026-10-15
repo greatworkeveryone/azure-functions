@@ -140,7 +140,8 @@ Keep the name list in step with `src/money-gated-routes.ts`.
 
 ```kusto
 let gated = dynamic(["setApprovalLimit", "upsertPayment", "markPaymentPaid", "directorApproveJobInvoice",
-  "markJobInvoiceMyobCreated", "unmarkJobInvoiceMyobCreated", "markPurchaseOrderMyobCreated", "unmarkPurchaseOrderMyobCreated"]);
+  "markJobInvoiceMyobCreated", "unmarkJobInvoiceMyobCreated", "markPurchaseOrderMyobCreated", "unmarkPurchaseOrderMyobCreated",
+  "submitRentReview", "approveRentReview", "waiveRentReview", "revertRentReview"]);
 requests
 | where timestamp > ago(15m)
 | where name in (gated)
@@ -191,7 +192,9 @@ traces
 Money endpoints (today: `setApprovalLimit`, `upsertPayment`, `markPaymentPaid`,
 `directorApproveJobInvoice`, `markJobInvoiceMyobCreated`,
 `unmarkJobInvoiceMyobCreated`, `markPurchaseOrderMyobCreated`,
-`unmarkPurchaseOrderMyobCreated`; lane M adds the
+`unmarkPurchaseOrderMyobCreated`, and WP26's rent review decisions
+`submitRentReview`, `approveRentReview`, `waiveRentReview`,
+`revertRentReview`; lane M adds the
 MYOB proposal, push, update and control routes — the list is
 `src/money-gated-routes.ts`) require all of:
 

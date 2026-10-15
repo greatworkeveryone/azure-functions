@@ -26,6 +26,7 @@
 import {
   closeOpenPredecessor,
   computeScheduleRows,
+  diffSteps,
   normaliseLegacyEnds,
   type RentScheduleMethodKind,
   type ScheduleRow,
@@ -255,6 +256,32 @@ export function representStep(input: RepresentInput): RepresentResult {
 export function rentPerAnnumIsCache(steps: readonly ScheduledRateStep[]): boolean {
   const first = sortSteps([...steps])[0];
   return first !== undefined && first.methodKind === "commencement" && first.baseRentPerAnnum != null;
+}
+
+// ── What a write changed (the change log) ──────────────────────────────────────
+
+export interface StepChange {
+  after: ScheduledRateStep;
+  /** Null for a row the write added. */
+  before: ScheduledRateStep | null;
+  kind: "added" | "updated";
+}
+
+/** Every row a review's write added or changed, the review's own row first, so
+ *  the change log holds all of it and REVERT can take all of it back (closing
+ *  the row before a new one, and an end normalised along the way, included). */
+export function stepChanges(
+  before: readonly ScheduledRateStep[],
+  after: readonly ScheduledRateStep[],
+  reviewStepId: string,
+): StepChange[] {
+  const changes: StepChange[] = [];
+  for (const step of after) {
+    const prior = before.find((candidate) => candidate.id === step.id) ?? null;
+    if (!prior) changes.push({ after: step, before: null, kind: "added" });
+    else if (diffSteps(prior, step)) changes.push({ after: step, before: prior, kind: "updated" });
+  }
+  return changes.sort((a, b) => Number(b.after.id === reviewStepId) - Number(a.after.id === reviewStepId));
 }
 
 // ── Undoing a review's write (REVERT) ──────────────────────────────────────────

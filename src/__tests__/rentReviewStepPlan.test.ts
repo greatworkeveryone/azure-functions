@@ -13,6 +13,7 @@ import {
   reviewRow,
   sameStep,
   simulate,
+  stepChanges,
   undoChanges,
   waivedStep,
   type ScheduleContext,
@@ -187,6 +188,21 @@ describe("rentPerAnnumIsCache", () => {
     expect(rentPerAnnumIsCache([{ ...COMMENCE, baseRentPerAnnum: undefined }, REVIEW])).toBe(false);
     expect(rentPerAnnumIsCache([REVIEW])).toBe(false);
     expect(rentPerAnnumIsCache([])).toBe(false);
+  });
+});
+
+describe("stepChanges: everything a write changed goes in the change log", () => {
+  it("lists an added row first (the review's own), then the row it closed, and nothing that didn't change", () => {
+    const added = { ...REVIEW, id: "00000000-0000-4000-8000-0000000000aa" };
+    const placed = placeStep([COMMENCE, LATER], added);
+    expect(stepChanges([COMMENCE, LATER], placed.steps, added.id)).toEqual([
+      { after: added, before: null, kind: "added" },
+      { after: { ...COMMENCE, effectiveTo: "2025-07-01" }, before: COMMENCE, kind: "updated" },
+    ]);
+  });
+
+  it("is empty when nothing changed", () => {
+    expect(stepChanges([COMMENCE, REVIEW], [COMMENCE, REVIEW], REVIEW.id)).toEqual([]);
   });
 });
 

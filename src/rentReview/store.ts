@@ -14,7 +14,9 @@ import {
   type SqlParam,
   type SqlRow,
 } from "../db";
+import { RESOLVED_REVIEW_DATES_SQL } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewMethod, type RentReviewState } from "../rentReviewMachine";
+import { SIGN_OFF_COLUMNS } from "../scheduleSignOff";
 import { rollbackQuietly } from "../tenancyScheduleWrite";
 import type { CpiIndexRow } from "./cpi";
 import { legacyReviewType, legacyStatus } from "./legacyMap";
@@ -30,6 +32,7 @@ const REVIEW_COLUMNS = `
   r.NoticeIssuedAt, r.NoticeIssuedBy, r.NoticeMethod,
   r.BillingConfirmedAt, r.BillingConfirmedBy,
   r.WaiveReason, r.ExpectedIndexAt, r.CreatedAt, r.UpdatedAt, r.Version,
+  r.OldRentPerAnnum, r.NewRentPerAnnum, r.IncreasePercent,
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
   t.ArchivedAt AS TenantArchivedAt,
   u.DisplayName AS OwnerName`;
@@ -97,7 +100,7 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
 const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
     t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
-    t.ScheduledRateSteps, b.BuildingName
+    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, b.BuildingName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
   WHERE t.TenantId = @TenantId`;
@@ -105,6 +108,22 @@ const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.Trad
 /** The lease terms a review is decided on, one tenancy. */
 export async function loadTenancyForReview(connection: Connection, tenantId: number): Promise<SqlRow | null> {
   const rows = await executeQuery(connection, TENANCY_FOR_REVIEW, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
+  return rows[0] ?? null;
+}
+
+const TENANCY_LOCKED_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.Status, t.ArchivedAt, t.ScheduleVersion,
+    t.Commencement, t.LastReviewDate, t.LastReviewIncreasePercent, t.ReviewIntervalMonths, t.NextReviewDate,
+    t.ReviewType, t.FixedReviewPercent, t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
+    t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.UpdatedAt, t.UpdatedByName,
+    ${SIGN_OFF_COLUMNS},
+    ${RESOLVED_REVIEW_DATES_SQL}
+  FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK)
+  WHERE t.TenantId = @TenantId`;
+
+/** The review's tenancy, locked for the rest of the transaction: what APPLY,
+ *  WAIVE and REVERT read and write (PLAN §3.1: "lock the tenant row"). */
+export async function lockTenancyForReview(connection: Connection, tenantId: number): Promise<SqlRow | null> {
+  const rows = await executeQuery(connection, TENANCY_LOCKED_FOR_REVIEW, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
   return rows[0] ?? null;
 }
 
@@ -245,12 +264,13 @@ export async function markCommenced(connection: Connection, commence: Commenceme
   return moved.length > 0;
 }
 
-/** Replaces the basis of a review that is still being worked on. */
+/** Replaces the basis of a review that is still being worked on. A calculation
+ *  worked on the old basis no longer stands, so it goes with it (WP26). */
 export async function saveBasis(connection: Connection, reviewId: string, basisJson: string): Promise<boolean> {
   const saved = await executeQuery(
     connection,
     `UPDATE dbo.RentReviews
-       SET Basis = @Basis, UpdatedAt = SYSUTCDATETIME()
+       SET Basis = @Basis, Calc = NULL, UpdatedAt = SYSUTCDATETIME()
      OUTPUT INSERTED.ReviewId
      WHERE ReviewId = @ReviewId AND State IN ('in_progress', 'awaiting_index')`,
     [

@@ -8,8 +8,9 @@ import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import type { Connection } from "tedious";
 import { AppRole, errorResponse, rolesForRequest } from "../auth";
 import type { SqlRow } from "../db";
-import type { LedgerActor } from "../ledger";
+import type { LedgerActor, LedgerEntryInput } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { recordApart } from "../ledger/refusals";
 import { ledgerRefusal } from "../tenancyScheduleWrite";
 import { toReviewDto } from "./dto";
 
@@ -39,6 +40,51 @@ export const TENANCY_EDIT_ROLES: readonly AppRole[] = [
   AppRole.DIRECTOR,
 ];
 
+/**
+ * Who may submit (and so apply, when the result keeps to the lease) a review:
+ * accounts, accounts_manager, cfo, director, admin (PLAN WP26's apply
+ * capability; the frontend mirrors it). The same list as TENANCY_EDIT_ROLES;
+ * the cfo passes through requireRole's hierarchy. Change them together.
+ */
+export const REVIEW_APPLY_ROLES: readonly AppRole[] = [
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
+  AppRole.ADMIN,
+  AppRole.DIRECTOR,
+];
+
+/**
+ * Who may approve, return, waive and revert a review: accounts_manager, cfo,
+ * director (PLAN WP26; frontend capabilities approveRentReview, waiveRentReview,
+ * revertRentReview). requireRole lets admin through every gate, so each of
+ * those handlers also asks holdsApproverRole: admin is never an approver (D20).
+ * A market review's waive is a director's alone. Change the frontend with these.
+ */
+export const REVIEW_APPROVE_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR];
+
+/**
+ * Who may cancel a review: an accounts manager and up, the roles that may change
+ * a review they don't own (isManagerOrAbove; frontend capability
+ * editAnyRentReview): accounts_manager, cfo, director, admin.
+ */
+export const REVIEW_CANCEL_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
+
+/** The approval ladder's levels, lowest first (E3: accounts_manager -> cfo -> director). */
+export const APPROVER_RANK: Readonly<Record<string, number>> = {
+  [AppRole.ACCOUNTS_APPROVAL]: 1,
+  [AppRole.CFO]: 2,
+  [AppRole.DIRECTOR]: 3,
+};
+
+/** The highest approval level among the caller's roles; 0 for none (admin included). */
+export function approverRank(roles: readonly string[]): number {
+  return roles.reduce((best, role) => Math.max(best, APPROVER_RANK[role] ?? 0), 0);
+}
+
+export function holdsApproverRole(roles: readonly string[]): boolean {
+  return approverRank(roles) > 0;
+}
+
 // accounts_manager and up: the roles that may change a review they don't own.
 const MANAGER_AND_UP: ReadonlySet<string> = new Set([
   AppRole.ACCOUNTS_APPROVAL,
@@ -56,28 +102,62 @@ const REVIEW_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
 
 export type RentReviewErrorCode =
+  | "approval_level"
   | "bad_request"
+  | "basis_incomplete"
+  | "changed_since_apply"
+  | "cpi_base_mismatch"
+  | "earlier_review_pending"
   | "forbidden"
   | "invalid_state"
+  | "manual_required"
+  | "method_not_supported"
+  | "next_review_in_progress"
   | "no_change"
+  | "no_current_rent"
   | "no_user"
+  | "not_calculated"
   | "not_found"
+  | "not_representable"
+  | "not_revertible"
+  | "not_signed_off"
   | "open_review_exists"
+  | "ratchet"
   | "reason_required"
+  | "sod_blocked"
   | "stale"
+  | "stale_schedule"
+  | "step_settled"
   | "tenancy_archived"
   | "tenancy_vacated";
 
 const STATUS: Record<RentReviewErrorCode, number> = {
+  approval_level: 403,
   bad_request: 400,
+  basis_incomplete: 422,
+  changed_since_apply: 409,
+  cpi_base_mismatch: 422,
+  earlier_review_pending: 422,
   forbidden: 403,
   invalid_state: 409,
+  manual_required: 400,
+  method_not_supported: 422,
+  next_review_in_progress: 409,
   no_change: 400,
+  no_current_rent: 422,
   no_user: 422,
+  not_calculated: 409,
   not_found: 404,
+  not_representable: 422,
+  not_revertible: 409,
+  not_signed_off: 422,
   open_review_exists: 422,
+  ratchet: 422,
   reason_required: 400,
+  sod_blocked: 403,
   stale: 409,
+  stale_schedule: 409,
+  step_settled: 409,
   tenancy_archived: 422,
   tenancy_vacated: 422,
 };
@@ -86,13 +166,17 @@ export class RentReviewError extends Error {
   readonly code: RentReviewErrorCode;
   /** Extra fields for the response body: the current review on a stale write. */
   readonly details: Record<string, unknown>;
+  /** A refused decision attempt the ledger records (sod_blocked, denied) once
+   *  the transaction has rolled back. Never part of the response. */
+  readonly refusal: LedgerEntryInput | null;
   readonly status: number;
 
-  constructor(code: RentReviewErrorCode, message: string, details: Record<string, unknown> = {}) {
+  constructor(code: RentReviewErrorCode, message: string, details: Record<string, unknown> = {}, refusal: LedgerEntryInput | null = null) {
     super(message);
     this.name = "RentReviewError";
     this.code = code;
     this.details = details;
+    this.refusal = refusal;
     this.status = STATUS[code];
   }
 }
@@ -110,6 +194,13 @@ export function staleReview(row: SqlRow, today: string): RentReviewError {
     "Someone else changed this review since you opened it. Reload to see their change.",
     { current: toReviewDto(row, today) },
   );
+}
+
+/** Writes a refused attempt's ledger row (sod_blocked, denied) after the
+ *  decision's transaction rolled back, in a transaction of its own. Never throws. */
+export async function recordReviewRefusal(connection: Connection | undefined, error: unknown): Promise<void> {
+  if (!connection || !(error instanceof RentReviewError) || !error.refusal) return;
+  await recordApart(connection, error.refusal, `refused ${error.code}`, "rent-review-refusal");
 }
 
 /** A refusal as a response; a ledger refusal is a 400, anything else a 500 that goes to Sentry. */
@@ -156,9 +247,9 @@ export function readRowVersion(value: unknown): string {
   return value.trim().toLowerCase();
 }
 
-export function readReason(value: unknown): string {
+export function readReason(value: unknown, missing = "Say why (a reason is required)"): string {
   if (typeof value !== "string" || value.trim() === "") {
-    throw new RentReviewError("reason_required", "Say why (a reason is required)");
+    throw new RentReviewError("reason_required", missing);
   }
   const reason = value.trim();
   if (reason.length > REASON_MAX_CHARS) {
