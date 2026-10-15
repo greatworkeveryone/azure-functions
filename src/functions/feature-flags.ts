@@ -26,8 +26,8 @@ const VISIBILITIES = ["enabled", "preview", "hidden"] as const;
 const ROLE_NAMES: readonly string[] = Object.values(AppRole);
 const FEATURE_KEYS = [
   "activity", "assets", "escalations", "finance", "incoming", "inspections", "jobs", "keys",
-  "maintenance", "payroll", "procedures", "quotes", "tenancySchedule", "tenancyVacancies",
-  "timesheets",
+  "maintenance", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule",
+  "tenancyVacancies", "timesheets",
 ] as const;
 
 export async function getFeatureFlags(

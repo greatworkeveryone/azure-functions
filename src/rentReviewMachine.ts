@@ -2,7 +2,7 @@
 // imports, so the same file runs in both repos.
 //
 // KEEP IN SYNC: the frontend has a byte-identical copy at
-// command-centre/src/helpers/rentReviewMachine.ts. Change both in the same
+// command-centre/src/types/rentReviewMachine.ts. Change both in the same
 // package; the exhaustive transition test is the same file on both sides.
 // The backend copy is the one that enforces; the frontend copy lets buttons
 // explain themselves without a round trip.

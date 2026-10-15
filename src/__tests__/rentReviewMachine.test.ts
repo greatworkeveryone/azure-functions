@@ -1,7 +1,7 @@
 /// <reference types="jest" />
 // The rent review machine (PLAN §3.1). This file is identical in both repos
 // apart from the import line below (the frontend copy imports
-// "@/helpers/rentReviewMachine"): change one, change the other.
+// "@/types/rentReviewMachine"): change one, change the other.
 //
 // SPEC restates the PLAN's table independently of the implementation, so a
 // transition added to or dropped from the machine fails here until the spec
