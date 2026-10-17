@@ -13,6 +13,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { AppRole, errorResponse } from "../auth";
+import { buildingCategoryColumnExists } from "../buildingCategoryColumn";
 import { buildUpdateSet, closeConnection, createRequestConnection, executeQuery, type SqlRow } from "../db";
 import {
   authorizeWrite,
@@ -45,6 +46,9 @@ interface UpsertManualBuildingResult {
 }
 
 const READ_COLUMNS = "BuildingID, BuildingName, BuildingAddress, Category, OwnerName, Active";
+const READ_BUILDING = `SELECT ${READ_COLUMNS} FROM dbo.Buildings`;
+const READ_BUILDING_LOCKED = `${READ_BUILDING} WITH (UPDLOCK, ROWLOCK)`;
+const MANUAL_ID_ONLY = " WHERE BuildingID = @BuildingId AND BuildingID <= 0";
 
 const UPDATE_COLUMNS = {
   BuildingAddress: TYPES.NVarChar,
@@ -65,18 +69,11 @@ function toApi(row: SqlRow): ManualBuildingApi {
 }
 
 async function fetchBuilding(connection: Connection, buildingId: number, forUpdate = false): Promise<SqlRow | null> {
-  const params = [{ name: "BuildingId", type: TYPES.Int, value: buildingId }];
-  const rows = forUpdate
-    ? await executeQuery(
-        connection,
-        `SELECT ${READ_COLUMNS} FROM dbo.Buildings WITH (UPDLOCK, ROWLOCK) WHERE BuildingID = @BuildingId AND BuildingID <= 0`,
-        params,
-      )
-    : await executeQuery(
-        connection,
-        `SELECT ${READ_COLUMNS} FROM dbo.Buildings WHERE BuildingID = @BuildingId AND BuildingID <= 0`,
-        params,
-      );
+  const rows = await executeQuery(
+    connection,
+    (forUpdate ? READ_BUILDING_LOCKED : READ_BUILDING) + MANUAL_ID_ONLY,
+    [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
+  );
   return rows[0] ?? null;
 }
 
@@ -93,6 +90,7 @@ async function nameTaken(connection: Connection, name: string, exceptId: number 
 }
 
 const NAME_TAKEN = "Another building already has that name. Work requests are matched to a building by its name.";
+const MIGRATION_PENDING = "Buildings cannot be edited until migration 136 is applied";
 
 async function createBuilding(
   connection: Connection,
@@ -100,14 +98,15 @@ async function createBuilding(
 ): Promise<TxResult<UpsertManualBuildingResult>> {
   const name = input.name;
   if (!name) return txFail(badRequest("name is required"));
-  if (await nameTaken(connection, name, null)) return txFail(conflict(NAME_TAKEN));
 
   // Locked until commit so two admins adding at once cannot take the same id.
+  // Taken before the name check: the second admin waits here, then sees the first one's row.
   const next = await executeQuery(
     connection,
     `SELECT ISNULL(MIN(BuildingID), 0) - 1 AS NextId FROM dbo.Buildings WITH (UPDLOCK, HOLDLOCK) WHERE BuildingID <= 0`,
   );
   const newId = Number(next[0]?.NextId ?? -1);
+  if (await nameTaken(connection, name, null)) return txFail(conflict(NAME_TAKEN));
 
   await executeQuery(
     connection,
@@ -173,6 +172,7 @@ export async function upsertManualBuilding(
   try {
     connection = await createRequestConnection(auth.token);
     const conn = connection;
+    if (!(await buildingCategoryColumnExists(conn))) return conflict(MIGRATION_PENDING);
     const outcome = await inTransaction(conn, () => (isUpdate ? updateBuilding(conn, input) : createBuilding(conn, input)));
     if (!outcome.ok) return outcome.response;
 

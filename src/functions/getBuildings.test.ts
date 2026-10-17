@@ -30,6 +30,7 @@ jest.mock("../db", () => {
 jest.mock("../blob-storage", () => ({ vacanciesReadSasUrl: jest.fn((url: string) => url) }));
 
 import { AppRole } from "../auth";
+import { resetBuildingCategoryColumnProbe } from "../buildingCategoryColumn";
 import { clearBuildingsCache, getBuildings } from "./getBuildings";
 
 const db = require("../db") as { executeQuery: jest.Mock };
@@ -46,10 +47,22 @@ const row = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/** Answers the column probe with `probeLen` (null: migration 136 not applied) and the list query with `rows`. */
+function serve(rows: Array<Record<string, unknown>>, probeLen: number | null = 20): void {
+  db.executeQuery.mockImplementation(async (_connection: unknown, sql: string) =>
+    /COL_LENGTH/i.test(sql) ? [{ Len: probeLen }] : rows,
+  );
+}
+const listSql = (): string => {
+  const call = (db.executeQuery.mock.calls as Array<[unknown, string]>).find(([, sql]) => /FROM Buildings/i.test(sql));
+  return call?.[1] ?? "";
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   clearBuildingsCache();
-  db.executeQuery.mockResolvedValue([]);
+  resetBuildingCategoryColumnProbe();
+  serve([]);
   auth.requireRole.mockResolvedValue(null);
 });
 
@@ -57,13 +70,12 @@ describe("getBuildings: category and owner (U8)", () => {
   it("selects Category and OwnerName", async () => {
     await getBuildings(get(), context);
 
-    const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
-    expect(sql).toMatch(/\bCategory\b/);
-    expect(sql).toMatch(/\bOwnerName\b/);
+    expect(listSql()).toMatch(/\bCategory\b/);
+    expect(listSql()).toMatch(/\bOwnerName\b/);
   });
 
   it("returns category and ownerName on every row, commercial and residence together", async () => {
-    db.executeQuery.mockResolvedValue([
+    serve([
       row(),
       row({ BuildingID: -4, BuildingName: "24 Gunbar St", Category: "residence", OwnerName: "Paolo" }),
     ]);
@@ -82,12 +94,11 @@ describe("getBuildings: category and owner (U8)", () => {
   it("does not filter by category: a residence is returned by the same query as everything else", async () => {
     await getBuildings(get(), context);
 
-    const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
-    expect(sql).not.toMatch(/WHERE[^]*\bCategory\s*(=|<>|!=|IN)\b/i);
+    expect(listSql()).not.toMatch(/WHERE[^]*\bCategory\s*(?:=|<>|!=|\bIN\b)/i);
   });
 
   it("serves the same fields from the cache on the next call", async () => {
-    db.executeQuery.mockResolvedValue([row({ BuildingID: -2, Category: "residence", OwnerName: "Paolo" })]);
+    serve([row({ BuildingID: -2, Category: "residence", OwnerName: "Paolo" })]);
     await getBuildings(get(), context);
     db.executeQuery.mockClear();
 
@@ -106,5 +117,60 @@ describe("getBuildings: category and owner (U8)", () => {
     auth.requireRole.mockResolvedValueOnce({ jsonBody: { error: "Forbidden" }, status: 403 });
     const denied = await getBuildings(get(), context);
     expect(denied.status).toBe(403);
+  });
+});
+
+describe("getBuildings: before migration 136 is applied", () => {
+  const oldRows = [
+    { Active: true, BuildingID: 7, BuildingName: "Alpha House" },
+    { Active: true, BuildingID: -1, BuildingName: "13 Seale St" },
+  ];
+
+  it("does not name Category or OwnerName, and returns every building", async () => {
+    serve(oldRows, null);
+
+    const response = await getBuildings(get(), context);
+
+    expect(listSql()).not.toMatch(/\bCategory\b/);
+    expect(listSql()).not.toMatch(/\bOwnerName\b/);
+    expect(response.status).toBe(200);
+    const body = response.jsonBody as { buildings: Array<Record<string, unknown>>; count: number };
+    expect(body.count).toBe(2);
+    expect(body.buildings.map((b) => [b.BuildingID, b.Category])).toEqual([[7, undefined], [-1, undefined]]);
+  });
+
+  it("probes again on the next cache miss, so applying 136 takes effect without a restart", async () => {
+    serve(oldRows, null);
+    await getBuildings(get(), context);
+    expect(listSql()).not.toMatch(/\bCategory\b/);
+
+    db.executeQuery.mockClear();
+    clearBuildingsCache();
+    serve([row()], 20);
+    await getBuildings(get(), context);
+
+    expect(listSql()).toMatch(/\bCategory\b/);
+  });
+
+  it("remembers a positive probe, so the column check is not repeated on every cache miss", async () => {
+    serve([row()], 20);
+    await getBuildings(get(), context);
+    db.executeQuery.mockClear();
+    clearBuildingsCache();
+
+    await getBuildings(get(), context);
+
+    const probes = (db.executeQuery.mock.calls as Array<[unknown, string]>).filter(([, sql]) => /COL_LENGTH/i.test(sql));
+    expect(probes).toHaveLength(0);
+    expect(listSql()).toMatch(/\bCategory\b/);
+  });
+
+  it("applies the same column list to a single-building lookup", async () => {
+    serve([oldRows[0]], null);
+
+    const response = await getBuildings(get("buildingId=7"), context);
+
+    expect(listSql()).not.toMatch(/\bCategory\b/);
+    expect(response.status).toBe(200);
   });
 });
