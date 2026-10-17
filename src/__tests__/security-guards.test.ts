@@ -49,6 +49,11 @@ describe("the MYOB proposal gate", () => {
   });
 });
 
+/** Gate names inside comments must not count (a `// requireRole(request)` is not a gate). */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
+}
+
 const ANONYMOUS_BY_DESIGN: Record<string, string> = {
   corsOptions: "preflight only; returns CORS headers and no data",
   graphNotification: "Graph webhook; authenticated by the constant-time clientState secret",
@@ -102,7 +107,7 @@ describe("every HTTP route checks the caller's role", () => {
     expect(route.fn).not.toBeNull();
     const body = handlerRegion(read(join(SRC, route.file)), route.fn as string);
     expect(body).not.toBeNull();
-    expect(body).toMatch(GATE);
+    expect(stripComments(body ?? "")).toMatch(GATE);
   });
 
   it("keeps the anonymous list honest", () => {
