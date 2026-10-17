@@ -260,4 +260,12 @@ describe("what the read endpoints say about sign-off", () => {
     const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
     expect(sql).toContain("ScheduleSignedOffAt IS NULL");
   });
+
+  it("getPortfolioOccupancy counts neither archived nor vacated tenancies as unsigned", async () => {
+    db.executeQuery.mockResolvedValueOnce([]);
+    await handlers.getPortfolioOccupancy(makeRequest(undefined), ctx);
+    const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+    expect(sql).toMatch(/WHERE t\.ArchivedAt IS NULL/);
+    expect(sql).toMatch(/t\.Status IN \('current','holdover'\)\s+AND t\.ScheduleSignedOffAt IS NULL/);
+  });
 });

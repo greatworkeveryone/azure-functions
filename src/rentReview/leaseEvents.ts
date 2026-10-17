@@ -33,6 +33,8 @@ export interface LeaseEvent {
   ownerName?: string | null;
   ownerUserId?: number | null;
   reviewId?: string;
+  /** Whether the tenancy's schedule has been signed off as verified (PLAN D7). A row of an unsigned one is held back from alerts. */
+  scheduleSignedOff: boolean;
   state?: RentReviewState;
   tenantId: number;
   tenantName: string;
@@ -43,6 +45,7 @@ export interface LeaseEventTenancy {
   expiry: string | null;
   optionNoticeMonths: number | null;
   optionPeriods: string | null;
+  scheduleSignedOff: boolean;
   tenantId: number;
   tenantName: string;
 }
@@ -53,6 +56,7 @@ export interface LeaseEventReview {
   ownerName: string | null;
   ownerUserId: number | null;
   reviewId: string;
+  scheduleSignedOff: boolean;
   scheduledFor: string;
   state: RentReviewState;
   tenantId: number;
@@ -89,6 +93,7 @@ export function buildLeaseEvents(input: {
       ownerName: review.ownerName,
       ownerUserId: review.ownerUserId,
       reviewId: review.reviewId,
+      scheduleSignedOff: review.scheduleSignedOff,
       state: review.state,
       tenantId: review.tenantId,
       tenantName: review.tenantName,
@@ -102,6 +107,7 @@ export function buildLeaseEvents(input: {
         date: tenancy.expiry,
         kind: "expiry",
         overdue: tenancy.expiry < today,
+        scheduleSignedOff: tenancy.scheduleSignedOff,
         tenantId: tenancy.tenantId,
         tenantName: tenancy.tenantName,
       });
@@ -113,6 +119,7 @@ export function buildLeaseEvents(input: {
         date: window.deadline,
         kind: "option_deadline",
         overdue: false,
+        scheduleSignedOff: tenancy.scheduleSignedOff,
         tenantId: tenancy.tenantId,
         tenantName: tenancy.tenantName,
       });

@@ -12,7 +12,6 @@ import { TYPES } from "tedious";
 import {
   errorResponse,
   extractToken,
-  requireRole,
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
@@ -30,7 +29,7 @@ import {
   readSignOffText,
   readTenantKey,
   scheduleSignOffFromRow,
-  SIGN_OFF_ROLES,
+  requireSignOffRole,
 } from "../scheduleSignOff";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { conflictResponse, isoTimestamp, ledgerRefusal, rollbackQuietly, rowVersionHex } from "../tenancyScheduleWrite";
@@ -41,7 +40,7 @@ export async function signOffTenancySchedule(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, SIGN_OFF_ROLES);
+  const denied = await requireSignOffRole(request);
   if (denied) return denied;
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();

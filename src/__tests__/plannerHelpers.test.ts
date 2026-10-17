@@ -32,6 +32,7 @@ const BASE_TENANT: PlannerTenantRow = {
   firstOccupancy: "L3 / Suite 3A",
   expiry: "2026-09-15",
   optionNoticeMonths: 3,
+  optionPeriods: "1 x 5 years",
   nextReviewDate: "2026-07-01",
   reviewType: "CPI Darwin",
   scheduleSignedOff: true,
@@ -67,6 +68,26 @@ describe("computeEventDate", () => {
   test("option_notice returns null when optionNoticeMonths is null", () => {
     const t = { ...BASE_TENANT, optionNoticeMonths: null };
     assert.strictEqual(computeEventDate(t, "option_notice"), null);
+  });
+
+  // Option text is how we know a lease has options to exercise (WP25 and the
+  // frontend gate on optionNoticeWindow the same way): "Nil" means no deadline.
+  test.each([null, "", "Nil", "nil", "None", "N/A", "no options", "see lease"])(
+    "option_notice returns null when the option text is %p: there is nothing to give notice of",
+    (optionPeriods) => {
+      assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionPeriods }, "option_notice"), null);
+    },
+  );
+
+  test("option_notice returns null when the notice period is 0, which is how an unset one reads", () => {
+    assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionNoticeMonths: 0 }, "option_notice"), null);
+  });
+
+  test("a Nil option raises no option task but still raises expiry and review tasks", () => {
+    const nil = { ...BASE_TENANT, optionPeriods: "Nil" };
+    assert.strictEqual(computeEventDate(nil, "option_notice"), null);
+    assert.ok(computeEventDate(nil, "lease_expiry") instanceof Date);
+    assert.ok(computeEventDate(nil, "rent_review") instanceof Date);
   });
 
   test("option_notice returns null when expiry is null", () => {

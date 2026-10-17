@@ -19,7 +19,7 @@ import {
   graphGetPlannerTask,
   resolveActivePlannerTasks,
 } from "../planner";
-import { plannerSyncEnabled } from "../plannerFlag";
+import { plannerSyncEnabled, plannerUnsignedHoldbackEnabled } from "../plannerFlag";
 import {
   buildJobTaskDescription,
   buildTaskTitle,
@@ -128,6 +128,7 @@ export async function plannerSyncTimer(
           ORDER BY Level, Area) AS FirstOccupancy,
          CONVERT(VARCHAR(10), t.Expiry, 120) AS Expiry,
          t.OptionNoticeMonths,
+         t.OptionPeriods,
          CONVERT(VARCHAR(10), t.NextReviewDate, 120) AS NextReviewDate,
          t.ReviewType,
          t.ScheduleSignedOffAt
@@ -146,6 +147,7 @@ export async function plannerSyncTimer(
       firstOccupancy: (r.FirstOccupancy as string | null) ?? null,
       expiry: (r.Expiry as string | null) ?? null,
       optionNoticeMonths: (r.OptionNoticeMonths as number | null) ?? null,
+      optionPeriods: typeof r.OptionPeriods === "string" ? r.OptionPeriods : null,
       nextReviewDate: (r.NextReviewDate as string | null) ?? null,
       reviewType: (r.ReviewType as string | null) ?? null,
       scheduleSignedOff: Boolean(r.ScheduleSignedOffAt),
@@ -177,16 +179,37 @@ export async function plannerSyncTimer(
     const tenantTaskByKey = groupPlannerTasksByKey(tenantTaskRows as PlannerTaskRowShape[]);
 
     // A schedule nobody has signed off is unverified: raise no lease tasks for
-    // it and take down any that are open (PLAN D7, D21).
+    // it (PLAN D7, D21). Taking down the ones already open changes live Planner
+    // data in bulk, so it only happens when PLANNER_UNSIGNED_HOLDBACK_ENABLED is
+    // "true"; otherwise they are left alone and the log says which.
     const plan = leaseTaskPlan(tenants, tenantTaskRows as PlannerTaskRowShape[]);
-    for (const tenantId of plan.removeFor) {
-      try {
-        await resolveActivePlannerTasks("tenant", tenantId, TENANT_TRIGGER_TYPES);
-      } catch (err: unknown) {
-        context.warn(
-          `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
-          err instanceof Error ? err.message : String(err),
+    const openTasks = new Map<number, number>();
+    for (const row of tenantTaskRows as PlannerTaskRowShape[]) {
+      if (row.Status === "active") openTasks.set(row.EntityId, (openTasks.get(row.EntityId) ?? 0) + 1);
+    }
+    if (plan.removeFor.length > 0) {
+      const describe = (tenantId: number) => `${tenantId} (${openTasks.get(tenantId) ?? 0} open lease tasks)`;
+      if (!plannerUnsignedHoldbackEnabled()) {
+        context.log(
+          `plannerSyncTimer: ${plan.removeFor.length} unsigned tenancies still have open lease tasks, not removed because PLANNER_UNSIGNED_HOLDBACK_ENABLED is not "true": ${plan.removeFor.map(describe).join(", ")}`,
         );
+      } else {
+        let removedTasks = 0;
+        let removedTenancies = 0;
+        for (const tenantId of plan.removeFor) {
+          try {
+            await resolveActivePlannerTasks("tenant", tenantId, TENANT_TRIGGER_TYPES);
+            removedTasks += openTasks.get(tenantId) ?? 0;
+            removedTenancies++;
+            context.log(`plannerSyncTimer: removed ${openTasks.get(tenantId) ?? 0} open lease tasks for unsigned tenancy ${tenantId}`);
+          } catch (err: unknown) {
+            context.warn(
+              `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+        context.log(`plannerSyncTimer: removed ${removedTasks} open lease tasks across ${removedTenancies} unsigned tenancies`);
       }
     }
 
