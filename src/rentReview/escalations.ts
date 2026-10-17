@@ -48,6 +48,7 @@ const REASON_WORDS: Record<string, string> = {
   manual_method: "keyed by hand",
   out_of_band: "outside the usual range",
   override: "a different rent was chosen",
+  reduction: "the rent goes down, so a director decides",
 };
 
 /** E3's headline: the change and why it needs a second person. */
@@ -78,6 +79,8 @@ export interface ApprovalEscalationInput {
   newAnnual: number;
   reasons: readonly string[];
   reviewId: string;
+  /** "director" for a rent reduction (A3): straight to the directors. */
+  startAtRole?: string | null;
 }
 
 /** E3 for a review that SUBMIT just sent to awaiting_approval. Null when it
@@ -95,6 +98,7 @@ export async function raiseApprovalEscalation(connection: Connection, input: App
       excludeUserIds: input.excludeUserIds,
       headline: approvalHeadline(input),
       policyKey: REVIEW_POLICIES.approval,
+      startAtRole: input.startAtRole ?? null,
       subjectId: input.reviewId,
       subjectType: REVIEW_SUBJECT,
     });

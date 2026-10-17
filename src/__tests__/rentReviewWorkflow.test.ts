@@ -837,3 +837,46 @@ describe("A2: directors override C3 and C5 with a reason, ledgered as rent_revie
   });
 });
 
+// ── A3: a lower rent needs a director ─────────────────────────────────────────
+
+describe("A3: a rent reduction is never applied in one step and needs a director", () => {
+  /** A CPI fall of 2%, inside the band, on a lease without a ratchet or a floor. */
+  const falling = { cpi: [100, 98] as [number, number], review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })) }, tenant: { CpiFloorPercent: null, ReviewRatchet: false } };
+
+  it("sends a computed fall to approval, with E3 straight to the directors", async () => {
+    await calculated(falling);
+    const res = await submit();
+    expect(res.jsonBody).toMatchObject({ applied: false, review: { calc: { newAnnual: 121237.11 }, state: "awaiting_approval" } });
+    expect(world.ledgerRows()[0]).toMatchObject({ Action: "rent_review.submit", RuleApplied: "reduction" });
+    expect(escalations.raiseApprovalEscalation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reasons: ["reduction"], startAtRole: "director" }),
+    );
+  });
+
+  it("refuses an accounts manager or the CFO whatever E3's rung, and lets a director approve it", async () => {
+    await calculated(falling);
+    await submit();
+    world.state.ledger = [];
+    for (const person of [PEOPLE.bo, PEOPLE.cy]) {
+      as(person);
+      const res = await approve();
+      expect(res.status).toBe(403);
+      expect(res.jsonBody).toEqual({ code: "approval_level", error: "This review lowers the rent, so a director has to approve it", requiredRole: "director" });
+    }
+    expect(world.ledgerRows().map((row) => row.RuleApplied)).toEqual(["reduction_needs_director", "reduction_needs_director"]);
+    as(PEOPLE.dee);
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(reviewBody(res).outcome).toMatchObject({ newAnnual: 121237.11, oldAnnual: 123711.34 });
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.approve")?.RuleApplied).toBe("reduction_director");
+  });
+
+  it("keeps an override below the computed rent but above the current one on the normal ladder", async () => {
+    await calculated();
+    await submit({ override: { newAnnual: 125000, reason: "Agreed with the tenant" } });
+    expect(escalations.raiseApprovalEscalation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reasons: ["override"], startAtRole: null }));
+    as(PEOPLE.bo);
+    expect((await approve()).status).toBe(200);
+  });
+});

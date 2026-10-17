@@ -31,9 +31,10 @@
 //               (an unchanged fixed %), with no override: APPLY now
 //               (rentReview/apply.ts), rule auto_in_bounds. applied: true.
 //   approval    anything else (an override, out of band, an `other` review, a basis
-//               that departs from the lease): awaiting_approval, the preparer
-//               stamped, and after the commit E3 (rent_review.approval) to an
-//               accounts manager who isn't the preparer. applied: false.
+//               that departs from the lease, a lower rent): awaiting_approval, the
+//               preparer stamped, and after the commit E3 (rent_review.approval) to
+//               an accounts manager who isn't the preparer, or for a lower rent to
+//               the directors at once (A3). applied: false.
 // The receipt is read off the schedule as APPLY will write the rent being
 // submitted (rentReview/written.ts): the cascade to AHAC, car parks and misc
 // fees and the arrears for every charge that changes, so the approver sees the
@@ -237,6 +238,8 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
           ...(sanity.inBand || bandOverridden ? [] : ["out_of_band"]),
           ...(calc.method === "other" ? ["manual_method"] : []),
           ...(departures.length > 0 ? ["basis_departs_from_lease"] : []),
+          // A3: a new rent below the current one is never applied in one step.
+          ...(chosen < calc.currentAnnual ? ["reduction"] : []),
         ];
         const buildingId = Number(tenancy.BuildingId);
         const scope = { buildingId, correlationId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
@@ -404,6 +407,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
       log: (message) => context.warn(message),
       reasons: done.reasons,
       reviewId,
+      startAtRole: done.reasons.includes("reduction") ? "director" : null,
     });
     return { jsonBody: { applied: false, review }, status: 200 };
   } catch (error) {

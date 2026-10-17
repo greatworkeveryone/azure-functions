@@ -19,7 +19,10 @@
 //               ledgered with rule director_own_preparation
 //   C7          the approver holds the level E3 has reached (accounts_manager,
 //               then cfo, then director; higher levels may approve lower), else
-//               403 approval_level, ledgered as denied
+//               403 approval_level, ledgered as denied. A new rent below the
+//               current one needs a director whatever the rung (A3); an override
+//               below the computed rent that is still above the current one
+//               stays on the normal ladder
 //   C4, C3      as APPLY: 409 stale_schedule ("return it so it can be calculated
 //               again"), 422 not_signed_off (with directorCanOverride for a
 //               director). A director may override C3 with
@@ -42,7 +45,7 @@ import * as ledger from "../ledger";
 import { requireMoneyContext } from "../moneyGate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
-import { chosenFigures, parseCalc } from "../rentReviewCalc";
+import { chosenFigures, isReduction, parseCalc } from "../rentReviewCalc";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision } from "../rentReview/afterDecision";
 import { applyReview } from "../rentReview/apply";
@@ -149,11 +152,19 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
           throw new RentReviewError("sod_blocked", message, {}, refusal("sod_blocked", rule, message));
         }
 
-        // C7: the level E3 has reached.
-        const required = await requiredApprovalRole(db, reviewId);
+        // C7: the level E3 has reached; a director, whatever the rung, for a lower rent (A3).
+        const reduction = isReduction(calc);
+        const required = reduction ? "director" : await requiredApprovalRole(db, reviewId);
         if (rank < (APPROVER_RANK[required] ?? APPROVER_RANK.director)) {
-          const message = `This review now needs ${ROLE_WORDS[required] ?? "a director"} to approve it`;
-          throw new RentReviewError("approval_level", message, { requiredRole: required }, refusal("denied", "approval_level", message));
+          const message = reduction
+            ? "This review lowers the rent, so a director has to approve it"
+            : `This review now needs ${ROLE_WORDS[required] ?? "a director"} to approve it`;
+          throw new RentReviewError(
+            "approval_level",
+            message,
+            { requiredRole: required },
+            refusal("denied", reduction ? "reduction_needs_director" : "approval_level", message),
+          );
         }
 
         const { appliedPercent: chosenPercent, newAnnual: chosen } = chosenFigures(calc);
@@ -165,7 +176,7 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
           buildingId,
           ...(part ? { computed: { ownPart: part, separationOfDuties: duties, stepUp: "money gate (S11)" } } : {}),
           correlationId,
-          ruleApplied: part ? "director_own_preparation" : `level_${required}`,
+          ruleApplied: part ? "director_own_preparation" : reduction ? "reduction_director" : `level_${required}`,
           subject: { id: reviewId, type: "rent_review" },
           tenantId,
         });

@@ -22,7 +22,7 @@ import { requireAdapter, type EscalationAdapter } from "./adapters/registry";
 import { addClockHours, holidaysFromEnv } from "./businessTime";
 import { fallbackEmailsByRole } from "./config";
 import { EscalationError, isUniqueViolation } from "./errors";
-import { LadderError, resolveTarget, type AuthorityRouteStep, type ResolvedTarget } from "./ladder";
+import { LadderError, levelOfRole, resolveTarget, type AuthorityRouteStep, type ResolvedTarget } from "./ladder";
 import { notifyPreviousLevel, notifyRaiserResolved, notifyTargets, type NotifyEvent, type NotifyOptions } from "./notifier";
 import { getPolicy } from "./policies";
 import { roleLabel } from "./roles";
@@ -185,6 +185,10 @@ export interface RaiseInput {
   reason?: string | null;
   /** For callers that just evaluated the condition (the sweep). */
   skipConditionCheck?: boolean;
+  /** Start at the first ladder level holding this role instead of the bottom:
+   *  a rent reduction goes to the directors at once, a re-raised approval goes
+   *  back to the level it had reached. Rules 1-3 still apply from there. */
+  startAtRole?: string | null;
   subjectId: string;
   subjectType: string;
   /** Replaces the subject's name and the headline altogether. */
@@ -256,6 +260,10 @@ export async function raise(connection: Connection, input: RaiseInput): Promise<
   if (existing) return { created: false, escalation: existing };
 
   const users = await listActiveUsers(connection);
+  const raiser = raiserFor(input.actor, users);
+  const fromLevel = input.startAtRole
+    ? levelOfRole(policy.ladder, input.startAtRole, { authorityRoute: input.authorityRoute, raiserRole: raiser?.role, userTargets: input.userTargets })
+    : undefined;
   let target: ResolvedTarget | null;
   try {
     target = resolveTarget({
@@ -263,11 +271,12 @@ export async function raise(connection: Connection, input: RaiseInput): Promise<
       authorityRoute: input.authorityRoute,
       excludeUserIds: input.excludeUserIds,
       fallbackEmails: fallbackEmailsByRole(),
+      fromLevel,
       kind: policy.kind,
       ladder: policy.ladder,
       onNoTarget: "directors",
       preferredUserId: input.preferredUserId,
-      raiser: raiserFor(input.actor, users),
+      raiser,
       userTargets: input.userTargets,
     });
   } catch (error) {

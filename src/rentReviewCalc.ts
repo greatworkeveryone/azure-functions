@@ -487,7 +487,13 @@ export function approvalReasonsOf(calc: RentReviewCalc): string[] {
     ...(calc.sanity && !calc.sanity.inBand ? ["out_of_band"] : []),
     ...(calc.method === "other" ? ["manual_method"] : []),
     ...((calc.departures?.length ?? 0) > 0 ? ["basis_departs_from_lease"] : []),
+    ...(isReduction(calc) ? ["reduction"] : []),
   ];
+}
+
+/** The review lowers the rent (A3): never applied in one step, and only a director approves it. */
+export function isReduction(calc: RentReviewCalc): boolean {
+  return chosenFigures(calc).newAnnual < calc.currentAnnual;
 }
 
 /** The charges that follow the rent as the review applies them: the chosen

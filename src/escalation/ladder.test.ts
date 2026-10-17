@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { describeTarget, expandLadder, LadderError, resolveTarget, type ResolveInput } from "./ladder";
+import { describeTarget, expandLadder, LadderError, levelOfRole, resolveTarget, type ResolveInput } from "./ladder";
 import { FINANCE_POLICY_PREFIX, isAbove, managerRoleFor, roleLabel, seenPolicyPrefixesOf, seenPolicyPrefixesOfAll, teamRolesOf, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, LadderEntry } from "./types";
 
@@ -372,5 +372,15 @@ describe("roles", () => {
     expect(isAbove("facilities", "facilities_manager")).toBe(false);
     expect(isAbove("facilities_manager", "director")).toBe(false);
     expect(isAbove("director", null)).toBe(false);
+  });
+});
+
+describe("levelOfRole", () => {
+  const ladder = [{ role: "accounts_manager" }, { role: "cfo" }, { role: "director" }];
+  it("is the position of the first level holding the role, or the top when none does", () => {
+    expect(levelOfRole(ladder, "accounts_manager")).toBe(1);
+    expect(levelOfRole(ladder, "cfo")).toBe(2);
+    expect(levelOfRole(ladder, "DIRECTOR")).toBe(3);
+    expect(levelOfRole(ladder, "facilities_manager")).toBe(3);
   });
 });

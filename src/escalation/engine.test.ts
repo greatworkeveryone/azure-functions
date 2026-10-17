@@ -1193,3 +1193,35 @@ describe("the sweep drives the engine", () => {
     expect(jest.mocked(notifyTargets).mock.calls.map((c) => c[2])).toContain("follow_up");
   });
 });
+
+describe("raise: startAtRole", () => {
+  beforeEach(() => {
+    // An earlier test leaves the shared summary mock answering "gone".
+    jobAdapter.loadSummary.mockImplementation(async () => ({ buildingId: 5, context: { title: "Over limit" }, summary: "Quote #7" }));
+  });
+
+  it("starts the ladder at the first level holding the role, skipping the eligible levels below it", async () => {
+    const { escalation } = await raise(conn, {
+      actor: SWEEP_ACTOR,
+      now: NOW,
+      policyKey: "quote.over_limit",
+      startAtRole: "director",
+      subjectId: "7",
+      subjectType: "quote",
+    });
+    expect(escalation).toMatchObject({ level: 2, noIndependentTarget: false, targetRole: "director" });
+  });
+
+  it("aims at the directors, flagged, when the only director is left out", async () => {
+    const { escalation } = await raise(conn, {
+      actor: SWEEP_ACTOR,
+      excludeUserIds: [DEE.userId],
+      now: NOW,
+      policyKey: "quote.over_limit",
+      startAtRole: "director",
+      subjectId: "7",
+      subjectType: "quote",
+    });
+    expect(escalation).toMatchObject({ noIndependentTarget: true, targetRole: "director" });
+  });
+});
