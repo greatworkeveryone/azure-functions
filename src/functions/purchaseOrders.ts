@@ -58,9 +58,23 @@ import {
   refusalResponse,
 } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
+import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance, type VarianceBody } from "../moneyVariance-db";
+import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import type { LedgerActor } from "../ledger/types";
+
+/** A PO's amount for the approval rules (PLAN §3.8): the cap, else the estimate; null when neither is known. */
+function poAmount(row: { CostNotToExceed?: unknown; EstimatedCost?: unknown }): number | null {
+  const raw = row.CostNotToExceed ?? row.EstimatedCost;
+  return raw === null || raw === undefined ? null : Number(raw);
+}
+
+/** Tells the manager named on an accepted variance (R13), after commit. Never throws. */
+async function noticeVariance(connection: Parameters<typeof raiseAttributionNotice>[0], actor: LedgerActor, jobId: number, recorded: RecordedVariance | null): Promise<void> {
+  if (!recorded || recorded.attributedToUserId === null) return;
+  await raiseAttributionNotice(connection, { actor, managerUserId: recorded.attributedToUserId, ref: { id: recorded.varianceId, jobId, kind: "variance" } });
+}
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -139,6 +153,8 @@ interface UpsertPurchaseOrderBody {
   ChargeCode?: string;
   /** @deprecated ignored — identity comes from the token */
   CreatedBy?: string;
+  /** R13: a rise above the approved quote within the margin: { attributedToUserId, rationale, directorOverrideReason? }. */
+  variance?: unknown;
 }
 
 // Editing a PO isn't a ledgered decision; only an attempt to create one is
@@ -348,6 +364,8 @@ export async function upsertPurchaseOrder(
     if (typeof PurchaseOrderID !== "number") {
       return { status: 400, jsonBody: { error: "PurchaseOrderID must be a number" } };
     }
+    const varianceBody = readVarianceBody(body?.variance);
+    if (!varianceBody.ok) return { status: 400, jsonBody: { error: varianceBody.error } };
     const update = buildUpdateSet(
       {
         ContractorID: TYPES.Int,
@@ -389,6 +407,8 @@ export async function upsertPurchaseOrder(
       if (!actor) return unauthorizedResponse();
     }
 
+    let recordedVariance: RecordedVariance | null = null;
+    let varianceJobId = 0;
     await beginTransaction(connection);
     try {
       // Read the existing PO before mutating so we can diff for the audit
@@ -420,6 +440,38 @@ export async function upsertPurchaseOrder(
           jobId,
           refusal: jobRefusal,
           state: { jobStatus: moneyJob?.status ?? null },
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
+      }
+
+      // R13: a cost that rises past the approved quote stays approved only within
+      // the margin, with a rationale and a named manager; a decrease, or a rise up
+      // to an amount already accepted, needs nothing. Outside the margin: refused.
+      const previousAmount = poAmount(before);
+      const editedAmount = poAmount({
+        CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
+        EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
+      });
+      const costRises =
+        (EstimatedCost !== undefined || CostNotToExceed !== undefined) &&
+        (editedAmount === null || previousAmount === null || Math.round(editedAmount * 100) > Math.round(previousAmount * 100));
+      const variance = costRises
+        ? await checkVariance(connection, {
+            accepted: { purchaseOrderId: PurchaseOrderID },
+            body: varianceBody.value as VarianceBody | null,
+            buildingId: moneyJob?.buildingId ?? null,
+            editor: { email: identity.email, roles: await rolesForRequest(request), userId: actor?.kind === "user" ? (actor.userId ?? undefined) : undefined },
+            jobId,
+            newAmount: editedAmount,
+            subject: "purchase_order",
+          })
+        : null;
+      if (variance?.decision.kind === "refused") {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "po.edit",
+          jobId,
+          refusal: variance.decision.refusal,
+          state: { newAmount: editedAmount, originalApprovedAmount: variance.originalAmount, previousAmount },
           subject: { id: PurchaseOrderID, type: "purchase_order" },
         });
       }
@@ -538,11 +590,32 @@ export async function upsertPurchaseOrder(
         });
       }
 
+      if (variance && (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override")) {
+        if (!actor) throw new Error("A variance was accepted without a ledger actor");
+        const edited = {
+          ...before,
+          CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
+          EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
+        };
+        recordedVariance = await recordVariance(connection, {
+          actor,
+          after: purchaseOrderFacts(edited),
+          before: contractorFacts(before),
+          decision: variance.decision,
+          jobId,
+          previousAmount,
+          scope: await jobScope(connection, jobId),
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
+        varianceJobId = jobId;
+      }
+
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
       throw err;
     }
+    if (actor) await noticeVariance(connection, actor, varianceJobId, recordedVariance);
 
     const stored = await executeQuery(
       connection,
@@ -728,6 +801,8 @@ async function previewPurchaseOrder(
 
 interface SendPurchaseOrderBody {
   PurchaseOrderID?: number;
+  /** R13: a PO above its approved quote goes out within the margin: { attributedToUserId, rationale, directorOverrideReason? }. */
+  variance?: unknown;
   /** @deprecated ignored — identity comes from the token */
   SentBy?: string;
   /** @deprecated ignored — the CC address is the token's email */
@@ -761,6 +836,8 @@ async function sendPurchaseOrder(
     if (typeof PurchaseOrderID !== "number") {
       return { status: 400, jsonBody: { error: "PurchaseOrderID (number) required" } };
     }
+    const varianceBody = readVarianceBody(body?.variance);
+    if (!varianceBody.ok) return { status: 400, jsonBody: { error: varianceBody.error } };
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -812,6 +889,28 @@ async function sendPurchaseOrder(
       return refusalResponse(sendRefusal);
     }
 
+    // R13: a PO above its approved quote goes out only within the margin (or up
+    // to an amount already accepted on it), before any email leaves.
+    const sendJobId = contractorRows[0].JobID as number;
+    const variance = await checkVariance(connection, {
+      accepted: { purchaseOrderId: PurchaseOrderID },
+      body: varianceBody.value as VarianceBody | null,
+      buildingId: sendJob?.buildingId ?? null,
+      editor: { email: identity.email, roles: await rolesForRequest(request), userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
+      jobId: sendJobId,
+      newAmount: poAmount(contractorRows[0]),
+      subject: "purchase_order",
+    });
+    if (variance.decision.kind === "refused") {
+      return await refuseMoneyChange(connection, request, {
+        attempted: "po.send",
+        jobId: sendJobId,
+        refusal: variance.decision.refusal,
+        state: { amount: poAmount(contractorRows[0]), originalApprovedAmount: variance.originalAmount },
+        subject: { id: PurchaseOrderID, type: "purchase_order" },
+      });
+    }
+
     context.log(
       `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
         recipient.overridden ? ` (overridden from ${recipient.original ?? "(none)"})` : ""
@@ -836,6 +935,7 @@ async function sendPurchaseOrder(
       ccAddresses,
     );
 
+    let recordedVariance: RecordedVariance | null = null;
     await beginTransaction(connection);
     try {
       await executeQuery(
@@ -869,11 +969,24 @@ async function sendPurchaseOrder(
         jobId: scope.jobId,
         subject: { id: PurchaseOrderID, type: "purchase_order" },
       });
+      if (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override") {
+        recordedVariance = await recordVariance(connection, {
+          actor,
+          after: purchaseOrderFacts(contractorRows[0]),
+          before: contractorFacts(contractorRows[0]),
+          decision: variance.decision,
+          jobId: sendJobId,
+          previousAmount: variance.originalAmount,
+          scope,
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
+      }
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
       throw err;
     }
+    await noticeVariance(connection, actor, sendJobId, recordedVariance);
     const stored = await executeQuery(
       connection,
       `SELECT ${PO_COLUMNS} FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,

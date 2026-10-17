@@ -52,6 +52,14 @@ jest.mock("../blob-storage", () => ({
 jest.mock("../pdf/purchase-order-pdf", () => ({ renderPurchaseOrderPDF: jest.fn() }));
 jest.mock("../pdf/default-po-email", () => ({ defaultPOEmail: jest.fn() }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
+jest.mock("../approval-limits-db", () => ({ getCachedApprovalLimits: jest.fn() }));
+jest.mock("../approvalAttributionNotice", () => ({ raiseAttributionNotice: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../escalation/engine", () => ({
+  ...jest.requireActual("../escalation/engine"),
+  raiseWithin: jest.fn().mockResolvedValue({ announce: jest.fn().mockResolvedValue({}), created: true, escalation: {} }),
+  resolveWithin: jest.fn().mockResolvedValue({}),
+}));
+jest.mock("../escalation/store", () => ({ ...jest.requireActual("../escalation/store"), findLiveEscalation: jest.fn().mockResolvedValue(null) }));
 
 const auth = require("../auth") as {
   requireRole: jest.Mock;
@@ -69,6 +77,8 @@ const db = require("../db") as {
 const graph = require("../graph") as { graphSendMail: jest.Mock };
 const blobs = require("../blob-storage") as { deleteBlob: jest.Mock; downloadBlob: jest.Mock };
 const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest.Mock };
+const limitsDb = require("../approval-limits-db") as { getCachedApprovalLimits: jest.Mock };
+const notices = require("../approvalAttributionNotice") as { raiseAttributionNotice: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ jsonBody?: unknown; status?: number }>;
@@ -1305,6 +1315,161 @@ describe("purchase order transitions", () => {
       expect(res).toBe(gate);
       expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.uncomplete" }, ruleApplied: "role_not_permitted" })]);
     });
+  });
+});
+
+describe("R13: a purchase order above its approved quote, within the margin", () => {
+  const APPROVED_QUOTE: Route = { match: /SELECT q\.Amount FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 10000 }] };
+  const FACTS: Route = { match: /FROM dbo\.ApprovalFacts/, rows: [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }] };
+  const MANAGER: Route = { match: /FROM dbo\.AppUsers WHERE UserID = @UserID/, rows: [{ DisplayName: "Mo Manager", Email: "mo@example.com", Role: "facilities_manager", UserID: 30 }] };
+  const VARIANCE_INSERT: Route = { match: /INSERT INTO dbo\.MoneyVariances/, rows: [{ VarianceID: 4 }] };
+  const PO_SCOPE: Route = { match: /FROM PurchaseOrders s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 42 }] };
+  const stored: Route = { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] };
+  const poRow: Route = {
+    match: /SELECT PurchaseOrderID, JobID, PONumber, ContractorName/,
+    rows: [{ CompletedAt: null, ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 10000, EstimatedCost: 9000, JobID: 42, MyobCreatedAt: null, PONumber: "66Se261013", PurchaseOrderID: 99, SentAt: null }],
+  };
+  const sendRow = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT c\.EmailAddress, po\.PDFBlobName/,
+    rows: [{ ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 10600, EmailAddress: "c@example.com", EstimatedCost: 9000, JobID: 42, PDFBlobName: "po/99.pdf", PONumber: "66Se261013", SentAt: null, ...over }],
+  });
+  const VARIANCE = { attributedToUserId: 30, rationale: "Extra valve found on site" };
+  const base = [APP_USER, JOB_BUILDING, APPROVED_QUOTE, FACTS, MANAGER, VARIANCE_INSERT, PO_SCOPE, stored];
+  const edit = (body: Record<string, unknown>) => upsertPurchaseOrder(makeRequest({ PurchaseOrderID: 99, ...body }), ctx);
+  const send = (body: Record<string, unknown> = {}) => sendPurchaseOrder(makeRequest({ PurchaseOrderID: 99, ...body }), ctx);
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetRateLimitForTests();
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    auth.requireRole.mockResolvedValue(null);
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    db.beginTransaction.mockResolvedValue(undefined);
+    db.commitTransaction.mockResolvedValue(undefined);
+    db.rollbackTransaction.mockResolvedValue(undefined);
+    db.createRequestConnection.mockResolvedValue({ id: "connection" });
+    graph.graphSendMail.mockResolvedValue(undefined);
+    blobs.downloadBlob.mockResolvedValue(Buffer.from("pdf"));
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 5000, RoleName: "accounts" },
+      { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it("an edit within the margin stays approved: po.variance_within_tolerance names both people, the figures and the rationale", async () => {
+    mockSql([...base, poRow]);
+
+    const res = await edit({ CostNotToExceed: 10600, variance: VARIANCE });
+
+    expect(res.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO dbo\.MoneyVariances/.test(String(c[1])));
+    expect(Object.fromEntries((insert?.[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]))).toMatchObject({
+      AttributedToUserID: 30, DeltaAmount: 600, DeltaPercent: 6, JobID: 42, NewAmount: 10600, OriginalAmount: 10000, PreviousAmount: 10000, SubjectID: 99,
+    });
+    expect(rows()).toEqual([
+      expect.objectContaining({
+        action: "po.variance_within_tolerance",
+        actorName: "Fred Facilities",
+        after: expect.objectContaining({ allowance: 1000, amount: 10600, delta: 600, deltaPercent: 6, newAmount: 10600, originalApprovedAmount: 10000, previousAmount: 10000 }),
+        attributedName: "Mo Manager",
+        attributedUserId: 30,
+        isException: false,
+        reason: "Extra valve found on site",
+        ruleApplied: "within_margin",
+        subjectId: "99",
+      }),
+    ]);
+    expect(notices.raiseAttributionNotice).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ managerUserId: 30, ref: { id: 4, jobId: 42, kind: "variance" } }));
+    expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeLessThan(notices.raiseAttributionNotice.mock.invocationCallOrder[0]);
+  });
+
+  it("above the margin the edit is refused with a sentence naming it: a `denied` row, nothing changed", async () => {
+    mockSql([...base, poRow]);
+
+    const res = await edit({ CostNotToExceed: 11240, variance: VARIANCE });
+
+    expect(res).toEqual({
+      jsonBody: { code: "variance_over_margin", error: "This is $1,240 (12.4%) above the approved $10,000 — the allowed margin is 10% up to $1,000. Get it re-approved." },
+      status: 422,
+    });
+    expect(ran(/UPDATE PurchaseOrders SET/)).toBe(false);
+    expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.edit" }), ruleApplied: "variance_over_margin" })]);
+  });
+
+  it("within the margin but with no rationale or manager, it asks for them (422) and changes nothing", async () => {
+    mockSql([...base, poRow]);
+    expect((await edit({ CostNotToExceed: 10600 })).jsonBody).toMatchObject({ code: "variance_rationale_required" });
+    expect((await edit({ CostNotToExceed: 10600, variance: { rationale: "why" } })).jsonBody).toMatchObject({ code: "variance_manager_required" });
+    expect(ran(/UPDATE PurchaseOrders SET/)).toBe(false);
+  });
+
+  it("a decrease is always allowed, and asks for nothing", async () => {
+    mockSql([...base, { ...poRow, rows: [{ ...poRow.rows![0], CostNotToExceed: 12000 }] }]);
+    expect((await edit({ CostNotToExceed: 11000 })).status).toBe(200);
+    expect(ran(/FROM dbo\.ApprovalFacts/)).toBe(false);
+  });
+
+  it("a director overrides the margin with a reason: po.variance_director_override, an exception naming what it overrode", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    mockSql([...base, poRow]);
+
+    const res = await edit({ CostNotToExceed: 13000, variance: { directorOverrideReason: "Agreed with the owner on site" } });
+
+    expect(res.status).toBe(200);
+    expect(rows()).toEqual([
+      expect.objectContaining({ action: "po.variance_director_override", isException: true, reason: "Agreed with the owner on site", ruleApplied: "variance_over_margin" }),
+    ]);
+    expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+  });
+
+  it("send: above the approved quote with nothing accepted is refused before any email leaves", async () => {
+    mockSql([...base, sendRow()]);
+
+    const res = await send();
+
+    expect(res.status).toBe(422);
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+    expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.send" }) })]);
+  });
+
+  it("send: within the margin with a rationale and manager, it goes out and both rows are written in one transaction", async () => {
+    mockSql([...base, sendRow()]);
+
+    const res = await send({ variance: VARIANCE });
+
+    expect(res.status).toBe(200);
+    expect(graph.graphSendMail).toHaveBeenCalledTimes(1);
+    expect(rows().map((r) => r.action)).toEqual(["po.send", "po.variance_within_tolerance"]);
+  });
+
+  it("send: an amount already accepted on this PO goes out without asking again", async () => {
+    mockSql([...base, { match: /SELECT MAX\(NewAmount\) AS Accepted/, rows: [{ Accepted: 10600 }] }, sendRow()]);
+
+    const res = await send();
+
+    expect(res.status).toBe(200);
+    expect(rows().map((r) => r.action)).toEqual(["po.send"]);
+  });
+
+  it("the named manager's dispute of a PO variance is ledgered against the PO", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "mo@example.com", name: "Mo Manager", oid: "mo-oid" });
+    mockSql([
+      { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ UserID: 30 }] },
+      {
+        match: /FROM dbo\.MoneyVariances v WITH/,
+        rows: [{ AttributedToName: "Mo Manager", AttributedToUserID: 30, BuildingID: 5, ContractorID: 3, ContractorName: "Acme", EditorName: "Fred", JobID: 42, NewAmount: 10600, OriginalAmount: 10000, SubjectID: 99, SubjectType: "purchase_order", VarianceID: 4 }],
+      },
+    ]);
+    const { answerApprovalAttribution } = require("./answerApprovalAttribution") as { answerApprovalAttribution: Handler };
+
+    const res = await answerApprovalAttribution(makeRequest({ agreed: false, id: 4, kind: "variance", reason: "Not agreed" }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(rows()).toEqual([expect.objectContaining({ action: "po.variance_disputed", isException: true, subjectId: "99" })]);
   });
 });
 

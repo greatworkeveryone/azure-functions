@@ -14,6 +14,7 @@ const MIGRATIONS = [
   "112_job_invoices_contractor_id.sql",
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
+  "117_quote_approval_attribution.sql",
   "124_myob_controls.sql",
   "123_graph_subscriptions.sql",
   "128_timer_runs.sql",

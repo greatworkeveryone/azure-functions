@@ -23,9 +23,10 @@ import {
   INTERNAL_ACRONYM,
   ensureContractorAcronym,
 } from "../contractor-acronym-db";
-import { loadApprovalFacts } from "../approvalAuthority-db";
-import { SUBJECT_ELIGIBLE_ROLES } from "../approvalAuthority";
-import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
+import { loadApprovalFacts, loadNamedUser } from "../approvalAuthority-db";
+import { ATTRIBUTED_APPROVAL_ROLES, SUBJECT_ELIGIBLE_ROLES, type Attribution } from "../approvalAuthority";
+import { approvalOutcome, refusalStatus, type ApprovalRefusalReason } from "../approvalOutcome";
+import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
 import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
@@ -507,6 +508,10 @@ export async function upsertQuote(
 
 interface ApproveQuoteBody {
   QuoteID?: unknown;
+  /** R2: plain facilities names the manager they discussed it with (AppUsers.UserID)... */
+  attributedToUserId?: unknown;
+  /** ...and declares that they did. Roles are read from AppUsers, never sent. */
+  declared?: unknown;
   /** @deprecated ignored — identity comes from the token */
   ApprovedBy?: string;
 }
@@ -515,6 +520,8 @@ const APPROVE_QUOTE_TARGET: RefusalTarget = { attempted: "quote.approve", idFiel
 
 interface QuoteApproval {
   amount: number;
+  /** The manager an attributed approval was agreed with (R2), for their notice. */
+  attributedToUserId: number | null;
   currency: string;
   directorNeeded: boolean;
   /** The quote's ledger facts, for the director request that may follow. */
@@ -547,12 +554,23 @@ function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): App
   };
 }
 
-/** Who may press Approve on a quote: every role the authority core lets approve one (J1). */
-const APPROVE_QUOTE_ROLES = SUBJECT_ELIGIBLE_ROLES.quote as readonly AppRole[];
+/** Who may press Approve on a quote: every role the authority core lets approve
+ *  one (J1), plus plain facilities, who approve within their own row only by
+ *  naming the manager they discussed it with (R2). The core decides the rest. */
+const APPROVE_QUOTE_ROLES = [...new Set([...SUBJECT_ELIGIBLE_ROLES.quote, ...ATTRIBUTED_APPROVAL_ROLES.quote])] as readonly AppRole[];
 
 async function approveQuoteInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; quoteId: number; userRoles: string[] },
+  input: {
+    actor: LedgerActor;
+    approvedBy: string;
+    /** R2: the manager named, and whether the officer declared they discussed it. */
+    attribution: { declared: boolean; userId: number | null };
+    correlationId: string;
+    email: string;
+    quoteId: number;
+    userRoles: string[];
+  },
 ): Promise<QuoteApprovalOutcome> {
   const { actor, approvedBy, correlationId, email, quoteId, userRoles } = input;
   await beginTransaction(connection);
@@ -601,9 +619,21 @@ async function approveQuoteInTransaction(
     const scope = await jobScope(connection, jobId);
     const facts = await loadApprovalFacts(connection, scope.buildingId);
     const isTest = userRoles.some((role) => role.trim().toLowerCase() === AppRole.ADMIN) && (await isTestJob(connection, jobId));
+    // R2: the named manager's roles come from AppUsers. Someone who isn't an
+    // active user is named with no roles, so the core finds them invalid; an
+    // attribution that wasn't declared isn't one (attribution_required).
+    let attribution: Attribution | undefined;
+    if (input.attribution.declared && input.attribution.userId !== null) {
+      const named = await loadNamedUser(connection, input.attribution.userId);
+      attribution = {
+        attributedTo: named
+          ? { displayName: named.displayName, email: named.email, roles: named.roles, userId: named.userId }
+          : { roles: [], userId: input.attribution.userId },
+      };
+    }
     const outcome = approvalOutcome(
       { email, roles: userRoles, userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
-      { amount: quote.Amount == null ? NaN : Number(quote.Amount), buildingId: scope.buildingId ?? 0, jobId, subject: "quote" },
+      { amount: quote.Amount == null ? NaN : Number(quote.Amount), attribution, buildingId: scope.buildingId ?? 0, jobId, subject: "quote" },
       facts,
       { isTest },
     );
@@ -612,22 +642,31 @@ async function approveQuoteInTransaction(
       return {
         jobId,
         ok: false,
-        refusal: { action: "denied", code: outcome.reason, httpStatus: 403, message: outcome.message, status: quoteStatus },
+        refusal: { action: "denied", code: outcome.reason, httpStatus: refusalStatus(outcome.reason), message: outcome.message, status: quoteStatus },
       };
     }
+    const attributedTo = outcome.kind === "approved" && outcome.basis === "attributed" ? (outcome.attributedTo ?? null) : null;
+    const attributedName = attributedTo ? (attributedTo.displayName?.trim() || attributedTo.email || `User ${attributedTo.userId}`) : null;
     const userCanApprove = outcome.kind === "approved";
     const directorNeeded = outcome.kind === "awaiting_director";
     const newStatus: string = outcome.kind;
 
     await executeQuery(
       connection,
-      `UPDATE Quotes
-         SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
-       WHERE QuoteID = @Id`,
+      attributedTo
+        ? `UPDATE Quotes
+             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy,
+                 ApprovalAttributedToUserID = @AttributedTo, ApprovalAttributionDeclaredAt = SYSUTCDATETIME(),
+                 AttributionAnsweredAt = NULL
+           WHERE QuoteID = @Id`
+        : `UPDATE Quotes
+             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
+           WHERE QuoteID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: quoteId },
         { name: "Status", type: TYPES.NVarChar, value: newStatus },
         { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
+        ...(attributedTo ? [{ name: "AttributedTo", type: TYPES.Int, value: attributedTo.userId ?? null }] : []),
       ],
     );
 
@@ -657,7 +696,9 @@ async function approveQuoteInTransaction(
 
     const quoteLabel = `${quoteNumber}${contractorName ? ` from ${contractorName}` : ""}`;
     const eventText =
-      newStatus === "approved"
+      attributedName
+        ? `Approved by ${approvedBy}, agreed with ${attributedName} — ${quoteLabel}`
+        : newStatus === "approved"
         ? `Approved ${quoteLabel}`
         : newStatus === "awaiting_director"
           ? `Selected ${quoteLabel} — awaiting director`
@@ -694,20 +735,28 @@ async function approveQuoteInTransaction(
       });
     }
 
+    // R2: an approval resting on a named manager is its own code, the officer
+    // as actor and the manager as attributedTo (the ledger refuses it otherwise).
     await record(connection, {
-      action: "quote.approve",
+      action: attributedTo ? "quote.approve_attributed" : "quote.approve",
       actor,
       after: { status: newStatus, ...quoteFacts(quote) },
+      attributedTo: attributedTo
+        ? { name: attributedName ?? "", role: attribution?.attributedTo.roles[0] ?? "", userId: attributedTo.userId ?? null }
+        : undefined,
       before: { status: (quote.Status as string | null) ?? null, ...contractorFacts(quote) },
       buildingId: scope.buildingId,
       correlationId,
       jobId: scope.jobId,
-      ruleApplied: approvalRule({ directorNeeded, userCanApprove }),
+      ruleApplied: attributedTo ? "attributed" : approvalRule({ directorNeeded, userCanApprove }),
       subject: { id: quoteId, type: "quote" },
     });
 
     await commitTransaction(connection);
-    return { ok: true, approval: { amount, currency, directorNeeded, facts: quoteFacts(quote), jobId, newStatus } };
+    return {
+      ok: true,
+      approval: { amount, attributedToUserId: attributedTo?.userId ?? null, currency, directorNeeded, facts: quoteFacts(quote), jobId, newStatus },
+    };
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
     throw err;
@@ -734,9 +783,16 @@ async function approveQuote(
   let connection;
   try {
     const body = ((await request.json()) ?? {}) as ApproveQuoteBody;
-    const { QuoteID } = body;
+    const { QuoteID, attributedToUserId, declared } = body;
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
+    }
+    const namedId = attributedToUserId ?? null;
+    if (namedId !== null && (typeof namedId !== "number" || !Number.isInteger(namedId) || namedId <= 0)) {
+      return { status: 400, jsonBody: { error: "attributedToUserId must be a user id" } };
+    }
+    if (declared !== undefined && typeof declared !== "boolean") {
+      return { status: 400, jsonBody: { error: "declared must be true or false" } };
     }
 
     connection = await createRequestConnection(token);
@@ -748,6 +804,7 @@ async function approveQuote(
     const outcome = await approveQuoteInTransaction(connection, {
       actor,
       approvedBy,
+      attribution: { declared: declared === true, userId: namedId },
       correlationId,
       email: identity.email,
       quoteId: QuoteID,
@@ -757,16 +814,21 @@ async function approveQuote(
       if ("response" in outcome) return outcome.response;
       const { action, code, httpStatus, message, status } = outcome.refusal;
       // Ledgered in a transaction of its own now that the decision's has rolled back.
-      await recordRefusal(
-        connection,
-        actor,
-        { id: QuoteID, type: "quote" },
-        { action, attempted: "quote.approve", code, message, state: { status } },
-        outcome.jobId,
-      );
-      return { status: httpStatus, jsonBody: { code, error: message } };
+      return await refuseMoneyChange(connection, request, {
+        action,
+        attempted: "quote.approve",
+        jobId: outcome.jobId,
+        refusal: { code, message, status: httpStatus as MoneyRefusal["status"] },
+        state: { status },
+        subject: { id: QuoteID, type: "quote" },
+      });
     }
-    const { amount, currency, directorNeeded, facts, jobId, newStatus } = outcome.approval;
+    const { amount, attributedToUserId: managerUserId, currency, directorNeeded, facts, jobId, newStatus } = outcome.approval;
+
+    // R2: the named manager is told, and can say "I didn't agree to this".
+    if (managerUserId !== null) {
+      await raiseAttributionNotice(connection, { actor, managerUserId, ref: { id: QuoteID, jobId, kind: "quote" } });
+    }
 
     // Fire-and-forget director email: packet build + Graph sendMail can take
     // 5–20s with attachments, and we don't want the user's click to block on

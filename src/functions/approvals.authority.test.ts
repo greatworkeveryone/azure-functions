@@ -154,14 +154,14 @@ describe("approveQuote", () => {
   const approve = () => approveQuote(makeRequest({ QuoteID: 7 }), ctx);
   const landed = (): unknown => param(/UPDATE Quotes\s+SET Status = @Status/, "Status");
 
-  it("lets every role that may approve a quote through the gate, and plain facilities not", async () => {
+  it("lets every role that may approve a quote through the gate, plain facilities included (they approve only by naming a manager, R2)", async () => {
     as("facilities_manager");
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, quote(4000), STORED]);
 
     await approve();
 
     const allowed = auth.requireRole.mock.calls[0][1] as string[];
-    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director", "facilities_manager"]);
+    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director", "facilities", "facilities_manager"]);
   });
 
   it("a facilities manager approves a $4,000 quote", async () => {
@@ -414,5 +414,12 @@ describe("getApprovalLimits", () => {
     const res = await getApprovalLimits(makeRequest(undefined), ctx);
 
     expect(res.jsonBody).toMatchObject({ directorThreshold: null, effectiveDirectorThreshold: 20000 });
+  });
+
+  it("sends the R13 variance margin and cap beside the limits, the defaults when the facts can't be read", async () => {
+    rules(PROD_TODAY);
+    as("accounts");
+    const res = await getApprovalLimits(makeRequest(undefined), ctx);
+    expect(res.jsonBody).toMatchObject({ varianceMargin: { capDollars: 1000, marginPercent: 10 } });
   });
 });

@@ -8,7 +8,9 @@
 import {
   canApprove,
   decideAuthority,
+  type ApprovalBasis,
   type Approver,
+  type AttributedPerson,
   type AuthorityFacts,
   type AuthorityInput,
   type DenyReason,
@@ -19,8 +21,9 @@ import {
 export type ApprovalRefusalReason = DenyReason | "admin_test_records_only";
 
 export type ApprovalOutcome =
-  /** Fully approved on the caller's own authority. */
-  | { kind: "approved"; route: Approver[] }
+  /** Fully approved: on the caller's own authority, or within their row on a
+   *  named manager's say-so (basis "attributed", R2). */
+  | { attributedTo?: AttributedPerson; basis: ApprovalBasis; kind: "approved"; route: Approver[] }
   /** Above the director threshold, or the amount is unknown: the director's own step decides. */
   | { kind: "awaiting_director"; route: Approver[] }
   /** Beyond the caller's limit; someone further up `route` can approve it. */
@@ -44,11 +47,18 @@ function refusalMessage(reason: ApprovalRefusalReason, subject: Subject): string
     case "not_residence_approver":
       return "Only this residence's approvers can approve its spend.";
     case "attribution_required":
+      return `To approve this ${SUBJECT_WORDS[subject]} yourself, tick that you discussed it with a manager and name them.`;
     case "attribution_invalid":
-      return `Your role can't approve this ${SUBJECT_WORDS[subject]} on its own. Ask a manager to approve it.`;
+      return `The manager you named can't approve this ${SUBJECT_WORDS[subject]} themselves. Name someone who can.`;
     default:
       return `Your role can't approve this ${SUBJECT_WORDS[subject]}.`;
   }
+}
+
+/** The HTTP status of a refusal: the two attribution answers are something the
+ *  person can fix in the dialog (422, shown as sent); the rest are 403. */
+export function refusalStatus(reason: ApprovalRefusalReason): 403 | 422 {
+  return reason === "attribution_required" || reason === "attribution_invalid" ? 422 : 403;
 }
 
 /**
@@ -90,7 +100,11 @@ export function approvalOutcome(
   if (actor === null) return refuse("admin_test_records_only");
   if (directorRequired) return { kind: "awaiting_director", route };
   const decision = canApprove(actor, input, facts);
-  if (decision.allowed) return { kind: "approved", route };
+  if (decision.allowed) {
+    return decision.attributedTo
+      ? { attributedTo: decision.attributedTo, basis: decision.basis, kind: "approved", route }
+      : { basis: decision.basis, kind: "approved", route };
+  }
   if (decision.reason === "over_limit") return { actorLimit: decision.actorLimit, kind: "awaiting_approval", route };
   return refuse(decision.reason);
 }
