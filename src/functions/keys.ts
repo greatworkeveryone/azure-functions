@@ -6,7 +6,14 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import ExcelJS from "exceljs";
 import { assertSafeXlsx, XlsxRejectedError } from "../xlsx-safe";
 import { TYPES } from "tedious";
-import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
+import {
+  beginTransaction,
+  closeConnection,
+  commitTransaction,
+  createRequestConnection,
+  createServiceConnection,
+  executeQuery,
+} from "../db";
 import {
   AppRole,
   extractToken,
@@ -19,6 +26,7 @@ import { uploadKeyPhotoBlob, keyPhotoReadSasUrl } from "../blob-storage";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "../keyRoles";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
+import { rollbackQuietly, rowVersionHex } from "../tenancyScheduleWrite";
 
 const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
@@ -83,7 +91,8 @@ const KEY_COLUMNS = `
   k.DateAdded, k.Status,
   k.CreatedById, k.CreatedByName, k.CreatedAt,
   k.IsDeleted, k.DeletedAt, k.DeletedById, k.DeletedByName,
-  k.LostAt, k.LostById, k.LostByName, k.LostComment
+  k.LostAt, k.LostById, k.LostByName, k.LostComment,
+  k.Version
 `;
 
 // Photo SAS URLs are baked into list/detail responses. Tight TTL keeps the
@@ -146,6 +155,8 @@ function formatKey(row: Record<string, unknown>) {
       ? { id: row.LostById as string, name: (row.LostByName as string) ?? "Unknown user" }
       : null,
     lostComment: (row.LostComment as string | null) ?? null,
+    // Hex of Keys.Version (migration 139): an edit sends it back, a mismatch is a 409.
+    rowVersion: rowVersionHex(row.Version),
   };
 }
 
@@ -440,6 +451,29 @@ async function createKey(
 }
 
 // ── PUT /api/updateKey ────────────────────────────────────────────────────────
+// Body: { Id, rowVersion, TenancyId, Level, SubType, Registration, Description,
+//         PhotoBlobUrl, StorageLocation }
+// rowVersion is the one the key was read with (getKeys, getKeyDetail). The row
+// is read under an update lock and the versions compared before anything is
+// written; if someone changed the key since, nothing is saved and the answer
+// is 409 with the current key (currentState, the shape the client's optimistic
+// mutations read), so the screen can refresh and the person can check their
+// edit against it. Any write to the row moves the version, check-in and
+// check-out included, because they set the storage location too.
+//
+// BuildingId, ItemType and KeyNumber are deliberately never read. A key's
+// building, type and number are fixed when it is registered (the edit form
+// shows them locked), so a body that carries them changes nothing.
+
+const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
+const STALE_KEY_MESSAGE = "Someone else changed this key — it has been refreshed. Check it and save again.";
+
+/** The key, locked until the transaction ends so two saves cannot both pass the version check. */
+const KEY_FOR_UPDATE_SQL = `SELECT ${KEY_COLUMNS}
+   FROM dbo.Keys k WITH (UPDLOCK, ROWLOCK)
+   JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
+   LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
+   WHERE k.Id = @Id`;
 
 async function updateKey(
   request: HttpRequest,
@@ -455,40 +489,68 @@ async function updateKey(
   try {
     const body = (await request.json()) as any;
     const { Id, TenancyId, Level, SubType, Registration, Description,
-            PhotoBlobUrl, StorageLocation } = body ?? {};
+            PhotoBlobUrl, StorageLocation, rowVersion } = body ?? {};
 
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
+    const readVersion = typeof rowVersion === "string" ? rowVersion.trim().toLowerCase() : "";
+    if (!ROW_VERSION_RE.test(readVersion)) {
+      return {
+        status: 400,
+        jsonBody: {
+          error: "rowVersion required: send back the one the key was read with",
+          code: "ROW_VERSION_REQUIRED",
+        },
+      };
+    }
 
     connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Keys
-       SET TenancyId = @TenancyId, Level = @Level, SubType = @SubType,
-           Registration = @Registration, Description = @Description,
-           PhotoBlobUrl = @PhotoBlobUrl, StorageLocation = @StorageLocation
-       WHERE Id = @Id`,
-      [
-        { name: "Id",              type: TYPES.Int,      value: Id },
-        { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-        { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
-        { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
-        { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? null },
-        { name: "Description",     type: TYPES.NVarChar,  value: Description },
-        { name: "PhotoBlobUrl",    type: TYPES.NVarChar,  value: PhotoBlobUrl ?? null },
-        { name: "StorageLocation", type: TYPES.NVarChar,  value: StorageLocation ?? null },
-      ],
-    );
+    const idParam = { name: "Id", type: TYPES.Int, value: Id };
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT ${KEY_COLUMNS}
-       FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
-       LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
-       WHERE k.Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
-    return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
+    await beginTransaction(connection);
+    try {
+      const locked = await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]);
+      if (locked.length === 0) {
+        await rollbackQuietly(connection);
+        return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
+      }
+      if (rowVersionHex(locked[0].Version) !== readVersion) {
+        await rollbackQuietly(connection);
+        return {
+          status: 409,
+          jsonBody: {
+            code: "KEY_STALE",
+            currentState: { ...formatKey(locked[0]), currentBatch: null },
+            error: STALE_KEY_MESSAGE,
+          },
+        };
+      }
+
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Keys
+         SET TenancyId = @TenancyId, Level = @Level, SubType = @SubType,
+             Registration = @Registration, Description = @Description,
+             PhotoBlobUrl = @PhotoBlobUrl, StorageLocation = @StorageLocation
+         WHERE Id = @Id`,
+        [
+          idParam,
+          { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
+          { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
+          { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
+          { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? null },
+          { name: "Description",     type: TYPES.NVarChar,  value: Description },
+          { name: "PhotoBlobUrl",    type: TYPES.NVarChar,  value: PhotoBlobUrl ?? null },
+          { name: "StorageLocation", type: TYPES.NVarChar,  value: StorageLocation ?? null },
+        ],
+      );
+
+      const rows = await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]);
+      await commitTransaction(connection);
+      return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
+    } catch (error) {
+      await rollbackQuietly(connection);
+      throw error;
+    }
   } catch (error: any) {
     context.error("updateKey failed:", error.message);
     return errorResponse("Failed to update key", error.message);
