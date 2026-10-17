@@ -1,0 +1,66 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// D9 guard: test records stay out of every list, count, figure and export
+// unless an admin has Show test data on. Each allowlisted read must carry the
+// toggle predicate (and its handler must pass @ShowTest), or — for timers and
+// emails that no one can toggle — the hard predicate. A new list query joins
+// this table when it is written.
+
+const SRC = join(__dirname, "..");
+const TOGGLE = /IsTest = 0\)*\s*OR @ShowTest = 1/;
+const HARD = /\bIsTest = 0\b|NOT EXISTS \(SELECT 1 FROM dbo\.\w+ \w+ WHERE [^)]*IsTest = 1\)/;
+
+type Read = { anchor: string; file: string; mode: "hard" | "toggle"; passes?: string; passesIn?: string };
+
+const READS: Read[] = [
+  // Lists, counts and figures people see: the admin toggle can show test records.
+  { anchor: "async function getJobs(", file: "functions/jobs.ts", mode: "toggle" },
+  { anchor: "const REGISTER_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
+  { anchor: "const REGISTER_WITH_ARCHIVED_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
+  { anchor: "async function getReviewsDue(", file: "functions/tenancy.ts", mode: "toggle" },
+  { anchor: "async function getPortfolioOccupancy(", file: "functions/tenancy.ts", mode: "toggle" },
+  { anchor: "async function getTenants(", file: "functions/tenants.ts", mode: "toggle" },
+  { anchor: "async function getInspections(", file: "functions/inspections.ts", mode: "toggle" },
+  { anchor: "async function getKeys(", file: "functions/keys.ts", mode: "toggle" },
+  { anchor: "async function handleGetVacancies(", file: "functions/vacancies.ts", mode: "toggle" },
+  { anchor: "async function getEmails(", file: "functions/emails.ts", mode: "toggle" },
+  { anchor: "const TENANTS_SQL =", file: "functions/search.ts", mode: "toggle", passes: "async function search(" },
+  { anchor: "const JOBS_SQL =", file: "functions/search.ts", mode: "toggle", passes: "async function search(" },
+  { anchor: "const KEYS_SQL =", file: "functions/search.ts", mode: "toggle", passes: "async function search(" },
+  { anchor: "export async function loadReviews(", file: "rentReview/store.ts", mode: "toggle", passes: "async function getRentReviews(", passesIn: "functions/getRentReviews.ts" },
+  { anchor: "async function getQuotes(", file: "functions/quotes.ts", mode: "toggle" },
+  { anchor: "const LINKED_JOBS =", file: "functions/getMaintenanceOverview.ts", mode: "toggle", passes: "async function getMaintenanceOverview(" },
+  { anchor: "const NOT_TEST_SCOPE =", file: "functions/getDecisions.ts", mode: "toggle", passes: "async function getDecisions(" },
+  // (Purchase orders and payments are listed only per job, so the job is what is shown or not.)
+  // Reads nobody can toggle: timers and emails.
+  { anchor: "export async function listWaitingApprovals(", file: "digest/store.ts", mode: "hard" },
+  { anchor: "export async function listDueJobs(", file: "digest/store.ts", mode: "hard" },
+  { anchor: "export async function listOverdueKeys(", file: "digest/store.ts", mode: "hard" },
+  { anchor: "export async function loadDailyFacts(", file: "myob/daily/store.ts", mode: "hard" },
+];
+
+function regionOf(source: string, anchor: string): string {
+  const start = source.indexOf(anchor);
+  if (start === -1) return "";
+  if (anchor.startsWith("const ")) {
+    const open = source.indexOf("`", start);
+    return source.slice(start, source.indexOf("`", open + 1) + 1);
+  }
+  const end = source.indexOf("\n}\n", start);
+  return source.slice(start, end === -1 ? undefined : end);
+}
+
+describe("test records stay out of lists, counts, figures and exports (D9)", () => {
+  it.each(READS)("$file $anchor", ({ anchor, file, mode, passes, passesIn }) => {
+    const source = readFileSync(join(SRC, file), "utf8");
+    const region = regionOf(source, anchor);
+    expect(region).not.toBe("");
+    expect(region).toMatch(mode === "toggle" ? TOGGLE : HARD);
+    if (mode === "toggle") {
+      const handlerSource = passesIn ? readFileSync(join(SRC, passesIn), "utf8") : source;
+      const handler = passes ? regionOf(handlerSource, passes) : region;
+      expect(handler).toMatch(/showTestParam\(request\)/);
+    }
+  });
+});

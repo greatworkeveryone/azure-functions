@@ -126,10 +126,10 @@ describe("filters", () => {
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
-  it("has no WHERE at all with no filters", async () => {
+  it("has no filter but the test-data scope (D9) with no filters", async () => {
     await get();
-    expect(dataQuery()[1]).not.toMatch(/WHERE/);
-    expect(dataQuery()[2]).toEqual([]);
+    expect(dataQuery()[1]).toMatch(/WHERE \(\(JobId IS NULL OR JobId IN \(SELECT tj\.JobID FROM dbo\.Jobs tj WHERE tj\.IsTest = 0\)\)\s+AND \(TenantId IS NULL OR TenantId IN \(SELECT tt\.TenantId FROM dbo\.Tenants tt WHERE tt\.IsTest = 0\)\) OR @ShowTest = 1\)\s+ORDER BY/);
+    expect(dataQuery()[2]).toEqual([expect.objectContaining({ name: "ShowTest", value: false })]);
   });
 
   it("turns every filter into a bound parameter", async () => {
@@ -184,7 +184,7 @@ describe("filters", () => {
 
     const [, sql, params] = dataQuery();
     expect(sql).toMatch(/Action LIKE @ActionPrefix ESCAPE '\\'/);
-    expect(params).toEqual([{ name: "ActionPrefix", type: TYPES.NVarChar, value: "schedule.%" }]);
+    expect(params).toEqual([{ name: "ActionPrefix", type: TYPES.NVarChar, value: "schedule.%" }, expect.objectContaining({ name: "ShowTest" })]);
   });
 });
 
@@ -331,7 +331,7 @@ describe("CSV export", () => {
     const [, sql, params] = dataQuery();
     expect(sql).toMatch(/WHERE OccurredAt >= @From AND TenantId = @TenantId/);
     expect(sql).toMatch(/ORDER BY FinancialImpact DESC/);
-    expect(params.map((p) => p.name)).toEqual(["From", "TenantId"]);
+    expect(params.map((p) => p.name)).toEqual(["From", "TenantId", "ShowTest"]);
   });
 
   it("applies the job and contractor filters to the export, the same as the screen", async () => {
@@ -342,6 +342,7 @@ describe("CSV export", () => {
     expect(params).toEqual([
       { name: "JobId", type: TYPES.Int, value: 9 },
       { name: "ContractorId", type: TYPES.Int, value: 3 },
+      expect.objectContaining({ name: "ShowTest", value: false }),
     ]);
   });
 

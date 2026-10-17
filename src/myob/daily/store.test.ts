@@ -86,3 +86,19 @@ describe("loadCfoRecipients", () => {
     expect(recipients).toEqual([{ email: "j@rp", name: "Johanne", userId: 12 }, { email: null, name: "User 13", userId: 13 }]);
   });
 });
+
+describe("test records (D9)", () => {
+  it("leaves out proposal events for a test record or a record on a test job", async () => {
+    await loadDailyFacts({} as never, SINCE, UNTIL);
+    const sql = String((executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("DecisionLedger")) as unknown[])[1]);
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.Jobs tj WHERE tj\.JobID = p\.JobId AND tj\.IsTest = 1\)/);
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.PurchaseOrders tpo WHERE p\.SubjectType = N'purchase_order' AND tpo\.PurchaseOrderID = p\.SubjectId AND tpo\.IsTest = 1\)/);
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.Quotes tq WHERE p\.SubjectType = N'quote' AND tq\.QuoteID = p\.SubjectId AND tq\.IsTest = 1\)/);
+  });
+
+  it("hands the run the test-record keys", async () => {
+    const facts = await loadDailyFacts({} as never, SINCE, UNTIL);
+    expect(facts.testKeys).toBeInstanceOf(Set);
+    expect(executeQuery.mock.calls.some((call: unknown[]) => String(call[1]).includes("DECLARE @Keys TABLE"))).toBe(true);
+  });
+});

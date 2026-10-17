@@ -103,6 +103,9 @@ export const LEDGER_ACTIONS = {
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // Test data (D9): an admin marks a record as test data, or back. An
+  // exception: it decides whether the record may leave Floorplan.
+  "test_data.flag": { exception: true, reasonRequired: false, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },
   "tenancy.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
 
   // Stored-holdover reset, run once after deploy (WP23a)

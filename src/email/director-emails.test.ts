@@ -18,7 +18,10 @@ jest.mock("../pdf/job-packet", () => ({
   buildJobPacket: jest.fn(),
 }));
 
+jest.mock("../test-data", () => ({ ...jest.requireActual("../test-data"), readIsTest: jest.fn() }));
+
 const graph = require("../graph") as { graphSendMail: jest.Mock };
+const testData = require("../test-data") as { readIsTest: jest.Mock };
 const loader = require("../pdf/job-packet-loader") as { loadJobPacketInputs: jest.Mock };
 const packet = require("../pdf/job-packet") as { buildJobPacket: jest.Mock };
 const { sendDirectorApprovalEmail } = require("./director-emails") as typeof import("./director-emails");
@@ -44,6 +47,7 @@ beforeEach(() => {
   packet.buildJobPacket.mockResolvedValue(Buffer.from("%PDF"));
   graph.graphSendMail.mockResolvedValue(undefined);
   loader.loadJobPacketInputs.mockResolvedValue(input());
+  testData.readIsTest.mockResolvedValue(false);
 });
 
 afterAll(() => {
@@ -99,7 +103,7 @@ describe("sendDirectorApprovalEmail: what it reports back", () => {
     await send();
 
     expect(graph.graphSendMail).toHaveBeenCalledTimes(1);
-    const [to, subject, body, attachments] = graph.graphSendMail.mock.calls[0];
+    const [, to, subject, body, attachments] = graph.graphSendMail.mock.calls[0];
     expect(to).toEqual(["dana@example.com", "boss@example.com"]);
     expect(subject).toBe("Director approval requested — Job #9 (quote) — AUD 5000.00");
     expect(body).toContain("Approved by: Casey Controller");
@@ -119,5 +123,21 @@ describe("sendDirectorApprovalEmail: what it reports back", () => {
     graph.graphSendMail.mockRejectedValue(new Error("Graph sendMail 503"));
 
     await expect(send()).rejects.toThrow("Graph sendMail 503");
+  });
+});
+
+describe("sendDirectorApprovalEmail and test records (D9)", () => {
+  it("refuses a test job before building the packet or sending", async () => {
+    testData.readIsTest.mockResolvedValueOnce(true);
+    const { TestDataEgressError } = jest.requireActual("../test-data") as typeof import("../test-data");
+    await expect(send()).rejects.toBeInstanceOf(TestDataEgressError);
+    expect(testData.readIsTest).toHaveBeenCalledWith(connection, "job", 9);
+    expect(packet.buildJobPacket).not.toHaveBeenCalled();
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+  });
+
+  it("tells the Graph helper a real job's packet isn't a test record", async () => {
+    await send();
+    expect(graph.graphSendMail.mock.calls[0][0]).toEqual({ isTest: false });
   });
 });

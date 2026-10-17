@@ -64,6 +64,8 @@ export interface DailyFacts {
   /** Company files the CFO registered (MyobCompanyFiles); nothing else is ever reported. */
   files: RegisteredFile[];
   since: Date;
+  /** "<kind>:<id>" of every test record (D9): none may appear in the email. */
+  testKeys?: ReadonlySet<string>;
   until: Date;
 }
 

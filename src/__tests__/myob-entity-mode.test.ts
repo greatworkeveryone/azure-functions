@@ -20,6 +20,7 @@ jest.mock("../myob-health", () => ({
 
 import { todayInDarwin } from "../darwinDate";
 import { myobRequest, MyobRequestRefusedError } from "../myob-api-log";
+import { setMyobTestRecordLookup } from "../myob-request-guard";
 
 const db = require("../db") as { executeQuery: jest.Mock };
 const CF = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
@@ -56,6 +57,12 @@ const write = () =>
     purpose: "create-order",
     url: `${API}/Purchase/Order/Service`,
   });
+
+
+// D9's test-record check has its own suite (myob-test-records.test.ts); here
+// every call is about a real record.
+beforeAll(() => setMyobTestRecordLookup(async () => ({ isTest: false, named: true })));
+afterAll(() => setMyobTestRecordLookup(null));
 
 beforeEach(() => {
   jest.clearAllMocks();

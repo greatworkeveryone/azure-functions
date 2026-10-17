@@ -16,6 +16,7 @@
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery, type SqlRow } from "../../db";
+import { loadTestSubjectKeys } from "../../test-data";
 import type { ControlEvent, DailyFacts, DailyRecipient, MyobCall, ProposalEvent } from "./types";
 
 /** More than a day can hold; a run that reaches it says so in the log. */
@@ -100,6 +101,9 @@ export async function loadDailyFacts(connection: Connection, since: Date, until:
        INNER JOIN dbo.MyobCompanyFiles f ON f.CompanyFileId = p.CompanyFileId
       WHERE l.SubjectType = N'myob_proposal' AND l.Action LIKE N'myob.%'
         AND l.OccurredAt >= @Since AND l.OccurredAt < @Until
+        AND NOT EXISTS (SELECT 1 FROM dbo.Jobs tj WHERE tj.JobID = p.JobId AND tj.IsTest = 1)
+        AND NOT EXISTS (SELECT 1 FROM dbo.PurchaseOrders tpo WHERE p.SubjectType = N'purchase_order' AND tpo.PurchaseOrderID = p.SubjectId AND tpo.IsTest = 1)
+        AND NOT EXISTS (SELECT 1 FROM dbo.Quotes tq WHERE p.SubjectType = N'quote' AND tq.QuoteID = p.SubjectId AND tq.IsTest = 1)
       ORDER BY l.OccurredAt, l.LedgerId`,
     window,
   );
@@ -122,12 +126,14 @@ export async function loadDailyFacts(connection: Connection, since: Date, until:
       ORDER BY OccurredAt, LogId`,
     window,
   );
+  const testKeys = await loadTestSubjectKeys(connection);
   return {
     calls: calls.map(toCall),
     controls: controls.map(toControl),
     events: events.map(toEvent),
     files: files.map((row) => ({ id: String(row.CompanyFileId).toLowerCase(), name: text(row.Name) })),
     since,
+    testKeys,
     until,
   };
 }

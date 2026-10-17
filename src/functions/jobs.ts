@@ -46,6 +46,7 @@ import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTran
 import { loadJobForTransition } from "../jobTransitionFacts";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 // Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
@@ -99,7 +100,7 @@ const JOB_COLUMNS = `
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
-  IsArchived, ArchivedAt, ArchivedBy,
+  IsArchived, ArchivedAt, ArchivedBy, IsTest,
   CreatedAt, CreatedBy, LastModifiedDate,
   -- Count of items on this job currently waiting on director sign-off.
   -- Drives the "Director needed" filter on the Jobs screen. Covers BOTH
@@ -439,6 +440,9 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     whereParts.push("BuildingID = @BuildingID");
     params.push({ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) });
   }
+  // D9: test jobs only with the admin's Show test data on (counts follow).
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
 
   let connection;
   try {
@@ -709,21 +713,26 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
       // ownership compare on archive/unarchive trusts these, so they must
       // not come from the (forgeable) request body.
       fields.CreatedBy = identity.name;
+      // D9: admins and directors may create a test job; an admin's "[TEST]" title does too.
+      const testFlag = await testFlagForCreate(request, (body as Record<string, unknown>).IsTest, fields.Title as string | null | undefined);
+      if ("error" in testFlag) return testFlag.error;
       const filteredParams = params.filter((p) => p.name !== "CreatedBy");
       filteredParams.push({ name: "CreatedBy", type: TYPES.NVarChar, value: identity.name });
       // Stamp StatusSince at creation (WP18a) so the escalation age clock has a
       // starting point for the New state; SYSUTCDATETIME() is inlined (no param)
       // exactly like LastModifiedDate on the UPDATE path.
       const cols = Object.keys(fields);
-      const insertCols = [...cols, "CreatedById", "StatusSince"].join(", ");
+      const insertCols = [...cols, "CreatedById", "StatusSince", "IsTest"].join(", ");
       const insertVals = [
         ...cols.map((c) => `@${c}`),
         "@CreatedById",
         "SYSUTCDATETIME()",
+        "@IsTest",
       ].join(", ");
       const insertParams: SqlParam[] = [
         ...filteredParams,
         { name: "CreatedById", type: TYPES.NVarChar, value: identity.oid },
+        { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
       ];
 
       await beginTransaction(connection);

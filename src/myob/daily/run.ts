@@ -14,6 +14,7 @@ import { resolveRecipient } from "../../email-recipient";
 import { darwinDateKey, holidaysFromEnv, isBusinessDay } from "../../escalation/businessTime";
 import { appBaseUrl, missingNotificationConfig } from "../../escalation/config";
 import { graphSendMail } from "../../graph";
+import { assertMayLeave, type EgressSubject } from "../../test-data";
 import { buildMyobDailyEmail } from "./email";
 import { lastCoveredRun, loadCfoRecipients, loadDailyFacts, MAX_CALL_ROWS } from "./store";
 import type { DailyFacts, DailyRecipient } from "./types";
@@ -56,7 +57,8 @@ export function dailyWindow(
   return { gapSince: null, since: new Date(until.getTime() - DAY_MS), until };
 }
 
-export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
+/** `egress` is what the email names; one naming a test record is refused (D9). */
+export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
 
 export interface MyobDailyDeps {
   lastCovered(connection: Connection, dryRun: boolean): Promise<Date | null>;
@@ -69,7 +71,7 @@ export const defaultDailyDeps: MyobDailyDeps = {
   lastCovered: lastCoveredRun,
   load: loadDailyFacts,
   recipients: loadCfoRecipients,
-  send: (to, subject, body) => graphSendMail(to, subject, body),
+  send: (to, subject, body, egress) => graphSendMail(egress, to, subject, body),
 };
 
 export interface MyobDailyReport {
@@ -140,7 +142,10 @@ export async function runMyobDaily(
         options.log(`myob daily dry run: would email user #${recipient.userId} "${email.subject}"\n${email.body}`);
         continue;
       }
-      await deps.send([resolved.address], email.subject, email.body);
+      // The read leaves test records' events out; this is the last check before it leaves.
+      const egress = { isTest: facts.events.some((event) => event.jobId !== null && (facts.testKeys?.has(`job:${event.jobId}`) ?? false)) };
+      assertMayLeave("email", egress);
+      await deps.send([resolved.address], email.subject, email.body, egress);
       report.sent += 1;
     } catch (error) {
       report.errors.push(`user #${recipient.userId}: ${errorText(error)}`);

@@ -47,6 +47,7 @@ import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
+import { TestDataEgressError, testRecordResponse } from "../test-data";
 
 // Approval limits and the director gate live in the approval-authority core
 // (src/approvalAuthority.ts, J1); ApprovalLimit rows in approval-limits-db.ts.
@@ -2115,6 +2116,7 @@ async function resendDirectorInvoiceEmail(
     );
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {
+    if (error instanceof TestDataEgressError) return testRecordResponse();
     context.error("resendDirectorInvoiceEmail failed:", error.message);
     return errorResponse("Resend director invoice email failed", error.message);
   } finally {

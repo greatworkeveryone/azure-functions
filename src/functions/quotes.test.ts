@@ -334,6 +334,19 @@ describe("resendDirectorQuoteEmail", () => {
     expect(sqlCalls().find((c) => /DirectorEmailSentBy = @SentBy/.test(c.sql))?.params.SentBy).toBe("Carlo Randazzo");
   });
 
+  it("says 'Not sent: test record' (409) for a test job and stamps nothing (D9)", async () => {
+    routeSql([
+      [/SELECT JobID, Amount, ISNULL\(Currency/, [{ Amount: 5000, Currency: "AUD", JobID: 9, Status: "awaiting_director" }]],
+    ]);
+    const { TestDataEgressError } = jest.requireActual("../test-data") as typeof import("../test-data");
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValueOnce(new TestDataEgressError("email"));
+
+    const res = await resendDirectorQuoteEmail(makeRequest({ QuoteID: 7 }), ctx);
+
+    expect(res).toEqual({ jsonBody: { code: "TEST_RECORD", error: "Not sent: test record" }, status: 409 });
+    expect(sqlCalls().some((c) => /DirectorEmailSentBy/.test(c.sql))).toBe(false);
+  });
+
   it("401s when the token has no verified identity", async () => {
     auth.verifiedIdentityFromRequest.mockResolvedValueOnce(null);
 

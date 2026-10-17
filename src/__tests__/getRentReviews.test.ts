@@ -101,7 +101,7 @@ describe("what it asks for", () => {
     await ask("buildingId=5&state=due,in_progress");
     const { sql } = lastSelect();
     expect(sql).toMatch(
-      /WHERE r\.State IS NOT NULL AND t\.BuildingId = @BuildingId AND r\.State IN \(@State0, @State1\) AND t\.ArchivedAt IS NULL\s+ORDER BY/,
+      /WHERE r\.State IS NOT NULL AND t\.BuildingId = @BuildingId AND r\.State IN \(@State0, @State1\) AND t\.ArchivedAt IS NULL AND \(t\.IsTest = 0 OR @ShowTest = 1\)\s+ORDER BY/,
     );
   });
 

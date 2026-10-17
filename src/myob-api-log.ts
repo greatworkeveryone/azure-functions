@@ -200,7 +200,7 @@ export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse
   const { loggable, wire } = serialiseBody(input.body);
   let guarded: GuardedRequest;
   try {
-    guarded = await guardMyobRequest({ body: wire, method, url });
+    guarded = await guardMyobRequest({ body: wire, correlationId: input.correlationId, method, record: input.record, url });
   } catch (err) {
     return refuse(base, err, loggable);
   }

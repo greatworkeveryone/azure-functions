@@ -3,6 +3,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
+import { assertMayLeave, showTestParam, TestDataEgressError, testFlagForCreate, testRecordResponse, type EgressSubject } from "../test-data";
 import {
   AppRole,
   extractToken,
@@ -151,6 +152,7 @@ function rowToVacancy(row: SqlRow): Record<string, unknown> {
     wordpressSlug: row.WordPressSlug ?? null,
     lastSyncedAt: row.LastSyncedAt ?? null,
     tenancyId: row.TenancyId ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
     createdAt: row.CreatedAt,
     updatedAt: row.UpdatedAt,
   };
@@ -185,6 +187,7 @@ function rowToVacancySummary(row: SqlRow): Record<string, unknown> {
     firstImageUrl: images[0] ?? heroImageUrl,
     lastSyncedAt: row.LastSyncedAt ?? null,
     tenancyId: row.TenancyId ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
   };
 }
 
@@ -204,12 +207,13 @@ async function handleGetVacancies(
     connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT v.Id, v.Title, v.Address, v.Status, v.Images, v.LastSyncedAt, v.TenancyId,
+      `SELECT v.Id, v.Title, v.Address, v.Status, v.Images, v.LastSyncedAt, v.TenancyId, v.IsTest,
               v.BuildingId, b.BuildingName, b.HeroImageUrl
        FROM dbo.Vacancies v
        LEFT JOIN dbo.Buildings b ON b.BuildingID = v.BuildingId
+       WHERE (v.IsTest = 0 OR @ShowTest = 1)
        ORDER BY v.CreatedAt DESC`,
-      [],
+      [await showTestParam(request)],
     );
     return { jsonBody: { vacancies: rows.map(rowToVacancySummary) } };
   } catch (error: any) {
@@ -314,6 +318,7 @@ async function handleCreateVacancy(
   let connection;
   try {
     const body = (await request.json()) as {
+      IsTest?: boolean;
       tenancyId?: number;
       buildingId?: number;
       title?: string;
@@ -321,15 +326,19 @@ async function handleCreateVacancy(
     const tenancyId = typeof body.tenancyId === "number" ? body.tenancyId : null;
     const buildingId = typeof body.buildingId === "number" ? body.buildingId : null;
     const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "New vacancy";
+    // D9: admins and directors may create a test vacancy; an admin's "[TEST]" title does too.
+    const testFlag = await testFlagForCreate(request, body.IsTest, title);
+    if ("error" in testFlag) return testFlag.error;
 
     connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO dbo.Vacancies (Title, Status, AdditionalDetails, Images, TenancyId, BuildingId)
+      `INSERT INTO dbo.Vacancies (Title, Status, AdditionalDetails, Images, TenancyId, BuildingId, IsTest)
        OUTPUT INSERTED.*
-       VALUES (@Title, 'draft', '[]', '[]', @TenancyId, @BuildingId)`,
+       VALUES (@Title, 'draft', '[]', '[]', @TenancyId, @BuildingId, @IsTest)`,
       [
+        { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
         { name: "Title", type: TYPES.NVarChar, value: title },
         { name: "TenancyId", type: TYPES.Int, value: tenancyId },
         { name: "BuildingId", type: TYPES.Int, value: buildingId },
@@ -945,9 +954,12 @@ function wpAuthHeader(): string {
 }
 
 async function uploadImageToWp(
+  egress: EgressSubject,
   imageUrl: string,
   context?: InvocationContext,
 ): Promise<number | null> {
+  // Outside the catch below: a test vacancy's refusal must not read as "skip this image".
+  assertMayLeave("wordpress", egress);
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
   // SSRF gate before issuing a server-side fetch. Silent reject + log so a
   // single bad URL doesn't fail the whole publish — publishVacancy treats
@@ -1033,6 +1045,10 @@ async function handlePublishVacancy(
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
+    // A test vacancy never reaches the website (D9).
+    const egress = { isTest: rows[0].IsTest === true || rows[0].IsTest === 1 };
+    assertMayLeave("wordpress", egress);
+
     const v = rowToVacancy(rows[0]);
     const buildingName = (rows[0].BuildingName as string | null) ?? null;
     const heroImageUrl = v.buildingHeroImageUrl as string | null;
@@ -1058,7 +1074,7 @@ async function handlePublishVacancy(
     });
     const mediaIds: number[] = [];
     for (const url of safeImages) {
-      const id = await uploadImageToWp(url, context);
+      const id = await uploadImageToWp(egress, url, context);
       if (id !== null) mediaIds.push(id);
     }
 
@@ -1076,6 +1092,7 @@ async function handlePublishVacancy(
       : `${wpBase}/wp/v2/tenancy`;
     const wpMethod = wpPostId ? "PUT" : "POST";
 
+    assertMayLeave("wordpress", egress);
     const wpResp = await fetch(wpEndpoint, {
       method: wpMethod,
       headers: {
@@ -1112,6 +1129,7 @@ async function handlePublishVacancy(
 
     return { jsonBody: { vacancy: rowToVacancy(updated[0]) } };
   } catch (error: any) {
+    if (error instanceof TestDataEgressError) return testRecordResponse();
     return errorResponse("Failed to publish vacancy", error.message);
   } finally {
     if (connection) closeConnection(connection);

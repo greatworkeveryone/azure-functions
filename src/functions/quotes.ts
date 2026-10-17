@@ -55,6 +55,7 @@ import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
+import { showTestParam, TestDataEgressError, testRecordResponse } from "../test-data";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -81,6 +82,10 @@ async function getQuotes(
     whereParts.push("Status = @Status");
     params.push({ name: "Status", type: TYPES.NVarChar, value: status });
   }
+  // D9: test quotes, and quotes on test jobs, only with the admin's Show test data on.
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  whereParts.push("(JobID NOT IN (SELECT tj.JobID FROM Jobs tj WHERE tj.IsTest = 1) OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
   const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
   let connection;
@@ -1674,6 +1679,7 @@ async function resendDirectorQuoteEmail(
     );
     return { status: 200, jsonBody: { quote: stored[0] } };
   } catch (error: any) {
+    if (error instanceof TestDataEgressError) return testRecordResponse();
     context.error("resendDirectorQuoteEmail failed:", error.message);
     return errorResponse("Resend director quote email failed", error.message);
   } finally {
