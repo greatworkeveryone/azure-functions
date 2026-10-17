@@ -37,9 +37,12 @@ Coming, not on `sprint/integration` yet: `REVIEW_SANITY_MIN_PERCENT` (−5) and
 ## Feature flags (Admin → Features)
 
 Hidden by default: Assets, Escalations, Rent reviews, Finance (CFO workspace),
-Procedures. A flag only shows the module. The timers behind Escalations and Rent
-reviews still need their app settings above. Coming: `decisionJobs` (admin
-decision jobs, hidden by default; the sweep, Planner sync and digest skip them).
+Procedures, Decision jobs. A flag only shows the module. The timers behind
+Escalations and Rent reviews still need their app settings above. Decision jobs
+(`decisionJobs`, Admin / Accounts jobs) need no setting and no migration: set it
+to preview for the director role first, then for everyone. The backend accepts
+the `admin` job kind whatever the flag says, and the sweep, Planner sync and
+digest skip those jobs.
 
 ## Migrations
 
