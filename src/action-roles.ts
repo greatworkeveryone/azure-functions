@@ -107,10 +107,10 @@ export const ACTION_ROLES = {
     why: "Approve timesheets (isApprovalManager, timesheets.ts: a literal role check).",
   },
   archiveAnyJob: {
-    gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     match: "exact",
     routes: [],
-    why: "Archive any job (ARCHIVE_ANY_JOB_ROLES, a literal check in archiveJob). Plain facilities archive only their own.",
+    why: "Archive any job: archiveJob checks this list literally, so the cfo is listed (above accounts_manager). Plain facilities archive only their own.",
   },
   archiveAssets: {
     gate: ARCHIVE_ASSETS_ROLES,

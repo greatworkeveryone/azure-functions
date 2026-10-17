@@ -48,6 +48,7 @@
   "archiveAnyJob": [
     "accounts_manager",
     "admin",
+    "cfo",
     "director",
     "facilities_manager"
   ],
