@@ -10,10 +10,16 @@
 // fire) or from the nightly plannerSyncTimer (safety net). The standalone
 // wrappers open their own service connection + load group members and swallow
 // errors so a caller's HTTP response never fails because Planner is down.
+//
+// Everything here is a no-op unless PLANNER_SYNC_ENABLED is "true" (plannerFlag.ts):
+// Planner is being retired and APP_BASE_URL, which used to be what switched this
+// on, now only builds links. With the flag on, behaviour is unchanged, including
+// the skip when APP_BASE_URL or a group id is unset.
 
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
-import { closeConnection, createServiceConnection, executeQuery } from "./db";
+import { closeConnection, createServiceConnection, executeQuery, type SqlRow } from "./db";
+import { runsContractorFlow } from "./jobKinds";
 import {
   getPlanConfig,
   graphCompletePlannerTask,
@@ -21,6 +27,7 @@ import {
   graphGetGroupMembers,
   graphGetPlannerTask,
 } from "./planner";
+import { plannerSyncEnabled } from "./plannerFlag";
 import { Sentry } from "./sentry";
 import {
   addDaysUTC,
@@ -38,6 +45,10 @@ import {
 } from "./plannerHelpers";
 
 type LogFn = (msg: string) => void;
+
+/** Planner follows the contractor and money flow. An Admin / Accounts job has
+ *  neither (plan D2), so no job sync creates, updates or completes a task for one. */
+const followsPlanner = (job: SqlRow): boolean => runsContractorFlow(job.Kind);
 
 /** Persist a failed Graph attempt onto an existing PlannerTasks row so the
  *  job-detail UI surfaces it via the `lastError` field. Failure to write
@@ -92,6 +103,8 @@ export interface ReconcileParams {
 }
 
 export async function reconcileTask(p: ReconcileParams): Promise<void> {
+  if (!plannerSyncEnabled()) return;
+
   const {
     connection, entityType, entityId, triggerType, shouldHaveTask,
     planType, title, description, dueDate, assigneeIds, log,
@@ -242,10 +255,11 @@ export async function syncJobOnchargePending(
   jobId: number,
   deps: AccountsSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
             j.IsOnchargeable, j.OnchargeAmount, j.OnchargeNotes,
             COALESCE(b.BuildingName, '') AS BuildingName,
             (SELECT TOP 1 1 FROM dbo.JobInvoices ji
@@ -257,6 +271,7 @@ export async function syncJobOnchargePending(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerOnchargeJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -292,10 +307,11 @@ export async function syncJobAwaitingAccounts(
   jobId: number,
   deps: AccountsSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -306,6 +322,7 @@ export async function syncJobAwaitingAccounts(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -342,10 +359,11 @@ export async function syncJobAwaitingFacilitiesApproval(
   jobId: number,
   deps: FacilitiesSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -356,6 +374,7 @@ export async function syncJobAwaitingFacilitiesApproval(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -391,10 +410,11 @@ export async function syncJobStalled(
   jobId: number,
   deps: FacilitiesSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.IsStalled, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
             au.EntraOid AS AssignedToEntraOid
@@ -406,6 +426,7 @@ export async function syncJobStalled(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const awaitingRole = r.AwaitingRole as string | null;
   const job: PlannerStalledJobRow = {
     jobId: r.JobID as number,
@@ -449,10 +470,11 @@ export async function syncJobDirectorApproval(
   jobId: number,
   deps: AccountsSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid,
             (SELECT COUNT(*) FROM dbo.JobInvoices ji
@@ -468,6 +490,7 @@ export async function syncJobDirectorApproval(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -506,6 +529,8 @@ export async function syncJobActionTriggersStandalone(
   jobId: number,
   log?: LogFn,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
+
   const {
     PLANNER_FACILITIES_GROUP_ID,
     PLANNER_ACCOUNTS_GROUP_ID,

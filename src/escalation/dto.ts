@@ -2,6 +2,7 @@
 // with it, and the version to send back with any change (rowVersion, base64).
 
 import { getAdapter } from "./adapters/registry";
+import { namedTargetIds } from "./decisionRows";
 import { availableActions, isOversight, type ActionAvailability } from "./permissions";
 import { roleLabel } from "./roles";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type Viewer } from "./types";
@@ -44,6 +45,9 @@ export interface EscalationDto {
   subjectId: string;
   subjectType: string;
   summary: string;
+  /** The several people a row goes to when its level is a group of named people
+   *  (a decision request's), else empty. A row with a role or one person has none. */
+  targetNames: string[];
   targetRole: string | null;
   targetRoleLabel: string;
   targetUserId: number | null;
@@ -54,9 +58,18 @@ export interface EscalationDto {
 
 const iso = (date: Date | null): string | null => (date ? date.toISOString() : null);
 
+/** "Cam, Dee" or "Cam, Dee, Eli +2 more": who a row goes to, for a label. */
+function describeNames(names: readonly string[]): string {
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} +${names.length - 3} more` : shown;
+}
+
 export function toDto(row: EscalationRow, viewer: Viewer, now: Date, directory: readonly DirectoryUser[] = []): EscalationDto {
   const adapter = getAdapter(row.subjectType);
   const target = row.targetUserId === null ? null : directory.find((user) => user.userId === row.targetUserId);
+  const targetNames = namedTargetIds(row)
+    .map((id) => directory.find((user) => user.userId === id)?.name)
+    .filter((name): name is string => Boolean(name));
   return {
     acknowledgedAt: iso(row.acknowledgedAt),
     acknowledgedByName: row.acknowledgedByName,
@@ -93,8 +106,10 @@ export function toDto(row: EscalationRow, viewer: Viewer, now: Date, directory: 
     subjectId: row.subjectId,
     subjectType: row.subjectType,
     summary: row.summary,
+    targetNames,
     targetRole: row.targetRole,
-    targetRoleLabel: roleLabel(row.targetRole),
+    // A row that goes to several named people has no role: say who, not "Nobody".
+    targetRoleLabel: targetNames.length > 0 ? describeNames(targetNames) : roleLabel(row.targetRole),
     targetUserId: row.targetUserId,
     targetUserName: target?.name ?? row.acknowledgedByName,
     updatedAt: row.updatedAt.toISOString(),

@@ -16,9 +16,23 @@ import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../paginati
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
-import { record } from "../ledger";
+import { resolveInvoiceContractor } from "../invoice-contractor";
+import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { approvalRule, invoiceFacts, invoiceSnapshot, jobScope } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvalRule,
+  approvalSnapshot,
+  approvedAmount,
+  contractorFacts,
+  deletionAfter,
+  invoiceFacts,
+  invoiceSnapshot,
+  jobScope,
+  withContractorId,
+} from "../ledger/moneyDecisions";
+import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
@@ -33,6 +47,10 @@ interface SyncInvoicesBody { queryParams: string }
 interface UpsertJobInvoiceBody {
   JobInvoiceID?: number;
   JobID?: number;
+  /** The contractor by id (migration 112), when the request has it: from the
+   *  picker, or from the quote or order the invoice answers. Never worked out
+   *  from the name. */
+  ContractorID?: number | null;
   ContractorName?: string;
   /** A number or a typed string such as "1,500.00"; parsed by parseMoneyField. */
   Amount?: number | string | null;
@@ -255,7 +273,7 @@ app.http("getInvoices", { methods: ["GET"], authLevel: "anonymous", handler: get
 // ─────────────────────────────────────────────────────────────────────────────
 
 const JOB_INVOICE_COLUMNS = `
-  JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName,
+  JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName, ContractorID,
   Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy,
@@ -295,9 +313,15 @@ async function getJobInvoices(
 }
 
 // ── POST /api/upsertJobInvoice ────────────────────────────────────────────────
-// Body: { JobInvoiceID?, JobID (required on create), ContractorName?, Amount?,
+// Body: { JobInvoiceID?, JobID (required on create), ContractorID?, ContractorName?, Amount?,
 //         Currency?, Notes?, InvoicePDFBlobName?, SourceEmailID?, ReceivedAt?, CreatedBy?,
 //         SupplierInvoiceNumber? }
+//
+// ContractorID (migration 112) is stored when the request gives it: from the
+// picker, or from the quote or order the invoice answers. Without a name it
+// takes the contractor's own. A name on its own is stored as text and never
+// matched to a contractor; on an edit it clears the id the invoice had, which
+// would otherwise point at the wrong one.
 
 export async function upsertJobInvoice(
   request: HttpRequest,
@@ -323,6 +347,7 @@ export async function upsertJobInvoice(
     const {
       JobInvoiceID,
       JobID,
+      ContractorID,
       ContractorName,
       Amount,
       Currency,
@@ -340,6 +365,10 @@ export async function upsertJobInvoice(
     if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
 
     connection = await createRequestConnection(token);
+
+    // The contractor by id, when the request names one; otherwise just the name.
+    const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
+    if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
 
     if (JobInvoiceID === undefined) {
       if (typeof JobID !== "number") {
@@ -360,7 +389,7 @@ export async function upsertJobInvoice(
         const invoiceNumber = formatDocNumber({
           prefix: "IV",
           jobId: JobID,
-          acronym: nameToAcronym(ContractorName ?? ""),
+          acronym: nameToAcronym(contractor.name ?? ""),
           seq: nextSeq,
         });
 
@@ -369,19 +398,20 @@ export async function upsertJobInvoice(
         const inserted = await executeQuery(
           connection,
           `INSERT INTO JobInvoices
-             (JobID, InvoiceNumber, Seq, ContractorName, Amount, Currency, Direction,
+             (JobID, InvoiceNumber, Seq, ContractorID, ContractorName, Amount, Currency, Direction,
               Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy,
               SupplierInvoiceNumber)
            OUTPUT INSERTED.JobInvoiceID
            VALUES
-             (@JobID, @InvoiceNumber, @Seq, @ContractorName, @Amount, @Currency, @Direction,
+             (@JobID, @InvoiceNumber, @Seq, @ContractorID, @ContractorName, @Amount, @Currency, @Direction,
               @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy,
               @SupplierInvoiceNumber);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
             { name: "InvoiceNumber", type: TYPES.NVarChar, value: invoiceNumber },
             { name: "Seq", type: TYPES.Int, value: nextSeq },
-            { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+            { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
+            { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
             { name: "Amount", type: TYPES.Decimal, value: amount.value ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Direction", type: TYPES.NVarChar, value: direction },
@@ -396,7 +426,7 @@ export async function upsertJobInvoice(
         const newId = inserted[0].JobInvoiceID as number;
 
         const amountLabel = typeof amount.value === "number" ? ` · $${amount.value.toLocaleString()}` : "";
-        const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
+        const contractorLabel = contractor.name ? ` · ${contractor.name}` : "";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
@@ -442,6 +472,7 @@ export async function upsertJobInvoice(
     const update = buildUpdateSet(
       {
         Amount: TYPES.Decimal,
+        ContractorID: TYPES.Int,
         ContractorName: TYPES.NVarChar,
         Currency: TYPES.NVarChar,
         Direction: TYPES.NVarChar,
@@ -452,7 +483,8 @@ export async function upsertJobInvoice(
       },
       {
         Amount: amount.value,
-        ContractorName,
+        ContractorID: contractor.id,
+        ContractorName: contractor.name,
         Currency,
         Direction,
         InvoicePDFBlobName,
@@ -465,40 +497,63 @@ export async function upsertJobInvoice(
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
-    // Read the existing invoice before mutating so we can diff for the audit
-    // trail and detect whether the edit invalidates a prior approval.
-    const beforeRows = await executeQuery(
-      connection,
-      `SELECT JobInvoiceID, JobID, InvoiceNumber, Amount, ContractorName, Status, ApprovedAt
-         FROM JobInvoices WHERE JobInvoiceID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
-    );
-    if (beforeRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Invoice not found" } };
+    // An edit that carries an amount can tear down an existing approval, which
+    // is a decision (PLAN §3.12): the reset and its ledger row commit together
+    // or not at all. Only those edits look up who is editing.
+    let actor: LedgerActor | null = null;
+    if (Amount !== undefined) {
+      actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
     }
-    const before = beforeRows[0];
-    const jobId = before.JobID as number;
-    if (InvoicePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, InvoicePDFBlobName))) {
-      return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
-    }
-    const invoiceNumber =
-      (before.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
-
-    const effects = decideApprovalAmountEdit(
-      {
-        amount: before.Amount != null ? Number(before.Amount) : null,
-        approvedAt: (before.ApprovedAt as Date | null) ?? null,
-        contractorName: (before.ContractorName as string | null) ?? null,
-        status: (before.Status as string | null) ?? null,
-      },
-      { amount: amount.value, contractorName: ContractorName },
-    );
 
     await beginTransaction(connection);
     try {
+      // Read the existing invoice before mutating so we can diff for the audit
+      // trail and detect whether the edit invalidates a prior approval. Locked
+      // until commit, so the approval recorded as reset is the one reset.
+      const beforeRows = await executeQuery(
+        connection,
+        `SELECT JobInvoiceID, JobID, InvoiceNumber, Amount, ContractorName, Status, ApprovedAt,
+                ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, SupplierInvoiceNumber, Direction, Currency,
+                ContractorID
+           FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      if (beforeRows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Invoice not found" } };
+      }
+      const before = beforeRows[0];
+      const jobId = before.JobID as number;
+      if (InvoicePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, InvoicePDFBlobName))) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+      }
+      const invoiceNumber =
+        (before.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+
+      const effects = decideApprovalAmountEdit(
+        {
+          amount: before.Amount != null ? Number(before.Amount) : null,
+          approvedAt: (before.ApprovedAt as Date | null) ?? null,
+          contractorName: (before.ContractorName as string | null) ?? null,
+          status: (before.Status as string | null) ?? null,
+        },
+        { amount: amount.value, contractorName: contractor.name },
+      );
+
+      // A new name with no id says the invoice is from someone else now, so the
+      // id it had would point at the wrong contractor.
+      const clearsContractorId =
+        contractor.id === undefined &&
+        ContractorName !== undefined &&
+        ContractorName !== before.ContractorName &&
+        before.ContractorID != null;
+      const setClause = clearsContractorId ? `${update.setClause}, ContractorID = NULL` : update.setClause;
+
       await executeQuery(
         connection,
-        `UPDATE JobInvoices SET ${update.setClause} WHERE JobInvoiceID = @Id`,
+        `UPDATE JobInvoices SET ${setClause} WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }, ...update.params],
       );
 
@@ -550,6 +605,39 @@ export async function upsertJobInvoice(
             { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
           ],
         );
+
+        // Only an edit that carries an amount can get here, and those looked
+        // up who is editing above.
+        if (!actor) throw new Error("An approval was reset without a ledger actor");
+        const scope = await jobScope(connection, jobId);
+        const known = await withContractorId(connection, before);
+        // What the invoice's columns hold once this edit is in: the id the request
+        // gave, or the one it had if the name is unchanged, or none (and then the
+        // ledger looks one up from the new name).
+        const editedName = contractor.name !== undefined ? contractor.name : before.ContractorName;
+        const editedId =
+          contractor.id !== undefined ? contractor.id : editedName !== before.ContractorName ? null : before.ContractorID;
+        const edited = await withContractorId(connection, {
+          ...before,
+          Amount: amount.value !== undefined ? amount.value : before.Amount,
+          ContractorID: editedId,
+          ContractorName: editedName,
+          Direction: Direction !== undefined ? Direction : before.Direction,
+          SupplierInvoiceNumber: supplierNumber.value !== undefined ? supplierNumber.value : before.SupplierInvoiceNumber,
+        });
+        await record(connection, {
+          action: "invoice.approval_reset",
+          actor,
+          after: {
+            ...invoiceFacts(edited),
+            ...amountChange({ approved: before.Amount, next: edited.Amount, previous: before.Amount }),
+            status: "pending",
+          },
+          before: approvalSnapshot(known),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
       }
 
       await commitTransaction(connection);
@@ -591,6 +679,8 @@ const APPROVE_INVOICE_TARGET: RefusalTarget = {
 interface InvoiceApproval {
   amount: number;
   directorGateEngaged: boolean;
+  /** The invoice's ledger facts, for the director request that may follow. */
+  facts: Record<string, unknown>;
   jobId: number;
   newStatus: "approved" | "awaiting_approval";
   routesToAwaitingApproval: boolean;
@@ -606,16 +696,16 @@ const APPROVE_INVOICE_ROLES = SUBJECT_ELIGIBLE_ROLES.invoice as readonly AppRole
 
 async function approveInvoiceInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; email: string; invoiceId: number; userRoles: string[] },
+  input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; invoiceId: number; userRoles: string[] },
 ): Promise<InvoiceApprovalOutcome> {
-  const { actor, approvedBy, email, invoiceId, userRoles } = input;
+  const { actor, approvedBy, correlationId, email, invoiceId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Fetch invoice — need Amount for limit check. Locked until commit, so the
     // status recorded as replaced is the one that was replaced.
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber, ContractorID FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: invoiceId }],
     );
     if (rows.length === 0) {
@@ -698,19 +788,22 @@ async function approveInvoiceInTransaction(
       [{ name: "JobID", type: TYPES.Int, value: jobId }],
     );
 
+    const known = await withContractorId(connection, invoice);
+    const ledgerFacts = invoiceFacts(known);
     await record(connection, {
       action: "invoice.approve",
       actor,
-      after: { status: newStatus, ...invoiceFacts(invoice) },
-      before: { status: (invoice.Status as string | null) ?? null },
+      after: { status: newStatus, ...ledgerFacts },
+      before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
       buildingId: scope.buildingId,
+      correlationId,
       jobId: scope.jobId,
       ruleApplied: approvalRule({ directorNeeded: directorGateEngaged, userCanApprove }),
       subject: { id: invoiceId, type: "invoice" },
     });
 
     await commitTransaction(connection);
-    return { ok: true, approval: { amount, directorGateEngaged, jobId, newStatus, routesToAwaitingApproval } };
+    return { ok: true, approval: { amount, directorGateEngaged, facts: ledgerFacts, jobId, newStatus, routesToAwaitingApproval } };
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
     throw err;
@@ -745,9 +838,12 @@ async function approveJobInvoice(
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return unauthorizedResponse();
 
+    // The approval and the director request it triggers are one operation.
+    const correlationId = newCorrelationId();
     const outcome = await approveInvoiceInTransaction(connection, {
       actor,
       approvedBy: identity.name,
+      correlationId,
       email: identity.email,
       invoiceId: JobInvoiceID,
       userRoles: await rolesForRequest(request),
@@ -765,7 +861,7 @@ async function approveJobInvoice(
       );
       return { status: 403, jsonBody: { error: message, reason } };
     }
-    const { amount, directorGateEngaged, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
+    const { amount, directorGateEngaged, facts, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
 
     // Director email + job→Done transition both gated on a successful approve
     // landing at status='approved'. If we routed to awaiting_approval, nothing
@@ -775,35 +871,27 @@ async function approveJobInvoice(
     // connection closes in `finally` once the response returns. Packet build
     // + Graph sendMail can take 5–20s with attachments — we don't want the
     // user's Approve click to block on it. If the background send fails, the
-    // Resend button on the banner is the recovery path.
+    // Resend button on the banner is the recovery path. The stamp and the
+    // ledger row for the send are written once the mail has gone (see
+    // ../email/director-requests).
     if (directorGateEngaged && !routesToAwaitingApproval) {
       void (async () => {
         let bgConnection;
         try {
           bgConnection = await createRequestConnection(token);
-          const { sendDirectorApprovalEmail } = await import("../email/director-emails");
-          const result = await sendDirectorApprovalEmail({
-            connection: bgConnection,
-            jobId,
-            stage: "invoice",
+          await sendDirectorRequest({
+            actor,
             amount,
+            connection: bgConnection,
+            correlationId,
             currency: "AUD",
+            facts,
+            jobId,
+            resend: false,
+            stage: "invoice",
+            subjectId: JobInvoiceID,
             triggeredBy: identity.name,
           });
-          await executeQuery(
-            bgConnection,
-            `UPDATE JobInvoices
-               SET DirectorEmailSentAt = @SentAt,
-                   DirectorEmailSentTo = @SentTo,
-                   DirectorEmailSentBy = @SentBy
-             WHERE JobInvoiceID = @Id`,
-            [
-              { name: "Id", type: TYPES.Int, value: JobInvoiceID },
-              { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
-              { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-              { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
-            ],
-          );
         } catch (emailErr: any) {
           context.warn(`Director email failed for invoice ${JobInvoiceID}: ${emailErr?.message}`);
         } finally {
@@ -893,7 +981,7 @@ async function directorApproveJobInvoice(
       // Locked until commit, so the status recorded as replaced is the one replaced.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -960,11 +1048,12 @@ async function directorApproveJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.director_approve",
         actor,
-        after: { status: "director_approved", ...invoiceFacts(invoice) },
-        before: { status },
+        after: { status: "director_approved", ...invoiceFacts(known) },
+        before: { status, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -994,7 +1083,7 @@ async function directorApproveJobInvoice(
 }
 
 // What the ledger needs to know about an invoice that is about to change or go.
-const INVOICE_LEDGER_COLUMNS = `JobID, InvoiceNumber, SupplierInvoiceNumber, ContractorName, Amount, Currency,
+const INVOICE_LEDGER_COLUMNS = `JobID, InvoiceNumber, SupplierInvoiceNumber, ContractorName, ContractorID, Amount, Currency,
   Direction, Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   MyobCreatedAt, MyobCreatedBy, InvoicePDFBlobName`;
 
@@ -1115,11 +1204,12 @@ async function undoDirectorApproveJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.undo_director_approve",
         actor,
-        after: { status: "approved", ...invoiceFacts(invoice) },
-        before: invoiceSnapshot(invoice),
+        after: { status: "approved", ...invoiceFacts(known), ...amountUnchanged(known.Amount, approvedAmount(known)) },
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1228,7 +1318,7 @@ async function rejectJobInvoice(
       // Locked until commit, so the status recorded as replaced is the one replaced.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1264,11 +1354,12 @@ async function rejectJobInvoice(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.reject",
         actor,
-        after: { status: "rejected", ...invoiceFacts(invoice) },
-        before: { status: (invoice.Status as string | null) ?? null },
+        after: { status: "rejected", ...invoiceFacts(known) },
+        before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1346,7 +1437,7 @@ async function markJobInvoiceMyobCreated(
       // Locked until commit, so the approval we check is the one we act on.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt, ContractorID
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1423,12 +1514,13 @@ async function markJobInvoiceMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.myob_created",
         actor,
-        after: { myobCreated: true, status, ...invoiceFacts(invoice) },
+        after: { myobCreated: true, status, ...invoiceFacts(known) },
         // Marking again just re-stamps; the earlier marking shows here.
-        before: { myobCreated: invoice.MyobCreatedAt != null },
+        before: { myobCreated: invoice.MyobCreatedAt != null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1535,11 +1627,17 @@ async function unmarkJobInvoiceMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.unmark_myob_created",
         actor,
-        after: { myobCreated: false, status: (invoice.Status as string | null) ?? null, ...invoiceFacts(invoice) },
-        before: invoiceSnapshot(invoice),
+        after: {
+          myobCreated: false,
+          status: (invoice.Status as string | null) ?? null,
+          ...invoiceFacts(known),
+          ...amountUnchanged(known.Amount, approvedAmount(known)),
+        },
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1566,7 +1664,8 @@ async function unmarkJobInvoiceMyobCreated(
 
 // ── POST /api/deleteJobInvoice ────────────────────────────────────────────────
 // Body: { JobInvoiceID }
-// Refuses to delete approved invoices.
+// Refuses to delete an invoice anyone has relied on (D5): approved, approved by
+// a director, marked in MYOB, or with a payment recorded against it.
 //
 // A deletion leaves nothing behind but its ledger row, so the row carries a
 // snapshot of what was deleted, and the two commit together or not at all.
@@ -1576,6 +1675,35 @@ const DELETE_INVOICE_TARGET: RefusalTarget = {
   idField: "JobInvoiceID",
   subjectType: "invoice",
 };
+
+/** Why this invoice can't be deleted, or null. `payments` are the statuses of
+ *  the payments recorded against it. */
+const PAYMENTS_BLOCK_DELETE = "This invoice has payments recorded against it";
+const SQL_FK_VIOLATION = 547;
+
+function deleteInvoiceRefusal(
+  invoice: { MyobCreatedAt?: unknown; Status?: unknown },
+  payments: readonly unknown[],
+): { code: string; error: string; status: number } | null {
+  if (invoice.Status === "approved") {
+    return { code: "approved_invoice_protected", error: "Cannot delete an approved invoice. Reject it first.", status: 400 };
+  }
+  if (invoice.Status === "director_approved") {
+    return {
+      code: "approved_invoice_protected",
+      error: "Cannot delete an invoice a director has approved. Undo the director approval first.",
+      status: 400,
+    };
+  }
+  if (invoice.MyobCreatedAt != null) {
+    return { code: "myob_invoice_protected", error: "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first.", status: 400 };
+  }
+  // Payments.JobInvoiceID references this row (FK_Payments_JobInvoices, migration 114).
+  if (payments.length > 0) {
+    return { code: "paid_invoice_protected", error: PAYMENTS_BLOCK_DELETE, status: 409 };
+  }
+  return null;
+}
 
 async function deleteJobInvoice(
   request: HttpRequest,
@@ -1615,19 +1743,29 @@ async function deleteJobInvoice(
         return { status: 404, jsonBody: { error: "Invoice not found" } };
       }
       const invoice = rows[0];
-      if (invoice.Status === "approved") {
+      const payments = await executeQuery(
+        connection,
+        "SELECT Status FROM Payments WHERE JobInvoiceID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
+      );
+      const refusal = deleteInvoiceRefusal(invoice, payments.map((p) => p.Status));
+      if (refusal) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.
         await rollbackTransaction(connection).catch(() => {});
-        const error = "Cannot delete an approved invoice. Reject it first.";
         await recordRefusal(
           connection,
           actor,
           { id: JobInvoiceID, type: "invoice" },
-          { attempted: "invoice.delete", code: "approved_invoice_protected", message: error, state: { status: "approved" } },
+          {
+            attempted: "invoice.delete",
+            code: refusal.code,
+            message: refusal.error,
+            state: { status: String(invoice.Status ?? "") },
+          },
           invoice.JobID as number,
         );
-        return { status: 400, jsonBody: { error } };
+        return { status: refusal.status, jsonBody: { error: refusal.error } };
       }
 
       await executeQuery(
@@ -1637,10 +1775,12 @@ async function deleteJobInvoice(
       );
 
       const scope = await jobScope(connection, invoice.JobID as number);
+      const known = await withContractorId(connection, invoice);
       await record(connection, {
         action: "invoice.delete",
         actor,
-        before: invoiceSnapshot(invoice),
+        after: deletionAfter(invoiceFacts(known), approvedAmount(known)),
+        before: invoiceSnapshot(known),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: JobInvoiceID, type: "invoice" },
@@ -1653,6 +1793,10 @@ async function deleteJobInvoice(
 
     return { status: 200, jsonBody: { deleted: true, invoiceId: JobInvoiceID } };
   } catch (error: any) {
+    // A payment landed between the check and the delete: the FK says no.
+    if (error?.number === SQL_FK_VIOLATION || error?.originalError?.number === SQL_FK_VIOLATION) {
+      return { status: 409, jsonBody: { error: PAYMENTS_BLOCK_DELETE } };
+    }
     context.error("deleteJobInvoice failed:", error.message);
     return errorResponse("Delete invoice failed", error.message);
   } finally {
@@ -1663,13 +1807,20 @@ async function deleteJobInvoice(
 // ── POST /api/resendDirectorInvoiceEmail ─────────────────────────────────────
 // Body: { JobInvoiceID } — the sender is the verified caller, never the body.
 // Re-fires the director packet email for an invoice already in the
-// awaiting-director state (Status='approved'). Updates the audit columns.
+// awaiting-director state (Status='approved'). Updates the audit columns. A
+// send is ledgered once the mail has gone (see ../email/director-requests).
 
 interface ResendDirectorInvoiceEmailBody {
   JobInvoiceID: number;
   /** @deprecated ignored — identity comes from the token */
   TriggeredBy?: string;
 }
+
+const RESEND_DIRECTOR_INVOICE_TARGET: RefusalTarget = {
+  attempted: "invoice.director_request_sent",
+  idField: "JobInvoiceID",
+  subjectType: "invoice",
+};
 
 async function resendDirectorInvoiceEmail(
   request: HttpRequest,
@@ -1683,7 +1834,10 @@ async function resendDirectorInvoiceEmail(
   // workflow participants (accounts + facilities) so they can re-trigger
   // the email when the director hasn't acted.
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, RESEND_DIRECTOR_INVOICE_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1697,10 +1851,13 @@ async function resendDirectorInvoiceEmail(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
     const rows = await executeQuery(
       connection,
-      `SELECT JobID, Amount, Status FROM JobInvoices WHERE JobInvoiceID = @Id`,
+      `SELECT JobID, Amount, Status, InvoiceNumber, ContractorName, SupplierInvoiceNumber, Direction, ContractorID
+         FROM JobInvoices WHERE JobInvoiceID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Invoice not found" } };
@@ -1713,29 +1870,18 @@ async function resendDirectorInvoiceEmail(
       return { status: 400, jsonBody: { error: "Invoice is not in the awaiting-director state" } };
     }
 
-    const { sendDirectorApprovalEmail } = await import("../email/director-emails");
-    const result = await sendDirectorApprovalEmail({
-      connection,
-      jobId,
-      stage: "invoice",
+    await sendDirectorRequest({
+      actor,
       amount,
+      connection,
       currency: "AUD",
+      facts: invoiceFacts(await withContractorId(connection, rows[0])),
+      jobId,
+      resend: true,
+      stage: "invoice",
+      subjectId: JobInvoiceID,
       triggeredBy: identity.name,
     });
-    await executeQuery(
-      connection,
-      `UPDATE JobInvoices
-         SET DirectorEmailSentAt = @SentAt,
-             DirectorEmailSentTo = @SentTo,
-             DirectorEmailSentBy = @SentBy
-       WHERE JobInvoiceID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: JobInvoiceID },
-        { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
-        { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
 
     const stored = await executeQuery(
       connection,

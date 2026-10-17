@@ -19,7 +19,9 @@ const sourceFiles = (dir: string): string[] =>
 // runControllerAction (src/myob-controller-handler.ts) is the CFO-only gate the
 // MYOB admin routes share, and withCaller (src/myob/proposalHttp.ts) resolves
 // the caller's roles for the MYOB proposal routes; the tests below keep both honest.
-const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
+// requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
+// alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
+const GATE = /\b(requireRole|requireSignOffRole|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {
@@ -46,6 +48,11 @@ describe("the MYOB proposal gate", () => {
     for (const file of users) expect(read(file)).toMatch(/return forbidden\(/);
   });
 });
+
+/** Gate names inside comments must not count (a `// requireRole(request)` is not a gate). */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
+}
 
 const ANONYMOUS_BY_DESIGN: Record<string, string> = {
   corsOptions: "preflight only; returns CORS headers and no data",
@@ -100,7 +107,7 @@ describe("every HTTP route checks the caller's role", () => {
     expect(route.fn).not.toBeNull();
     const body = handlerRegion(read(join(SRC, route.file)), route.fn as string);
     expect(body).not.toBeNull();
-    expect(body).toMatch(GATE);
+    expect(stripComments(body ?? "")).toMatch(GATE);
   });
 
   it("keeps the anonymous list honest", () => {

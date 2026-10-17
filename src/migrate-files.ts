@@ -116,9 +116,9 @@ const DESTRUCTIVE_PATTERNS: [string, RegExp][] = [
   ["DROP TRIGGER", /\bDROP\s+TRIGGER\b/i],
   ["DISABLE TRIGGER", /\bDISABLE\s+TRIGGER\b/i],
   ["TRUNCATE", /\bTRUNCATE\b/i],
-  // A DELETE statement in any form (with FROM, alias + FROM, or no FROM at
-  // all: "DELETE dbo.T WHERE …"); not ON DELETE (FK action) or a trigger's
-  // event list (INSTEAD OF UPDATE, DELETE AS …).
+  // A DELETE statement in any form (with FROM, alias + FROM, or with no FROM
+  // at all before the table and its WHERE); not ON DELETE (FK action) or a
+  // trigger's event list (INSTEAD OF UPDATE, DELETE AS …).
   [
     "DELETE",
     /(?<!(?:\b(?:ON|OF|FOR|AFTER)\s+|,\s*))\bDELETE\s+(?:TOP\s*\(\s*\d+\s*\)\s*)?(?:FROM\b|[\w.@#[\]]+\s+(?:FROM|WHERE|OUTPUT)\b|[\w.@#[\]]+\s*;)/i,
@@ -128,11 +128,52 @@ const DESTRUCTIVE_PATTERNS: [string, RegExp][] = [
   ["sp_rename", /\bsp_rename\b/i],
 ];
 
+/** Top-level comma split (ignores commas inside parentheses). */
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "(") depth += 1;
+    else if (text[i] === ")") depth -= 1;
+    else if (text[i] === "," && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+const UPDATE_STATEMENT = /\bUPDATE\s+(?:TOP\s*\(\s*\d+\s*\)\s*)?[\w.@#[\]]+\s+SET\b([\s\S]*?)(?=;|\n\s*\n|\bGO\b|\bEND\b|$)/gi;
+
+/**
+ * An UPDATE that rewrites values already there (database-safety rule 3), as
+ * opposed to a backfill of a column that is still NULL: every column it SETs
+ * must be pinned `<column> IS NULL` in its WHERE. Strings are already blanked.
+ */
+function rewritesExistingValues(code: string): boolean {
+  for (const match of code.matchAll(UPDATE_STATEMENT)) {
+    const statement = match[1];
+    const setPart = statement.split(/\b(?:FROM|WHERE)\b/i)[0];
+    const where = statement.match(/\bWHERE\b([\s\S]*)$/i)?.[1] ?? "";
+    const columns = splitTopLevel(setPart)
+      .map((assignment) => assignment.split("=")[0].trim().split(".").pop()?.replace(/[[\]]/g, "") ?? "")
+      .filter(Boolean);
+    const pinned = (column: string) =>
+      new RegExp(`(?:^|[\\s(.\\]])\\[?${column}\\]?\\s+IS\\s+NULL\\b`, "i").test(where);
+    if (columns.some((column) => !pinned(column))) return true;
+  }
+  return false;
+}
+
 /** Destructive statements in the file's code and in its dynamic SQL strings. */
 export function findDestructiveStatements(sql: string): string[] {
   const { code, dynamic } = scanSql(sql);
   const texts = [code, ...dynamic];
-  return DESTRUCTIVE_PATTERNS.filter(([, re]) => texts.some((t) => re.test(t))).map(([label]) => label);
+  const hits = DESTRUCTIVE_PATTERNS.filter(([, re]) => texts.some((t) => re.test(t))).map(([label]) => label);
+  if (texts.some((t) => rewritesExistingValues(scanSql(t).code))) hits.push("UPDATE (rewrites existing values)");
+  return hits;
 }
 
 /** Leading comment block contains `-- NOTRANSACTION`. */

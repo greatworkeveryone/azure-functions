@@ -57,12 +57,12 @@ function escalation(over: Partial<EscalationRow> = {}): EscalationRow {
 function approval(over: Partial<WaitingApproval> = {}): WaitingApproval {
   return {
     amount: 3_000, buildingId: 1, buildingName: "Tower A", createdAt: new Date("2026-10-12T01:00:00Z"),
-    id: 7, jobId: 20, jobTitle: "Replace pump", status: "pending", subject: "quote", ...over,
+    id: 7, jobId: 20, jobKind: "facilities", jobTitle: "Replace pump", status: "pending", subject: "quote", ...over,
   };
 }
 
 const dueJob = (over: Partial<DueJob> = {}): DueJob => ({
-  assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: TODAY_START, jobId: 30, title: "Paint stairwell", ...over,
+  assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: TODAY_START, jobId: 30, kind: "facilities", title: "Paint stairwell", ...over,
 });
 
 const key = (over: Partial<OverdueKey> = {}): OverdueKey => ({
@@ -246,6 +246,40 @@ describe("items due today or overdue", () => {
   it("puts the most overdue first", () => {
     const f = facts({ dueJobs: [dueJob({ jobId: 1, expectedProgressUpdate: TODAY_START }), dueJob({ jobId: 2, expectedProgressUpdate: YESTERDAY })] });
     expect(paths(USERS.facilities, f)).toEqual(["/jobs?jobId=2", "/jobs?jobId=1"]);
+  });
+});
+
+describe("Admin / Accounts jobs are not on the contractor and money lines (plan D2)", () => {
+  const everyone = Object.values(USERS);
+  const quote = (jobKind: string) => approval({ amount: 100, jobKind });
+  const invoice = (jobKind: string) => approval({ amount: 100, id: 8, jobKind, subject: "invoice" });
+
+  it("leaves their quotes and invoices out of every digest, where the same facts on a facilities job reach people", () => {
+    const control = facts({ waitingApprovals: [quote("facilities"), invoice("facilities")] });
+    expect(deriveItems(USERS.facilitiesManager, control, ctx)).toHaveLength(1);
+    expect(deriveItems(USERS.accounts, control, ctx)).toHaveLength(1);
+
+    const admin = facts({ waitingApprovals: [quote("admin"), invoice("admin")] });
+    for (const u of everyone) expect(deriveItems(u, admin, ctx)).toEqual([]);
+  });
+
+  it("leaves their update-due lines out, where the same job on the facilities side is listed", () => {
+    expect(lines(USERS.facilities, facts({ dueJobs: [dueJob({ kind: "facilities" })] }))).toHaveLength(1);
+    expect(deriveItems(USERS.facilities, facts({ dueJobs: [dueJob({ kind: "admin" })] }), ctx)).toEqual([]);
+  });
+
+  it("keeps listing the facilities and maintenance work around them", () => {
+    const f = facts({
+      dueJobs: [dueJob({ jobId: 31, kind: "admin" }), dueJob({ jobId: 32, kind: "maintenance" })],
+      waitingApprovals: [approval({ id: 1, jobId: 21, jobKind: "admin" }), approval({ id: 2, jobId: 22, jobKind: "maintenance" })],
+    });
+    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=22"]);
+    expect(paths(USERS.facilities, f)).toEqual(["/jobs?jobId=32"]);
+  });
+
+  it("selects the kinds by name, so a kind nobody has listed gets no lines either", () => {
+    const f = facts({ dueJobs: [dueJob({ kind: "projects" })], waitingApprovals: [approval({ jobKind: "projects" })] });
+    for (const u of everyone) expect(deriveItems(u, f, ctx)).toEqual([]);
   });
 });
 

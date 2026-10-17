@@ -20,6 +20,8 @@ Icon
 ### Node
 # Dependencies
 node_modules/
+# the worktrees link node_modules to the main checkout; ignore the symlink too
+node_modules
 
 # Logs
 *.log

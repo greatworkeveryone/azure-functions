@@ -36,7 +36,9 @@ jest.mock("../jobStatusHelpers", () => ({ advanceJobStatus: jest.fn() }));
 jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../quote-decisions", () => ({ approveDirectorQuote: jest.fn(), rejectQuote: jest.fn() }));
 jest.mock("../pdf/job-packet-loader", () => ({
-  loadJobPacketInputs: jest.fn().mockResolvedValue({ job: { buildingName: "Harbour House", title: "Leak" } }),
+  loadJobPacketInputs: jest
+    .fn()
+    .mockResolvedValue({ job: { buildingName: "Harbour House", title: "Leak" }, jobAttachments: [], sourcePointAttachments: [] }),
 }));
 jest.mock("../pdf/job-packet", () => ({
   buildJobPacket: jest.fn().mockResolvedValue(Buffer.from("pdf")),

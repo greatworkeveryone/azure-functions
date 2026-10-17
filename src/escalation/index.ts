@@ -9,9 +9,23 @@
 // An authority escalation ends with the domain's decision, which is WP21's
 // to wire up (it will resolve the escalation in the decision's own transaction).
 // The engine never decides for the domain, and its resolve refuses authority
-// escalations from the inbox.
+// escalations from the inbox. A domain that writes its own rows beside the
+// escalation raises it with raiseWithin and ends it with withdrawWithin, on a
+// transaction it owns (the decision requests of jobs plan A1 do).
 
-export { acknowledge, autoResolve, escalateFurther, hasNextLevel, previewTarget, raise, resolve, SWEEP_ACTOR, withdraw } from "./engine";
+export {
+  acknowledge,
+  autoResolve,
+  escalateFurther,
+  hasNextLevel,
+  previewTarget,
+  raise,
+  raiseWithin,
+  resolve,
+  SWEEP_ACTOR,
+  withdraw,
+  withdrawWithin,
+} from "./engine";
 export type {
   AcknowledgeInput,
   AutoResolveInput,
@@ -19,6 +33,7 @@ export type {
   EscalateFurtherResult,
   RaiseInput,
   RaiseResult,
+  RaiseWithinResult,
   ResolveInput,
   WithdrawInput,
 } from "./engine";

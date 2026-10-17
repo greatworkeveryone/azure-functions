@@ -230,7 +230,7 @@ describe("markJobInvoiceMyobCreated", () => {
 describe("resendDirectorInvoiceEmail", () => {
   it("uses the token's name for triggeredBy and DirectorEmailSentBy, ignoring TriggeredBy", async () => {
     routeSql([
-      [/SELECT JobID, Amount, Status FROM JobInvoices/, [{ Amount: 5000, JobID: 9, Status: "approved" }]],
+      [/SELECT JobID, Amount, Status, InvoiceNumber/, [{ Amount: 5000, JobID: 9, Status: "approved" }]],
       storedInvoice,
     ]);
 

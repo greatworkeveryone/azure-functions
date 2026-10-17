@@ -7,7 +7,7 @@
 
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
-import { buildJobPacket, nonMergeableAttachments } from "../pdf/job-packet";
+import { buildJobPacket, nonMergeableAttachments, type PacketInput } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
 import type { Connection } from "tedious";
 import { resolveRoleRecipients } from "./role-recipients";
@@ -40,9 +40,35 @@ export interface SendDirectorApprovalArgs {
   triggeredBy?: string;
 }
 
+/** What went out, for the ledger: no file contents, no addresses. */
+export interface DirectorPacketSummary {
+  /** Job and inspection-point files in the packet, merged into the PDF or not. */
+  attachments: number;
+  /** What the packet holds, in order: "job summary", "quote QT-9-1", "invoice IV-9-1"... */
+  sections: string[];
+  /** Files that can't be merged into the PDF and went as separate email attachments. */
+  separateFiles: number;
+}
+
 export interface SendDirectorApprovalResult {
+  /** Present on a real send; a stand-in that only returns who it sent to may leave it out. */
+  packet?: DirectorPacketSummary;
   sentTo: string[];
   sentAt: Date;
+}
+
+function packetSummary(input: PacketInput, separateFiles: number): DirectorPacketSummary {
+  const label = (kind: string, number: string | null | undefined, id: number): string => `${kind} ${number ?? `#${id}`}`;
+  return {
+    attachments: input.jobAttachments.length + input.sourcePointAttachments.length,
+    sections: [
+      "job summary",
+      ...(input.selectedQuote ? [label("quote", input.selectedQuote.quoteNumber, input.selectedQuote.id)] : []),
+      ...(input.purchaseOrder ? [label("purchase order", input.purchaseOrder.poNumber, input.purchaseOrder.id)] : []),
+      ...(input.invoice ? [label("invoice", input.invoice.invoiceNumber, input.invoice.id)] : []),
+    ],
+    separateFiles,
+  };
 }
 
 export async function sendDirectorApprovalEmail(
@@ -104,5 +130,5 @@ ${linkLine}
     ],
   );
 
-  return { sentTo: recipients, sentAt: new Date() };
+  return { packet: packetSummary(input, extras.length), sentTo: recipients, sentAt: new Date() };
 }

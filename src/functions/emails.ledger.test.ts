@@ -5,6 +5,7 @@
 // layer is mocked; the real ledger and quote-decisions helpers run.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -149,6 +150,8 @@ beforeEach(() => {
   mockSql(HAPPY);
 });
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("a director's emailed approval", () => {

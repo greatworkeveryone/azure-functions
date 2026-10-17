@@ -19,6 +19,8 @@ import { graphSendMail } from "../graph";
 import { formatDarwinDateTime } from "../ledger/darwinTime";
 import { getAdapter } from "./adapters/registry";
 import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "./config";
+import { buildDecisionEmail } from "./decisionEmail";
+import { askedOfIds, namedTargetIds } from "./decisionRows";
 import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
@@ -32,6 +34,11 @@ export interface NotifyOptions {
   attempts?: number;
   /** First wait between tries, doubled each time (default 500 ms). */
   backoffMs?: number;
+  /** What a call adds to the row's NotificationAttempts, which the retry limit
+   *  counts. "all" (the default) counts every try; "failures" counts only the tries
+   *  that failed, so a reminder that goes out first time costs the row nothing and
+   *  a request reminded five times is not "out of tries" at its first hiccup. */
+  countAttempts?: "all" | "failures";
   env?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
   now?: () => Date;
@@ -74,8 +81,18 @@ export function targetUsers(row: EscalationRow, users: readonly DirectoryUser[])
     return active.filter((user) => OVERSIGHT_ROLES.has(normaliseRole(user.role)));
   }
   if (row.targetUserId !== null) return active.filter((user) => user.userId === row.targetUserId);
+  // A level of several named people: they are in the row's context (a decision request's).
+  const named = namedTargetIds(row);
+  if (named.length > 0) return active.filter((user) => named.includes(user.userId));
   const role = normaliseRole(row.targetRole);
   return role === "" ? [] : active.filter((user) => normaliseRole(user.role) === role);
+}
+
+/** The names of the people a row was raised to ask, for an email that says so. */
+export function askedOfNames(row: EscalationRow, users: readonly DirectoryUser[]): string[] {
+  return askedOfIds(row)
+    .map((id) => users.find((user) => user.userId === id)?.name)
+    .filter((name): name is string => Boolean(name));
 }
 
 /** Email addresses to send to: the target users', or the env list when a
@@ -123,12 +140,17 @@ function reasonLine(row: EscalationRow): string[] {
   return lines;
 }
 
-/** Subject and body for one email. Plain text; the link is the point of it. */
+/** Subject and body for one email. Plain text; the link is the point of it. A
+ *  decision request has its own wording (decisionEmail.ts); `askedOf` names the
+ *  people it was asked of for that. */
 export function buildEmail(
   kind: NotifyEvent | "fyi" | "resolved",
   row: EscalationRow,
   link: string | null,
+  askedOf: readonly string[] = [],
 ): { body: string; subject: string } {
+  const decision = buildDecisionEmail(kind, row, link, askedOf);
+  if (decision) return decision;
   const prefix: Record<typeof kind, string> = {
     follow_up: "New email on an escalation",
     fyi: "FYI, moved up",
@@ -207,7 +229,7 @@ async function remember(
         notifiedAt: outcome.state === "sent" ? now : null,
         state: outcome.state,
       },
-      outcome.attempts,
+      options.countAttempts === "failures" && outcome.state === "sent" ? 0 : outcome.attempts,
     );
   } catch (error) {
     // The escalation is committed and the email may have gone; bookkeeping that
@@ -241,7 +263,7 @@ export async function notifyTargets(
       if (recipients.length === 0) {
         outcome = { attempts: 0, error: "No one with an email address is at this level", recipients, state: "none" };
       } else {
-        const { body, subject } = buildEmail(event, row, linkFor(row, env));
+        const { body, subject } = buildEmail(event, row, linkFor(row, env), askedOfNames(row, users));
         const sent = await sendWithRetry(options.sendMail ?? defaultSend, recipients, subject, body, options);
         outcome = { attempts: sent.attempts, error: sent.error, recipients, state: sent.error === null ? "sent" : "failed" };
       }
@@ -269,7 +291,7 @@ export async function notifyPreviousLevel(
     const already = new Set(targetAddresses(next, users, env).map((address) => address.toLowerCase()));
     const recipients = targetAddresses(previous, users, env).filter((address) => !already.has(address.toLowerCase()));
     if (recipients.length === 0) return;
-    const { body, subject } = buildEmail("fyi", next, linkFor(next, env));
+    const { body, subject } = buildEmail("fyi", next, linkFor(next, env), askedOfNames(next, users));
     await (options.sendMail ?? defaultSend)(recipients, subject, body);
   } catch (error) {
     options.log?.(`escalation ${previous.escalationId}: could not tell the previous level: ${errorText(error)}`);
@@ -291,7 +313,7 @@ export async function notifyRaiserResolved(
     const raiser = users.find((user) => user.userId === row.raisedByUserId);
     const recipients = uniqueAddresses([raiser?.email]);
     if (recipients.length === 0) return;
-    const { body, subject } = buildEmail("resolved", row, linkFor(row, env));
+    const { body, subject } = buildEmail("resolved", row, linkFor(row, env), askedOfNames(row, users));
     await (options.sendMail ?? defaultSend)(recipients, subject, body);
   } catch (error) {
     options.log?.(`escalation ${row.escalationId}: could not tell the raiser: ${errorText(error)}`);

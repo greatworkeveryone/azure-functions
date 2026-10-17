@@ -10,13 +10,26 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { uploadAttachment } from "../mybuildings-client";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { jobScope } from "../ledger/moneyDecisions";
+import { leaseDocumentRefusal, tenancyOfDocument } from "../tenancy-records";
+import { DECISION_FILE_REFUSAL, requestsAboutAttachment } from "../jobDecisions/store";
+import {
+  detachRefusal,
+  isMoneyLinkTable,
+  linkedFileRefusal,
+  moneyLinksOf,
+  moneyLinksOfJob,
+  readDetachTarget,
+} from "../money-record-files";
 
 // A stored name that is not a minted wr-attachments name (a legacy row, or
 // one claimed before SEC-01 was fixed) gets no link rather than failing the list.
@@ -28,7 +41,7 @@ function readSasOrNull(blobName: unknown): string | null {
 // BlobName is included because callers use it to mint a read SAS URL
 // (see `generateReadSasUrl(r.BlobName)` in the response mapping).
 // MyBuildingsConfirmedAt is included for the same SAS-vs-archived
-// decision in the response mapping.
+// decision in the response mapping (legacy — see the note on getAttachments).
 const ATTACHMENT_COLUMNS = `
   Id, WorkRequestID, JobID, JobCode,
   BlobName, OriginalName, Extension, ContentType, SizeBytes,
@@ -213,11 +226,17 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
           [{ name: "WorkRequestID", type: TYPES.Int, value: workRequestId }],
         );
 
-    // Mint a fresh read SAS for rows whose blob still exists. Once a blob has
-    // been cleaned up (MyBuildingsConfirmedAt set), the SAS would 404 — return
-    // null so the UI can show the row as archived.
+    // Mint a fresh read SAS for rows whose blob still exists. Rows stamped with
+    // MyBuildingsConfirmedAt had their blob deleted by the old cleanupAttachments
+    // timer (removed Oct 2026 — it reaped files that never went to myBuildings).
+    // Nothing sets the column any more; the null-SAS guard stays so those legacy
+    // rows show as archived instead of handing out a 404 link.
+    // LinkedTo: the quotes, POs and invoices a file backs (D5), so the screen
+    // can say why its delete is refused before anyone clicks.
+    const linkedTo = jobId !== null ? await moneyLinksOfJob(connection, jobId) : new Map<number, string[]>();
     const attachments = rows.map((r: any) => ({
       ...r,
+      LinkedTo: linkedTo.get(r.Id) ?? [],
       sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
 
@@ -232,7 +251,8 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
 
 // ── Join-table helpers (PurchaseOrderAttachments / QuoteAttachments / JobInvoiceAttachments)
 // One pair of endpoints per parent. Idempotent attach (NOT EXISTS guard) so
-// the FE can call without first checking; detach is a plain DELETE.
+// the FE can call without first checking; detach refuses a record that has
+// been approved, paid, sent or marked in MYOB, and is ledgered (D5).
 //
 // A file links to a parent only when it is on the parent's job
 // (Attachments.JobID = parent.JobID; a NULL JobID matches nothing), and the
@@ -369,19 +389,55 @@ async function detachFromParent(
         jsonBody: { error: `${spec.parentParam} (number) and AttachmentID (number) required` },
       };
     }
+    // Every join table backs a money record and must declare when its files
+    // are fixed (src/money-record-files.ts).
+    if (!isMoneyLinkTable(spec.table)) throw new Error(`detach: no money-record rule for ${spec.table}`);
 
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
-    await executeQuery(
-      connection,
-      `DELETE FROM ${spec.table}
-        WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID`,
-      [
-        { name: "ParentID", type: TYPES.Int, value: parentId },
-        { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
-      ],
-    );
-    /* eslint-enable local/no-sql-interpolation */
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    // D5: read the record's state and lock the link in one statement, refuse
+    // a record someone has relied on, and ledger every detach that goes ahead,
+    // all in one transaction.
+    await beginTransaction(connection);
+    try {
+      const target = await readDetachTarget(connection, spec.table, parentId, attachmentId);
+      if (!target || !target.linked) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "That file isn't attached there" } };
+      }
+      if (target.lockedBecause) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 422, jsonBody: { error: detachRefusal(target, parentId) } };
+      }
+
+      /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+      await executeQuery(
+        connection,
+        `DELETE FROM ${spec.table}
+          WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID`,
+        [
+          { name: "ParentID", type: TYPES.Int, value: parentId },
+          { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
+        ],
+      );
+      /* eslint-enable local/no-sql-interpolation */
+
+      const scope = await jobScope(connection, target.jobId);
+      await record(connection, {
+        action: "attachment.detach",
+        actor,
+        before: { attachmentId, fileName: target.fileName },
+        buildingId: scope.buildingId,
+        jobId: scope.jobId,
+        subject: { id: parentId, type: target.subject },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error(`detach (${spec.table}) failed:`, error.message);
@@ -452,10 +508,12 @@ async function listParentAttachments(
 }
 
 // ── POST /api/deleteAttachment ──────────────────────────────────────────────
-// Body: { AttachmentID }. Deletes the local blob + the Attachments row;
-// PurchaseOrderAttachments / QuoteAttachments rows are removed via the
-// cascading FKs (see migration 010). Archived rows (MyBuildingsConfirmedAt
-// set) keep no local blob, so the storage delete is skipped.
+// Body: { AttachmentID }. Deletes the local blob + the Attachments row, for its
+// uploader or an admin, and only while no quote, PO or invoice links it (D5):
+// a linked file answers 422 naming the records. (The link rows would go with
+// it through the cascading FKs of migrations 010 and 134.) Legacy archived rows
+// (MyBuildingsConfirmedAt set by the removed cleanup timer) keep no local blob,
+// so the storage delete is skipped.
 
 async function handleDeleteAttachment(
   request: HttpRequest,
@@ -516,6 +574,24 @@ async function handleDeleteAttachment(
     const isOwner = uploadedBy != null && uploadedBy === callerOid;
     if (!isAdmin && !isOwner) {
       return forbiddenResponse("Only the uploader or an admin can delete this attachment.");
+    }
+
+    // A file that backs a quote, PO or invoice is relied on (D5): the delete
+    // below would take its blob and, through the cascades, every link to it.
+    const links = await moneyLinksOf(connection, attachmentId);
+    if (links.length > 0) {
+      return { status: 422, jsonBody: { error: linkedFileRefusal(links) } };
+    }
+    // A lease document is archived, never deleted (D4, DL-19): the cascade
+    // would also drop its TenancyAttachments link with no record kept.
+    const tenancy = await tenancyOfDocument(connection, attachmentId);
+    if (tenancy) {
+      return { status: 422, jsonBody: { error: leaseDocumentRefusal(tenancy) } };
+    }
+    // The file a decision request is about stays with it (jobs plan A1): the
+    // decision keeps pointing at it, and the foreign key would refuse the delete.
+    if ((await requestsAboutAttachment(connection, attachmentId)).length > 0) {
+      return { status: 422, jsonBody: { error: DECISION_FILE_REFUSAL } };
     }
 
     // Only a file uploaded to this row is the row's to delete. A claimed email

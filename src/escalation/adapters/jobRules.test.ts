@@ -13,6 +13,8 @@ import {
   isUnassigned,
   jobConditionActive,
   jobHeadline,
+  policyAppliesToKind,
+  POLICY_JOB_KINDS,
   quoteWaitDays,
   stallClockStart,
   SWEEP_JOB_POLICIES,
@@ -41,6 +43,7 @@ function job(overrides: Partial<JobFacts> = {}): JobFacts {
     firstQuoteRequestAt: null,
     isArchived: false,
     jobId: 12,
+    kind: "facilities",
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
@@ -271,6 +274,62 @@ describe("jobConditionActive", () => {
       "job.invoice_waiting",
       "job.past_due",
     ]);
+  });
+});
+
+describe("the job kinds each sweep policy applies to (plan D2)", () => {
+  const rule = { env: ENV, holidays: NO_HOLIDAYS, now: darwin("2026-10-20 12:00") };
+  const POLICIES = [...SWEEP_JOB_POLICIES];
+
+  // A job that meets each policy's rule, before its kind is considered.
+  const MEETS: Record<(typeof SWEEP_JOB_POLICIES)[number], Partial<JobFacts>> = {
+    "job.stalled_unacknowledged": { statusSince: darwin("2026-09-01 09:00") },
+    "job.unassigned": { assigned: false },
+    "job.quote_not_back": { firstQuoteRequestAt: darwin("2026-10-01 09:00"), requestedContractors: 1, status: "Quote" },
+    "job.invoice_waiting": { oldestPendingInvoiceAt: darwin("2026-10-01 09:00"), pendingInvoices: 1 },
+    "job.past_due": { expectedProgressUpdate: darwin("2026-10-01 00:00") },
+  };
+
+  it.each(POLICIES)("%s applies to facilities and maintenance jobs", (policyKey) => {
+    for (const kind of ["facilities", "maintenance"]) {
+      expect(jobConditionActive(policyKey, job({ ...MEETS[policyKey], kind }), rule)).toBe(true);
+    }
+  });
+
+  it.each(POLICIES)("%s never applies to an Admin / Accounts job, whatever else is true of it", (policyKey) => {
+    expect(jobConditionActive(policyKey, job({ ...MEETS[policyKey], kind: "admin" }), rule)).toBe(false);
+  });
+
+  it.each(POLICIES)("%s lists its kinds by name, so a kind nobody listed gets nothing", (policyKey) => {
+    expect(jobConditionActive(policyKey, job({ ...MEETS[policyKey], kind: "projects" }), rule)).toBe(false);
+  });
+
+  it("names the kinds of every sweep policy, and only those", () => {
+    expect(Object.keys(POLICY_JOB_KINDS).sort()).toEqual([...SWEEP_JOB_POLICIES].sort());
+    for (const policyKey of POLICIES) expect([...POLICY_JOB_KINDS[policyKey]]).toEqual(["facilities", "maintenance"]);
+  });
+
+  it("asks job.critical and the manual policies of every kind: the job save or a person raised those", () => {
+    const admin = job({ kind: "admin", priority: "Critical" });
+    expect(jobConditionActive("job.critical", admin, rule)).toBe(true);
+    expect(jobConditionActive("job.manual", admin, rule)).toBe(true);
+    expect(jobConditionActive("any.manual", admin, rule)).toBe(true);
+    expect(policyAppliesToKind("job.critical", "admin")).toBe(true);
+  });
+
+  it("answers by policy name, and not for a name that only exists on Object", () => {
+    expect(policyAppliesToKind("job.quote_not_back", "maintenance")).toBe(true);
+    expect(policyAppliesToKind("job.quote_not_back", "admin")).toBe(false);
+    expect(policyAppliesToKind("constructor", "admin")).toBe(true);
+    expect(jobConditionActive("constructor", job({ kind: "admin" }), rule)).toBe(false);
+  });
+
+  it("reads the kind from the row, and a row without one as facilities", () => {
+    const row = { AssignedTo: "Fay", AssignedToUserID: 3, BuildingID: 1, CreatedAt: darwin("2026-09-01 09:00"), IsArchived: false, JobID: 7, Status: "Work", Title: "t" };
+    expect(toJobFacts({ ...row, Kind: "admin" }).kind).toBe("admin");
+    expect(toJobFacts({ ...row, Kind: "maintenance" }).kind).toBe("maintenance");
+    expect(toJobFacts(row).kind).toBe("facilities");
+    expect(toJobFacts({ ...row, Kind: "  " }).kind).toBe("facilities");
   });
 });
 
