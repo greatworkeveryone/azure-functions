@@ -123,12 +123,34 @@ export class ReviewWorld {
     return { IndexArrivedAt: new Date(String(arrived.OccurredAt)), IndexArrivedQuarter: after.referenceQuarter ?? null };
   }
 
+  /** The review queries' APPROVAL_RUNG: the highest E3 rung since the last submit, while waiting for approval. */
+  private approvalRung(review: Row): Row {
+    if (review.State !== "awaiting_approval") return { ApprovalRung: null };
+    const since = review.SubmittedAt instanceof Date ? review.SubmittedAt.getTime() : null;
+    const rungs = this.state.escalations
+      .filter((e) => e.SubjectId === review.ReviewId && e.PolicyKey === "rent_review.approval")
+      .filter((e) => since === null || !(e.CreatedAt instanceof Date) || e.CreatedAt.getTime() >= since)
+      .map((e) => (e.NoIndependentTarget === true || e.NoIndependentTarget === 1 ? 3 : e.TargetRole === "accounts_manager" ? 1 : e.TargetRole === "cfo" ? 2 : 3));
+    return { ApprovalRung: rungs.length > 0 ? Math.max(...rungs) : null };
+  }
+
+  /** The review queries' LAST_CANCEL: a cancelled review's reason from its ledger row. */
+  private cancelReason(review: Row): Row {
+    if (review.State !== "cancelled") return {};
+    const row = this.state.ledger
+      .filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId && l.Action === "rent_review.cancel")
+      .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    return row ? { CancelReason: row.Reason ?? null } : {};
+  }
+
   private joined(review: Row): Row {
     const tenant = this.tenant(Number(review.TenantId));
     return {
       ...review,
       ...this.lastReturn(review),
       ...this.indexArrival(review),
+      ...this.approvalRung(review),
+      ...this.cancelReason(review),
       LegalName: tenant.LegalName,
       OwnerName: review.OwnerUserId ? `User ${review.OwnerUserId}` : null,
       TenantArchivedAt: tenant.ArchivedAt ?? null,
@@ -213,17 +235,8 @@ export class ReviewWorld {
       const ids = Object.entries(p).filter(([k]) => k.startsWith("Change")).map(([, v]) => v);
       return this.state.changeLog.filter((r) => r.TenantId === p.TenantId && ids.includes(r.ChangeId));
     }
-    if (/^SELECT e\.TargetRole, e\.NoIndependentTarget, e\.\[Level\], e\.Status\s+FROM dbo\.Escalations e/.test(sql.trim())) {
-      const review = this.state.reviews.find((r) => r.ReviewId === p.ReviewId);
-      const since = review?.SubmittedAt instanceof Date ? review.SubmittedAt.getTime() : null;
-      return this.state.escalations.filter(
-        (e) =>
-          e.SubjectId === p.ReviewId &&
-          e.PolicyKey === p.Approval &&
-          (since === null || !(e.CreatedAt instanceof Date) || e.CreatedAt.getTime() >= since),
-      );
-    }
-    if (/FROM dbo\.Escalations/.test(sql)) return [];
+    // Escalation reads of their own (not a review query's OUTER APPLY over them): nothing here.
+    if (sql.match(/\bFROM\s+(dbo\.\w+)/)?.[1] === "dbo.Escalations") return [];
     if (/FROM dbo\.CpiIndex/.test(sql)) {
       return this.state.cpi.filter((r) => r.Region === p.Region && (r.Period === p.PeriodA || r.Period === p.PeriodB));
     }

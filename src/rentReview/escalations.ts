@@ -421,13 +421,7 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
   return result;
 }
 
-// ── C7: the level E3 has reached ─────────────────────────────────────────────
-
-const LEVEL_REACHED_SQL = `SELECT e.TargetRole, e.NoIndependentTarget, e.[Level], e.Status
-  FROM dbo.Escalations e
-  INNER JOIN dbo.RentReviews r ON r.ReviewId = e.SubjectId
-  WHERE e.SubjectType = N'rent_review' AND e.SubjectId = @ReviewId AND e.PolicyKey = @Approval
-    AND (r.SubmittedAt IS NULL OR e.CreatedAt >= r.SubmittedAt)`;
+// ── The rung an E3 stands at (the generator; C7 reads it in SQL) ─────────────
 
 const APPROVAL_RUNGS = ["accounts_manager", "cfo", "director"] as const;
 
@@ -442,16 +436,3 @@ export function rungOf(row: { NoIndependentTarget?: unknown; TargetRole?: unknow
 /** The higher of two rungs. */
 export const higherRung = (a: string | null, b: string): string =>
   a !== null && APPROVAL_RUNGS.indexOf(a as (typeof APPROVAL_RUNGS)[number]) >= APPROVAL_RUNGS.indexOf(b as (typeof APPROVAL_RUNGS)[number]) ? a : b;
-
-/** The role an approver must hold (at least) to approve the review now (C7): the
- *  highest rung any E3 since the review was submitted has reached, live or not,
- *  so withdrawing or losing the live one never lowers it (L3); the directors when
- *  nobody independent was left; the ladder's first rung (an accounts manager)
- *  when none was raised (or its policy is off). */
-export async function requiredApprovalRole(connection: Connection, reviewId: string): Promise<string> {
-  const rows = await executeQuery(connection, LEVEL_REACHED_SQL, [
-    { name: "ReviewId", type: TYPES.NVarChar, value: reviewId },
-    { name: "Approval", type: TYPES.NVarChar, value: REVIEW_POLICIES.approval },
-  ]);
-  return rows.reduce<string | null>((reached, row) => higherRung(reached, rungOf(row)), null) ?? "accounts_manager";
-}

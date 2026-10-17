@@ -54,7 +54,8 @@ import { applyReview } from "../rentReview/apply";
 import { readDirectorOverride } from "../rentReview/directorOverride";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
-import { basisEditorsSinceCommence, dutiesOf, requiredApprovalRole } from "../rentReview/escalations";
+import { requiredApprovalRoleOf } from "../rentReview/approvalLevel";
+import { basisEditorsSinceCommence, dutiesOf } from "../rentReview/escalations";
 import {
   APPROVER_RANK,
   approverRank,
@@ -156,7 +157,7 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
 
         // C7: the level E3 has reached; a director, whatever the rung, for a lower rent (A3).
         const reduction = isReduction(calc);
-        const required = reduction ? "director" : await requiredApprovalRole(db, reviewId);
+        const required = requiredApprovalRoleOf(review, calc);
         if (rank < (APPROVER_RANK[required] ?? APPROVER_RANK.director)) {
           const message = reduction
             ? "This review lowers the rent, so a director has to approve it"

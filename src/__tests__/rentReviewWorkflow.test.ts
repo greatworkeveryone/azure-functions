@@ -974,3 +974,39 @@ describe("L7: a review waiting for its index comes back calculated, and its owne
     expect(review.indexArrived).toEqual({ at: expect.any(String), referenceQuarter: REFERENCE });
   });
 });
+
+// ── The review shows the level an approver needs (approval.requiredRole) ─────
+
+describe("approval.requiredRole: the rung C7 requires, on the review while it waits for approval", () => {
+  const outOfBand = { cpi: [100, 120] as [number, number], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } };
+
+  it("is an accounts manager with no E3, the rung E3 reached, and null once approved", async () => {
+    await calculated(outOfBand);
+    as(PEOPLE.ann);
+    const waiting = reviewBody(await submit());
+    expect(waiting.approval).toEqual({ at: null, basis: null, name: null, requiredRole: "accounts_manager", userId: null });
+    const later = new Date((world.review("rev-1").SubmittedAt as Date).getTime() + 60_000);
+    world.state.escalations.push({ CreatedAt: later, EscalationId: 1, Level: 2, NoIndependentTarget: false, PolicyKey: "rent_review.approval", Status: "open", SubjectId: "rev-1", TargetRole: "cfo" });
+    const read = toReviewDto((await loadReview({} as never, "rev-1")) as never, TODAY);
+    expect(read.approval?.requiredRole).toBe("cfo");
+    // APPROVE reads the same rung from the locked row.
+    as(PEOPLE.bo);
+    expect((await approve()).jsonBody).toMatchObject({ code: "approval_level", requiredRole: "cfo" });
+    as(PEOPLE.cy);
+    const approved = reviewBody(await approve());
+    expect(approved.approval).toMatchObject({ basis: "approved", name: "Cy Finance", requiredRole: null });
+  });
+
+  it("is a director for a lower rent, whatever the rung (A3)", async () => {
+    await calculated({ cpi: [100, 98], review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })) }, tenant: { CpiFloorPercent: null, ReviewRatchet: false } });
+    expect(reviewBody(await submit()).approval).toMatchObject({ requiredRole: "director" });
+  });
+
+  it("is a director when nobody independent was left on the ladder", async () => {
+    await calculated(outOfBand);
+    await submit();
+    const later = new Date((world.review("rev-1").SubmittedAt as Date).getTime() + 60_000);
+    world.state.escalations.push({ CreatedAt: later, EscalationId: 1, Level: 3, NoIndependentTarget: true, PolicyKey: "rent_review.approval", Status: "open", SubjectId: "rev-1", TargetRole: "director" });
+    expect(toReviewDto((await loadReview({} as never, "rev-1")) as never, TODAY).approval?.requiredRole).toBe("director");
+  });
+});

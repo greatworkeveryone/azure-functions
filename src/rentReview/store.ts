@@ -37,7 +37,8 @@ const REVIEW_COLUMNS = `
   t.ArchivedAt AS TenantArchivedAt,
   u.DisplayName AS OwnerName,
   lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote,
-  ia.IndexArrivedAt, ia.IndexArrivedQuarter`;
+  ia.IndexArrivedAt, ia.IndexArrivedQuarter,
+  ar.ApprovalRung, cr.CancelReason`;
 
 // The last RETURN of a review that is back in progress and hasn't been
 // submitted since (WP26): the latest rent_review.return row in the decision
@@ -74,11 +75,41 @@ const LAST_INDEX_ARRIVAL = `
     ORDER BY a.LedgerId DESC
   ) ia`;
 
+// C7's rung while the review waits for approval: the highest any E3 has reached
+// since the review was last submitted, live or not (1 accounts_manager, 2 cfo,
+// 3 director; nobody independent left, or a role it doesn't know, counts as
+// the directors). APPROVE reads it from the locked row and the review's DTO
+// shows it, so the two can't disagree (rentReview/approvalLevel.ts).
+const APPROVAL_RUNG = `
+  OUTER APPLY (
+    SELECT MAX(CASE
+        WHEN e.NoIndependentTarget = 1 THEN 3
+        WHEN e.TargetRole = N'accounts_manager' THEN 1
+        WHEN e.TargetRole = N'cfo' THEN 2
+        ELSE 3 END) AS ApprovalRung
+    FROM dbo.Escalations e
+    WHERE r.State = 'awaiting_approval'
+      AND e.SubjectType = N'rent_review' AND e.SubjectId = r.ReviewId AND e.PolicyKey = N'rent_review.approval'
+      AND (r.SubmittedAt IS NULL OR e.CreatedAt >= r.SubmittedAt)
+  ) ar`;
+
+// A cancelled review's reason: CANCEL records it in the ledger, not on the row.
+const LAST_CANCEL = `
+  OUTER APPLY (
+    SELECT TOP 1 c.Reason AS CancelReason
+    FROM dbo.DecisionLedger c
+    WHERE r.State = 'cancelled'
+      AND c.SubjectType = N'rent_review' AND c.SubjectId = r.ReviewId AND c.Action = N'rent_review.cancel'
+    ORDER BY c.LedgerId DESC
+  ) cr`;
+
 const REVIEW_JOINS = `
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
   ${LAST_RETURN}
-  ${LAST_INDEX_ARRIVAL}`;
+  ${LAST_INDEX_ARRIVAL}
+  ${APPROVAL_RUNG}
+  ${LAST_CANCEL}`;
 
 const REVIEW_BY_ID = `SELECT ${REVIEW_COLUMNS} FROM dbo.RentReviews r ${REVIEW_JOINS}
   WHERE r.ReviewId = @ReviewId AND r.State IS NOT NULL`;

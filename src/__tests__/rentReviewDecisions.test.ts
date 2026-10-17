@@ -590,3 +590,21 @@ describe("L10: a review applied ahead of its date leaves the RentPerAnnum cache 
     expect(world.tenant(7).RentPerAnnum).toBe(123711.34);
   });
 });
+
+// ── cancelReason ──────────────────────────────────────────────────────────────
+
+describe("cancelReason: a cancelled review says why", () => {
+  it("carries the cancel's reason beside waiveReason, and only once cancelled", async () => {
+    await calculated();
+    as(PEOPLE.bo);
+    const res = await call(cancelRentReview, { reason: "Superseded by the deed of variation" });
+    expect(res.status).toBe(200);
+    expect(reviewOf(res)).toMatchObject({ cancelReason: "Superseded by the deed of variation", state: "cancelled", waiveReason: null });
+  });
+
+  it("is null on a review that isn't cancelled", async () => {
+    await calculated();
+    as(PEOPLE.bo);
+    expect(reviewOf(await call(waiveRentReview, { reason: "Hardship" }))).toMatchObject({ cancelReason: null, waiveReason: "Hardship" });
+  });
+});

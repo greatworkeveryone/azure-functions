@@ -47,11 +47,15 @@ let tenancy: Row | null;
 let otherOpen: Row[];
 let updateMoves: boolean;
 
+// An escalation read of its own: the first FROM is dbo.Escalations. A review
+// read also reaches it, in an OUTER APPLY (C7's rung), and is not one.
+const ESCALATIONS_FIRST = /^\s*SELECT(?:(?!\bFROM\b)[\s\S])*\bFROM dbo\.Escalations\b/;
+
 function serve() {
   routeSql(db.executeQuery, [
     [/INSERT INTO dbo\.DecisionLedger/, () => []],
     // After the commit: the review's live escalations, to end E1 (none here).
-    [/FROM dbo\.Escalations/, () => []],
+    [ESCALATIONS_FIRST, () => []],
     [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
     [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],
     [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (tenancy ? [tenancy] : [])],
@@ -513,16 +517,16 @@ describe("the ledger", () => {
 describe("after the commit, E1 ends (WP26)", () => {
   it("looks up the review's live escalations to end E1 with the code commenced, once the commence has committed", async () => {
     await commence();
-    const lookups = callsMatching(db.executeQuery, /FROM dbo\.Escalations/);
+    const lookups = callsMatching(db.executeQuery, ESCALATIONS_FIRST);
     expect(lookups).toHaveLength(1);
     expect(lookups[0].params).toMatchObject({ SubjectId: "rev-1", SubjectType: "rent_review" });
-    const lookupOrder = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.findIndex((c: unknown[]) => /FROM dbo\.Escalations/.test(String(c[1])))];
+    const lookupOrder = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.findIndex((c: unknown[]) => ESCALATIONS_FIRST.test(String(c[1])))];
     expect(lookupOrder).toBeGreaterThan(db.commitTransaction.mock.invocationCallOrder[0]);
   });
 
   it("still answers 200 when ending the escalation fails", async () => {
     routeSql(db.executeQuery, [
-      [/FROM dbo\.Escalations/, () => Promise.reject(new Error("escalations unavailable"))],
+      [ESCALATIONS_FIRST, () => Promise.reject(new Error("escalations unavailable"))],
       [/INSERT INTO dbo\.DecisionLedger/, () => []],
       [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
       [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],

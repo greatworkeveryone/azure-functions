@@ -15,6 +15,7 @@ import {
 import { parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { isoTimestamp, rowVersionHex } from "../tenancyScheduleWrite";
+import { type ApproverRole, requiredApprovalRoleOf } from "./approvalLevel";
 import { parseBasis, type RentReviewBasis } from "./basis";
 
 export interface PersonStamp {
@@ -35,9 +36,14 @@ export interface RentReviewOutcome {
 }
 
 export interface RentReviewDto {
-  approval: (PersonStamp & { basis: string | null }) | null;
+  /** Who approved it and on what basis (approved, completed); while it waits for
+   *  approval, the role an approver must hold now (C7: rentReview/approvalLevel.ts),
+   *  the person fields null. Null otherwise. */
+  approval: (PersonStamp & { basis: string | null; requiredRole: ApproverRole | null }) | null;
   basis: RentReviewBasis | null;
   billingConfirmed: { at: string | null; by: string | null } | null;
+  /** A cancelled review's reason, from its rent_review.cancel ledger row. */
+  cancelReason: string | null;
   /** The tenancy's building (from the tenancy, so a moved tenancy reads right). */
   buildingId: number | null;
   /** The receipt (rentReviewCalc.ts), set by calculate; the override rides in it after submit. */
@@ -129,6 +135,14 @@ function indexArrivedOf(row: SqlRow, state: RentReviewState): RentReviewDto["ind
   return { at: isoTimestamp(row.IndexArrivedAt), referenceQuarter: text(row.IndexArrivedQuarter) };
 }
 
+function approvalOf(row: SqlRow, state: RentReviewState, calc: RentReviewCalc | null): RentReviewDto["approval"] {
+  if (state === "awaiting_approval") {
+    return { at: null, basis: null, name: null, requiredRole: requiredApprovalRoleOf(row, calc), userId: null };
+  }
+  const approval = stamp(row.ApprovedById, row.ApprovedByName, row.ApprovedAt);
+  return approval ? { ...approval, basis: text(row.ApprovalBasis), requiredRole: null } : null;
+}
+
 function stamp(userId: unknown, name: unknown, at: unknown): PersonStamp | null {
   const result: PersonStamp = { at: isoTimestamp(at), name: text(name), userId: whole(userId) };
   return result.at === null && result.name === null && result.userId === null ? null : result;
@@ -139,18 +153,19 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
   const state = String(row.State) as RentReviewState;
   if (!RENT_REVIEW_STATES.includes(state)) throw new Error(`Review ${row.ReviewId} has an unknown state "${row.State}"`);
   const scheduledFor = sqlDateToIso(row.ScheduledFor) ?? "";
-  const approval = stamp(row.ApprovedById, row.ApprovedByName, row.ApprovedAt);
+  const calc = parseCalc(row.Calc);
   const noticeAt = isoTimestamp(row.NoticeIssuedAt);
   const noticeBy = text(row.NoticeIssuedBy);
   const noticeMethod = text(row.NoticeMethod);
   const billingAt = isoTimestamp(row.BillingConfirmedAt);
   const billingBy = text(row.BillingConfirmedBy);
   return {
-    approval: approval ? { ...approval, basis: text(row.ApprovalBasis) } : null,
+    approval: approvalOf(row, state, calc),
     basis: parseBasis(row.Basis),
     billingConfirmed: billingAt === null && billingBy === null ? null : { at: billingAt, by: billingBy },
     buildingId: whole(row.TenantBuildingId) ?? whole(row.BuildingId),
-    calc: parseCalc(row.Calc),
+    calc,
+    cancelReason: state === "cancelled" ? text(row.CancelReason) : null,
     createdAt: isoTimestamp(row.CreatedAt),
     expectedIndexAt: sqlDateToIso(row.ExpectedIndexAt),
     indexArrived: indexArrivedOf(row, state),
