@@ -6,10 +6,15 @@
 //
 // Each review moves in a transaction of its own, only if it is still waiting
 // (someone may have cancelled or waived it since), ledgered as
-// rent_review.index_available by the system (the timer). Nothing is calculated
-// here: the owner calculates, with the values as they stand then. The owner
-// hears of it in Floorplan (D21): the review is in progress and theirs again,
-// which puts "Continue rent review" back in their next action.
+// rent_review.index_available by the system (the timer). It is then calculated
+// straight away, in a second transaction, as the system (L7): the same
+// calculation CALCULATE runs (rentReview/calculate.ts), ledgered as
+// rent_review.calculate by the timer, computedBy "Floorplan, when the CPI was
+// published". A calculation that is refused (an earlier review unsettled, say)
+// or fails leaves the review in progress for its owner to calculate by hand.
+// The owner hears of it in Floorplan (D21): the review is theirs and in progress
+// again, carrying indexArrived (when, which quarter) until it is submitted, and
+// its calc, if Floorplan made one, says so (computedBy.userId null).
 
 import type { Connection } from "tedious";
 import { executeQuery } from "../db";
@@ -20,10 +25,16 @@ import { Sentry } from "../sentry";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { parseBasis } from "./basis";
 import { previousQuarter, referenceQuarter, type CpiIndexRow } from "./cpi";
-import { inTransaction, loadCpiRows } from "./store";
-import { markIndexAvailable } from "./transitions";
+import { todayInDarwin } from "../darwinDate";
+import { parseCalc } from "../rentReviewCalc";
+import { workOutReview } from "./calculate";
+import { inTransaction, loadCpiRows, loadTenancyForReview, reviewForUpdate } from "./store";
+import { markIndexAvailable, saveCalc } from "./transitions";
 
 export const CPI_TIMER_ACTOR: LedgerActor = { kind: "system", name: "tenancyCpiSyncTimer" };
+
+/** Who a calculation made by the CPI timer says worked it out. */
+export const AUTO_CALC_BY = { name: "Floorplan, when the CPI was published", userId: null } as const;
 
 const AWAITING_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.Basis, r.OwnerUserId, r.ExpectedIndexAt,
     t.BuildingId AS TenantBuildingId
@@ -72,17 +83,48 @@ export function indexPublished(review: AwaitingReview, rows: readonly CpiIndexRo
 }
 
 export interface IndexResumeReport {
+  /** Back in progress and calculated straight away. */
+  calculated: number;
   errors: Array<{ message: string; reviewId: string }>;
+  /** Back in progress but not calculated: why, for the owner to pick up. */
+  notCalculated: Array<{ reviewId: string; why: string }>;
   resumed: number;
   /** Still waiting: a quarter not yet published (or on a different base). */
   waiting: number;
 }
 
+/** CALCULATE as the system, for a review INDEX_AVAILABLE just moved: "calculated", or why not. */
+async function calculateResumed(connection: Connection, review: AwaitingReview, today: string): Promise<string> {
+  return inTransaction(connection, async () => {
+    const row = await reviewForUpdate(connection, review.reviewId);
+    if (!row || row.State !== "in_progress" || parseCalc(row.Calc)) return "it moved on before it could be calculated";
+    const tenancy = await loadTenancyForReview(connection, review.tenantId);
+    if (!tenancy || tenancy.Status === "vacated" || (tenancy.ArchivedAt !== null && tenancy.ArchivedAt !== undefined)) {
+      return "its tenancy is vacated or archived";
+    }
+    const result = await workOutReview(connection, { computedBy: { ...AUTO_CALC_BY }, manual: null, method: "cpi", review: row, tenancy, today });
+    if (result.kind === "index_pending") return "its quarters aren't both published on one base";
+    if (result.kind === "refused") return `${result.code}: ${result.message}`;
+    if (!(await saveCalc(connection, review.reviewId, JSON.stringify(result.calc)))) return "it moved on before it could be calculated";
+    await ledger.record(connection, {
+      action: "rent_review.calculate",
+      actor: CPI_TIMER_ACTOR,
+      after: result.calc,
+      buildingId: review.buildingId,
+      ruleApplied: "cpi_quarter_before_review_date",
+      subject: { id: review.reviewId, type: "rent_review" },
+      tenantId: review.tenantId,
+    });
+    return "calculated";
+  });
+}
+
 export async function resumeAwaitingIndex(
   connection: Connection,
-  run: { dryRun: boolean; log: (message: string) => void; warn: (message: string) => void },
+  run: { dryRun: boolean; log: (message: string) => void; today?: string; warn: (message: string) => void },
 ): Promise<IndexResumeReport> {
-  const report: IndexResumeReport = { errors: [], resumed: 0, waiting: 0 };
+  const report: IndexResumeReport = { calculated: 0, errors: [], notCalculated: [], resumed: 0, waiting: 0 };
+  const today = run.today ?? todayInDarwin();
   const reviews = (await executeQuery(connection, AWAITING_SQL)).map(awaitingReviewOf);
   for (const review of reviews) {
     const rows = review.region ? await loadCpiRows(connection, review.region, [review.referenceQuarter, review.previousQuarter]) : [];
@@ -91,7 +133,7 @@ export async function resumeAwaitingIndex(
       continue;
     }
     if (run.dryRun) {
-      run.log(`cpi sync dry run: would return rent review ${review.reviewId} to in progress (${review.referenceQuarter} is published)`);
+      run.log(`cpi sync dry run: would return rent review ${review.reviewId} to in progress and calculate it (${review.referenceQuarter} is published)`);
       report.resumed += 1;
       continue;
     }
@@ -116,20 +158,34 @@ export async function resumeAwaitingIndex(
         });
         return true;
       });
-      if (moved) {
-        report.resumed += 1;
-        invalidateTenantAndBuilding(review.tenantId, review.buildingId);
-      }
+      if (!moved) continue;
+      report.resumed += 1;
+      invalidateTenantAndBuilding(review.tenantId, review.buildingId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       report.errors.push({ message, reviewId: review.reviewId });
       run.warn(`cpi sync: rent review ${review.reviewId} couldn't go back to in progress: ${message}`);
       Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer index resume", reviewId: review.reviewId } });
+      continue;
+    }
+    // In progress again: calculate it now, so the owner finds it ready to check and submit.
+    try {
+      const outcome = await calculateResumed(connection, review, today);
+      if (outcome === "calculated") report.calculated += 1;
+      else {
+        report.notCalculated.push({ reviewId: review.reviewId, why: outcome });
+        run.warn(`cpi sync: rent review ${review.reviewId} is back in progress but wasn't calculated: ${outcome}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      report.notCalculated.push({ reviewId: review.reviewId, why: message });
+      run.warn(`cpi sync: rent review ${review.reviewId} is back in progress but its calculation failed: ${message}`);
+      Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer index resume calculate", reviewId: review.reviewId } });
     }
   }
   run.log(
-    `cpi sync: ${run.dryRun ? "would return" : "returned"} ${report.resumed} rent review(s) waiting for the index to in progress; ` +
-      `${report.waiting} still waiting, ${report.errors.length} failed`,
+    `cpi sync: ${run.dryRun ? "would return" : "returned"} ${report.resumed} rent review(s) waiting for the index to in progress ` +
+      `(${run.dryRun ? "each to be" : `${report.calculated}`} calculated); ${report.waiting} still waiting, ${report.errors.length} failed`,
   );
   return report;
 }

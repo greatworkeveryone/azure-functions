@@ -113,11 +113,22 @@ export class ReviewWorld {
     return { ReturnNote: ret.Reason, ReturnedAt: new Date(String(ret.OccurredAt)), ReturnedByName: ret.ActorName };
   }
 
+  /** The review queries' LAST_INDEX_ARRIVAL: the latest rent_review.index_available with no submit after it, in progress only. */
+  private indexArrival(review: Row): Row {
+    if (review.State !== "in_progress") return {};
+    const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId);
+    const arrived = rows.filter((l) => l.Action === "rent_review.index_available").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    if (!arrived || rows.some((l) => l.Action === "rent_review.submit" && Number(l.LedgerId) > Number(arrived.LedgerId))) return {};
+    const after = typeof arrived.After === "string" ? (JSON.parse(arrived.After) as Row) : {};
+    return { IndexArrivedAt: new Date(String(arrived.OccurredAt)), IndexArrivedQuarter: after.referenceQuarter ?? null };
+  }
+
   private joined(review: Row): Row {
     const tenant = this.tenant(Number(review.TenantId));
     return {
       ...review,
       ...this.lastReturn(review),
+      ...this.indexArrival(review),
       LegalName: tenant.LegalName,
       OwnerName: review.OwnerUserId ? `User ${review.OwnerUserId}` : null,
       TenantArchivedAt: tenant.ArchivedAt ?? null,
@@ -219,6 +230,11 @@ export class ReviewWorld {
     if (/FROM dbo\.TenantOccupancies/.test(sql)) return [{ Sqm: this.state.occupancySqm[Number(p.TenantId)] ?? 0 }];
 
     // Reviews
+    if (/WHERE r\.State = 'awaiting_index'/.test(sql)) {
+      return this.state.reviews
+        .filter((r) => r.State === "awaiting_index")
+        .map((r) => ({ ...r, TenantBuildingId: this.tenant(Number(r.TenantId)).BuildingId }));
+    }
     if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.RentReviews r/.test(sql.trim())) {
       return this.state.reviews
         .filter((r) => r.State !== null && r.State !== undefined && (p.TenantId === undefined || r.TenantId === p.TenantId))

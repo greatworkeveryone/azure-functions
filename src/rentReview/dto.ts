@@ -45,6 +45,11 @@ export interface RentReviewDto {
   createdAt: string | null;
   /** Set while a CPI review waits for the index (WP26). */
   expectedIndexAt: string | null;
+  /** The CPI index this review waited for was published (L7): when, and the
+   *  reference quarter, while the review is in progress and not submitted since.
+   *  The CPI timer calculates it straight away; its calc then says so
+   *  (computedBy.userId null). Null otherwise. */
+  indexArrived: { at: string | null; referenceQuarter: string | null } | null;
   method: RentReviewMethod | null;
   notice: { at: string | null; by: string | null; method: string | null } | null;
   /** Approved and completed reviews: what was applied (WP26). */
@@ -119,6 +124,11 @@ function returnedOf(row: SqlRow, state: RentReviewState): RentReviewDto["returne
   return { at: isoTimestamp(row.ReturnedAt), byName: text(row.ReturnedByName) ?? "someone", note: text(row.ReturnNote) };
 }
 
+function indexArrivedOf(row: SqlRow, state: RentReviewState): RentReviewDto["indexArrived"] {
+  if (state !== "in_progress" || row.IndexArrivedAt === null || row.IndexArrivedAt === undefined) return null;
+  return { at: isoTimestamp(row.IndexArrivedAt), referenceQuarter: text(row.IndexArrivedQuarter) };
+}
+
 function stamp(userId: unknown, name: unknown, at: unknown): PersonStamp | null {
   const result: PersonStamp = { at: isoTimestamp(at), name: text(name), userId: whole(userId) };
   return result.at === null && result.name === null && result.userId === null ? null : result;
@@ -143,6 +153,7 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
     calc: parseCalc(row.Calc),
     createdAt: isoTimestamp(row.CreatedAt),
     expectedIndexAt: sqlDateToIso(row.ExpectedIndexAt),
+    indexArrived: indexArrivedOf(row, state),
     method: METHODS.has(String(row.Method)) ? (row.Method as RentReviewMethod) : null,
     notice:
       noticeAt === null && noticeBy === null && noticeMethod === null

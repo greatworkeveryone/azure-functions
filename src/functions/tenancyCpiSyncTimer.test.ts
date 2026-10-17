@@ -161,7 +161,7 @@ describe("tenancyCpiSyncTimer", () => {
     expect(context.warn).toHaveBeenCalledWith(expect.stringMatching(/past due/));
   });
 
-  it("a failed ABS fetch leaves the table untouched and reports to Sentry", async () => {
+  it("a failed ABS fetch leaves the table untouched, still brings back waiting reviews from it (L7), and reports to Sentry", async () => {
     const failure = new AbsCpiError("http", "AUS: ABS responded 503 Service Unavailable", {
       status: 503,
       retryable: true,
@@ -170,8 +170,10 @@ describe("tenancyCpiSyncTimer", () => {
 
     await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toBe(failure);
 
-    expect(databaseTouched()).toBe(false);
-    expect(db.closeConnection).not.toHaveBeenCalled();
+    expect(sync.syncCpiIndex).not.toHaveBeenCalled();
+    expect(sync.planCpiSync).not.toHaveBeenCalled();
+    expect(resume.resumeAwaitingIndex).toHaveBeenCalledWith(connection, expect.objectContaining({ dryRun: false, today: expect.any(String) }));
+    expect(db.closeConnection).toHaveBeenCalledWith(connection);
     expect(Sentry.captureException).toHaveBeenCalledTimes(1);
     expect(Sentry.captureException).toHaveBeenCalledWith(failure, {
       extra: { context: "tenancyCpiSyncTimer ABS fetch", kind: "http", status: 503 },
@@ -185,7 +187,8 @@ describe("tenancyCpiSyncTimer", () => {
     abs.fetchAllCpiSeries.mockRejectedValue(failure);
 
     await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toBe(failure);
-    expect(databaseTouched()).toBe(false);
+    expect(sync.syncCpiIndex).not.toHaveBeenCalled();
+    expect(resume.resumeAwaitingIndex).toHaveBeenCalledTimes(1);
     expect(Sentry.captureException).toHaveBeenCalledWith(
       failure,
       expect.objectContaining({ extra: expect.objectContaining({ kind: "validation" }) }),
@@ -299,14 +302,16 @@ describe("tenancyCpiSyncTimer — CPI_SYNC_DRY_RUN", () => {
     expect(sync.planCpiSync).not.toHaveBeenCalled();
   });
 
-  it("still fails visibly when ABS cannot be fetched, without touching the database", async () => {
+  it("still fails visibly when ABS cannot be fetched, writing nothing and only saying which reviews would come back", async () => {
     setFlags({ dryRun: "true" });
     const failure = new AbsCpiError("http", "AUS: ABS responded 503", { status: 503, retryable: true });
     abs.fetchAllCpiSeries.mockRejectedValue(failure);
 
     await expect(tenancyCpiSyncTimer(timer, ctx)).rejects.toBe(failure);
 
-    expect(databaseTouched()).toBe(false);
+    expect(sync.planCpiSync).not.toHaveBeenCalled();
+    expect(sync.syncCpiIndex).not.toHaveBeenCalled();
+    expect(resume.resumeAwaitingIndex).toHaveBeenCalledWith(connection, expect.objectContaining({ dryRun: true }));
     expect(Sentry.captureException).toHaveBeenCalledWith(
       failure,
       expect.objectContaining({

@@ -30,19 +30,16 @@
 //
 // Gate: the roles that may edit a tenancy, as commence (rentReview/http.ts).
 
-import { randomUUID } from "node:crypto";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import * as ledger from "../ledger";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
-import { calculateReview, sanityBandFromEnv, type CalcMethod } from "../rentReviewCalc";
-import { parseSteps } from "../scheduledRateStepLogic";
+import type { CalcMethod } from "../rentReviewCalc";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { rowVersionHex } from "../tenancyScheduleWrite";
-import { parseBasis } from "../rentReview/basis";
-import { previousQuarter, referenceQuarter } from "../rentReview/cpi";
+import { workOutReview } from "../rentReview/calculate";
 import { toReviewDto } from "../rentReview/dto";
 import {
   deniedAttempt,
@@ -57,8 +54,8 @@ import {
   staleReview,
   TENANCY_EDIT_ROLES,
 } from "../rentReview/http";
-import { refuseClosedTenancy, scheduleOf } from "../rentReview/reviewTenancy";
-import { inTransaction, loadCpiRows, loadReview, loadTenancyForReview, reviewForUpdate, totalOccupancySqm } from "../rentReview/store";
+import { refuseClosedTenancy } from "../rentReview/reviewTenancy";
+import { inTransaction, loadReview, loadTenancyForReview, reviewForUpdate } from "../rentReview/store";
 import { markAwaitingIndex, saveCalc } from "../rentReview/transitions";
 
 /** `manual` as sent: only an `other` review takes one. */
@@ -125,40 +122,12 @@ export async function calculateRentReview(request: HttpRequest, context: Invocat
         if (!tenancy) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
         refuseClosedTenancy(tenancy);
 
-        const basis = parseBasis(review.Basis) ?? {};
-        const scheduledFor = toReviewDto(review, today).scheduledFor;
-        const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
-        const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
-        const reference = referenceQuarter(scheduledFor);
-        const cpiRows =
-          method === "cpi" && (region === "AUS" || region === "DARWIN")
-            ? await loadCpiRows(db, region, [reference, previousQuarter(reference, interval)])
-            : [];
-        const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
-        const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId));
-        const result = calculateReview({
-          basis,
-          carparkGroups: schedule.carparkGroups,
-          computedAt: new Date().toISOString(),
+        const result = await workOutReview(db, {
           computedBy: { name: caller.actor.name, userId: caller.actor.userId },
-          cpiRows,
-          fallbackAnnual: schedule.context.fallbackAnnual,
-          fallbackSqm: schedule.context.fallbackSqm,
-          lease: {
-            cpiCapPercent: schedule.context.lease.cpiCapPercent ?? null,
-            cpiFloorPercent: schedule.context.lease.cpiFloorPercent ?? null,
-            reviewRatchet: schedule.context.lease.reviewRatchet === true,
-          },
           manual,
           method: method as CalcMethod,
-          miscFees: schedule.miscFees,
-          newStepId: randomUUID(),
-          reviewId,
-          sanity: sanityBandFromEnv(),
-          scheduledFor,
-          scheduleVersion: Number(tenancy.ScheduleVersion ?? 0),
-          stepId: typeof review.StepId === "string" ? review.StepId : null,
-          steps,
+          review,
+          tenancy,
           today,
         });
         if (result.kind === "refused") throw new RentReviewError(result.code, result.message);

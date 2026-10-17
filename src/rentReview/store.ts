@@ -36,7 +36,8 @@ const REVIEW_COLUMNS = `
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
   t.ArchivedAt AS TenantArchivedAt,
   u.DisplayName AS OwnerName,
-  lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote`;
+  lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote,
+  ia.IndexArrivedAt, ia.IndexArrivedQuarter`;
 
 // The last RETURN of a review that is back in progress and hasn't been
 // submitted since (WP26): the latest rent_review.return row in the decision
@@ -57,10 +58,27 @@ const LAST_RETURN = `
     ORDER BY l.LedgerId DESC
   ) lr`;
 
+// The CPI index a waiting review needed was published (L7): the latest
+// rent_review.index_available row while the review is in progress and hasn't
+// been submitted since, so its owner sees why it is back and what to do.
+const LAST_INDEX_ARRIVAL = `
+  OUTER APPLY (
+    SELECT TOP 1 a.OccurredAt AS IndexArrivedAt, JSON_VALUE(a.[After], '$.referenceQuarter') AS IndexArrivedQuarter
+    FROM dbo.DecisionLedger a
+    WHERE r.State = 'in_progress'
+      AND a.SubjectType = N'rent_review' AND a.SubjectId = r.ReviewId AND a.Action = N'rent_review.index_available'
+      AND NOT EXISTS (
+        SELECT 1 FROM dbo.DecisionLedger s
+        WHERE s.SubjectType = N'rent_review' AND s.SubjectId = r.ReviewId
+          AND s.Action = N'rent_review.submit' AND s.LedgerId > a.LedgerId)
+    ORDER BY a.LedgerId DESC
+  ) ia`;
+
 const REVIEW_JOINS = `
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
-  ${LAST_RETURN}`;
+  ${LAST_RETURN}
+  ${LAST_INDEX_ARRIVAL}`;
 
 const REVIEW_BY_ID = `SELECT ${REVIEW_COLUMNS} FROM dbo.RentReviews r ${REVIEW_JOINS}
   WHERE r.ReviewId = @ReviewId AND r.State IS NOT NULL`;

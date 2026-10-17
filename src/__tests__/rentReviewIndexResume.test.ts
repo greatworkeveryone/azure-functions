@@ -54,6 +54,8 @@ beforeEach(() => {
     [/WHERE r\.State = 'awaiting_index'/, () => waiting],
     [/FROM dbo\.CpiIndex/, (params: Param[]) => cpi.filter((row) => params.some((p) => p.value === row.Period))],
     [/UPDATE dbo\.RentReviews/, (params: Param[]) => (moves ? [{ ReviewId: params.find((p) => p.name === "ReviewId")?.value }] : [])],
+    // The calculation after the move (its own tests use the in-memory world): nothing found here.
+    [/FROM dbo\.RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => []],
   ]);
 });
 
@@ -83,7 +85,7 @@ describe("which waiting reviews can go back", () => {
 
 describe("resumeAwaitingIndex", () => {
   it("moves a review whose quarter is now published back to in progress, ledgered as the CPI timer", async () => {
-    expect(await run()).toEqual({ errors: [], resumed: 1, waiting: 0 });
+    expect(await run()).toMatchObject({ errors: [], resumed: 1, waiting: 0 });
     const [update] = callsMatching(db.executeQuery, /UPDATE dbo\.RentReviews/);
     expect(update.sql).toMatch(/WHERE ReviewId = @ReviewId AND State IN \(@From0\)/);
     expect(update.params).toMatchObject({ From0: "awaiting_index", Status: "due", To: "in_progress" });
@@ -99,24 +101,25 @@ describe("resumeAwaitingIndex", () => {
       }),
     ]);
     expect(ledgerRowsOf(db.executeQuery)[0].after).toMatchObject({ ownerUserId: 7, referenceQuarter: REFERENCE, state: "in_progress" });
-    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    // The move, then (its own transaction) the calculation, which finds nothing here.
+    expect(db.commitTransaction).toHaveBeenCalledTimes(2);
     expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(7, 5);
   });
 
   it("leaves a review whose quarter still isn't published", async () => {
     cpi = cpi.filter((row) => row.Period !== REFERENCE);
-    expect(await run()).toEqual({ errors: [], resumed: 0, waiting: 1 });
+    expect(await run()).toMatchObject({ errors: [], resumed: 0, waiting: 1 });
     expect(callsMatching(db.executeQuery, /UPDATE/)).toEqual([]);
   });
 
   it("leaves a review someone moved on meanwhile, without a ledger row", async () => {
     moves = false;
-    expect(await run()).toEqual({ errors: [], resumed: 0, waiting: 0 });
+    expect(await run()).toMatchObject({ errors: [], resumed: 0, waiting: 0 });
     expect(ledgerRowsOf(db.executeQuery)).toEqual([]);
   });
 
   it("writes nothing in a dry run, and says what it would move", async () => {
-    expect(await run(true)).toEqual({ errors: [], resumed: 1, waiting: 0 });
+    expect(await run(true)).toMatchObject({ calculated: 0, errors: [], resumed: 1, waiting: 0 });
     expect(callsMatching(db.executeQuery, /\b(UPDATE|INSERT)\b/)).toEqual([]);
     expect(db.beginTransaction).not.toHaveBeenCalled();
   });
@@ -128,9 +131,10 @@ describe("resumeAwaitingIndex", () => {
       [/WHERE r\.State = 'awaiting_index'/, () => waiting],
       [/FROM dbo\.CpiIndex/, (params: Param[]) => cpi.filter((row) => params.some((p) => p.value === row.Period))],
       [/UPDATE dbo\.RentReviews/, (params: Param[]) => [{ ReviewId: params.find((p) => p.name === "ReviewId")?.value }]],
+      [/FROM dbo\.RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => []],
     ]);
     const report = await run();
-    expect(report).toEqual({ errors: [{ message: "ledger down", reviewId: "rev-1" }], resumed: 1, waiting: 0 });
+    expect(report).toMatchObject({ errors: [{ message: "ledger down", reviewId: "rev-1" }], resumed: 1, waiting: 0 });
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 });

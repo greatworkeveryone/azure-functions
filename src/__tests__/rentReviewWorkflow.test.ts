@@ -11,7 +11,11 @@ import { approveRentReview } from "../functions/approveRentReview";
 import { calculateRentReview } from "../functions/calculateRentReview";
 import { submitRentReview } from "../functions/submitRentReview";
 import { updateRentReviewBasis } from "../functions/updateRentReviewBasis";
+import { addDaysIso } from "../darwinDate";
 import { carparkRunning, miscFeeRunning } from "../rentReview/cascade";
+import { toReviewDto } from "../rentReview/dto";
+import { resumeAwaitingIndex } from "../rentReview/indexResume";
+import { loadReview } from "../rentReview/store";
 import { computeScheduleRows, parseGroups, parseMiscFees, parseSteps } from "../scheduledRateStepLogic";
 import { postRequest } from "./fixtures/rentReviewFakes";
 import {
@@ -937,5 +941,36 @@ describe("L5: only the review's owner, or an accounts manager and up, calculates
     expect(world.ledgerRows()[0].before).toEqual({ attempted: "rent_review.submit", state: "in_progress" });
     as(PEOPLE.dee);
     expect((await submit()).status).toBe(200);
+  });
+});
+
+// ── L7: the CPI timer brings a waiting review back calculated ─────────────────
+
+describe("L7: a review waiting for its index comes back calculated, and its owner sees why", () => {
+  const timer = { dryRun: false, log: jest.fn(), today: TODAY, warn: jest.fn() };
+
+  it("is calculated straight away by the system, ledgered as the CPI timer, with indexArrived on the review", async () => {
+    seed(world, { review: { ExpectedIndexAt: addDaysIso(TODAY, -5), State: "awaiting_index" } });
+    const report = await resumeAwaitingIndex({} as never, timer);
+    expect(report).toMatchObject({ calculated: 1, errors: [], notCalculated: [], resumed: 1 });
+    expect(actions()).toEqual(["rent_review.index_available", "rent_review.calculate"]);
+    expect(world.ledgerRows()[1]).toMatchObject({ ActorKind: "system", ActorName: "tenancyCpiSyncTimer", RuleApplied: "cpi_quarter_before_review_date" });
+    const review = toReviewDto((await loadReview({} as never, "rev-1")) as never, TODAY);
+    expect(review).toMatchObject({ calc: { computedBy: { name: "Floorplan, when the CPI was published", userId: null }, newAnnual: 127670.1 }, expectedIndexAt: null, state: "in_progress" });
+    expect(review.indexArrived).toEqual({ at: expect.any(String), referenceQuarter: REFERENCE });
+    // Once it is submitted the news is old.
+    as(PEOPLE.ann);
+    const submitted = await submit();
+    expect(reviewBody(submitted).indexArrived).toBeNull();
+  });
+
+  it("is left in progress for its owner when the calculation is refused, and says why", async () => {
+    seed(world, { review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })), ExpectedIndexAt: addDaysIso(TODAY, -5), State: "awaiting_index" }, cpi: [100, 98] });
+    const report = await resumeAwaitingIndex({} as never, timer);
+    expect(report).toMatchObject({ calculated: 0, resumed: 1 });
+    expect(report.notCalculated).toEqual([{ reviewId: "rev-1", why: expect.stringMatching(/^ratchet: /) }]);
+    expect(world.review("rev-1")).toMatchObject({ Calc: null, State: "in_progress" });
+    const review = toReviewDto((await loadReview({} as never, "rev-1")) as never, TODAY);
+    expect(review.indexArrived).toEqual({ at: expect.any(String), referenceQuarter: REFERENCE });
   });
 });
