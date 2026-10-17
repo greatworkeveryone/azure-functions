@@ -807,6 +807,7 @@ type InvoiceApprovalOutcome =
 interface InvoiceRefusal {
   action: "denied" | "sod_blocked";
   code: ApprovalRefusalReason | string;
+  details?: Record<string, unknown>;
   httpStatus: number;
   message: string;
   status: string | null;
@@ -816,6 +817,7 @@ function invoiceRefusal(refusal: MoneyRefusal, invoiceStatus: string | null): In
   return {
     action: refusal.code === "creator" ? "sod_blocked" : "denied",
     code: refusal.code,
+    details: refusal.details,
     httpStatus: refusal.status,
     message: refusal.message,
     status: invoiceStatus,
@@ -1048,13 +1050,13 @@ async function approveJobInvoice(
     });
     if (!outcome.ok) {
       if ("response" in outcome) return outcome.response;
-      const { action, code, httpStatus, message, status } = outcome.refusal;
+      const { action, code, details, httpStatus, message, status } = outcome.refusal;
       // Ledgered in a transaction of its own now that the decision's has rolled back.
       return await refuseMoneyChange(connection, request, {
         action,
         attempted: "invoice.approve",
         jobId: outcome.jobId,
-        refusal: { code, message, status: httpStatus as MoneyRefusal["status"] },
+        refusal: { code, details, message, status: httpStatus as MoneyRefusal["status"] },
         state: { status },
         subject: { id: JobInvoiceID, type: "invoice" },
       });

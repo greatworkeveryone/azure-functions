@@ -322,7 +322,7 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
     const res = await approve({ variance: { attributedToUserId: 30, rationale: "More work" } });
 
     expect(res).toEqual({
-      jsonBody: { code: "variance_over_margin", error: "This is $100 (20%) above the approved $500 — the allowed margin is 10% up to $1,000. Get it re-approved." },
+      jsonBody: { amount: 600, code: "variance_over_margin", originalApprovedAmount: 500, error: "This is $100 (20%) above the approved $500 — the allowed margin is 10% up to $1,000. Get it re-approved." },
       status: 422,
     });
     expect(ran(/UPDATE JobInvoices/)).toBe(false);

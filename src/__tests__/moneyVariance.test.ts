@@ -90,6 +90,7 @@ describe("varianceDecision: refused", () => {
       kind: "refused",
       refusal: {
         code: "variance_over_margin",
+        details: { amount: 11540, originalApprovedAmount: 10300 },
         message: "This is $1,240 (12%) above the approved $10,300 — the allowed margin is 10% up to $1,000. Get it re-approved.",
         status: 422,
       },

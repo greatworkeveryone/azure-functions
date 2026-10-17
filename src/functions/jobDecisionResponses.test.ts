@@ -434,6 +434,8 @@ function installDatabase(): void {
           ]
         : [];
     }
+    // The sweep's attribution-notice step (R2, R13): nothing unanswered here.
+    if (/ApprovalAttributedToUserID IS NOT NULL AND AttributionAnsweredAt IS NULL/.test(text)) return [];
     if (/UPDATE dbo\.Jobs SET EscalatedAt/.test(text)) {
       mockWorld.events.push("job flag");
       return [];

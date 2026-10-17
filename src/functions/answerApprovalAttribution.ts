@@ -21,7 +21,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
-import { errorResponse, extractToken, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import "../escalation/adapters";
 import {
@@ -41,6 +41,7 @@ import type { LedgerActor } from "../ledger/types";
 import { refuseMoneyChange } from "../moneyJob-db";
 
 const REASON_MAX = 1000;
+const ANSWER_ROLES = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR];
 
 interface AnswerBody {
   agreed?: unknown;
@@ -147,6 +148,10 @@ async function writeAnswer(connection: Connection, actor: LedgerActor, found: At
 export async function answerApprovalAttribution(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
+  // Only someone who can approve on their own authority is ever named; the
+  // handler then checks the caller IS the person named.
+  const denied = await requireRole(request, ANSWER_ROLES);
+  if (denied) return denied;
 
   let connection;
   try {

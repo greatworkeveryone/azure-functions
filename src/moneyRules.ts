@@ -7,6 +7,8 @@ import { canApprove, decideAuthority, type AuthorityFacts, type Identity } from 
 
 export interface MoneyRefusal {
   code: string;
+  /** Extra facts the screen needs to help (R13: the new total, for the manager picker). */
+  details?: Record<string, unknown>;
   message: string;
   status: 403 | 409 | 422;
 }
@@ -133,7 +135,7 @@ export function holdsAdmin(roles: readonly string[]): boolean {
 
 /** A refusal as the HTTP answer: the code the ledger records and the sentence people see. */
 export function refusalResponse(refusal: MoneyRefusal): { jsonBody: { code: string; error: string }; status: number } {
-  return { jsonBody: { code: refusal.code, error: refusal.message }, status: refusal.status };
+  return { jsonBody: { ...refusal.details, code: refusal.code, error: refusal.message }, status: refusal.status };
 }
 
 // ── R13: amount variance within a margin (Connor, 13 Oct 2026) ──────────────
@@ -270,7 +272,11 @@ function decideVariance(input: VarianceInput, original: number, facts: VarianceF
     originalAmount: original,
   };
   const above = `This is ${formatDollars(figures.deltaAmount)} (${formatPercent(figures.deltaPercent)}) above the approved ${formatDollars(original)}`;
-  const refused = (code: string, message: string): VarianceDecision => ({ figures, kind: "refused", refusal: refuse(code, message, 422) });
+  const refused = (code: string, message: string): VarianceDecision => ({
+    figures,
+    kind: "refused",
+    refusal: { ...refuse(code, message, 422), details: { amount: next, originalApprovedAmount: original } },
+  });
 
   if (deltaCents > allowanceCents) {
     return refused(

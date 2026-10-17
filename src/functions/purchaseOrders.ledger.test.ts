@@ -1393,7 +1393,7 @@ describe("R13: a purchase order above its approved quote, within the margin", ()
     const res = await edit({ CostNotToExceed: 11240, variance: VARIANCE });
 
     expect(res).toEqual({
-      jsonBody: { code: "variance_over_margin", error: "This is $1,240 (12.4%) above the approved $10,000 — the allowed margin is 10% up to $1,000. Get it re-approved." },
+      jsonBody: { amount: 11240, code: "variance_over_margin", originalApprovedAmount: 10000, error: "This is $1,240 (12.4%) above the approved $10,000 — the allowed margin is 10% up to $1,000. Get it re-approved." },
       status: 422,
     });
     expect(ran(/UPDATE PurchaseOrders SET/)).toBe(false);

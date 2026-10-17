@@ -24,6 +24,7 @@ jest.mock("../auth", () => {
     ...actual,
     errorResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Error" }, status: 500 }),
     extractToken: jest.fn().mockReturnValue("mock-token"),
+    requireRole: jest.fn().mockResolvedValue(null),
     rolesForRequest: jest.fn(),
     unauthorizedResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Unauthorized" }, status: 401 }),
     verifiedIdentityFromRequest: jest.fn(),
