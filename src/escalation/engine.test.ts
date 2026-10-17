@@ -973,6 +973,7 @@ describe("the sweep drives the engine", () => {
     firstQuoteRequestAt: null,
     isArchived: false,
     jobId: 12,
+    kind: "facilities",
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",

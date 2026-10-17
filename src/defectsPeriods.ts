@@ -24,6 +24,7 @@ import {
   type DefectsScope,
   type DefectsServices,
 } from "./facilitiesRules";
+import { runsContractorFlow } from "./jobKinds";
 
 // ── SQL ──────────────────────────────────────────────────────────────────────
 
@@ -345,8 +346,9 @@ export async function coveredOpenJobs(connection: Connection, period: DefectsPer
     [{ name: "BuildingId", type: TYPES.Int, value: period.buildingId }],
   );
   const coverage = toCoveragePeriod(period);
+  // Contractor works only: an Admin / Accounts job is never the builder's to fix.
   return rows
-    .filter((row) => isJobCovered(jobRowToCoverage(row), coverage, today))
+    .filter((row) => runsContractorFlow(row.Kind) && isJobCovered(jobRowToCoverage(row), coverage, today))
     .map((row) => ({ jobId: Number(row.JobID), status: String(row.Status ?? ""), title: String(row.Title ?? "") }));
 }
 

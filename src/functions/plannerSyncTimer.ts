@@ -3,6 +3,7 @@ import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { runsContractorFlow } from "../jobKinds";
 import {
   syncJobAwaitingAccounts,
   syncJobAwaitingFacilitiesApproval,
@@ -341,7 +342,7 @@ export async function plannerSyncTimer(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
+      `SELECT j.JobID, j.Title, j.Kind,
               COALESCE(b.BuildingName, '') AS BuildingName,
               CONVERT(VARCHAR(23), j.ExpectedProgressUpdate, 126) AS ExpectedProgressUpdate
        FROM Jobs j
@@ -355,12 +356,15 @@ export async function plannerSyncTimer(
          AND j.ExpectedProgressUpdate < DATEADD(DAY, 1, CAST(SYSUTCDATETIME() AS DATE))`,
     );
 
-    const jobs: PlannerJobRow[] = jobRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-      expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
-    }));
+    // Admin / Accounts jobs (plan D2) have no contractor to chase, so no update task.
+    const jobs: PlannerJobRow[] = jobRows
+      .filter((r) => runsContractorFlow(r.Kind))
+      .map((r) => ({
+        jobId: r.JobID as number,
+        title: r.Title as string,
+        buildingName: (r.BuildingName as string | null) ?? null,
+        expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
+      }));
 
     let jobCreated = 0;
     let jobSkipped = 0;

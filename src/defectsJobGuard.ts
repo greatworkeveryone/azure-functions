@@ -18,6 +18,7 @@ import { executeQuery } from "./db";
 import { displayDate, livePeriodsForBuilding, servicesLabel, type DefectsPeriodApi } from "./defectsPeriods";
 import { DEFECTS_OVERRIDE_ROLES } from "./facilitiesRoles";
 import { coveringPeriods, missingAnswer, type CoverageJob, type MissingAnswer } from "./facilitiesRules";
+import { runsContractorFlow } from "./jobKinds";
 import { record } from "./ledger";
 import { Sentry } from "./sentry";
 import { resolveLedgerActor } from "./ledger/actor";
@@ -97,7 +98,9 @@ export async function guardNewJob(
   today: string,
 ): Promise<DefectsGuardResult> {
   const job = coverageFromFields(fields);
-  if (!job) return { override: null, warnings: [] };
+  // Defects liability is about contractor works, so only the kinds that run that
+  // flow are checked: an Admin / Accounts job is never held, warned or overridden.
+  if (!job || !runsContractorFlow(job.kind)) return { override: null, warnings: [] };
   const live = await livePeriodsOrNone(connection, job.buildingId, today);
   const covering = coveringPeriods(job, live, today);
   const blocking = covering.filter((period) => period.enforcement === "block");

@@ -7,9 +7,10 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam, type SqlRow } from "../../db";
+import { jobKindOf } from "../../jobKinds";
 import type { JobFacts } from "./jobRules";
 
-const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title, j.Status, j.Priority,
+const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title, j.Status, j.Priority, j.Kind,
     j.AssignedTo, j.AssignedToUserID, j.CreatedAt, j.StatusSince, j.AcknowledgedAt,
     j.ExpectedProgressUpdate, j.IsArchived,
     (SELECT COUNT(*) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID) AS RequestedContractors,
@@ -41,6 +42,7 @@ export function toJobFacts(row: SqlRow): JobFacts {
     firstQuoteRequestAt: asDate(row.FirstQuoteRequestAt),
     isArchived: Boolean(row.IsArchived),
     jobId: Number(row.JobID),
+    kind: jobKindOf(row.Kind),
     oldestPendingInvoiceAt: asDate(row.OldestPendingInvoiceAt),
     pendingInvoices: Number(row.PendingInvoices ?? 0),
     priority: typeof row.Priority === "string" ? row.Priority : null,
