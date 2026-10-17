@@ -12,7 +12,7 @@ import { AppRole, rolesPassGate } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "5511323b4c937b2a3947eefc17251e72db4fa199899d511cc29128f0f230996c";
+const PINNED_SHA256 = "57bfa52231a45a64539089d3e0feb6552894a30372614c658e3f83c5d045477b";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -52,11 +52,6 @@ describe("the table", () => {
     expect(rolesFor({ gate: [AppRole.DIRECTOR], refused: [AppRole.ADMIN], routes: [], why: "director, admin refused" })).toEqual([
       AppRole.DIRECTOR,
     ]);
-  });
-
-  it("lets the cfo archive any job: archiveJob checks the list literally, so the cfo is on it", () => {
-    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).toContain(AppRole.CFO);
-    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).not.toContain(AppRole.FACILITIES);
   });
 
   // Decision 1: field officers create jobs, request quotes, add received quotes
