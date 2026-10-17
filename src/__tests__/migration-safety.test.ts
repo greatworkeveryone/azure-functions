@@ -10,17 +10,32 @@ import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, sc
 // files, not a SQL parser.
 
 const MIGRATIONS = [
+  "099_schedule_change_requests.sql",
+  "112_job_invoices_contractor_id.sql",
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
+  "124_myob_controls.sql",
   "123_graph_subscriptions.sql",
   "128_timer_runs.sql",
   "129_email_intake_watermark.sql",
+  "133_email_archive_columns.sql",
+  "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
+  "136_building_category_owner.sql",
+  "139_keys_rowversion.sql",
+  "137_job_decision_requests.sql",
+  "138_job_decisions.sql",
+  "125_myob_reference_cache.sql",
+  "126_myob_proposals.sql",
+  "119_defects_periods.sql",
+  "120_service_schedules.sql",
 ];
 
-// The one destructive-looking phrase the money migrations need: the trigger
-// that makes the append-only log refuse changes. It never changes data itself.
-const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi];
+// Destructive-looking phrases that change no data themselves: the trigger that
+// makes the append-only log refuse changes, the names of the MYOB update
+// operations in 124's CHECK constraint, and a link table's foreign key removing
+// its own link row when the parent goes (134, as migration 010 does).
+const ALLOWED_PHRASES = [/INSTEAD\s+OF\s+UPDATE\s*,\s*DELETE/gi, /N'(quotes|orders)\.update'/g, /\bON\s+DELETE\s+CASCADE\b/gi];
 
 function stripComments(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
@@ -57,10 +72,13 @@ describe.each(MIGRATIONS)("migration %s", (file) => {
     }
   });
 
-  it("adds columns only as NULLable or with a default", () => {
+  it("adds columns only as NULLable, with a default, or as a ROWVERSION", () => {
     const code = stripComments(raw);
     const adds = code.match(/ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+(?!CONSTRAINT\b)[^;]+;/gi) ?? [];
     for (const add of adds) {
+      // The server stamps a ROWVERSION on every row itself (096, 101, 139), so a statement that
+      // adds nothing but one needs neither NULL nor a default and cannot fail on existing rows.
+      if (/^ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+\w+\s+ROWVERSION\s*;$/i.test(add)) continue;
       expect(add).toMatch(/(?<!NOT\s)NULL\b|\bDEFAULT\b/i);
     }
   });
@@ -199,5 +217,46 @@ describe("dynamic SQL in guarded migrations", () => {
     "EXEC(N'EXEC(N''TRUNCATE TABLE dbo.Jobs'')');",
   ])("flags %s", (sql) => {
     expect(scanSql(sql).dynamic.flatMap((text) => findDestructiveStatements(text))).not.toEqual([]);
+  });
+});
+
+// Destructive migrations approved in writing (database-safety rule 3). Each
+// carries the approval header on its first line, never drops or truncates,
+// copies the table it changes to a dated backup before its first DELETE or
+// UPDATE (creating the backup only once, so a re-run keeps the first copy),
+// and runs in one transaction that rolls back and rethrows.
+const APPROVED_DESTRUCTIVE = ["121_approval_limits_normalise.sql"];
+
+describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) => {
+  const raw = read(file);
+  const code = stripComments(raw);
+
+  it("starts with the DESTRUCTIVE approval header", () => {
+    expect(raw.split("\n")[0]).toMatch(/^-- DESTRUCTIVE: .+ · approved by .+ \d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("never drops, truncates, renames or alters a column", () => {
+    expect(code).not.toMatch(/\b(DROP|TRUNCATE|sp_rename)\b|\bALTER\s+COLUMN\b/i);
+  });
+
+  it("copies to a dated backup table before its first DELETE or UPDATE", () => {
+    const backup = code.search(/\bSELECT\b[^;]*?\bINTO\s+dbo\.\w+_bak_\d{8}\b/i);
+    const firstChange = code.search(/\b(DELETE|UPDATE)\b/i);
+    expect(backup).toBeGreaterThan(-1);
+    expect(firstChange).toBeGreaterThan(backup);
+  });
+
+  it("creates the backup only when it does not exist yet", () => {
+    const table = /\bINTO\s+(dbo\.\w+_bak_\d{8})\b/i.exec(code)?.[1];
+    expect(table).toBeDefined();
+    const guard = code.search(new RegExp(`IF OBJECT_ID\\('${table}', 'U'\\) IS NULL`));
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(code.search(/\bINTO\s+dbo\.\w+_bak_\d{8}\b/i));
+  });
+
+  it("runs in one transaction that rolls back and rethrows", () => {
+    expect(code).toMatch(/BEGIN TRY\s+BEGIN TRANSACTION;/);
+    expect(code).toMatch(/COMMIT TRANSACTION;\s*END TRY/);
+    expect(code).toMatch(/BEGIN CATCH\s+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;\s*END CATCH;/);
   });
 });

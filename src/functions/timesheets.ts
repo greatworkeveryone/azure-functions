@@ -604,55 +604,10 @@ async function getTimesheetUsers(
 }
 
 // ── POST /api/syncTimesheetsToMyob ───────────────────────────────────────────
-// Marks newly approved timesheets as sent to MYOB. Requires approval role.
-// The actual MYOB API call is stubbed — wire in credentials when ready.
-
-export async function runMyobSync(
-  token: string,
-  roles: string[],
-  context: InvocationContext,
-): Promise<{ synced: number; errors: string[] }> {
-  const managed = managedRoles(roles);
-  const errors: string[] = [];
-  let synced = 0;
-
-  const connection = await createRequestConnection(token);
-  try {
-    const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
-    const params: SqlParam[] = managed.map((r, i) => ({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
-
-    const pending = await executeQuery(
-      connection,
-      `SELECT TimesheetID, UserDisplayName, WeekStartDate, Data
-       FROM dbo.Timesheets
-       WHERE Approved = 1 AND SentToMyobDate IS NULL
-         AND Role IN (${PLACEHOLDERS})`,
-      params,
-    );
-
-    for (const row of pending) {
-      try {
-        // TODO: call MYOB API here when credentials are available
-        // await sendToMyob(row);
-
-        await executeQuery(
-          connection,
-          "UPDATE dbo.Timesheets SET SentToMyobDate = GETUTCDATE() WHERE TimesheetID = @Id",
-          [{ name: "Id", type: TYPES.Int, value: row.TimesheetID }],
-        );
-        synced++;
-        context.log(`MYOB sync: stamped TimesheetID ${row.TimesheetID} (${row.UserDisplayName})`);
-      } catch (err: any) {
-        errors.push(`TimesheetID ${row.TimesheetID}: ${err.message}`);
-        context.error(`MYOB sync error for TimesheetID ${row.TimesheetID}:`, err.message);
-      }
-    }
-  } finally {
-    closeConnection(connection);
-  }
-
-  return { errors, synced };
-}
+// Sending timesheets to MYOB is not built (Track T). This used to stamp
+// SentToMyobDate without calling MYOB, a false record in the CFO's audit trail
+// that would also block unapproving (MYOB N11). It now writes nothing and says
+// so; the stamp belongs only after MYOB confirms, once the export exists.
 
 async function syncTimesheetsToMyob(
   request: HttpRequest,
@@ -669,13 +624,8 @@ async function syncTimesheetsToMyob(
     return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
-  try {
-    const result = await runMyobSync(token, roles, context);
-    return { status: 200, jsonBody: result };
-  } catch (error: any) {
-    context.error("syncTimesheetsToMyob failed:", error.message);
-    return errorResponse("MYOB sync failed", error.message);
-  }
+  context.log("syncTimesheetsToMyob: refused, the MYOB timesheet export is not built; nothing stamped");
+  return { status: 501, jsonBody: { error: "MYOB timesheet export not built" } };
 }
 
 // ── Registrations ─────────────────────────────────────────────────────────────

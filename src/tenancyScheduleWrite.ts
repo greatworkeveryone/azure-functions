@@ -18,6 +18,14 @@ import * as ledger from "./ledger";
 import type { LedgerActor, LedgerEntryInput } from "./ledger";
 import { deriveNextReviewDate, nextReviewInputFromRow, RESOLVED_REVIEW_DATES_SQL } from "./nextReviewDate";
 import { parseSteps, type ScheduledRateStep } from "./scheduledRateStepLogic";
+import {
+  CLEAR_SIGN_OFF_SQL,
+  recordSignOffCleared,
+  type ScheduleSignOff,
+  scheduleSignOffFromRow,
+  SIGN_OFF_COLUMNS,
+  signOffReasonRequiredResponse,
+} from "./scheduleSignOff";
 
 /** The JSON columns a schedule write may replace. Keys are SQL column names. */
 export const SCHEDULE_JSON_COLUMNS = [
@@ -32,6 +40,7 @@ const LOCKED_COLUMNS = `
   TenantId, BuildingId, ScheduleVersion, RowVersion, UpdatedByName, UpdatedAt,
   Commencement, LastReviewDate, ReviewIntervalMonths, NextReviewDate,
   ScheduledRateSteps, CarparkScheduleGroups, MiscFees, Incentives,
+  ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
@@ -58,6 +67,8 @@ export type ScheduleWriteOutcome<T> =
   | { conflict: ScheduleConflict; kind: "conflict" }
   | { error: string; kind: "rejected"; status: number }
   | { kind: "notFound" }
+  /** The tenancy is signed off and the writer gave no reason for clearing it (PLAN WP24). */
+  | { kind: "signOffReasonRequired"; signOff: ScheduleSignOff }
   | { kind: "ok"; result: T; rowVersion: string; scheduleVersion: number };
 
 export interface ScheduleWriteTarget {
@@ -65,6 +76,8 @@ export interface ScheduleWriteTarget {
   buildingId: number;
   /** The ScheduleVersion the caller read; undefined skips the check (legacy callers). */
   expectedVersion: number | undefined;
+  /** Why the writer is editing a signed-off schedule (body.SignOffClearReason); an edit clears the sign-off. */
+  signOffClearReason?: string | null;
   tenantId: number;
   updatedById: string;
 }
@@ -115,6 +128,8 @@ export function scheduleWriteResponse<T>(
       return conflictResponse(outcome.conflict, { scheduleVersion: outcome.conflict.scheduleVersion });
     case "rejected":
       return { status: outcome.status, jsonBody: { error: outcome.error } };
+    case "signOffReasonRequired":
+      return signOffReasonRequiredResponse(outcome.signOff);
     case "ok":
       return {
         status: 200,
@@ -213,6 +228,15 @@ export async function runScheduleWrite<T>(
       throw new Error(`Not a schedule column: ${mutation.column}`);
     }
 
+    // An edit to a signed-off schedule clears the sign-off, and says why. Asked
+    // after the version and the request itself are known to be good, so nobody
+    // is prompted for a reason on a write that would be refused anyway.
+    const priorSignOff = scheduleSignOffFromRow(locked);
+    if (priorSignOff && !target.signOffClearReason) {
+      await rollbackQuietly(connection);
+      return { kind: "signOffReasonRequired", signOff: priorSignOff };
+    }
+
     // NextReviewDate follows the schedule as this write leaves it (PLAN D1).
     const review = nextReviewInputFromRow(
       locked,
@@ -223,9 +247,11 @@ export async function runScheduleWrite<T>(
     const derived = deriveNextReviewDate(review);
     const nextReview = derived !== null && derived !== review.storedNextReviewDate ? derived : null;
 
-    const setClause = nextReview
-      ? `${mutation.column} = @Value, NextReviewDate = @NextReviewDate`
-      : `${mutation.column} = @Value`;
+    const setClause = [
+      `${mutation.column} = @Value`,
+      ...(nextReview ? ["NextReviewDate = @NextReviewDate"] : []),
+      ...(priorSignOff ? [CLEAR_SIGN_OFF_SQL] : []),
+    ].join(", ");
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Tenants SET ${setClause},
@@ -257,6 +283,15 @@ export async function runScheduleWrite<T>(
         correlationId,
         tenantId: target.tenantId,
       });
+    }
+    if (priorSignOff && target.signOffClearReason) {
+      await recordSignOffCleared(
+        connection,
+        { actor: target.actor, buildingId: target.buildingId, correlationId, tenantId: target.tenantId },
+        priorSignOff,
+        target.signOffClearReason,
+        mutation.column,
+      );
     }
 
     await commitTransaction(connection);

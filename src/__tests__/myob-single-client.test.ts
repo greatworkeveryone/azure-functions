@@ -2,8 +2,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 // MYOB's audit trail (src/myob-api-log.ts) only means something if nothing can
-// reach MYOB around it. Every myob* file must make its HTTP calls through
-// myobRequest(); the one place allowed to call fetch is myob-api-log.ts itself.
+// reach MYOB around it. Every file that is about MYOB (a myob* name) or that
+// names a MYOB host (myob.com anywhere in its source) must make its HTTP calls
+// through myobRequest(); the one place allowed to call fetch is myob-api-log.ts.
 
 const SRC = join(__dirname, "..");
 const ALLOWED = "myob-api-log.ts";
@@ -23,7 +24,7 @@ function stripComments(code: string): string {
   return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-const myobFiles = walk(SRC).filter((f) => /myob/i.test(basename(f)));
+const myobFiles = walk(SRC).filter((f) => /myob/i.test(basename(f)) || /myob\.com/i.test(readFileSync(f, "utf8")));
 
 describe("MYOB single client", () => {
   it("finds the MYOB files (library, auth, handlers)", () => {
@@ -38,6 +39,11 @@ describe("MYOB single client", () => {
         join("functions", "testMyobConnection.ts"),
       ]),
     );
+  });
+
+  it("also covers a file that names a MYOB host without myob in its name", () => {
+    const named = walk(SRC).filter((f) => !/myob/i.test(basename(f)) && /myob\.com/i.test(readFileSync(f, "utf8")));
+    expect(myobFiles).toEqual(expect.arrayContaining(named));
   });
 
   it("the logging client really is the one place that calls fetch", () => {

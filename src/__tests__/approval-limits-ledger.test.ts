@@ -90,7 +90,7 @@ beforeEach(() => {
   db.commitTransaction.mockResolvedValue(undefined);
   db.rollbackTransaction.mockResolvedValue(undefined);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   mockDb([ADA]);
 });
 
@@ -138,6 +138,17 @@ describe("changing an existing limit", () => {
     expect(param(ledger, "IsException")?.value).toBe(true);
     expect(JSON.parse(param(ledger, "Before")?.value as string)).toEqual({ maxApprovalAmount: 1000 });
     expect(JSON.parse(param(ledger, "After")?.value as string)).toEqual({ maxApprovalAmount: 5000 });
+  });
+
+  it("stores and records the role name trimmed and lower-cased, as the authority core reads it (J1)", async () => {
+    mockDb([ADA, { match: LOCK_READ, rows: [{ MaxApprovalAmount: null }] }]);
+
+    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: 50000, RoleName: " Admin " }), makeContext());
+
+    expect(res.jsonBody).toEqual({ maxApprovalAmount: 50000, ok: true, roleName: "admin" });
+    expect(param(callsMatching(LOCK_READ)[0], "RoleName")?.value).toBe("admin");
+    expect(param(callsMatching("MERGE dbo.ApprovalLimits")[0], "RoleName")?.value).toBe("admin");
+    expect(param(callsMatching("INSERT INTO dbo.DecisionLedger")[0], "SubjectId")?.value).toBe("admin");
   });
 
   it("reads the old value under a lock, merges, and ledgers, all inside one transaction that commits", async () => {

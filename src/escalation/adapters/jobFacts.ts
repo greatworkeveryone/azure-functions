@@ -7,9 +7,10 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam, type SqlRow } from "../../db";
+import { jobKindOf } from "../../jobKinds";
 import type { JobFacts } from "./jobRules";
 
-const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title, j.Status, j.Priority,
+const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title, j.Status, j.Priority, j.Kind,
     j.AssignedTo, j.AssignedToUserID, j.CreatedAt, j.StatusSince, j.AcknowledgedAt,
     j.ExpectedProgressUpdate, j.IsArchived,
     (SELECT COUNT(*) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID) AS RequestedContractors,
@@ -41,6 +42,7 @@ export function toJobFacts(row: SqlRow): JobFacts {
     firstQuoteRequestAt: asDate(row.FirstQuoteRequestAt),
     isArchived: Boolean(row.IsArchived),
     jobId: Number(row.JobID),
+    kind: jobKindOf(row.Kind),
     oldestPendingInvoiceAt: asDate(row.OldestPendingInvoiceAt),
     pendingInvoices: Number(row.PendingInvoices ?? 0),
     priority: typeof row.Priority === "string" ? row.Priority : null,
@@ -61,6 +63,22 @@ export async function loadLiveJobFacts(connection: Connection): Promise<JobFacts
 export async function loadJobFacts(connection: Connection, jobId: number): Promise<JobFacts | null> {
   const rows = await executeQuery(connection, ONE_JOB_SQL, [{ name: "JobID", type: TYPES.Int, value: jobId }]);
   return rows.length === 0 ? null : toJobFacts(rows[0]);
+}
+
+/** Whether the job is live and a decision on it has handed on a next step that is
+ *  not yet closed (migration 138): what keeps a job.next_step escalation alive. */
+export async function hasOpenNextStep(connection: Connection, jobId: number): Promise<boolean> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT CASE WHEN EXISTS (
+       SELECT 1 FROM dbo.JobDecisions d
+       JOIN dbo.Jobs j ON j.JobID = d.JobId
+       WHERE d.JobId = @JobID AND d.NextStep IS NOT NULL AND d.NextStepClosedAt IS NULL
+         AND j.IsArchived = 0 AND j.Status <> N'Done'
+     ) THEN 1 ELSE 0 END AS IsOpen`,
+    [{ name: "JobID", type: TYPES.Int, value: jobId }],
+  );
+  return Number(rows[0]?.IsOpen ?? 0) === 1;
 }
 
 const CHUNK = 500;

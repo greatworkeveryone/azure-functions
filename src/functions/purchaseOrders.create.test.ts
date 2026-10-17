@@ -67,8 +67,9 @@ interface Scenario {
 
 function arrange({ referenceCode, jobType = "Electrical", existing = [] }: Scenario) {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    if (/SELECT Status, AwaitingRole, ApprovedQuoteID FROM Jobs/.test(sql)) {
-      return [{ Status: "Work", AwaitingRole: "facilities", ApprovedQuoteID: 5 }];
+    // The job, locked for the J3 rules: live, with an approved quote.
+    if (/SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/.test(sql)) {
+      return [{ HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 42, Status: "Work" }];
     }
     if (/MAX\(Seq\)/.test(sql)) return [{ NextSeq: 7 }];
     if (/FROM Jobs j/.test(sql)) return [{ Category: "Common Areas", JobType: jobType, SubType: null, ReferenceCode: referenceCode }];
@@ -95,7 +96,7 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
   it("numbers a PO as building + charge code + Darwin date and stores the charge code", async () => {
     arrange({ referenceCode: "66S" });
 
-    const res = await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3 }), ctx);
+    const res = await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, CostNotToExceed: 500 }), ctx);
 
     expect(res.status).toBe(200);
     const params = insertParams();
@@ -108,7 +109,7 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
 
   it("includes ChargeCode in the INSERT statement", async () => {
     arrange({ referenceCode: "66S" });
-    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3 }), ctx);
+    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, CostNotToExceed: 500 }), ctx);
     const sql = db.executeQuery.mock.calls.map(([, s]: [unknown, string]) => s).find((s: string) => /INSERT INTO PurchaseOrders/.test(s));
     expect(sql).toMatch(/CreatedBy, ChargeCode\)/);
     expect(sql).toMatch(/@CreatedBy, @ChargeCode\)/);
@@ -116,26 +117,26 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
 
   it("honours a valid body ChargeCode over the job's category", async () => {
     arrange({ referenceCode: "McM" });
-    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, ChargeCode: "gm" }), ctx);
+    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, ChargeCode: "gm", CostNotToExceed: 500 }), ctx);
     expect(insertParams()).toMatchObject({ PONumber: "McMgm261013", ChargeCode: "gm" });
   });
 
   it("ignores an unknown body ChargeCode and derives one", async () => {
     arrange({ referenceCode: "66S", jobType: "Lifts" });
-    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, ChargeCode: "nope" }), ctx);
+    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, ChargeCode: "nope", CostNotToExceed: 500 }), ctx);
     expect(insertParams()).toMatchObject({ PONumber: "66Slm261013", ChargeCode: "lm" });
   });
 
   it("suffixes a same-day repeat for the same building and charge code", async () => {
     arrange({ referenceCode: "66S", existing: ["66Se261013"] });
-    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3 }), ctx);
+    await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, CostNotToExceed: 500 }), ctx);
     expect(insertParams().PONumber).toBe("66Se261013b");
   });
 
   it("falls back to the legacy number, with one warning, when the building has no ReferenceCode", async () => {
     arrange({ referenceCode: null });
 
-    const res = await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3 }), ctx);
+    const res = await upsertPurchaseOrder(makeRequest({ JobID: 42, ContractorID: 3, CostNotToExceed: 500 }), ctx);
 
     expect(res.status).toBe(200);
     const params = insertParams();
@@ -147,7 +148,7 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
 
   it("uses the internal acronym for the fallback when there is no contractor", async () => {
     arrange({ referenceCode: null });
-    await upsertPurchaseOrder(makeRequest({ JobID: 42 }), ctx);
+    await upsertPurchaseOrder(makeRequest({ JobID: 42, CostNotToExceed: 500 }), ctx);
     expect(insertParams().PONumber).toBe("261012-PO-42-INT-7");
   });
 

@@ -12,6 +12,7 @@ import {
   isOversight,
   isRaiser,
   isTargetOf,
+  isWithdrawable,
 } from "./permissions";
 import type { DirectoryUser, EscalationRow, Viewer } from "./types";
 
@@ -109,6 +110,82 @@ describe("who sees an escalation (§3.7: the targets, the raiser, every role abo
     expect(canSee(ADA, flagged)).toBe(true);
     expect(canSee(DEE, flagged)).toBe(true);
     expect(canSee(FM_ADAM, flagged)).toBe(false);
+  });
+});
+
+describe("the CFO oversees every finance. alert: sees them all, acts on none that isn't aimed at her", () => {
+  // Raised by Floorplan itself, so no raiser's team comes into it.
+  const finance = (overrides: Partial<EscalationRow> = {}) =>
+    row({
+      policyKey: "finance.variance_disputed",
+      raisedByKind: "system",
+      raisedByName: "Floorplan",
+      raisedByUserId: null,
+      targetRole: "director",
+      ...overrides,
+    });
+  const NONE = { acknowledge: false, escalateFurther: false, resolve: false, withdraw: false };
+
+  it("sees one aimed at a director, at admin or at a named person, which she could not before", () => {
+    expect(canSee(JOH, finance({ policyKey: "job.critical" }))).toBe(false);
+    expect(canSee(JOH, finance())).toBe(true);
+    expect(canSee(JOH, finance({ targetRole: "admin" }))).toBe(true);
+    expect(canSee(JOH, finance({ targetRole: "director", targetUserId: 5 }))).toBe(true);
+  });
+
+  it("sees every one of the Finance workspace's policies", () => {
+    for (const key of ["finance.attribution_disputed", "finance.variance_disputed", "finance.repeated_denials", "finance.myob_write_failed"]) {
+      expect(canSee(JOH, finance({ policyKey: key }))).toBe(true);
+    }
+  });
+
+  it("still cannot see a non-finance escalation aimed at a director", () => {
+    expect(canSee(JOH, finance({ policyKey: "job.critical" }))).toBe(false);
+    expect(canSee(JOH, finance({ policyKey: "rent_review.approval" }))).toBe(false);
+    expect(canSee(JOH, finance({ policyKey: "system.health", targetRole: "admin" }))).toBe(false);
+  });
+
+  it("matches the prefix finance., not any key that begins with the word", () => {
+    expect(canSee(JOH, finance({ policyKey: "financex.variance_disputed" }))).toBe(false);
+    expect(canSee(JOH, finance({ policyKey: "finance" }))).toBe(false);
+    expect(canSee(JOH, finance({ policyKey: "any.finance.thing" }))).toBe(false);
+  });
+
+  it("compares the key the way the database does: without regard to case", () => {
+    expect(canSee(JOH, finance({ policyKey: "Finance.Variance_Disputed" }))).toBe(true);
+  });
+
+  it("gives nobody else anything: the other roles see exactly what they saw before", () => {
+    for (const who of [CAM, FM_ADAM, FAY, GUS, viewer(10, "user")]) {
+      expect(canSee(who, finance())).toBe(false);
+    }
+    // Directors and admin already saw everything.
+    expect(canSee(DEE, finance())).toBe(true);
+    expect(canSee(ADA, finance())).toBe(true);
+  });
+
+  it("changes nothing for a finance escalation she could already see", () => {
+    expect(canSee(JOH, finance({ targetRole: "accounts_manager" }))).toBe(true);
+    expect(canSee(JOH, finance({ targetRole: "cfo" }))).toBe(true);
+  });
+
+  it("seeing is not acting: every action is off for one that isn't aimed at her", () => {
+    for (const status of ["open", "acknowledged"] as const) {
+      for (const kind of ["attention", "authority"] as const) {
+        const aimedAtDirector = finance({ kind, status });
+        expect(availableActions(JOH, aimedAtDirector)).toEqual(NONE);
+        expect(canAct(JOH, aimedAtDirector)).toBe(false);
+        expect(canWithdraw(JOH, aimedAtDirector)).toBe(false);
+        expect(canEscalateFurther(JOH, aimedAtDirector)).toBe(false);
+      }
+    }
+  });
+
+  it("acts only where the existing rules say: as the target", () => {
+    expect(availableActions(JOH, finance({ targetRole: "cfo" }))).toEqual({ acknowledge: true, escalateFurther: true, resolve: true, withdraw: false });
+    expect(availableActions(JOH, finance({ targetUserId: 4 }))).toMatchObject({ acknowledge: true, resolve: true });
+    // Seeing a colleague's named escalation is not being its target.
+    expect(availableActions(JOH, finance({ targetRole: "cfo", targetUserId: 99 }))).toEqual(NONE);
   });
 });
 
@@ -236,5 +313,23 @@ describe("the DTO", () => {
 
   it("has no deep link for a subject type nobody registered", () => {
     expect(toDto(row({ subjectType: "mystery" }), DEE, now, directory).deepLink).toBeNull();
+  });
+});
+
+describe("L3: a rent review's approval ends only with the review's decision", () => {
+  const approval = (over: Partial<EscalationRow> = {}) =>
+    row({ kind: "authority", policyKey: "rent_review.approval", raisedByUserId: 9, subjectId: "rev-1", subjectType: "rent_review", ...over });
+
+  it("can't be withdrawn by its raiser (the preparer) or by admin", () => {
+    expect(isWithdrawable(approval())).toBe(false);
+    expect(canWithdraw(GUS, approval())).toBe(false);
+    expect(canWithdraw(ADA, approval())).toBe(false);
+    expect(availableActions(GUS, approval()).withdraw).toBe(false);
+  });
+
+  it("leaves a review's attention escalations to the usual rule", () => {
+    const overdue = approval({ kind: "attention", policyKey: "rent_review.overdue", raisedByKind: "system", raisedByUserId: null });
+    expect(isWithdrawable(overdue)).toBe(true);
+    expect(canWithdraw(ADA, overdue)).toBe(true);
   });
 });

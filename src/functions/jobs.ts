@@ -21,6 +21,9 @@ import {
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
+import { todayInDarwin } from "../darwinDate";
+import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
+import { isWorkCompletion, markServiceJobCompleted } from "../serviceScheduleRuns";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -39,6 +42,10 @@ import {
   JobStatus,
   resolveManualTarget,
 } from "../jobStatusMachine";
+import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
+import { loadJobForTransition } from "../jobTransitionFacts";
+import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
+import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
 
 // Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
@@ -253,9 +260,22 @@ const ALLOWED_PRIORITIES = ["Critical", "High", "Normal", "Low"] as const;
 
 const ALLOWED_CREATION_METHODS = ["manual", "wr", "email", "inspection"] as const;
 
-// Job kind — reactive Facilities works vs scheduled Maintenance servicing
-// (m079). Mirrors JobKind in command-centre/src/types/job.ts.
-const ALLOWED_KINDS = ["facilities", "maintenance"] as const;
+// Job kind — reactive Facilities works, scheduled Maintenance servicing (m079)
+// and Admin / Accounts decision jobs. Mirrors JobKind in
+// command-centre/src/types/job.ts; the list lives in ../jobKinds.
+const ALLOWED_KINDS = JOB_KINDS;
+
+// An Admin / Accounts job is in-house for good (plan D2): no quote, PO or
+// invoice. Its kind is fixed when it is raised, so these two refusals keep it
+// that way. Codes are for the frontend, the sentences for the person.
+const ADMIN_KIND_FIXED = {
+  code: "kind_fixed",
+  error: "An Admin / Accounts job keeps its kind, and no other job can become one. Raise a new job instead.",
+} as const;
+const ADMIN_STAYS_INTERNAL = {
+  code: "admin_is_internal",
+  error: "An Admin / Accounts job is always in-house, with no quote, purchase order or invoice, so that can't be switched off.",
+} as const;
 
 const MAX_LEN: Partial<Record<JobColumn, number>> = {
   Title: 200,
@@ -553,7 +573,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 // Body: { JobID?, ...job columns }. Omit JobID to create; include to update.
 // Events are NOT touched by this endpoint — use addJobEvent for those.
 
-async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -599,10 +619,26 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           jsonBody: { error: "Status must be 'New' when creating a job" },
         };
       }
-      // Default AwaitingRole to 'facilities' when the caller omits it — a New
-      // job is always on the facilities side first.
-      if (fields.AwaitingRole === undefined || fields.AwaitingRole === null) {
-        fields.AwaitingRole = "facilities";
+      // A New job is always on the facilities side first (J3): who it waits
+      // on isn't the caller's to choose, here or later (N1).
+      if (fields.AwaitingRole != null && fields.AwaitingRole !== "facilities") {
+        return {
+          status: 422,
+          jsonBody: { code: "awaiting_role_derived", error: "A new job always starts with facilities, so who it waits on can't be set." },
+        };
+      }
+      fields.AwaitingRole = "facilities";
+      // An Admin / Accounts job is stored in-house whatever the payload says: the
+      // kind decides that, not a person, so the manager gate below leaves it alone
+      // and the internal close path (jobTransitionGuard) is open to it.
+      const isAdminJob = fields.Kind === ADMIN_KIND;
+      if (isAdminJob) fields.IsInternal = true;
+      // N4 (J2): only a manager starts a job as contract or internal.
+      if (fields.IsContract || (fields.IsInternal && !isAdminJob)) {
+        const refusal = flagChangeRefusal({ actor: { kind: "user", roles: await rolesForRequest(request) }, hasMoneyRecords: false });
+        if (refusal) {
+          return { status: refusal.code === "role_not_permitted" ? 403 : 422, jsonBody: { code: refusal.code, error: refusal.reason } };
+        }
       }
     } else if (typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID must be a number when provided" } };
@@ -643,6 +679,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
     }
 
     connection = await createRequestConnection(token);
+
+    // Defects liability periods (sprint F1, LAUNCH-READINESS §5): new planned
+    // maintenance on a covered scope is refused (409) unless a manager books it
+    // anyway with a reason; anything else covered comes back as a warning.
+    const defects =
+      JobID === undefined
+        ? await guardNewJob(connection, request, body as Record<string, unknown>, fields, todayInDarwin())
+        : null;
+    if (defects?.response) return defects.response;
 
     const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
@@ -691,6 +736,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           insertParams,
         );
         newJobId = inserted[0].JobID as number;
+
+        if (defects?.override) {
+          await recordDefectsOverride(connection, request, {
+            buildingId: fields.BuildingID as number,
+            callerName: identity.name,
+            jobId: newJobId,
+            override: defects.override,
+          });
+        }
 
         // If the job was created from a Work Request, claim any attachments
         // that arrived with the WR. They were inserted earlier with JobID NULL
@@ -753,11 +807,45 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         // so those diff/event blocks were removed.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, Kind, IsContract, Priority FROM Jobs WHERE JobID = @JobID",
+          `SELECT Status, AssignedTo, Kind, IsContract, IsInternal, Priority,
+                  CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = Jobs.JobID)
+                         OR EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = Jobs.JobID)
+                         OR EXISTS (SELECT 1 FROM JobInvoices i WHERE i.JobID = Jobs.JobID) THEN 1 ELSE 0 END AS HasMoneyRecords
+             FROM Jobs WITH (UPDLOCK, HOLDLOCK) WHERE JobID = @JobID`,
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
         previousPriority = previous?.Priority ?? null;
+
+        // Admin / Accounts jobs keep their kind and stay in-house (plan D2). No job
+        // becomes one, because only a manager may skip the money path (N4) and
+        // nothing here checks the job has no quote, PO or invoice; and none turns
+        // into another kind, so a decision job never lands on the contractor flow.
+        if (previous !== undefined) {
+          const wasAdmin = previous.Kind === ADMIN_KIND;
+          const changesKind = fields.Kind !== undefined && (fields.Kind === ADMIN_KIND) !== wasAdmin;
+          const unsetsInternal = wasAdmin && fields.IsInternal !== undefined && !fields.IsInternal;
+          if (changesKind || unsetsInternal) {
+            await rollbackTransaction(connection).catch(() => {});
+            return { status: 422, jsonBody: changesKind ? ADMIN_KIND_FIXED : ADMIN_STAYS_INTERNAL };
+          }
+        }
+
+        // N4 (J2): IsContract / IsInternal decide which money path the job
+        // takes, so only a manager changes them, and never once a quote, PO
+        // or invoice exists. Re-sending the value the job has is no change.
+        const flips = (column: "IsContract" | "IsInternal"): boolean =>
+          previous !== undefined && fields[column] !== undefined && Boolean(fields[column]) !== Boolean(previous[column]);
+        if (flips("IsContract") || flips("IsInternal")) {
+          const refusal = flagChangeRefusal({
+            actor: { kind: "user", roles: await rolesForRequest(request) },
+            hasMoneyRecords: Boolean(previous?.HasMoneyRecords),
+          });
+          if (refusal) {
+            await rollbackTransaction(connection).catch(() => {});
+            return { status: refusal.code === "role_not_permitted" ? 403 : 422, jsonBody: { code: refusal.code, error: refusal.reason } };
+          }
+        }
 
         // Guard the contract flip (WP10): isContract may only change while the
         // job is still New — flipping it mid-flow would invalidate the quote /
@@ -840,6 +928,24 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
             );
           }
 
+          if (fields.IsInternal !== undefined && Boolean(fields.IsInternal) !== Boolean(previous.IsInternal)) {
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                {
+                  name: "Text",
+                  type: TYPES.NVarChar,
+                  value: fields.IsInternal ? "Marked as internal (no quote, PO or invoice)" : "Internal flag removed",
+                },
+                { name: "EventType", type: TYPES.NVarChar, value: "internal_change" },
+              ],
+            );
+          }
+
           if (
             newIsContract !== undefined &&
             Boolean(newIsContract) !== Boolean(previous.IsContract)
@@ -909,7 +1015,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       await syncJobActionTriggersStandalone(newJobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { job: { ...stored[0], Events: events } } };
+    return {
+      status: 200,
+      jsonBody: {
+        job: { ...stored[0], Events: events },
+        ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
+      },
+    };
   } catch (error: any) {
     context.error("upsertJob failed:", error.message);
     return errorResponse("Upsert failed", error.message);
@@ -1156,7 +1268,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
 //   NewAssignee           → Jobs.AssignedTo
 // Always bumps Jobs.LastModifiedDate.
 
-async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -1224,110 +1336,110 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     if (validationError) {
       return { status: 400, jsonBody: { error: validationError } };
     }
+    // N1 (J2): the awaiting side is derived by the state machine from the
+    // status; a request never writes it, with or without a status change.
+    if (NewAwaitingRole != null) {
+      return {
+        status: 422,
+        jsonBody: {
+          code: "awaiting_role_derived",
+          error: "Who the job waits on follows its status, so it can't be set directly.",
+        },
+      };
+    }
+    // J3: money, contractor, archive and flag entries come from the handler
+    // that made the change, never from a client.
+    const typeRefusal = eventTypeRefusal(EventType);
+    if (typeRefusal) return { status: 422, jsonBody: typeRefusal };
+    if (linkedIdsInvalid({ InvoiceID, PurchaseOrderID, QuoteID })) {
+      return { status: 400, jsonBody: { error: "QuoteID, InvoiceID and PurchaseOrderID must be positive whole numbers" } };
+    }
     const isStalledBit =
       IsStalled == null ? null : IsStalled ? 1 : 0;
 
     connection = await createRequestConnection(token);
+    const roles = await rolesForRequest(request);
 
-    // If the caller is changing status, validate the transition against the
-    // state machine and let the machine compute the resulting awaitingRole
-    // (the caller's NewAwaitingRole on a status-change request is advisory
-    // only — the machine wins).
-    let resolvedNewStatus: string | null = NewStatus ?? null;
-    let resolvedNewAwaitingRole: string | null = NewAwaitingRole ?? null;
-    // Pre-block capture/restore for tenant blocks (WP8). `capturesPreBlock` is
-    // set when this status change blocks the job (→ Tenant): we persist the
-    // composite the job is leaving so unblocking can restore it exactly.
-    // `clearsPreBlock` is set when this change unblocks the job (Tenant → Work):
-    // the restore has already been applied to the resolved target above, so we
-    // null the columns out. Both writes happen in the mirror UPDATE below,
-    // inside the same transaction as the status change.
+    // Everything below is one transaction: the job is read and locked, the
+    // transition guard decides on exactly that state (J2), and the event and
+    // the mirror UPDATE are written, the UPDATE predicated on the state read.
+    // An event without the mirror leaves the Jobs row out of date (list views
+    // read from Jobs, not from the event log), and an update without the event
+    // loses the audit trail.
+    let resolvedNewStatus: string | null = null;
+    let resolvedNewAwaitingRole: string | null = null;
+    // The state the guard decided on; the mirror UPDATE only lands if the row
+    // still holds it.
+    let expectedState: JobState | null = null;
+    // Pre-block capture/restore for tenant blocks (WP8): capture the composite
+    // the job is leaving when it is blocked, clear it when it is unblocked (the
+    // machine has already applied the restore to the target).
     let preBlockToCapture: JobState | null = null;
     let clearsPreBlock = false;
-    // True when this event lands the job in a genuinely new status (not a
-    // self-transition no-op). A real transition resets the accountability
-    // clock: StatusSince=now and any prior acknowledgement / escalation is
-    // cleared, because a fresh state needs fresh acknowledgement. Set inside the
-    // real-transition branch below and consumed by the mirror UPDATE.
+    // A real transition (not a self-transition no-op) resets the
+    // accountability clock: StatusSince=now, prior acknowledgement and
+    // escalation cleared.
     let isRealTransition = false;
-    if (NewStatus != null) {
-      const currentRows = await executeQuery(
-        connection,
-        "SELECT Status, AwaitingRole, PreBlockStatus, PreBlockAwaitingRole, IsContract, IsInternal FROM Jobs WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: JobID }],
-      );
-      if (currentRows.length === 0) {
-        return { status: 404, jsonBody: { error: "Job not found" } };
-      }
-      const currentState: JobState = {
-        status: currentRows[0].Status as JobStatus,
-        awaitingRole:
-          (currentRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
-      };
-      // The composite the job sat in before it was tenant-blocked, if captured.
-      const preBlockStatus = currentRows[0].PreBlockStatus as JobStatus | null;
-      const preBlockState: JobState | undefined =
-        preBlockStatus != null
-          ? {
-              status: preBlockStatus,
-              awaitingRole:
-                (currentRows[0].PreBlockAwaitingRole as AwaitingRole) ??
-                AwaitingRole.FACILITIES,
-            }
-          : undefined;
-      // Self-transitions (NewStatus equals current Status) are accepted as
-      // no-ops so the activity event still lands in the feed — e.g. "Quote
-      // received" while the job is already Awaiting Approval, or "Invoice
-      // approved" while parked in Awaiting Approval awaiting payment.
-      if (NewStatus === currentState.status) {
-        resolvedNewStatus = currentState.status;
-        resolvedNewAwaitingRole = currentState.awaitingRole;
-      } else {
-        // Restore the captured pre-block state on a Tenant → Work unblock so
-        // the job returns where it was (e.g. Awaiting Approval) rather than
-        // leapfrogging into Work without the quote ever being approved.
-        // `isContract` opens the standing-contract New → Work fast path
-        // (WORK_AUTHORIZED) — a no-op for every non-contract job.
-        const isContract = Boolean(currentRows[0].IsContract);
-        const isInternal = Boolean(currentRows[0].IsInternal);
-        const target = resolveManualTarget(currentState, NewStatus as JobStatus, {
-          preBlockState,
-          isContract,
-          isInternal,
-        });
-        if (target == null) {
-          return {
-            status: 422,
-            jsonBody: {
-              error: "Illegal status transition",
-              from: currentState.status,
-              to: NewStatus,
-            },
-          };
-        }
-        resolvedNewStatus = target.status;
-        resolvedNewAwaitingRole = target.awaitingRole;
-        // The composite actually moved — reset the accountability clock below.
-        isRealTransition =
-          target.status !== currentState.status ||
-          target.awaitingRole !== currentState.awaitingRole;
-        if (target.status === JobStatus.TENANT) {
-          // Blocking — remember exactly where we came from.
-          preBlockToCapture = currentState;
-        } else if (currentState.status === JobStatus.TENANT) {
-          // Unblocking — the restore is applied; clear the captured columns.
-          clearsPreBlock = true;
-        }
-      }
-    }
-
-    // INSERT JobEvents and the mirror UPDATE Jobs are a logical unit — an
-    // event without the mirror leaves the Jobs row out of date (list views
-    // read from Jobs, not from the event log), and an update without the
-    // event loses the audit trail. Wrap both in one transaction.
     let insertedEventId: number;
     await beginTransaction(connection);
     try {
+      const linkRefusal = await linkedRecordRefusal(connection, JobID, { InvoiceID, PurchaseOrderID, QuoteID });
+      if (linkRefusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 422, jsonBody: linkRefusal };
+      }
+      if (NewStatus != null) {
+        const locked = await loadJobForTransition(connection, JobID);
+        if (!locked) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 404, jsonBody: { error: "Job not found" } };
+        }
+        const currentState: JobState = {
+          awaitingRole: locked.current.awaitingRole as AwaitingRole,
+          status: locked.current.status as JobStatus,
+        };
+        if (NewStatus === currentState.status) {
+          // Self-transitions are accepted as no-ops so the activity event
+          // still lands in the feed ("Quote received" while already Awaiting
+          // Approval).
+          resolvedNewStatus = currentState.status;
+          resolvedNewAwaitingRole = currentState.awaitingRole;
+        } else {
+          const preBlockState: JobState | undefined = locked.preBlock
+            ? { awaitingRole: locked.preBlock.awaitingRole as AwaitingRole, status: locked.preBlock.status as JobStatus }
+            : undefined;
+          const machineTarget = resolveManualTarget(currentState, NewStatus as JobStatus, {
+            isContract: locked.facts.isContract,
+            isInternal: locked.facts.isInternal,
+            preBlockState,
+          });
+          const decision = guardTransition({
+            actor: { kind: "user", roles },
+            current: locked.current,
+            facts: locked.facts,
+            machineTarget,
+            request: { kind: "manual", target: NewStatus as GuardStatus },
+          });
+          if (!decision.allowed) {
+            await rollbackTransaction(connection).catch(() => {});
+            return {
+              status: decision.code === "role_not_permitted" ? 403 : 422,
+              jsonBody: { code: decision.code, error: decision.reason, from: currentState.status, to: NewStatus },
+            };
+          }
+          const target: JobState = { awaitingRole: decision.to.awaitingRole as AwaitingRole, status: decision.to.status as JobStatus };
+          resolvedNewStatus = target.status;
+          resolvedNewAwaitingRole = target.awaitingRole;
+          expectedState = currentState;
+          isRealTransition = target.status !== currentState.status || target.awaitingRole !== currentState.awaitingRole;
+          if (target.status === JobStatus.TENANT) {
+            preBlockToCapture = currentState;
+          } else if (currentState.status === JobStatus.TENANT) {
+            clearsPreBlock = true;
+          }
+        }
+      }
+
       const inserted = await executeQuery(
         connection,
         `INSERT INTO JobEvents (
@@ -1416,10 +1528,6 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           value: resolvedNewAwaitingRole,
         });
       }
-      // Capture the pre-block composite when blocking, clear it when
-      // unblocking — same transaction as the status write so the two never
-      // diverge (a Tenant row always carries its restore target; a non-Tenant
-      // row never holds a stale one).
       if (preBlockToCapture != null) {
         updates.push("PreBlockStatus=@PreBlockStatus", "PreBlockAwaitingRole=@PreBlockAwaitingRole");
         updateParams.push(
@@ -1429,15 +1537,9 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       } else if (clearsPreBlock) {
         updates.push("PreBlockStatus=NULL", "PreBlockAwaitingRole=NULL");
       }
-      // Acknowledge event (WP18a): the assignee/manager has seen the current
-      // state and is on it — stamp who/when onto Jobs in the SAME transaction as
-      // the event, identical to the StalledAt mirror above. This resets the
-      // escalation clock (the evaluator COALESCEs AcknowledgedAt first). The
-      // backend keeps no event-type whitelist; "acknowledged" is persisted
-      // verbatim on the JobEvents row by the INSERT above.
-      // Guarded by !isRealTransition so the AcknowledgedAt column is never
-      // assigned twice in one SET (a transition clears it; both can't apply —
-      // and an acknowledge event never carries a NewStatus anyway).
+      // Acknowledge event (WP18a): stamp who/when in the same transaction as
+      // the event; resets the escalation clock. Never alongside a real
+      // transition, which clears it.
       if (EventType === "acknowledged" && !isRealTransition) {
         updates.push("AcknowledgedAt=SYSUTCDATETIME()", "AcknowledgedBy=@AcknowledgedBy");
         updateParams.push({
@@ -1446,10 +1548,6 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           value: identity.name,
         });
       }
-      // Real status transition (WP18a): a new state needs fresh acknowledgement,
-      // so reset the clock — StatusSince=now and clear any prior ack/escalation.
-      // Self-transitions (e.g. "Quote received" while already Awaiting Approval)
-      // are no-ops and leave the clock untouched.
       if (isRealTransition) {
         updates.push(
           "StatusSince=SYSUTCDATETIME()",
@@ -1458,11 +1556,41 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           "EscalatedAt=NULL",
         );
       }
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
-        updateParams,
-      );
+      if (expectedState) {
+        // Predicated on the state the guard decided on: if the job moved in
+        // between (it can't while the row lock holds, but the write says so
+        // itself), nothing lands and the caller is told.
+        updateParams.push(
+          { name: "ExpectedStatus", type: TYPES.NVarChar, value: expectedState.status },
+          { name: "ExpectedAwaitingRole", type: TYPES.NVarChar, value: expectedState.awaitingRole },
+        );
+        const moved = await executeQuery(
+          connection,
+          `UPDATE Jobs SET ${updates.join(", ")}
+           OUTPUT INSERTED.JobID
+           WHERE JobID = @JobID AND Status = @ExpectedStatus AND ISNULL(AwaitingRole, 'facilities') = @ExpectedAwaitingRole`,
+          updateParams,
+        );
+        if (moved.length === 0) {
+          await rollbackTransaction(connection).catch(() => {});
+          return {
+            status: 409,
+            jsonBody: { code: "job_changed", error: "This job changed while you were saving. Reload it and try again." },
+          };
+        }
+      } else {
+        await executeQuery(
+          connection,
+          `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
+          updateParams,
+        );
+      }
+
+      // Service schedules (sprint F2, WP50): completing a scheduled job's work
+      // moves its schedule on to the next due date of the anchor series.
+      if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
+        await markServiceJobCompleted(connection, JobID, identity.name);
+      }
 
       await commitTransaction(connection);
     } catch (err) {

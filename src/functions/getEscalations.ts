@@ -8,7 +8,10 @@
 //              visible  everything I may see; the default when a subject is given
 //   status   active (default: open + acknowledged) | open (not yet acknowledged) | closed | all
 //   subjectType, subjectId   one subject's escalations (the banner on a job)
-//   policyKey, kind (attention | authority), urgent (true | false)
+//   policyKey                one policy by its exact key (job.manual), or a whole domain
+//                            by a prefix ending in "." (finance.), as getDecisions does
+//                            for action
+//   kind (attention | authority), urgent (true | false)
 //   page, pageSize           see ../pagination
 //
 // 200 { items: EscalationDto[], total, page, pageSize }; `total` is the count for
@@ -17,7 +20,8 @@
 // Gate: ESCALATION_ROLES (frontend capability viewEscalations); view=team needs
 // TEAM_ESCALATION_ROLES (viewTeamEscalations); view=all needs ALL_ESCALATION_ROLES
 // (viewAllEscalations). Visibility within the view is §3.7: the targets, the
-// raiser and every role above the target.
+// raiser and every role above the target; the team and visible views also give
+// the CFO every escalation whose policy key starts with finance.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection } from "../db";
@@ -40,6 +44,10 @@ import type { DirectoryUser, EscalationKind } from "../escalation/types";
 
 const VIEWS: readonly string[] = ["mine", "raised", "team", "all", "visible"];
 const STATUSES: readonly string[] = ["active", "open", "closed", "all"];
+const MAX_POLICY_KEY_CHARS = 64;
+// A policy key is a domain and a rule in lower case (job.past_due); a prefix is
+// the same up to a dot. Only prefixes are checked for shape: they go into a LIKE.
+const POLICY_KEY_PREFIX = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*\.$/;
 
 function readFilter(request: HttpRequest, caller: Caller): ListFilter {
   const q = request.query;
@@ -64,12 +72,18 @@ function readFilter(request: HttpRequest, caller: Caller): ListFilter {
   if (urgentText && !["true", "false", "1", "0"].includes(urgentText)) {
     throw new EscalationError("bad_request", "urgent must be true or false");
   }
-  const policyKey = q.get("policyKey")?.trim() || undefined;
-  if (policyKey && policyKey.length > 64) throw new EscalationError("bad_request", "policyKey is too long");
+  const policyText = q.get("policyKey")?.trim() || undefined;
+  if (policyText && policyText.length > MAX_POLICY_KEY_CHARS) throw new EscalationError("bad_request", "policyKey is too long");
+  // A trailing "." asks for every policy in a domain, e.g. finance.
+  const policyKeyPrefix = policyText?.endsWith(".") ? policyText : undefined;
+  if (policyKeyPrefix !== undefined && !POLICY_KEY_PREFIX.test(policyKeyPrefix)) {
+    throw new EscalationError("bad_request", "policyKey must be a policy key, or a prefix ending in '.'");
+  }
 
   return {
     kind,
-    policyKey,
+    policyKey: policyKeyPrefix === undefined ? policyText : undefined,
+    policyKeyPrefix,
     status: status as ListStatus,
     subjectId,
     subjectType,

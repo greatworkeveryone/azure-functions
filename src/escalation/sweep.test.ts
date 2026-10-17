@@ -10,6 +10,8 @@ import { jobConditionActive, type JobFacts } from "./adapters/jobRules";
 import type { EscalationAdapter } from "./adapters/registry";
 import { NO_HOLIDAYS } from "./businessTime";
 import { MAX_NOTIFICATION_ATTEMPTS } from "./config";
+import type { DueDeferral } from "../jobDecisions/decisionsStore";
+import type { ReaskOptions, ReaskResult } from "../jobDecisions/reask";
 import { followUpSince, runSweep, type SweepDeps, type SweepOptions, type SweepReport } from "./sweep";
 import { latestKey, type LatestEscalationTimes } from "./store";
 import type { EscalationPolicy, EscalationRow } from "./types";
@@ -41,6 +43,7 @@ function job(over: Partial<JobFacts> = {}): JobFacts {
     firstQuoteRequestAt: null,
     isArchived: false,
     jobId: 1,
+    kind: "facilities",
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
@@ -121,7 +124,10 @@ interface World {
     escalateFurther: Parameters<SweepDeps["escalateFurther"]>[1][];
     notify: { event: string; id: number }[];
     raise: Parameters<SweepDeps["raise"]>[1][];
+    reask: { deferral: DueDeferral; options: ReaskOptions }[];
   };
+  /** Deferred decisions not yet asked again (what the database would list as due). */
+  deferrals: DueDeferral[];
   deps: SweepDeps;
   exhausted: number;
   jobs: JobFacts[];
@@ -134,7 +140,8 @@ const live = (row: EscalationRow): boolean => row.status === "open" || row.statu
 function makeWorld(): World {
   const world: World = {
     arrivals: new Map(),
-    calls: { autoResolve: [], escalateFurther: [], notify: [], raise: [] },
+    calls: { autoResolve: [], escalateFurther: [], notify: [], raise: [], reask: [] },
+    deferrals: [],
     deps: undefined as unknown as SweepDeps,
     exhausted: 0,
     jobs: [],
@@ -219,6 +226,7 @@ function makeWorld(): World {
       }
       return map;
     },
+    listDueDeferrals: async () => world.deferrals.map((d) => ({ ...d })),
     listLiveEscalations: async () => world.rows.filter(live).map((r) => ({ ...r })),
     loadLiveJobFacts: async () => world.jobs.filter((j) => !j.isArchived && j.status !== "Done"),
     notifyTargets: async (_c, row, event) => {
@@ -244,6 +252,12 @@ function makeWorld(): World {
       });
       world.rows.push(row);
       return { created: true, escalation: { ...row } };
+    },
+    // Like the real one: asking again stamps the deferral, so it is not due any more.
+    reaskDeferral: async (_c, deferral, options): Promise<ReaskResult> => {
+      world.calls.reask.push({ deferral, options });
+      world.deferrals = world.deferrals.filter((d) => d.decisionId !== deferral.decisionId);
+      return "asked";
     },
   };
   return world;
@@ -407,6 +421,77 @@ describe("job policies", () => {
       expect.arrayContaining(["job.stalled_unacknowledged:1", "job.unassigned:2", "system.health:notification_config"]),
     );
     expect(report.errors).toEqual([]);
+  });
+});
+
+describe("Admin / Accounts jobs (plan D2) are on none of the job policies", () => {
+  // The same facts for every kind: a job stuck waiting on a quote and an invoice,
+  // stalled and past its update date; and one nobody owns.
+  const stuck = (jobId: number, kind: string): JobFacts =>
+    job({
+      expectedProgressUpdate: ago(5 * DAY),
+      firstQuoteRequestAt: ago(10 * DAY),
+      jobId,
+      kind,
+      oldestPendingInvoiceAt: ago(10 * DAY),
+      pendingInvoices: 1,
+      requestedContractors: 1,
+      status: "Quote",
+      statusSince: ago(30 * DAY),
+    });
+  const unowned = (jobId: number, kind: string): JobFacts =>
+    job({ assigned: false, createdAt: ago(3 * DAY), jobId, kind, statusSince: ago(3 * DAY) });
+  const raisedFor = (world: World, jobId: number): string[] =>
+    world.calls.raise.filter((c) => c.subjectId === String(jobId)).map((c) => c.policyKey).sort();
+
+  it("raises quote_not_back, invoice_waiting and the rest for facilities and maintenance jobs, and none of them for an admin job that qualifies for every one", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(1, "facilities"), stuck(2, "maintenance"), stuck(3, "admin"), unowned(4, "facilities"), unowned(5, "admin")];
+
+    const report = await sweep(world);
+
+    const WORK = ["job.invoice_waiting", "job.past_due", "job.quote_not_back", "job.stalled_unacknowledged"];
+    expect(raisedFor(world, 1)).toEqual(WORK);
+    expect(raisedFor(world, 2)).toEqual(WORK);
+    expect(raisedFor(world, 4)).toEqual(["job.unassigned"]);
+    expect(raisedFor(world, 3)).toEqual([]);
+    expect(raisedFor(world, 5)).toEqual([]);
+    expect(report.raised).toBe(9);
+  });
+
+  it("selects kinds by name: a job of a kind nobody listed is left alone too", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(6, "projects"), unowned(7, "projects")];
+
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("ends a contractor-flow escalation an admin job already has, as cleared, and keeps the same one on a facilities job", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(3, "admin"), stuck(1, "facilities")];
+    world.rows = [
+      esc({ dueAt: ago(-5), policyKey: "job.quote_not_back", subjectId: "3" }),
+      esc({ dueAt: ago(-5), policyKey: "job.quote_not_back", subjectId: "1" }),
+    ];
+
+    await sweep(world);
+
+    expect(world.calls.autoResolve.map((c) => c.escalationId)).toEqual([1]);
+    expect(world.rows[0]).toMatchObject({ resolutionCode: "condition_cleared", subjectId: "3" });
+    expect(world.rows[1]).toMatchObject({ status: "open", subjectId: "1" });
+  });
+
+  it("still lets a person escalate an admin job by hand: job.manual follows the job being live, not its kind", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(3, "admin")];
+    world.rows = [esc({ dueAt: ago(-5), policyKey: "job.manual", raisedByKind: "user", subjectId: "3" })];
+
+    await sweep(world);
+
+    expect(world.calls.autoResolve).toEqual([]);
+    expect(world.rows[0].status).toBe("open");
   });
 });
 
@@ -853,7 +938,7 @@ describe("dry run", () => {
 
     const report = await sweep(world, { dryRun: true, log });
 
-    expect(world.calls).toEqual({ autoResolve: [], escalateFurther: [], notify: [], raise: [] });
+    expect(world.calls).toEqual({ autoResolve: [], escalateFurther: [], notify: [], raise: [], reask: [] });
     expect(JSON.stringify(world.rows)).toBe(before);
     expect(report).toMatchObject({ autoResolved: 1, dryRun: true, followUps: 1, superseded: 1 });
     const lines = log.mock.calls.map((c) => c[0] as string).join("\n");
@@ -950,5 +1035,523 @@ describe("running it twice", () => {
     expect(first.autoResolved).toBe(1);
     expect(second.autoResolved).toBe(0);
     expect(world.calls.autoResolve).toHaveLength(1);
+  });
+});
+
+// ── A decision request's schedule (jobs plan A1) ─────────────────────────────
+
+describe("scheduled reminders (a decision request's)", () => {
+  /** A pending decision request: authority, asked of two named people, with reminders at the given hours from NOW. */
+  const decisionRow = (remindHoursFromNow: number[], over: Partial<EscalationRow> = {}): EscalationRow =>
+    esc({
+      context: { decision: { question: "Pay it?", requestId: 7 }, schedule: { remindAt: remindHoursFromNow.map((h) => ago(-h).toISOString()) }, userTargets: [3, 5] },
+      createdAt: ago(48),
+      dueAt: ago(-100),
+      kind: "authority",
+      lastNotifiedAt: ago(47),
+      policyKey: "job.decision_pending",
+      subjectId: "12",
+      targetRole: null,
+      ...over,
+    });
+
+  /** Like the real notifier: a reminder that went out is when the people were last told. */
+  function remindingWorld(): World {
+    const world = makeWorld();
+    world.policies["job.decision_pending"] = policy("job.decision_pending", {
+      kind: "authority",
+      ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }],
+    });
+    world.deps.notifyTargets = async (_c, row, event, options) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      (world.calls as unknown as { options: unknown[] }).options = [...(((world.calls as unknown as { options?: unknown[] }).options) ?? []), options];
+      const found = world.rows.find((r) => r.escalationId === row.escalationId);
+      if (found) found.lastNotifiedAt = NOW;
+      return { attempts: 1, error: null, recipients: [], state: "sent" };
+    };
+    return world;
+  }
+
+  it("emails the reminder that is due, as a reminder, and writes no new row", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
+    expect(world.rows).toHaveLength(1);
+    expect(world.calls.escalateFurther).toEqual([]);
+    expect(report.errors).toEqual([]);
+  });
+
+  it("costs the row no attempts when it goes through: the notifier is asked to count failures only", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+
+    await sweep(world);
+
+    const options = (world.calls as unknown as { options: { countAttempts?: string }[] }).options;
+    expect(options).toHaveLength(1);
+    expect(options[0].countAttempts).toBe("failures");
+  });
+
+  it("does nothing before its time", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([5, 30])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("sends one for the time that has come and, run again, nothing more", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2, 30])];
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.scheduledReminders).toBe(1);
+    expect(second.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toHaveLength(1);
+  });
+
+  it("sends one reminder, not several, when more than one time has passed (the sweep was off)", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-30, -20, -2])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toHaveLength(1);
+  });
+
+  it("still reminds a row someone has acknowledged: the decision has not been made", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { acknowledgedAt: ago(5), status: "acknowledged", targetUserId: 3 })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+  });
+
+  it("in a dry run says what it would send and sends nothing", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    const log = jest.fn();
+
+    const report = await sweep(world, { dryRun: true, log });
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("would remind the people on #1 job.decision_pending on job 12"));
+  });
+
+  it("reminds a request with no due moment (an urgent one not ticked to move up), and never moves it up, however far past its respond-by", async () => {
+    const world = remindingWorld();
+    world.rows = [
+      decisionRow([-2], {
+        context: {
+          decision: { autoEscalate: false, question: "Pay it?", requestId: 7, respondBy: ago(30).toISOString(), tier: "urgent" },
+          schedule: { escalateAt: null, remindAt: [ago(2).toISOString()] },
+          userTargets: [3, 5],
+        },
+        createdAt: ago(100),
+        dueAt: null,
+        lastNotifiedAt: ago(99),
+        urgent: true,
+      }),
+    ];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
+    expect(report.superseded).toBe(0);
+    expect(report.reminded).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+    expect(world.rows).toHaveLength(1);
+    expect(world.rows[0]).toMatchObject({ dueAt: null, level: 1, status: "open" });
+  });
+
+  it("moves a request up first when its deadline has passed, and does not remind the row it left or the one it made", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { dueAt: ago(1) })];
+
+    const report = await sweep(world);
+
+    expect(report.superseded).toBe(1);
+    expect(world.calls.escalateFurther[0]).toMatchObject({ code: "sla_breach", mode: "next_level", onlyIfOpen: true });
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("reports a send that failed as a problem of the run, so system.health hears of it, and tries again next run", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    world.deps.notifyTargets = async (_c, row, event) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      return { attempts: 3, error: "Graph sendMail failed: 503", recipients: ["dee@example.com"], state: "failed" };
+    };
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.scheduledReminders).toBe(0);
+    expect(first.errors).toEqual([expect.stringContaining("reminding on escalation #1: Graph sendMail failed: 503")]);
+    expect(world.calls.notify).toHaveLength(2);
+    expect(second.errors).toHaveLength(1);
+  });
+
+  it("only logs, and reports no problem, when there was nobody to tell or the mail settings are missing", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    world.deps.notifyTargets = async (_c, row, event) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      return { attempts: 0, error: "No one with an email address is at this level", recipients: [], state: "none" };
+    };
+    const log = jest.fn();
+
+    const report = await sweep(world, { log });
+
+    expect(report.errors).toEqual([]);
+    expect(report.scheduledReminders).toBe(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("no reminder sent on #1 (none: No one with an email address is at this level)"));
+  });
+
+  it("counts its sends against the run's allowance", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { subjectId: "12" }), decisionRow([-2], { subjectId: "13" })];
+
+    const report = await sweep(world, { env: { ...ENV, ESCALATION_SWEEP_MAX_ACTIONS: "1" } as NodeJS.ProcessEnv });
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(report.truncated).toBe(true);
+  });
+
+  it("leaves every escalation without a schedule alone", async () => {
+    const world = remindingWorld();
+    world.jobs = [job({ statusSince: ago(9 * DAY) })];
+    world.rows = [esc({ dueAt: ago(-5) }), esc({ context: { schedule: { remindAt: [] } }, dueAt: ago(-5), subjectId: "2" })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("does not end a pending decision request whose job meets no condition: it ends with the decision", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([30])];
+
+    const report = await sweep(world);
+
+    expect(report.autoResolved).toBe(0);
+    expect(world.calls.autoResolve).toEqual([]);
+    expect(world.rows[0].status).toBe("open");
+  });
+
+  it("does not restart a pending decision request's clock when mail about the job arrives", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([30])];
+    world.arrivals.set(12, ago(1));
+
+    const report = await sweep(world);
+
+    expect(report.followUps).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+  });
+
+  it("puts the count in the run's one-line summary", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    const log = jest.fn();
+
+    await sweep(world, { log });
+
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/scheduledReminders=1 /));
+  });
+});
+
+// ── Deferred decisions come back (jobs plan A2) ──────────────────────────────
+
+describe("a deferred decision comes back on its day", () => {
+  // NOW is Tuesday 2026-10-13, 12:00 Darwin.
+  const deferral = (over: Partial<DueDeferral> = {}): DueDeferral => ({ decisionId: 4, deferUntil: "2026-10-13", jobId: 12, requestId: 7, ...over });
+
+  function askingWorld(): World {
+    const world = makeWorld();
+    world.policies["job.decision_pending"] = policy("job.decision_pending", {
+      kind: "authority",
+      ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }],
+    });
+    return world;
+  }
+
+  it("asks it again, once, and says so in the report and the one-line summary", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    const log = jest.fn();
+
+    const report = await sweep(world, { log });
+
+    expect(world.calls.reask).toHaveLength(1);
+    expect(world.calls.reask[0].deferral).toEqual(deferral());
+    expect(report.reasked).toBe(1);
+    expect(report.errors).toEqual([]);
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/reasked=1 /));
+  });
+
+  it("hands the asker the moment, the holidays and the send options of the run", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+
+    await sweep(world, { env: { ...ENV, ESCALATION_HOLIDAYS: "2026-10-14" } });
+
+    const { options } = world.calls.reask[0];
+    expect(options.now).toEqual(NOW);
+    expect(options.holidays?.has("2026-10-14")).toBe(true);
+    expect(options.notify).toMatchObject({ attempts: 3, backoffMs: 1000 });
+  });
+
+  it("is idempotent: run again, and it is not asked a second time", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.reasked).toBe(1);
+    expect(second.reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(1);
+  });
+
+  it("asks every deferral that is due, oldest first as the database lists them", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, deferUntil: "2026-10-09", jobId: 12 }), deferral({ decisionId: 5, deferUntil: "2026-10-13", jobId: 14 })];
+
+    const report = await sweep(world);
+
+    expect(world.calls.reask.map((c) => c.deferral.jobId)).toEqual([12, 14]);
+    expect(report.reasked).toBe(2);
+  });
+
+  it("waits for the day to open: 08:30 Darwin on the date, not midnight", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-10-13" })];
+    const sevenAm = new Date(Date.UTC(2026, 9, 13, 7, 0) - 9.5 * 3_600_000);
+    const halfPastEight = new Date(Date.UTC(2026, 9, 13, 8, 30) - 9.5 * 3_600_000);
+
+    expect((await sweep(world, { now: sevenAm })).reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(0);
+    expect((await sweep(world, { now: halfPastEight })).reasked).toBe(1);
+  });
+
+  it("does not ask on a day to come, even if the database listed it", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-10-14" })];
+
+    expect((await sweep(world)).reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(0);
+  });
+
+  it("asks one whose day went by while the sweep was off, at once", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-09-30" })];
+
+    expect((await sweep(world)).reasked).toBe(1);
+  });
+
+  it("does not count one the asker skipped (asked already, job closed, a request since)", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    world.deps.reaskDeferral = async (_c, d, options) => {
+      world.calls.reask.push({ deferral: d, options });
+      return "skipped";
+    };
+
+    const report = await sweep(world);
+
+    expect(world.calls.reask).toHaveLength(1);
+    expect(report.reasked).toBe(0);
+    expect(report.errors).toEqual([]);
+  });
+
+  it("reports a failure as a problem of the run and carries on with the next", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, jobId: 12 }), deferral({ decisionId: 5, jobId: 14 })];
+    const asked: number[] = [];
+    world.deps.reaskDeferral = async (_c, d) => {
+      if (d.jobId === 12) throw new Error("Nobody this question was put to can be asked any more");
+      asked.push(d.jobId);
+      return "asked";
+    };
+
+    const report = await sweep(world);
+
+    expect(asked).toEqual([14]);
+    expect(report.reasked).toBe(1);
+    expect(report.errors).toEqual(["asking job #12 again: Nobody this question was put to can be asked any more"]);
+  });
+
+  it("does not stop the other steps of the run when it cannot list the deferrals", async () => {
+    const world = askingWorld();
+    world.deps.listDueDeferrals = async () => {
+      throw new Error("deadlock victim");
+    };
+    world.jobs = [job({ assigned: false, createdAt: ago(3 * DAY), jobId: 5, statusSince: ago(3 * DAY) })];
+
+    const report = await sweep(world);
+
+    expect(report.errors).toEqual(["asking deferred decisions again: deadlock victim"]);
+    expect(raisedKeys(world)).toContain("job.unassigned:5");
+  });
+
+  it("leaves them be, and says so, while job.decision_pending is switched off or has no row", async () => {
+    for (const setup of [(w: World) => (w.policies["job.decision_pending"].active = false), (w: World) => delete w.policies["job.decision_pending"]]) {
+      const world = askingWorld();
+      setup(world);
+      world.deferrals = [deferral()];
+      const log = jest.fn();
+
+      const report = await sweep(world, { log });
+
+      expect(world.calls.reask).toHaveLength(0);
+      expect(report.reasked).toBe(0);
+      expect(report.errors).toEqual([]);
+      expect(log).toHaveBeenCalledWith(expect.stringMatching(/1 deferred decision is due, but job\.decision_pending .* so it is not asked again/));
+    }
+  });
+
+  it("says nothing about the policy when nothing is due", async () => {
+    const world = askingWorld();
+    world.policies["job.decision_pending"].active = false;
+    const log = jest.fn();
+
+    await sweep(world, { log });
+
+    expect(log).not.toHaveBeenCalledWith(expect.stringMatching(/deferred decision/));
+  });
+
+  it("in a dry run says what it would ask and asks nothing", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    const log = jest.fn();
+
+    const report = await sweep(world, { dryRun: true, log });
+
+    expect(world.calls.reask).toHaveLength(0);
+    expect(world.deferrals).toHaveLength(1);
+    expect(report.reasked).toBe(1);
+    expect(log).toHaveBeenCalledWith("escalationSweep: would ask job #12 again (decision #4, deferred until 2026-10-13)");
+  });
+
+  it("counts against the run's allowance and finishes over the next run", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, jobId: 12 }), deferral({ decisionId: 5, jobId: 14 }), deferral({ decisionId: 6, jobId: 16 })];
+
+    const first = await sweep(world, { maxActions: 2 });
+    const second = await sweep(world, { maxActions: 2 });
+
+    expect(first.reasked).toBe(2);
+    expect(first.truncated).toBe(true);
+    expect(second.reasked).toBe(1);
+    expect(world.calls.reask.map((c) => c.deferral.jobId)).toEqual([12, 14, 16]);
+  });
+
+  it("leaves every other step alone: nothing due, nothing asked, no policy read for it", async () => {
+    const world = askingWorld();
+    const getPolicy = jest.spyOn(world.deps, "getPolicy");
+
+    await sweep(world);
+
+    expect(world.calls.reask).toHaveLength(0);
+    expect(getPolicy.mock.calls.map((c) => c[1])).not.toContain("job.decision_pending");
+  });
+});
+
+describe("a next step is chased on its own clock (jobs plan A2)", () => {
+  /** An open next step handed to Alana (9): attention, on the job, with a schedule. */
+  const stepRow = (over: Partial<EscalationRow> = {}): EscalationRow =>
+    esc({
+      context: { nextStep: { decisionId: 4, nextStep: "Pay it" }, schedule: { remindAt: [] }, userTargets: [9] },
+      dueAt: ago(-30),
+      kind: "attention",
+      lastNotifiedAt: ago(10),
+      policyKey: "job.next_step",
+      raisedByKind: "user",
+      raisedByName: "Dee",
+      raisedByUserId: 5,
+      subjectId: "12",
+      targetRole: "accounts",
+      targetUserId: 9,
+      ...over,
+    });
+
+  function stepWorld(): World {
+    const world = makeWorld();
+    world.policies["job.next_step"] = policy("job.next_step", { ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }] });
+    // The step is open while the world says so, as the job adapter asks the decisions table.
+    const original = world.deps.getAdapter;
+    world.deps.getAdapter = (type) => {
+      const adapter = original(type);
+      if (type !== "job" || !adapter) return adapter;
+      return { ...adapter, isConditionActive: async (c, ref, now) => (ref.policyKey === "job.next_step" ? true : adapter.isConditionActive(c, ref, now)) };
+    };
+    return world;
+  }
+
+  it("is not restarted by mail about the job, as a stalled job is: it is due when its decision said", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow()];
+    world.arrivals.set(12, ago(1));
+
+    const report = await sweep(world);
+
+    expect(report.followUps).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+  });
+
+  it("is restarted by that mail in the control case, so the test above proves something", async () => {
+    const world = stepWorld();
+    world.jobs = [job({ jobId: 12, statusSince: ago(9 * DAY) })];
+    world.rows = [esc({ dueAt: ago(-30), lastNotifiedAt: ago(10), subjectId: "12" })];
+    world.arrivals.set(12, ago(1));
+
+    expect((await sweep(world)).followUps).toBe(1);
+  });
+
+  it("moves up to the owner's manager when it is overdue, like any open attention escalation", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow({ dueAt: ago(1) })];
+
+    const report = await sweep(world);
+
+    expect(report.superseded).toBe(1);
+    expect(world.calls.escalateFurther[0]).toMatchObject({ code: "sla_breach", escalationId: 1, mode: "next_level", onlyIfOpen: true });
+  });
+
+  it("is ended as cleared when the step is no longer open (the job was closed or archived)", async () => {
+    const world = stepWorld();
+    const adapter = world.deps.getAdapter("job") as EscalationAdapter;
+    world.deps.getAdapter = (type) => (type === "job" ? { ...adapter, isConditionActive: async () => false } : null);
+    world.rows = [stepRow()];
+
+    const report = await sweep(world);
+
+    expect(report.autoResolved).toBe(1);
+    expect(world.calls.autoResolve).toHaveLength(1);
+  });
+
+  it("reminds its owner on the schedule it was raised with", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow({ context: { nextStep: { decisionId: 4, nextStep: "Pay it" }, schedule: { remindAt: [ago(2).toISOString()] }, userTargets: [9] }, lastNotifiedAt: ago(30) })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
   });
 });

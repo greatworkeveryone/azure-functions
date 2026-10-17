@@ -78,7 +78,6 @@ describe("the migration scan, on crafted text", () => {
 const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: number; deleteOther?: number }> = {
   "src/blob-storage.ts": { deleteBlob: 1 },
   "src/functions/attachments.ts": { deleteBlob: 1, deleteFrom: 2 },
-  "src/functions/cleanupAttachments.ts": { deleteBlob: 1 },
   // deleteOther: the four alias-form deletes (removeRoom, removePoint,
   // removeAttachment, the linkRooms fold), invisible to the FROM-only count
   // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.
@@ -87,12 +86,29 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   "src/functions/jobRequestedContractors.ts": { deleteFrom: 1 },
   "src/functions/purchaseOrders.ts": { deleteBlob: 1, deleteFrom: 1 },
   "src/functions/quotes.ts": { deleteFrom: 1 },
-  "src/functions/tenancy.ts": { deleteFrom: 4 },
-  "src/functions/tenants.ts": { deleteFrom: 1 },
+  // Occupancy, note and car park deletes (grandfathered). The tenancy delete
+  // moved to src/tenancy-records.ts and is reviewed below.
+  "src/functions/tenancy.ts": { deleteFrom: 3 },
   // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
   "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
   "src/functions/vacancies.ts": { deleteFrom: 1 },
   "src/functions/workRequests.ts": { deleteFrom: 1 },
+  // REVIEWED (D4, 17 Oct 2026): the one tenancy hard delete, shared by
+  // deleteRegisterTenant and deleteTenant. See TENANCY_DRAFT_DELETE below.
+  "src/tenancy-records.ts": { deleteFrom: 1 },
+};
+
+// The reviewed tenancy hard delete and the conditions it was reviewed under:
+// it runs inside a transaction, after the tenancy and every table that refers
+// to it were read under lock and found empty — no jobs, keys, vacancies,
+// occupancies or their history, notes, rent reviews, rent schedule change log,
+// lease documents, car parks, decision-ledger rows (as subject or scope),
+// schedule rows, schedule sign-off or defects periods — and its own ledger row
+// (tenancy.delete_draft) is written before the commit.
+const TENANCY_DRAFT_DELETE = {
+  file: "src/tenancy-records.ts",
+  fn: "deleteTenancyDraft",
+  statement: /DELETE\s+FROM\s+(?:dbo\.)?Tenants\b/gi,
 };
 
 function sourceFiles(dir: string): string[] {
@@ -142,5 +158,40 @@ describe("the source scan, on crafted text", () => {
     expect(hardDeletes("`DELETE r\n   FROM InspectionRooms r WHERE r.Id = @Id`").deleteOther).toBe(1);
     expect(hardDeletes("`DELETE FROM Jobs WHERE JobID = @Id`")).toEqual({ deleteBlob: 0, deleteFrom: 1, deleteOther: 0 });
     expect(hardDeletes("ON DELETE CASCADE; INSTEAD OF UPDATE, DELETE AS BEGIN").deleteOther).toBe(0);
+  });
+});
+
+describe("the tenancy hard delete is the reviewed one", () => {
+  const files = sourceFiles(SRC_DIR).map((full) => ({
+    file: relative(ROOT, full).split("\\").join("/"),
+    text: readFileSync(full, "utf8"),
+  }));
+
+  it("exists once, in deleteTenancyDraft, and nowhere else", () => {
+    const hits = files.flatMap(({ file, text }) => Array(count(text, TENANCY_DRAFT_DELETE.statement)).fill(file));
+    expect(hits).toEqual([TENANCY_DRAFT_DELETE.file]);
+  });
+
+  it("runs only after the empty-draft refusal, inside the transaction, and is ledgered before the commit", () => {
+    const text = files.find((f) => f.file === TENANCY_DRAFT_DELETE.file)?.text ?? "";
+    const start = text.indexOf(`export async function ${TENANCY_DRAFT_DELETE.fn}(`);
+    expect(start).toBeGreaterThan(-1);
+    const body = text.slice(start, text.indexOf("\n}\n", start));
+    const at = (needle: string) => body.indexOf(needle);
+    const deleteAt = body.search(/DELETE_DRAFT_SQL/);
+    expect(at("beginTransaction(")).toBeGreaterThan(-1);
+    expect(at("readDraftFacts(")).toBeGreaterThan(at("beginTransaction("));
+    expect(at("draftDeletionRefusal(")).toBeGreaterThan(at("readDraftFacts("));
+    expect(deleteAt).toBeGreaterThan(at("draftDeletionRefusal("));
+    expect(at('"tenancy.delete_draft"')).toBeGreaterThan(deleteAt);
+    expect(at("commitTransaction(")).toBeGreaterThan(at('"tenancy.delete_draft"'));
+  });
+
+  it("is reached from both delete routes and from nowhere else", () => {
+    const callers = files
+      .filter(({ file, text }) => file !== TENANCY_DRAFT_DELETE.file && text.includes(`${TENANCY_DRAFT_DELETE.fn}(`))
+      .map((f) => f.file)
+      .sort();
+    expect(callers).toEqual(["src/functions/tenancy.ts", "src/functions/tenants.ts"]);
   });
 });

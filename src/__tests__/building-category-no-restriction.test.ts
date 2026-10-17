@@ -1,0 +1,45 @@
+/// <reference types="jest" />
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+
+// U8: Buildings.Category only changes how the picker groups buildings. A
+// residence is a building like any other: jobs, work requests, keys,
+// inspections, tenancy and assets can all be raised against one. This is a
+// tripwire for the day someone filters on it in a query: the only server code
+// that may read Buildings.Category is the list the picker reads and the screen
+// that sets it. Anything else is a new restriction and needs a decision first.
+
+const SRC = join(__dirname, "..");
+const ALLOWED = new Set(["functions/getBuildings.ts", "functions/upsertManualBuilding.ts", "manualBuildingInput.ts"]);
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return entry === "__tests__" ? [] : sourceFiles(full);
+    return full.endsWith(".ts") && !full.endsWith(".test.ts") ? [full] : [];
+  });
+}
+
+describe("a residence is never restricted by its category", () => {
+  const files = sourceFiles(SRC).map((f) => ({ path: relative(SRC, f), text: readFileSync(f, "utf8") }));
+
+  it("only the building list and the manual-buildings upsert mention a building's Category", () => {
+    const readers = files
+      .filter(({ text }) => /\b(?:b|bld|building|Buildings)\.Category\b/.test(text))
+      .map(({ path }) => path)
+      .filter((path) => !ALLOWED.has(path));
+    expect(readers).toEqual([]);
+  });
+
+  it("no query filters Buildings on a category value", () => {
+    const filters = files
+      .filter(({ path }) => !ALLOWED.has(path))
+      .filter(({ text }) => /Buildings[^`"]{0,400}Category\s*(?:=|<>|!=|\bIN\b)\s*\(?\s*N?'(?:commercial|residence)'/i.test(text))
+      .map(({ path }) => path);
+    expect(filters).toEqual([]);
+  });
+
+  it("the check can fail: it sees a category read in the building list itself", () => {
+    expect(files.find(({ path }) => path === "functions/getBuildings.ts")?.text).toMatch(/\bCategory\b/);
+  });
+});

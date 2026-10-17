@@ -114,14 +114,28 @@ describe("decideApprovalAmountEdit", () => {
   });
 
   describe("contractor change", () => {
-    test("on its own does NOT clear approval — approval is on the amount", () => {
+    test("on its own clears approval: the approver approved paying this payee (J3)", () => {
       const effects = decideApprovalAmountEdit(APPROVED_QUOTE, {
         contractorName: "New Plumbing Co",
       });
       assert.strictEqual(effects.contractorChanged, true);
       assert.strictEqual(effects.amountChanged, false);
-      assert.strictEqual(effects.clearApproval, false);
+      assert.strictEqual(effects.clearApproval, true);
       assert.match(effects.summary, /contractor A&D Plumbing → New Plumbing Co/);
+    });
+
+    test("a contractor id change is a payee change too, even with the same name", () => {
+      const effects = decideApprovalAmountEdit({ ...APPROVED_QUOTE, contractorId: 3 }, {
+        contractorId: 4,
+        contractorName: "A&D Plumbing",
+      });
+      assert.strictEqual(effects.contractorChanged, true);
+      assert.strictEqual(effects.clearApproval, true);
+    });
+
+    test("on a pending row it is just an edit", () => {
+      const effects = decideApprovalAmountEdit(PENDING_QUOTE, { contractorName: "New Plumbing Co" });
+      assert.strictEqual(effects.clearApproval, false);
     });
 
     test("paired with an amount change keeps the clear", () => {
@@ -255,16 +269,26 @@ describe("decidePurchaseOrderEdit", () => {
   });
 
   describe("non-cost edits", () => {
-    test("contractor rename on a MYOB'd PO does NOT clear markers", () => {
-      // Renaming the recipient row isn't the same as the contractor's PO
-      // copy being wrong — leave the markers, just log the rename.
+    test("a payee change on a MYOB'd PO clears both markers: the PO now goes to someone else (J3)", () => {
       const effects = decidePurchaseOrderEdit(MYOB_PO, {
         contractorName: "Other Plumbing",
       });
       assert.strictEqual(effects.contractorChanged, true);
+      assert.strictEqual(effects.clearSentMarker, true);
+      assert.strictEqual(effects.clearMyobMarker, true);
+      assert.match(effects.summary, /contractor A&D Plumbing → Other Plumbing/);
+    });
+
+    test("a contractor id change counts, even under the same name", () => {
+      const effects = decidePurchaseOrderEdit({ ...MYOB_PO, contractorId: 3 }, { contractorId: 4, contractorName: "A&D Plumbing" });
+      assert.strictEqual(effects.contractorChanged, true);
+      assert.strictEqual(effects.clearMyobMarker, true);
+    });
+
+    test("a payee change on a completed PO leaves its markers: the work is done and paid for as it stood", () => {
+      const effects = decidePurchaseOrderEdit(COMPLETED_PO, { contractorName: "Other Plumbing" });
       assert.strictEqual(effects.clearSentMarker, false);
       assert.strictEqual(effects.clearMyobMarker, false);
-      assert.match(effects.summary, /contractor A&D Plumbing → Other Plumbing/);
     });
   });
 

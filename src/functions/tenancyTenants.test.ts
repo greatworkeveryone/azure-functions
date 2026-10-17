@@ -180,7 +180,7 @@ describe("getRegisterTenants", () => {
     db.executeQuery.mockResolvedValueOnce([]);
     const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
     expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ tenants: [] });
+    expect(res.jsonBody).toEqual({ pendingChanges: { count: 0, items: [] }, tenants: [] });
     expect(db.executeQuery).toHaveBeenCalledTimes(1);
   });
 
@@ -194,7 +194,10 @@ describe("getRegisterTenants", () => {
       ])
       .mockResolvedValueOnce([
         { TenantId: 1, AnchorKind: "tenant", OccupancyId: "", FieldKey: "", Cnt: 2 },
-      ]);
+      ])
+      // WP26c: the building's relief requests and reviews awaiting approval.
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
 
     const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
     expect(res.status).toBe(200);
@@ -259,6 +262,9 @@ describe("getRegisterTenant", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      // WP26c: the tenancy's relief requests and reviews awaiting approval.
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
 
@@ -589,6 +595,63 @@ describe("upsertRegisterTenant — write integrity", () => {
     expect(tenant.rowVersion).toBe("00000000000007d1");
     expect(tenant.scheduleVersion).toBe(4);
   });
+
+  // M4 (WP26c): the lease's CPI reference-quarter rule, set with its terms at sign-off.
+  it("stores the lease's CPI reference-quarter rule as a schedule term, ledgered, and shows it on the tenant (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ CpiReferenceQuarterRule: null })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ CpiReferenceQuarterRule: "latest_published_before_review" }));
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, CpiReferenceQuarterRule: "latest_published_before_review", RowVersion: ROW_VERSION }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(updateSql()).toMatch(/CpiReferenceQuarterRule = @CpiReferenceQuarterRule/);
+    expect(updateSql()).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.terms_edit",
+      after: { cpiReferenceQuarterRule: "latest_published_before_review" },
+      before: { cpiReferenceQuarterRule: null },
+    });
+    expect((res.jsonBody as { tenant: Record<string, unknown> }).tenant.cpiReferenceQuarterRule).toBe("latest_published_before_review");
+  });
+
+  it("puts the rule back to the default with an empty string (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ CpiReferenceQuarterRule: "latest_published_before_review" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, CpiReferenceQuarterRule: "" }), ctx);
+    const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+    expect(update?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "CpiReferenceQuarterRule", value: null })]));
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({ after: { cpiReferenceQuarterRule: null }, before: { cpiReferenceQuarterRule: "latest_published_before_review" } });
+  });
+
+  it.each([["quarter_before_review"], ["latest"], [3]])("refuses %p as a reference-quarter rule before touching the database (M4)", async (rule) => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, CpiReferenceQuarterRule: rule }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe(
+      "CpiReferenceQuarterRule must be one of quarter_before_review_date, latest_published_before_review, or null",
+    );
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("takes the rule on create (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 42 }])
+      .mockResolvedValueOnce([{ TenantId: 42, BuildingId: 5, LegalName: "Acme", Status: "current" }]);
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ BuildingId: 5, CpiReferenceQuarterRule: "latest_published_before_review", LegalName: "Acme" }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants"));
+    expect(insert?.[1]).toMatch(/@CpiReferenceQuarterRule/);
+    expect(insert?.[2]).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "CpiReferenceQuarterRule", value: "latest_published_before_review" })]),
+    );
+  });
 });
 
 // ── upsertRegisterTenant: review terms and next review (PLAN WP23b) ─────────
@@ -749,6 +812,51 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
     expect((res.jsonBody as { tenant: { effectiveRentPerAnnum: number } }).tenant.effectiveRentPerAnnum).toBe(103000);
   });
+
+  // WP26c (M2): once reviews run through the workflow, a row keyed ahead moves
+  // the rent only when a review applies it, so its arrears are never counted twice.
+  describe("with REVIEW_WORKFLOW_LIVE_FROM set", () => {
+    const keyedAhead = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2024-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2025-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    afterEach(() => {
+      delete process.env.REVIEW_WORKFLOW_LIVE_FROM;
+    });
+
+    it("keeps the rent before a review row keyed ahead until a review applies it, and says when the workflow went live", async () => {
+      process.env.REVIEW_WORKFLOW_LIVE_FROM = "2025-01-01";
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: keyedAhead }));
+      const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      const { tenant } = res.jsonBody as { tenant: { effectiveRentPerAnnum: number; reviewWorkflowLiveFrom: string | null } };
+      expect(tenant.effectiveRentPerAnnum).toBe(100000);
+      expect(tenant.reviewWorkflowLiveFrom).toBe("2025-01-01");
+    });
+
+    it("moves it once the row is settled, and reads every row as keyed while the setting is unset", async () => {
+      process.env.REVIEW_WORKFLOW_LIVE_FROM = "2025-01-01";
+      const applied = keyedAhead.replace('"ratePercent":3}', '"ratePercent":3,"resolution":"applied","reviewId":"rev-1"}');
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: applied }));
+      const settled = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      expect((settled.jsonBody as { tenant: { effectiveRentPerAnnum: number } }).tenant.effectiveRentPerAnnum).toBe(103000);
+
+      delete process.env.REVIEW_WORKFLOW_LIVE_FROM;
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: keyedAhead }));
+      const unset = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      const { tenant } = unset.jsonBody as { tenant: { effectiveRentPerAnnum: number; reviewWorkflowLiveFrom: string | null } };
+      expect(tenant.effectiveRentPerAnnum).toBe(103000);
+      expect(tenant.reviewWorkflowLiveFrom).toBeNull();
+    });
+  });
 });
 
 // ── deleteRegisterTenant ────────────────────────────────────────────────────
@@ -777,8 +885,11 @@ describe("deleteRegisterTenant", () => {
   });
 
   it("returns 400 when the tenant is referenced by a job", async () => {
-    // The facts query (D4: jobs, schedule rows, areas, documents under lock).
-    db.executeQuery.mockResolvedValueOnce([{ Documents: 0, Jobs: 2, LegalName: "Acme", Occupancies: 0, ScheduledRateSteps: "[]" }]);
+    // The draft facts (D4: every table that refers to the tenancy, under lock),
+    // then the optional sign-off / defects-period read.
+    db.executeQuery
+      .mockResolvedValueOnce([{ Jobs: 2, LegalName: "Acme", ScheduledRateSteps: "[]" }])
+      .mockResolvedValueOnce([{ DefectsPeriods: 0, SignedOff: 0 }]);
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);
     expect(res.status).toBe(400);
     expect((res.jsonBody as { error: string }).error).toMatch(/Reassign first/);

@@ -133,12 +133,21 @@ export function parseResolvedReviewDates(raw: unknown): Set<string> {
 /**
  * Select-list column for a query over `dbo.Tenants t`: the ScheduledFor dates
  * of the tenancy's settled reviews, comma-separated (parseResolvedReviewDates).
- * 'skipped' is the legacy name for a waived review.
+ *
+ * A workflow review (State set, WP25/WP26) settles its date when it is
+ * approved, completed or waived; a cancelled one does not, so a review
+ * cancelled as superseded leaves its date still to be reviewed (the generator
+ * schedules it again) and only a tenancy that has gone stops needing it. A row
+ * from before the workflow (State NULL) settles by its legacy Status, where
+ * 'skipped' is the old name for a waived review. The workflow writes 'skipped'
+ * for a cancelled review too (legacyMap.ts), which is why State is read first.
  */
 export const RESOLVED_REVIEW_DATES_SQL = `(
     SELECT STRING_AGG(CONVERT(CHAR(10), rr.ScheduledFor, 23), ',')
     FROM dbo.RentReviews rr
-    WHERE rr.TenantId = t.TenantId AND rr.Status IN ('completed', 'skipped', 'waived')
+    WHERE rr.TenantId = t.TenantId
+      AND (rr.State IN ('approved', 'completed', 'waived')
+        OR (rr.State IS NULL AND rr.Status IN ('completed', 'skipped', 'waived')))
   ) AS ResolvedReviewDates`;
 
 /** A DATE column (tedious returns a Date at UTC midnight) or an ISO string as

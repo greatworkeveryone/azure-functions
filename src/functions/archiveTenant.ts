@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { setTenancyArchived } from "../tenancy-records";
+import { extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { setTenancyArchived, TENANCY_ARCHIVE_ROLES } from "../tenancy-records";
 
 // ── POST /api/archiveTenant ──────────────────────────────────────────────────
 // Body: { TenantId, Reason }. Takes a tenancy out of the register, counts and
@@ -7,7 +8,11 @@ import { setTenancyArchived } from "../tenancy-records";
 // ledgers tenancy.archive with the reason. unarchiveTenant reverses it.
 
 export async function archiveTenant(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return setTenancyArchived(request, context, true);
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+  const denied = await requireRole(request, TENANCY_ARCHIVE_ROLES);
+  if (denied) return denied;
+  return setTenancyArchived(request, context, token, true);
 }
 
 app.http("archiveTenant", { authLevel: "anonymous", handler: archiveTenant, methods: ["POST"] });

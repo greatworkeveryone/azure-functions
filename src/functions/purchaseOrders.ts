@@ -14,7 +14,8 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
@@ -32,41 +33,34 @@ import {
 import { formatDocNumber } from "../doc-number";
 import { resolvePoNumber } from "../po-reference-db";
 import { advanceJobStatus } from "../jobStatusHelpers";
-import { AwaitingRole, JobEvent, JobStatus } from "../jobStatusMachine";
+import { JobEvent } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { jobScope, purchaseOrderFacts, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvedQuoteAmount,
+  contractorFacts,
+  deletionAfter,
+  jobScope,
+  purchaseOrderFacts,
+  purchaseOrderMarkers,
+  purchaseOrderSnapshot,
+} from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import {
+  adminRefusal,
+  holdsAdmin,
+  jobMoneyRefusal,
+  purchaseOrderCostRefusal,
+  purchaseOrderQuoteRefusal,
+  refusalResponse,
+} from "../moneyRules";
+import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
+import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
-
-/**
- * Quote-approval guard for PO creation (WP8). Returns an error string if
- * creating a PO would act as implicit quote approval, else null.
- *
- * The machine's PO_CREATED edge moves a job out of (Awaiting Approval,
- * facilities) → Work. That is the only state where creating a PO transitions
- * the job — and createPurchaseOrder is callable by plain accounts, a wider set
- * than the quote-approval authority (approveQuote applies the role approval
- * limit + director routing, and only then stamps Jobs.ApprovedQuoteID). So a
- * PO created in that state with no ApprovedQuoteID would leapfrog the manager
- * approval limit. Block exactly that case; every other state is a no-op
- * transition and proceeds untouched.
- */
-export function purchaseOrderApprovalError(job: {
-  status: JobStatus;
-  awaitingRole: AwaitingRole;
-  approvedQuoteId: number | null;
-}): string | null {
-  const leapfrogsApproval =
-    job.status === JobStatus.AWAITING_APPROVAL &&
-    job.awaitingRole === AwaitingRole.FACILITIES &&
-    job.approvedQuoteId == null;
-  if (leapfrogsApproval) {
-    return "Cannot create a purchase order — the quote hasn't been approved yet. Approve the quote first (this enforces the approval limit) before raising a PO.";
-  }
-  return null;
-}
+import type { LedgerActor } from "../ledger/types";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -204,49 +198,35 @@ export async function upsertPurchaseOrder(
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create a PO" } };
       }
+      const badCost = purchaseOrderCostRefusal(EstimatedCost, CostNotToExceed, true);
+      if (badCost) return refusalResponse(badCost);
 
       const actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
 
       await beginTransaction(connection);
       try {
-        // Quote-approval gate: refuse a PO that would leapfrog an unapproved
-        // quote out of (Awaiting Approval, facilities) → Work. Read inside the
-        // tx so the state we guard on is the state advanceJobStatus will act
-        // on. ApprovedQuoteID is only set once approveQuote has applied the
-        // role approval limit + director routing.
-        const jobStateRows = await executeQuery(
-          connection,
-          "SELECT Status, AwaitingRole, ApprovedQuoteID FROM Jobs WHERE JobID = @JobID",
-          [{ name: "JobID", type: TYPES.Int, value: JobID }],
-        );
-        if (jobStateRows.length === 0) {
+        // J3: the job takes money changes, and a PO rests on an approved quote
+        // in every job state (contract jobs excepted). The quote's own status is
+        // read, not just Jobs.ApprovedQuoteID; the job row is locked to commit.
+        const moneyJob = await loadJobForMoney(connection, JobID);
+        if (!moneyJob) {
           await rollbackTransaction(connection).catch(() => {});
           return { status: 404, jsonBody: { error: "Job not found" } };
         }
-        const approvalError = purchaseOrderApprovalError({
-          status: jobStateRows[0].Status as JobStatus,
-          awaitingRole:
-            (jobStateRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
-          approvedQuoteId: (jobStateRows[0].ApprovedQuoteID as number | null) ?? null,
-        });
-        if (approvalError) {
-          // A PO that would act as the quote's approval is a refused attempt,
-          // ledgered in a transaction of its own now that this one has rolled back.
+        const gateRefusal = jobMoneyRefusal(moneyJob) ?? purchaseOrderQuoteRefusal(moneyJob);
+        if (gateRefusal) {
+          // A refused attempt, ledgered in a transaction of its own now that
+          // this one has rolled back.
           await rollbackTransaction(connection).catch(() => {});
           await recordRefusal(
             connection,
             actor,
             { id: JobID, type: "job" },
-            {
-              attempted: "po.create",
-              code: "quote_not_approved",
-              message: approvalError,
-              state: { jobStatus: String(jobStateRows[0].Status) },
-            },
+            { attempted: "po.create", code: gateRefusal.code, message: gateRefusal.message, state: { jobStatus: moneyJob.status } },
             JobID,
           );
-          return { status: 422, jsonBody: { error: approvalError } };
+          return refusalResponse(gateRefusal);
         }
 
         const acronym =
@@ -311,13 +291,28 @@ export async function upsertPurchaseOrder(
         );
         const newId = inserted[0].PurchaseOrderID as number;
 
-        // First PO insert advances (Awaiting Approval, facilities) → (Work, facilities).
-        // No-op if already past that state (subsequent POs, manual moves, etc).
-        await advanceJobStatus(connection, JobID, JobEvent.PO_CREATED, {
-          actor: identity.name,
-          purchaseOrderId: newId,
-          note: `PO ${poNumber} created — work in progress.`,
-        });
+        // First PO insert advances (Awaiting Approval, facilities) → (Work, facilities),
+        // and only on a quote whose approval was just verified (J3); a contract
+        // job's PO doesn't stand in for a quote approval. No-op if already past
+        // that state (subsequent POs, manual moves, etc).
+        if (moneyJob.hasApprovedQuote) {
+          await advanceJobStatus(connection, JobID, JobEvent.PO_CREATED, {
+            actor: identity.name,
+            purchaseOrderId: newId,
+            note: `PO ${poNumber} created — work in progress.`,
+          });
+        }
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+           VALUES (@JobID, @CreatedBy, @Text, 'po_generated', @POID);`,
+          [
+            { name: "JobID", type: TYPES.Int, value: JobID },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+            { name: "Text", type: TYPES.NVarChar, value: `Raised PO ${poNumber}${ContractorName ? ` to ${ContractorName}` : ""}` },
+            { name: "POID", type: TYPES.Int, value: newId },
+          ],
+        );
 
         const scope = await jobScope(connection, JobID);
         await record(connection, {
@@ -381,43 +376,74 @@ export async function upsertPurchaseOrder(
       ? `${update.setClause}, UpdatedAt = SYSUTCDATETIME()`
       : "UpdatedAt = SYSUTCDATETIME()";
 
-    // Read the existing PO before mutating so we can diff for the audit
-    // trail and decide whether to clear the Sent / MYOB markers.
-    const beforeRows = await executeQuery(
-      connection,
-      `SELECT PurchaseOrderID, JobID, PONumber, ContractorName,
-              EstimatedCost, CostNotToExceed, SentAt, MyobCreatedAt, CompletedAt
-         FROM PurchaseOrders WHERE PurchaseOrderID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
-    );
-    if (beforeRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Purchase order not found" } };
-    }
-    const before = beforeRows[0];
-    const jobId = before.JobID as number;
-    const poNumber =
-      (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
+    const badCost = purchaseOrderCostRefusal(EstimatedCost, CostNotToExceed, false);
+    if (badCost) return refusalResponse(badCost);
 
-    const effects = decidePurchaseOrderEdit(
-      {
-        completedAt: (before.CompletedAt as Date | null) ?? null,
-        contractorName: (before.ContractorName as string | null) ?? null,
-        costNotToExceed:
-          before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
-        estimatedCost:
-          before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
-        myobCreatedAt: (before.MyobCreatedAt as Date | null) ?? null,
-        sentAt: (before.SentAt as Date | null) ?? null,
-      },
-      {
-        contractorName: ContractorName,
-        costNotToExceed: CostNotToExceed,
-        estimatedCost: EstimatedCost,
-      },
-    );
+    // A cost or payee edit can void the sent and MYOB markers, which is a
+    // decision (PLAN §3.12): the reset and its ledger row commit together or
+    // not at all. Only an edit that carries a cost or a payee looks up who is
+    // editing.
+    let actor: LedgerActor | null = null;
+    if (EstimatedCost !== undefined || CostNotToExceed !== undefined || ContractorID !== undefined || ContractorName !== undefined) {
+      actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+    }
 
     await beginTransaction(connection);
     try {
+      // Read the existing PO before mutating so we can diff for the audit
+      // trail and decide whether to clear the Sent / MYOB markers. Locked until
+      // commit, so the markers recorded as reset are the ones reset.
+      const beforeRows = await executeQuery(
+        connection,
+        `SELECT PurchaseOrderID, JobID, PONumber, ContractorName,
+                EstimatedCost, CostNotToExceed, SentAt, MyobCreatedAt, CompletedAt,
+                SentBy, MyobCreatedBy, ContractorID
+           FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+      );
+      if (beforeRows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Purchase order not found" } };
+      }
+      const before = beforeRows[0];
+      const jobId = before.JobID as number;
+      const poNumber =
+        (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
+
+      // J3: the job still takes money changes (not internal, done or archived).
+      const moneyJob = await loadJobForMoney(connection, jobId);
+      const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
+      if (jobRefusal) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "po.edit",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob?.status ?? null },
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
+      }
+
+      const effects = decidePurchaseOrderEdit(
+        {
+          completedAt: (before.CompletedAt as Date | null) ?? null,
+          contractorId: (before.ContractorID as number | null) ?? null,
+          contractorName: (before.ContractorName as string | null) ?? null,
+          costNotToExceed:
+            before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
+          estimatedCost:
+            before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
+          myobCreatedAt: (before.MyobCreatedAt as Date | null) ?? null,
+          sentAt: (before.SentAt as Date | null) ?? null,
+        },
+        {
+          contractorId: ContractorID,
+          contractorName: ContractorName,
+          costNotToExceed: CostNotToExceed,
+          estimatedCost: EstimatedCost,
+        },
+      );
+
       await executeQuery(
         connection,
         `UPDATE PurchaseOrders SET ${setClause} WHERE PurchaseOrderID = @Id`,
@@ -443,11 +469,11 @@ export async function upsertPurchaseOrder(
         ],
       );
 
-      // Cost moved while a PDF/email had already gone to the contractor or
-      // MYOB had already been told about this PO — the downstream record is
-      // now stale. Clear the markers + log it so the user knows to re-send
-      // / re-record. (Once Completed we treat dollars as historical and
-      // leave markers alone — see decidePurchaseOrderEdit.)
+      // Cost or payee moved while a PDF/email had already gone to the
+      // contractor or MYOB had already been told about this PO: the
+      // downstream record is now stale. Clear the markers, log and ledger it
+      // so the user knows to re-send / re-record (J3). Once Completed the PO is
+      // historical and markers stay (see decidePurchaseOrderEdit).
       if (effects.clearSentMarker || effects.clearMyobMarker) {
         const clauses: string[] = [];
         if (effects.clearSentMarker) {
@@ -464,6 +490,7 @@ export async function upsertPurchaseOrder(
         const noteParts: string[] = [];
         if (effects.clearSentMarker) noteParts.push("re-send to contractor");
         if (effects.clearMyobMarker) noteParts.push("re-record in MYOB");
+        const what = effects.contractorChanged ? "contractor" : "cost";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
@@ -474,11 +501,41 @@ export async function upsertPurchaseOrder(
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `PO ${poNumber} cost changed — please ${noteParts.join(" and ")}.`,
+              value: `PO ${poNumber} ${what} changed — please ${noteParts.join(" and ")}.`,
             },
             { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
           ],
         );
+
+        // Only an edit that carries a cost or a payee can get here, and those
+        // looked up who is editing above.
+        if (!actor) throw new Error("PO markers were reset without a ledger actor");
+        const cleared = { myob: effects.clearMyobMarker, sent: effects.clearSentMarker };
+        const scope = await jobScope(connection, jobId);
+        const edited = {
+          ...before,
+          ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
+          ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
+          CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
+          EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
+        };
+        // An order is measured against the quote approved for its job.
+        const approvedQuote = await approvedQuoteAmount(connection, jobId);
+        await record(connection, {
+          action: "po.markers_reset",
+          actor,
+          after: {
+            ...purchaseOrderFacts(edited),
+            ...amountChange({ approved: approvedQuote, next: edited.EstimatedCost, previous: before.EstimatedCost }),
+            myobMarkerCleared: cleared.myob,
+            sentMarkerCleared: cleared.sent,
+          },
+          before: purchaseOrderMarkers(before, cleared),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          ruleApplied: effects.contractorChanged ? "payee_changed" : "cost_changed",
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
       }
 
       await commitTransaction(connection);
@@ -740,6 +797,21 @@ async function sendPurchaseOrder(
     const scope = await jobScope(connection, contractorRows[0].JobID as number | null | undefined);
     const previousSentAt = contractorRows[0].SentAt as Date | null | undefined;
 
+    // J3: a PO goes out only from a job that takes money changes and rests on
+    // an approved quote (contract jobs excepted), before any email leaves.
+    const sendJob = await loadJobForMoney(connection, contractorRows[0].JobID as number);
+    const sendRefusal = sendJob ? (jobMoneyRefusal(sendJob) ?? purchaseOrderQuoteRefusal(sendJob)) : null;
+    if (sendRefusal) {
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: sendRefusal.code, message: sendRefusal.message, state: { jobStatus: sendJob?.status ?? null } },
+        contractorRows[0].JobID as number,
+      );
+      return refusalResponse(sendRefusal);
+    }
+
     context.log(
       `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
         recipient.overridden ? ` (overridden from ${recipient.original ?? "(none)"})` : ""
@@ -776,12 +848,23 @@ async function sendPurchaseOrder(
           { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
         ],
       );
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
+         VALUES (@JobID, @CreatedBy, @Text, 'po_sent', @POID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: contractorRows[0].JobID as number },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+          { name: "Text", type: TYPES.NVarChar, value: `Sent PO ${poNumber ?? `#${PurchaseOrderID}`} to ${recipient.address}` },
+          { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
+        ],
+      );
       await record(connection, {
         action: "po.send",
         actor,
         after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
         // A re-send shows the earlier send here.
-        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null },
+        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null, ...contractorFacts(contractorRows[0]) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: PurchaseOrderID, type: "purchase_order" },
@@ -896,9 +979,11 @@ async function deletePurchaseOrder(
       );
 
       const scope = await jobScope(connection, po.JobID as number);
+      const approvedQuote = await approvedQuoteAmount(connection, po.JobID as number);
       await record(connection, {
         action: "po.delete",
         actor,
+        after: deletionAfter(purchaseOrderFacts(po), approvedQuote),
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -959,6 +1044,9 @@ async function markPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, MARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -996,6 +1084,21 @@ async function markPurchaseOrderMyobCreated(
       const po = rows[0];
       const poLabel = po.PONumber ?? `PO #${id}`;
 
+      // Decision 4 (J3): admin marks in MYOB on test records only.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, jobId)));
+      if (adminBar) {
+        await rollbackTransaction(connection).catch(() => {});
+        await recordRefusal(
+          connection,
+          actor,
+          { id, type: "purchase_order" },
+          { attempted: "po.myob_created", code: adminBar.code, message: adminBar.message },
+          jobId,
+        );
+        return refusalResponse(adminBar);
+      }
+
       await executeQuery(
         connection,
         `UPDATE PurchaseOrders
@@ -1030,7 +1133,7 @@ async function markPurchaseOrderMyobCreated(
         actor,
         after: { myobCreated: true, ...purchaseOrderFacts(po) },
         // Marking again just re-stamps; the earlier marking shows here.
-        before: { myobCreated: po.MyobCreatedAt != null },
+        before: { myobCreated: po.MyobCreatedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1080,6 +1183,9 @@ async function unmarkPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {
@@ -1112,6 +1218,17 @@ async function unmarkPurchaseOrderMyobCreated(
         return { status: 404, jsonBody: { error: "Purchase order not found" } };
       }
       const po = rows[0];
+      // Decision 4 (J3 review): admin un-marks in MYOB on test records only, as it marks.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, jobId)));
+      if (adminBar) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "po.unmark_myob_created",
+          jobId,
+          refusal: adminBar,
+          subject: { id, type: "purchase_order" },
+        });
+      }
       if (po.CompletedAt) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.
@@ -1155,10 +1272,11 @@ async function unmarkPurchaseOrderMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.unmark_myob_created",
         actor,
-        after: { myobCreated: false, ...purchaseOrderFacts(po) },
+        after: { myobCreated: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1308,7 +1426,7 @@ async function markPurchaseOrderComplete(
         actor,
         after: { completed: true, ...purchaseOrderFacts(po) },
         // Completing again just re-stamps; the earlier completion shows here.
-        before: { completed: po.CompletedAt != null },
+        before: { completed: po.CompletedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1402,40 +1520,32 @@ async function unmarkPurchaseOrderComplete(
         ],
       );
 
-      // Fire PO event
+      // N3 (J2): undoing a completion never moves the job. Done stays done
+      // (reopening is a manager's job, with a reason: reopenJob); a job
+      // already with accounts stays there.
       await executeQuery(
         connection,
         `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, PurchaseOrderID)
-         VALUES (@JobID, NULL, @Text, 'po_uncompleted', @PurchaseOrderID);`,
+         VALUES (@JobID, @CreatedBy, @Text, 'po_uncompleted', @PurchaseOrderID);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: actor.name },
           { name: "Text", type: TYPES.NVarChar, value: `Unmarked ${poLabel} as complete` },
           { name: "PurchaseOrderID", type: TYPES.Int, value: id },
         ],
       );
-
-      // Roll back job status
       await executeQuery(
         connection,
-        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole)
-         VALUES (@JobID, NULL, @Text, 'status_changed', 'Work', 'facilities');`,
-        [
-          { name: "JobID", type: TYPES.Int, value: jobId },
-          { name: "Text", type: TYPES.NVarChar, value: "Completion undone — back to work in progress" },
-        ],
-      );
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET Status = 'Work', AwaitingRole = 'facilities', LastModifiedDate = SYSUTCDATETIME()
-         WHERE JobID = @JobID`,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
         [{ name: "JobID", type: TYPES.Int, value: jobId }],
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.uncomplete",
         actor,
-        after: { completed: false, ...purchaseOrderFacts(po) },
+        after: { completed: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,

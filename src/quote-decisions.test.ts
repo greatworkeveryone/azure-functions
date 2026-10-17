@@ -164,6 +164,53 @@ describe("approveDirectorQuote", () => {
 
     expect(outcome).toEqual({ error: "Quote is already fully approved", ok: false, status: 409 });
   });
+
+  // J3 review: the director's approval keeps the job rules, in-app and by email.
+  describe("the job the quote is on", () => {
+    const MONEY_JOB = /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/;
+    const withJob = (job: Record<string, unknown>): void => {
+      mockExecuteQuery.mockImplementation(async (_conn, sql) => {
+        if (MONEY_JOB.test(sql)) return [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: false, IsInternal: false, JobID: 42, Status: "Awaiting Approval", ...job }];
+        if (/SELECT\s+QuoteID, JobID/i.test(sql)) return [storedQuote];
+        if (/SELECT JobID, QuoteNumber/i.test(sql)) return [awaiting];
+        if (/UPDATE Quotes/.test(sql)) return [{ QuoteID: 7 }];
+        return [];
+      });
+    };
+
+    it.each([
+      ["done", { Status: "Done" }, 409, "job_done"],
+      ["archived", { IsArchived: true }, 409, "job_archived"],
+      ["internal", { IsInternal: true }, 422, "internal_job"],
+    ])("refuses on a %s job, writing nothing", async (_label, job, status, code) => {
+      withJob(job);
+
+      const outcome = await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7 });
+
+      expect(outcome).toMatchObject({ code, jobId: 42, ok: false, status });
+      expect(calls().some((c) => /UPDATE|INSERT/i.test(c.sql))).toBe(false);
+    });
+
+    it("refuses when another quote on the job is already approved: Jobs.ApprovedQuoteID is never overwritten", async () => {
+      withJob({ HasApprovedQuote: 1 });
+
+      const outcome = await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7 });
+
+      expect(outcome).toMatchObject({ code: "quote_already_approved", jobId: 42, ok: false, status: 409 });
+      expect(calls().some((c) => /UPDATE Jobs/.test(c.sql))).toBe(false);
+      expect(calls().some((c) => /UPDATE Quotes/.test(c.sql))).toBe(false);
+    });
+
+    it("reads the job, locked, before any write", async () => {
+      withJob({});
+
+      await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7 });
+
+      const order = (re: RegExp) => calls().findIndex((c) => re.test(c.sql));
+      expect(order(MONEY_JOB)).toBeGreaterThan(-1);
+      expect(order(MONEY_JOB)).toBeLessThan(order(/UPDATE Quotes/));
+    });
+  });
 });
 
 describe("rejectQuote", () => {

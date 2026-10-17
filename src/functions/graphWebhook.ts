@@ -5,6 +5,7 @@ import { createRequestConnection, createServiceRequestConnection, executeQuery, 
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
+import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { checkRateLimit } from "../rateLimit";
 import { runTimer } from "../timerRuns";
 
@@ -133,7 +134,7 @@ export async function setupGraphSubscription(
     };
   }
 
-  const mailbox = process.env.GRAPH_MAILBOX_DEV;
+  const mailbox = incomingMailbox();
   const notificationUrl = process.env.GRAPH_NOTIFICATION_URL;
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
 
@@ -141,7 +142,9 @@ export async function setupGraphSubscription(
     return {
       status: 500,
       jsonBody: {
-        error: "GRAPH_MAILBOX_DEV, GRAPH_NOTIFICATION_URL, and GRAPH_SUBSCRIPTION_CLIENT_STATE must all be set",
+        error: mailbox
+          ? "GRAPH_NOTIFICATION_URL and GRAPH_SUBSCRIPTION_CLIENT_STATE must both be set"
+          : mailboxConfigError(),
       },
     };
   }
@@ -173,7 +176,7 @@ export async function renewGraphSubscription(
   _myTimer: unknown,
   context: InvocationContext,
 ): Promise<void> {
-  const mailbox = process.env.GRAPH_MAILBOX_DEV;
+  const mailbox = incomingMailbox();
   const notificationUrl = process.env.GRAPH_NOTIFICATION_URL;
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;
 

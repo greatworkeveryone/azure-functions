@@ -7,11 +7,12 @@
 // every subsequent request hits the cache.
 //
 // Production code path: full signature verification via JWKS.
-// Local dev escape hatch: when DEV_ROLE_OVERRIDE_ENABLED=true AND the host is
-// NOT running under AZURE_FUNCTIONS_ENVIRONMENT=Production, we skip
-// verification and just decode the payload. This keeps offline / no-Entra
-// development working and is gated tightly enough that it cannot enable in
-// the deployed Function App.
+// Local dev escape hatch: only when DEV_ROLE_OVERRIDE_ENABLED=true AND the host
+// positively says AZURE_FUNCTIONS_ENVIRONMENT=Development (Core Tools sets it
+// locally) AND it is not an Azure-hosted app (no WEBSITE_INSTANCE_ID) do we skip
+// verification and just decode the payload. An unset environment is
+// production (SEC-04), and startup refuses to boot if the switch is on anywhere
+// the bypass cannot apply.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createRemoteJWKSet, errors as joseErrors, jwtVerify } from "jose";
@@ -56,8 +57,14 @@ function decodeWithoutVerify(token: string): JWTPayload | null {
 export function isDevOverrideEnabled(): boolean {
   return (
     process.env.DEV_ROLE_OVERRIDE_ENABLED === "true" &&
-    process.env.AZURE_FUNCTIONS_ENVIRONMENT !== "Production"
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Development" &&
+    !process.env.WEBSITE_INSTANCE_ID
   );
+}
+
+/** True when the bypass switch is on in a place it must never apply (any deployed or unlabelled host). */
+export function devOverrideMisconfigured(): boolean {
+  return process.env.DEV_ROLE_OVERRIDE_ENABLED === "true" && !isDevOverrideEnabled();
 }
 
 /**

@@ -265,7 +265,7 @@ const flush = async () => {
 describe("approveQuote", () => {
   const quoteRow = (amount: number): SqlRoute => [
     /SELECT JobID, QuoteNumber, ContractorName, Amount/,
-    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1" }],
+    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
   ];
   const stored: SqlRoute = [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7, Status: "approved" }]];
 
@@ -355,8 +355,9 @@ describe("quote handlers that used to read the actor from the body", () => {
       /OUTPUT INSERTED|^\s*SELECT/i.test(sql) ? [row] : [],
     );
 
-    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy.
-    const ids = name === "upsertQuote" ? { JobID: 9 } : { JobID: 9, QuoteID: 7 };
+    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy
+    // (and, since J3, needs an amount above $0).
+    const ids = name === "upsertQuote" ? { Amount: 100, JobID: 9 } : { JobID: 9, QuoteID: 7 };
     await bodyActorHandler[name](makeRequest({ ...ids, [field]: "Someone Else" }), ctx);
 
     const values = sqlCalls().flatMap((c) => Object.values(c.params));
@@ -371,5 +372,31 @@ describe("quote handlers that used to read the actor from the body", () => {
 
     expect(res.status).toBe(401);
     expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe("upsertQuote: editing an approved quote's amount (J2, N2)", () => {
+  const upsertQuote = registered("upsertQuote");
+  const dbWithUpdate = require("../db") as { buildUpdateSet: jest.Mock };
+
+  it("clears the approval and records why, but never moves the job", async () => {
+    dbWithUpdate.buildUpdateSet.mockReturnValue({ params: [{ name: "Amount", type: undefined, value: 9000 }], setClause: "Amount = @Amount" });
+    routeSql([
+      [/FROM Quotes WITH \(UPDLOCK, HOLDLOCK\) WHERE QuoteID = @Id/, [
+        { Amount: 4000, ApprovedAt: new Date("2026-10-10T00:00:00Z"), ContractorName: "Acme", JobID: 9, QuoteID: 7, QuoteNumber: "QT-9-1", Status: "approved" },
+      ]],
+      [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7 }]],
+    ]);
+
+    const res = await upsertQuote(makeRequest({ Amount: 9000, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(sqlCalls().some((c) => /SET Status = 'pending'/.test(c.sql))).toBe(true);
+    const jobWrites = sqlCalls().filter((c) => /UPDATE Jobs/.test(c.sql));
+    expect(jobWrites.length).toBeGreaterThan(0);
+    for (const write of jobWrites) expect(write.sql).not.toMatch(/\bStatus\b|\bAwaitingRole\b/);
+    const cleared = sqlCalls().find((c) => /INSERT INTO JobEvents/.test(c.sql) && c.params.EventType === "quote_approval_cleared");
+    expect(cleared?.params.Text).toBe("Quote QT-9-1 amount changed — approval cleared. The job keeps its status until a quote is approved again.");
+    expect(sqlCalls().some((c) => /'status_change'/.test(c.sql))).toBe(false);
   });
 });

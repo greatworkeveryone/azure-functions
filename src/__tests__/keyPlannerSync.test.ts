@@ -1,4 +1,4 @@
-import { describe, expect, it, jest, beforeEach } from "@jest/globals";
+import { afterAll, beforeAll, describe, expect, it, jest, beforeEach } from "@jest/globals";
 
 jest.mock("../db");
 jest.mock("../planner");
@@ -24,6 +24,17 @@ const baseDeps = {
   facilitiesMembers: ["user-1", "user-2"],
   appBaseUrl: "https://test.local",
 };
+
+// Planner writes are off unless PLANNER_SYNC_ENABLED is "true"; this file tests
+// the reconcile with them on (the off case is in planner-sync-flag.test.ts).
+const originalPlannerFlag = process.env.PLANNER_SYNC_ENABLED;
+beforeAll(() => {
+  process.env.PLANNER_SYNC_ENABLED = "true";
+});
+afterAll(() => {
+  if (originalPlannerFlag === undefined) delete process.env.PLANNER_SYNC_ENABLED;
+  else process.env.PLANNER_SYNC_ENABLED = originalPlannerFlag;
+});
 
 beforeEach(() => {
   jest.resetAllMocks();

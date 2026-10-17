@@ -16,7 +16,11 @@
 //               before today in Darwin; the job has no separate due date, and
 //               that date defaults to a week out, so the policy is seeded
 //               inactive until Jobs has a real one
+//
+// Each sweep policy also names the job kinds it applies to (POLICY_JOB_KINDS), and
+// a job of any other kind never meets it.
 
+import { CONTRACTOR_FLOW_KINDS } from "../../jobKinds";
 import { formatDarwinDateTime } from "../../ledger/darwinTime";
 import { escalationThresholdDays } from "../../plannerHelpers";
 import { addBusinessHours, businessDaysToHours, darwinDateKey, type Holidays } from "../businessTime";
@@ -34,6 +38,8 @@ export interface JobFacts {
   firstQuoteRequestAt: Date | null;
   isArchived: boolean;
   jobId: number;
+  /** Jobs.Kind; which sweep policies apply to the job follows from it. */
+  kind: string;
   /** Incoming invoices still 'pending', and when the oldest arrived. */
   oldestPendingInvoiceAt: Date | null;
   pendingInvoices: number;
@@ -109,6 +115,31 @@ export const SWEEP_JOB_POLICIES = [
 ] as const;
 export type SweepJobPolicy = (typeof SWEEP_JOB_POLICIES)[number];
 
+/**
+ * The job kinds each sweep policy applies to, chosen policy by policy. A job of a
+ * kind that isn't listed never meets the policy, both ways: the sweep doesn't
+ * raise it and ends one it finds (condition_cleared). All five follow the
+ * facilities and maintenance work (an assignee, contractor quotes, invoice
+ * approval, and ladders that run to the facilities and accounts managers). An
+ * Admin / Accounts job (plan D2) has no quote, PO or invoice, and the clock that
+ * chases it is the tier its raiser chose (D5), not these priority thresholds, so
+ * it is on none of them. To chase another kind, list it here; never subtract.
+ */
+export const POLICY_JOB_KINDS: Readonly<Record<SweepJobPolicy, readonly string[]>> = {
+  "job.stalled_unacknowledged": CONTRACTOR_FLOW_KINDS,
+  "job.unassigned": CONTRACTOR_FLOW_KINDS,
+  "job.quote_not_back": CONTRACTOR_FLOW_KINDS,
+  "job.invoice_waiting": CONTRACTOR_FLOW_KINDS,
+  "job.past_due": CONTRACTOR_FLOW_KINDS,
+};
+
+/** Whether a policy applies to a job of this kind. job.critical and the manual
+ *  policies aren't sweep policies: the job save or a person raised them, for any kind. */
+export function policyAppliesToKind(policyKey: string, kind: string): boolean {
+  if (!Object.hasOwn(POLICY_JOB_KINDS, policyKey)) return true;
+  return POLICY_JOB_KINDS[policyKey as SweepJobPolicy].includes(kind);
+}
+
 export interface RuleContext {
   env?: NodeJS.ProcessEnv;
   holidays: Holidays;
@@ -117,6 +148,7 @@ export interface RuleContext {
 
 /** Whether a job meets a job policy's condition right now. */
 export function jobConditionActive(policyKey: string, job: JobFacts, context: RuleContext): boolean {
+  if (!policyAppliesToKind(policyKey, job.kind)) return false;
   switch (policyKey) {
     case "job.stalled_unacknowledged":
       return isStalled(job, context.now, context.env);

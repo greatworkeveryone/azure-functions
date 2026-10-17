@@ -21,6 +21,7 @@ import { invalidateApprovalLimitsCache } from "../approval-limits-db";
 import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { LedgerValidationError, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { requireMoneyContext } from "../moneyGate";
 
 interface SetApprovalLimitBody {
   RoleName: string;
@@ -39,6 +40,9 @@ export async function setApprovalLimit(
   if (!userRoles.includes(AppRole.ADMIN)) {
     return { status: 403, jsonBody: { error: "Admin role required" } };
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {
@@ -50,6 +54,9 @@ export async function setApprovalLimit(
     if (MaxApprovalAmount !== null && (typeof MaxApprovalAmount !== "number" || MaxApprovalAmount < 0)) {
       return { status: 400, jsonBody: { error: "MaxApprovalAmount must be null or a non-negative number" } };
     }
+    // Stored as the authority core reads it (migration 121 normalised the rest),
+    // so a row saved as 'Admin' can never again miss the admin role.
+    const roleName = RoleName.trim().toLowerCase();
     // The column is DECIMAL(18,2): settle on whole cents here so the value we
     // compare, store and record are the same number.
     const limit = MaxApprovalAmount === null ? null : Math.round(MaxApprovalAmount * 100) / 100;
@@ -64,7 +71,7 @@ export async function setApprovalLimit(
       const existing = await executeQuery(
         connection,
         `SELECT MaxApprovalAmount FROM dbo.ApprovalLimits WITH (UPDLOCK, HOLDLOCK) WHERE RoleName = @RoleName`,
-        [{ name: "RoleName", type: TYPES.NVarChar, value: RoleName }],
+        [{ name: "RoleName", type: TYPES.NVarChar, value: roleName }],
       );
       const hadRow = existing.length > 0;
       const previous = hadRow ? ((existing[0].MaxApprovalAmount as number | null) ?? null) : null;
@@ -79,7 +86,7 @@ export async function setApprovalLimit(
          WHEN NOT MATCHED THEN
            INSERT (RoleName, MaxApprovalAmount) VALUES (@RoleName, @MaxApprovalAmount);`,
         [
-          { name: "RoleName", type: TYPES.NVarChar, value: RoleName },
+          { name: "RoleName", type: TYPES.NVarChar, value: roleName },
           // Without precision/scale tedious sends scale 0 and rounds away the cents.
           {
             name: "MaxApprovalAmount",
@@ -96,7 +103,7 @@ export async function setApprovalLimit(
           actor,
           after: { maxApprovalAmount: limit },
           before: hadRow ? { maxApprovalAmount: previous } : undefined,
-          subject: { id: RoleName, type: "approval_limit" },
+          subject: { id: roleName, type: "approval_limit" },
         });
       }
       await commitTransaction(connection);
@@ -106,7 +113,7 @@ export async function setApprovalLimit(
     }
 
     invalidateApprovalLimitsCache();
-    return { status: 200, jsonBody: { ok: true, roleName: RoleName, maxApprovalAmount: limit } };
+    return { status: 200, jsonBody: { ok: true, roleName, maxApprovalAmount: limit } };
   } catch (error: unknown) {
     // The decision was rolled back above; the entry itself was unrecordable
     // (a role name too long for the ledger, say).

@@ -29,6 +29,7 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   required("APP_BASE_URL", "Director emails go out without the job link; Planner sync stops early."),
   required("MYBUILDINGS_API_URL", "Building and work-request sync fail on first use."),
   required("MYBUILDINGS_BEARER_TOKEN", "Building and work-request sync fail on first use."),
+  required("DIRECTOR_APPROVAL_THRESHOLD", "Director sign-off gate (expected 50000 once migration 121 is applied). Unset or invalid: the gate is derived from the highest non-director limit, which moves whenever a limit is edited on the Roles page."),
   optional("DIRECTOR_APPROVAL_EMAILS", "Fallback director list: used only when no active user has the director role."),
   optional("FACILITIES_MANAGER_EMAILS", "Fallback facilities-manager list for escalation emails."),
   optional("FEEDBACK_EMAIL_RECIPIENTS", "The in-app feedback form answers 500."),

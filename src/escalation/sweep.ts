@@ -5,6 +5,10 @@
 //  1. Attention escalations whose condition has cleared end (condition_cleared).
 //  2. Open escalations past their SLA move up a level, or are repeated as a
 //     reminder at the top (autoReescalate on the policy decides).
+//     Then the rows that carry a reminder schedule (a decision request's) are
+//     emailed when one of their times has come: no new row, and not a row that has
+//     just moved up (reminders.ts). Then a deferred decision whose day has come is
+//     asked again: a new pending request to the same people, once (jobDecisions/reask.ts).
 //  3. Jobs that meet a job policy and have no live escalation for it get one:
 //     stalled and unacknowledged, unassigned, quote not back, invoice waiting,
 //     past due. A policy switched off in dbo.EscalationPolicies is skipped, and
@@ -26,7 +30,7 @@
 // idempotent: running the sweep twice does nothing the second time.
 
 import type { Connection } from "tedious";
-import { holidaysFromEnv, parseHolidays } from "./businessTime";
+import { businessDayStart, darwinDateKey, holidaysFromEnv, parseHolidays } from "./businessTime";
 import { MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig, sweepMaxActions } from "./config";
 import { autoResolve, escalateFurther, hasNextLevel, raise, SWEEP_ACTOR } from "./engine";
 import type { AutoResolveInput, EscalateFurtherInput, EscalateFurtherResult, RaiseInput, RaiseResult } from "./engine";
@@ -42,6 +46,10 @@ import {
   type SweepJobPolicy,
 } from "./adapters/jobRules";
 import { countExhaustedNotifications, SYSTEM_SUBJECTS } from "./adapters/system";
+import { DECISION_PENDING_POLICY, isNextStepRow } from "./decisionRows";
+import { dueDeferrals, type DueDeferral } from "../jobDecisions/decisionsStore";
+import { reaskDeferral, type ReaskOptions, type ReaskResult } from "../jobDecisions/reask";
+import { dueReminder } from "./reminders";
 import { eventForRetry, isRetryDue, notifyTargets, type NotifyEvent, type NotifyOptions, type NotifyOutcome } from "./notifier";
 import { getPolicy } from "./policies";
 import { latestKey, latestTimesBySubject, listLiveEscalations, type LatestEscalationTimes } from "./store";
@@ -66,7 +74,11 @@ export interface SweepReport {
   healthResolved: number;
   notificationsRetried: number;
   raised: number;
+  /** Deferred decisions whose day came, asked again as a new pending request (jobs plan A2). */
+  reasked: number;
   reminded: number;
+  /** Scheduled reminders emailed to the people a row is for (a decision request's). */
+  scheduledReminders: number;
   /** Conditions a person already dealt with, so not raised again. */
   skippedAsHandled: number;
   superseded: number;
@@ -83,10 +95,12 @@ export interface SweepDeps {
   hasNextLevel(connection: Connection, row: EscalationRow, now: Date): Promise<boolean>;
   latestEmailArrivals(connection: Connection, jobIds: readonly number[]): Promise<Map<number, Date>>;
   latestTimesBySubject(connection: Connection, subjectType: string): Promise<Map<string, LatestEscalationTimes>>;
+  listDueDeferrals(connection: Connection, today: string, limit: number): Promise<DueDeferral[]>;
   listLiveEscalations(connection: Connection): Promise<EscalationRow[]>;
   loadLiveJobFacts(connection: Connection): Promise<JobFacts[]>;
   notifyTargets(connection: Connection, row: EscalationRow, event: NotifyEvent, options: NotifyOptions): Promise<NotifyOutcome>;
   raise(connection: Connection, input: RaiseInput): Promise<RaiseResult>;
+  reaskDeferral(connection: Connection, deferral: DueDeferral, options: ReaskOptions): Promise<ReaskResult>;
 }
 
 export const defaultSweepDeps: SweepDeps = {
@@ -98,10 +112,12 @@ export const defaultSweepDeps: SweepDeps = {
   hasNextLevel,
   latestEmailArrivals,
   latestTimesBySubject,
+  listDueDeferrals: dueDeferrals,
   listLiveEscalations,
   loadLiveJobFacts,
   notifyTargets,
   raise,
+  reaskDeferral,
 };
 
 const PRIORITY_RANK: Record<string, number> = { Critical: 0, High: 1, Normal: 2, Low: 3 };
@@ -136,7 +152,9 @@ class Run {
       healthResolved: 0,
       notificationsRetried: 0,
       raised: 0,
+      reasked: 0,
       reminded: 0,
+      scheduledReminders: 0,
       skippedAsHandled: 0,
       superseded: 0,
       truncated: false,
@@ -259,6 +277,66 @@ async function moveUpOverdue(run: Run): Promise<void> {
   }
 }
 
+// ── 2b. Scheduled reminders ──────────────────────────────────────────────────
+
+async function sendScheduledReminders(run: Run): Promise<void> {
+  for (const row of await run.deps.listLiveEscalations(run.connection)) {
+    if (!dueReminder(row, run.now)) continue;
+    if (!run.take()) return;
+
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would remind the people on #${row.escalationId} ${row.policyKey} on ${row.subjectType} ${row.subjectId}`);
+      run.report.scheduledReminders += 1;
+      continue;
+    }
+    await run.attempt(`reminding on escalation #${row.escalationId}`, async () => {
+      // A reminder that goes through costs the row no attempts; one that fails does,
+      // and the next run tries again (the row is still due) until one gets through.
+      const outcome = await run.deps.notifyTargets(run.connection, row, "reminder", { ...run.notifyOptions(), countAttempts: "failures" });
+      if (outcome.state === "sent") {
+        run.report.scheduledReminders += 1;
+      } else if (outcome.state === "failed") {
+        throw new Error(outcome.error ?? "the reminder could not be sent");
+      } else {
+        run.options.log(`escalationSweep: no reminder sent on #${row.escalationId} (${outcome.state}${outcome.error ? `: ${outcome.error}` : ""})`);
+      }
+    });
+  }
+}
+
+// ── 2c. Deferred questions come back ─────────────────────────────────────────
+
+/** A deferral comes back when its day opens: 08:30 Darwin on the date, the first
+ *  sweep at or after it. One that was missed (the sweep was off) comes back at once. */
+async function reaskDeferred(run: Run): Promise<void> {
+  const due = (await run.deps.listDueDeferrals(run.connection, darwinDateKey(run.now), sweepMaxActions(run.env))).filter(
+    (deferral) => businessDayStart(deferral.deferUntil).getTime() <= run.now.getTime(),
+  );
+  if (due.length === 0) return;
+
+  const policy = await run.deps.getPolicy(run.connection, DECISION_PENDING_POLICY, run.now.getTime());
+  if (!policy?.active) {
+    run.options.log(
+      `escalationSweep: ${due.length} deferred decision${due.length === 1 ? " is" : "s are"} due, but ${DECISION_PENDING_POLICY} ${policy ? "is switched off (Active = 0)" : "has no row in dbo.EscalationPolicies"}, so ${due.length === 1 ? "it is" : "they are"} not asked again`,
+    );
+    return;
+  }
+
+  const holidays = holidaysFromEnv(run.env);
+  for (const deferral of due) {
+    if (!run.take()) return;
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would ask job #${deferral.jobId} again (decision #${deferral.decisionId}, deferred until ${deferral.deferUntil})`);
+      run.report.reasked += 1;
+      continue;
+    }
+    await run.attempt(`asking job #${deferral.jobId} again`, async () => {
+      const result = await run.deps.reaskDeferral(run.connection, deferral, { holidays, notify: run.notifyOptions(), now: run.now });
+      if (result === "asked") run.report.reasked += 1;
+    });
+  }
+}
+
 // ── 3. Job policies ──────────────────────────────────────────────────────────
 
 interface Candidate {
@@ -357,9 +435,10 @@ export function followUpSince(row: Pick<EscalationRow, "createdAt" | "lastFollow
 }
 
 async function restartOnFollowUps(run: Run): Promise<void> {
-  // Emergencies don't wait for a tenant's email to restart their clock.
+  // Emergencies don't wait for a tenant's email to restart their clock, and a next step
+  // is due when its decision said, whatever mail arrives about the job.
   const rows = (await run.deps.listLiveEscalations(run.connection)).filter(
-    (row) => row.status === "open" && row.kind === "attention" && !row.urgent && row.subjectType === "job",
+    (row) => row.status === "open" && row.kind === "attention" && !row.urgent && row.subjectType === "job" && !isNextStepRow(row),
   );
   if (rows.length === 0) return;
 
@@ -494,6 +573,8 @@ export async function runSweep(
   const steps: [string, (run: Run) => Promise<void>][] = [
     ["ending cleared conditions", endClearedConditions],
     ["moving up overdue escalations", moveUpOverdue],
+    ["sending scheduled reminders", sendScheduledReminders],
+    ["asking deferred decisions again", reaskDeferred],
     ["raising for jobs", raiseForJobs],
     ["restarting on follow-up emails", restartOnFollowUps],
     ["retrying notifications", retryNotifications],
@@ -515,7 +596,7 @@ export async function runSweep(
   const r = run.report;
   options.log(
     `escalationSweep: ${options.dryRun ? "DRY RUN (nothing written), would" : "done,"} raised=${r.raised} superseded=${r.superseded} reminded=${r.reminded} ` +
-      `autoResolved=${r.autoResolved} followUps=${r.followUps} notificationsRetried=${r.notificationsRetried} ` +
+      `scheduledReminders=${r.scheduledReminders} reasked=${r.reasked} autoResolved=${r.autoResolved} followUps=${r.followUps} notificationsRetried=${r.notificationsRetried} ` +
       `healthRaised=${r.healthRaised} healthResolved=${r.healthResolved} skippedAsHandled=${r.skippedAsHandled} ` +
       `errors=${r.errors.length}${r.truncated ? " (stopped at the action limit; the rest waits for the next run)" : ""}`,
   );
