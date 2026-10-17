@@ -11,9 +11,12 @@ jest.mock("@azure/functions", () => {
   return { ...actual, app: { http: jest.fn(), storageQueue: jest.fn(), timer: jest.fn() } };
 });
 jest.mock("../db", () => ({
+  beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),
+  commitTransaction: jest.fn().mockResolvedValue(undefined),
   createRequestConnection: jest.fn(),
   executeQuery: jest.fn(),
+  rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../auth", () => {
   const actual = jest.requireActual("../auth");
@@ -23,6 +26,7 @@ jest.mock("../auth", () => {
     extractToken: jest.fn(),
     oidFromToken: jest.fn().mockReturnValue("caller-oid"),
     requireRole: jest.fn(),
+    rolesForRequest: jest.fn().mockResolvedValue(["facilities_manager"]),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     verifiedIdentityFromRequest: jest.fn(),
   };
@@ -96,6 +100,13 @@ function sameJob(statement: string, parentId: number, attachmentId: number): boo
 async function fakeDb(_connection: unknown, sql: string, params: { name: string; value: unknown }[] = []): Promise<Record<string, unknown>[]> {
   const value = (name: string) => params.find((p) => p.name === name)?.value as number;
   const parentId = value("ParentID");
+  // D5's transactional detach: the record's state with the link locked, the
+  // ledger actor, and the job's building. The invoice here is open.
+  if (/FROM dbo\.\w+ r WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) {
+    return [{ FileName: "a.pdf", JobID: 9, Linked: 1, LockedBecause: null, Number: "INV-5" }];
+  }
+  if (/FROM dbo\.AppUsers WHERE EntraOid/.test(sql)) return [{ UserID: 3 }];
+  if (/SELECT BuildingID FROM Jobs/.test(sql)) return [{ BuildingID: 5 }];
   const list = /FROM (\w+Attachments) j\s+JOIN Attachments a/.exec(sql);
   if (list) {
     return (LINKS[list[1]] ?? [])
@@ -204,9 +215,11 @@ describe("detachFromInvoice", () => {
     const res = await detach({ AttachmentID: 11, InvoiceID: 5 });
 
     expect(res).toEqual({ jsonBody: { ok: true }, status: 200 });
-    const [call] = sqlCalls();
-    expect(call.sql).toMatch(/DELETE FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
-    expect(call.params).toEqual({ AttachmentID: 11, ParentID: 5 });
+    const call = sqlCalls().find((c) => /DELETE FROM JobInvoiceAttachments/.test(c.sql));
+    expect(call?.sql).toMatch(/DELETE FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
+    expect(call?.params).toEqual({ AttachmentID: 11, ParentID: 5 });
+    expect(sqlCalls().some((c) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql))).toBe(true); // D5: the detach is ledgered
+    expect(sqlCalls().some((c) => /DELETE FROM Attachments/.test(c.sql))).toBe(false); // the file itself stays
   });
 
   it("400s without InvoiceID, 401s without a token, answers the gate's 403", async () => {

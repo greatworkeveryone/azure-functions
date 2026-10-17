@@ -95,8 +95,11 @@ Click **Grant admin consent**.
 
 Add to Azure Functions App Settings:
 
+> **Planner is being retired (PLAN D21, Q16) and nothing new goes to it.** Every path that creates, updates or completes a Planner task (the job-save reconcile, `plannerSyncTimer`, `triggerPlannerSync`, the lost-key sync, and the resolve calls on job, quote, invoice, tenancy and email actions) does nothing unless `PLANNER_SYNC_ENABLED` is exactly `true`. The first time one is skipped in a process, the log says `Planner sync disabled (PLANNER_SYNC_ENABLED is not "true")`; it is not repeated per call. Leave it unset in production. The `PLANNER_*` ids below only matter once it is `true`.
+
 | Variable | Description |
 |---|---|
+| `PLANNER_SYNC_ENABLED` | `true` turns Planner task creation, updates and completion on. Unset, or anything but the exact string `true`, leaves them all off |
 | `PLANNER_FACILITIES_GROUP_ID` | Property Facilities group ID |
 | `PLANNER_FACILITIES_PLAN_ID` | Facilities Tasks plan ID |
 | `PLANNER_FACILITIES_BUCKET_JOB_UPDATES_ID` | "Job Updates" bucket ID |
@@ -108,7 +111,7 @@ Add to Azure Functions App Settings:
 | `PLANNER_ACCOUNTS_BUCKET_OPTION_DEADLINES_ID` | "Option Deadlines" bucket ID |
 | `PLANNER_ACCOUNTS_BUCKET_RENT_REVIEWS_ID` | "Rent Reviews" bucket ID |
 | `PLANNER_ACCOUNTS_BUCKET_ONCHARGE_ID` | "Oncharge Pending" bucket ID |
-| `APP_BASE_URL` | e.g. `https://command-centre.example.com` |
+| `APP_BASE_URL` | e.g. `https://command-centre.example.com`. Builds links only (escalation and director emails, and Planner task descriptions while `PLANNER_SYNC_ENABLED` is `true`). Setting it no longer switches Planner on |
 
 Also fill in `local.settings.json` for local testing.
 

@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ASSET_BLOB_PREFIX,
@@ -11,7 +11,6 @@ import {
   SPACE_TYPES,
   UNIQUE_INDEXES,
 } from "../assetRegister";
-import { CLEANUP_SELECT } from "../attachmentCleanup";
 import { ASSET_DETAIL_COLUMNS, ASSET_TYPE_COLUMNS, LOCATION_COLUMNS } from "../assetRegisterSupport";
 
 // Migration 113 is applied by the startup runner, which refuses to boot the app
@@ -239,16 +238,12 @@ describe("migration 113: schema stays in step with the handlers", () => {
   });
 });
 
-describe("the attachment cleanup leaves asset files alone", () => {
-  it("reaps work-request rows only, and an asset upload is never one", () => {
+describe("asset files are never reaped", () => {
+  it("has no attachment cleanup timer, and an asset upload is never a work-request row", () => {
     expect(ASSET_BLOB_PREFIX).toBe("asset-");
-    expect(CLEANUP_SELECT).toContain("WorkRequestID IS NOT NULL");
+    expect(existsSync(join(__dirname, "..", "functions", "cleanupAttachments.ts"))).toBe(false);
     const columns = sourceOf("src/functions/uploadAssetAttachment.ts").match(/INSERT INTO dbo\.Attachments\s*\(([^)]*)\)/)?.[1] ?? "";
     expect(columns).toContain("BlobName");
     expect(columns).not.toMatch(/WorkRequestID|JobID/);
-  });
-
-  it("is what the timer selects with, rather than a query of its own", () => {
-    expect(sourceOf("src/functions/cleanupAttachments.ts")).toContain("CLEANUP_SELECT");
   });
 });

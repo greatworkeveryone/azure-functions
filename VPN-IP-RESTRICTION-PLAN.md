@@ -48,7 +48,7 @@ moved on:
 
 2. **Scheduled work is on timer triggers, not inbound HTTP.**
    `tenancyCpiSyncTimer`, `timesheetSyncTimer`, `tenancyReviewScheduleTimer`,
-   `plannerSyncTimer`, `cleanupAttachments`, `parseEmails` run
+   `plannerSyncTimer`, `parseEmails` run
    *inside* the Functions runtime on a schedule. Access restrictions only affect
    inbound HTTP, so these are unaffected.
 

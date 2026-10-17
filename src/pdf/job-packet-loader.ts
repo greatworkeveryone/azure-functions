@@ -183,7 +183,8 @@ async function loadJobAttachments(
 ): Promise<PacketAttachment[]> {
   // Attachments are stored in the polymorphic `Attachments` table (not
   // JobAttachments). OriginalName is the display name; ContentType is stored
-  // directly. Rows without MyBuildingsConfirmedAt still have live blobs.
+  // directly. Rows with MyBuildingsConfirmedAt set are legacy rows whose blob was
+  // deleted by the removed cleanup timer; every other row has a live blob.
   //
   // Director packet rule: include every attachment on the job, EXCEPT those
   // whose only link is to a rejected quote. An attachment with no quote links

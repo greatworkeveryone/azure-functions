@@ -4,9 +4,10 @@
 
 import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, executeQuery, type SqlParam, type SqlRow } from "../db";
+import { escapeLike } from "../ledger/filters";
 import { paginationSqlSuffix, type PaginationParams } from "../pagination";
 import { EscalationError } from "./errors";
-import { normaliseRole, teamRolesOfAll } from "./roles";
+import { normaliseRole, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, EscalationKind, EscalationRow, EscalationStatus, NotificationState, Viewer } from "./types";
 
 export const ESCALATION_COLUMNS = `EscalationId, SubjectType, SubjectId, BuildingId, Kind, Urgent, PolicyKey, [Level],
@@ -349,7 +350,10 @@ export type ListStatus = "active" | "open" | "closed" | "all";
 
 export interface ListFilter {
   kind?: EscalationKind;
+  /** One policy, by its exact key (job.manual). */
   policyKey?: string;
+  /** A whole domain of policies: a prefix ending in "." (finance.). */
+  policyKeyPrefix?: string;
   status: ListStatus;
   subjectId?: string;
   subjectType?: string;
@@ -380,26 +384,46 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
   const userId = viewer.userId ?? -1;
   params.push({ name: "ViewerUserId", type: TYPES.Int, value: userId });
 
+  // A level of several named people (a decision request's) puts no role on the
+  // row, so the people it is for are the userTargets in its context. It stays true
+  // when one of them has acknowledged it. Mirrors decisionRows.namedTargetIds.
+  const namedForMe = `(e.TargetRole IS NULL AND e.NoIndependentTarget = 0 AND EXISTS (
+      SELECT 1 FROM OPENJSON(ISNULL(e.Context, N'{}'), N'$.userTargets') t WHERE TRY_CONVERT(INT, t.[value]) = @ViewerUserId))`;
   // "For me": named for me, or aimed at my role and not yet named for someone
   // else. An escalation flagged NoIndependentTarget is for every director and
   // admin: nobody independent has it, so they all should.
   const mine = (): string => {
     const placeholders = rolePlaceholders("MineRole", roles.length ? roles : [""], params);
     const oversight = roles.some((role) => role === "director" || role === "admin") ? " OR e.NoIndependentTarget = 1" : "";
-    return `(e.TargetUserId = @ViewerUserId OR (e.TargetUserId IS NULL AND e.TargetRole IN (${placeholders}))${oversight})`;
+    return `(e.TargetUserId = @ViewerUserId OR (e.TargetUserId IS NULL AND e.TargetRole IN (${placeholders}))${oversight} OR ${namedForMe})`;
   };
   // Everything aimed at my role, whoever it is named for: colleagues cover for each other.
   const myRole = (): string => {
     const placeholders = rolePlaceholders("OwnRole", roles.length ? roles : [""], params);
-    return `(e.TargetUserId = @ViewerUserId OR e.TargetRole IN (${placeholders}))`;
+    return `(e.TargetUserId = @ViewerUserId OR e.TargetRole IN (${placeholders}) OR ${namedForMe})`;
   };
   const raised = (): string => "e.RaisedByUserId = @ViewerUserId";
+  // Policy domains the viewer oversees in full (the CFO's finance. alerts),
+  // whoever they go to. The prefix is a constant of ours, escaped and bound like
+  // the policyKey filter's; no request input reaches it.
+  const seenPolicies = (): string[] =>
+    seenPolicyPrefixesOfAll(roles).map((prefix, index) => {
+      params.push({ name: `SeenPolicy${index}`, type: TYPES.NVarChar, value: `${escapeLike(prefix)}%` });
+      return `e.PolicyKey LIKE @SeenPolicy${index} ESCAPE '\\'`;
+    });
   const team = (): string | null => {
     const teamRoles = teamRolesOfAll(roles);
     if (teamRoles === null) return null; // everything
-    if (teamRoles.length === 0) return "1 = 0";
-    const placeholders = rolePlaceholders("TeamRole", teamRoles, params);
-    return `(e.TargetRole IN (${placeholders}) OR e.RaisedByUserId IN (SELECT u.UserID FROM dbo.AppUsers u WHERE u.Role IN (${placeholders})))`;
+    const clauses: string[] = [];
+    if (teamRoles.length > 0) {
+      const placeholders = rolePlaceholders("TeamRole", teamRoles, params);
+      clauses.push(
+        `e.TargetRole IN (${placeholders})`,
+        `e.RaisedByUserId IN (SELECT u.UserID FROM dbo.AppUsers u WHERE u.Role IN (${placeholders}))`,
+      );
+    }
+    clauses.push(...seenPolicies());
+    return clauses.length === 0 ? "1 = 0" : `(${clauses.join(" OR ")})`;
   };
 
   switch (filter.view) {
@@ -439,6 +463,13 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
   if (filter.policyKey) {
     parts.push("e.PolicyKey = @PolicyKey");
     params.push({ name: "PolicyKey", type: TYPES.NVarChar, value: filter.policyKey });
+  }
+  if (filter.policyKeyPrefix) {
+    // As the decision log does for an action prefix: policy keys are full of
+    // underscores, which LIKE would read as "any one character", so the prefix
+    // is escaped and the pattern is bound, never written into the SQL.
+    parts.push("e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'");
+    params.push({ name: "PolicyKeyPrefix", type: TYPES.NVarChar, value: `${escapeLike(filter.policyKeyPrefix)}%` });
   }
   if (filter.kind) {
     parts.push("e.Kind = @Kind");

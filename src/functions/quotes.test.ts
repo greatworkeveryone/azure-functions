@@ -381,7 +381,7 @@ describe("upsertQuote: editing an approved quote's amount (J2, N2)", () => {
   it("clears the approval and records why, but never moves the job", async () => {
     dbWithUpdate.buildUpdateSet.mockReturnValue({ params: [{ name: "Amount", type: undefined, value: 9000 }], setClause: "Amount = @Amount" });
     routeSql([
-      [/SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorName, Status, ApprovedAt/, [
+      [/FROM Quotes WITH \(UPDLOCK, HOLDLOCK\) WHERE QuoteID = @Id/, [
         { Amount: 4000, ApprovedAt: new Date("2026-10-10T00:00:00Z"), ContractorName: "Acme", JobID: 9, QuoteID: 7, QuoteNumber: "QT-9-1", Status: "approved" },
       ]],
       [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7 }]],

@@ -175,8 +175,8 @@ describe("uploadKeyPhotoBlob", () => {
     // Blob-name shape is unchanged from the legacy convention (keys/<uuid>.<ext>)
     // so existing DB values keep the same format — only the container differs.
     expect(result.blobName).toMatch(/^keys\/.*\.png$/);
-    // The regression this guards: must NOT land in the transient wr-attachments
-    // container that cleanupAttachments reaps.
+    // The regression this guards: must NOT land in the wr-attachments
+    // container — key photos are permanent evidence and stay isolated from it.
     expect(result.url).toContain("/key-photos/");
     expect(result.url).not.toContain("/wr-attachments/");
   });

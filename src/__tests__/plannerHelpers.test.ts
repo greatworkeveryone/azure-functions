@@ -16,6 +16,7 @@ import {
   escalationThresholdDays,
   jobLink,
   getFacilitiesManagerEmails,
+  leaseTaskPlan,
   type PlannerTenantRow,
   type PlannerJobRow,
   type PlannerStalledJobRow,
@@ -31,8 +32,10 @@ const BASE_TENANT: PlannerTenantRow = {
   firstOccupancy: "L3 / Suite 3A",
   expiry: "2026-09-15",
   optionNoticeMonths: 3,
+  optionPeriods: "1 x 5 years",
   nextReviewDate: "2026-07-01",
   reviewType: "CPI Darwin",
+  scheduleSignedOff: true,
 };
 
 describe("formatDDMMYYYY", () => {
@@ -65,6 +68,26 @@ describe("computeEventDate", () => {
   test("option_notice returns null when optionNoticeMonths is null", () => {
     const t = { ...BASE_TENANT, optionNoticeMonths: null };
     assert.strictEqual(computeEventDate(t, "option_notice"), null);
+  });
+
+  // Option text is how we know a lease has options to exercise (WP25 and the
+  // frontend gate on optionNoticeWindow the same way): "Nil" means no deadline.
+  test.each([null, "", "Nil", "nil", "None", "N/A", "no options", "see lease"])(
+    "option_notice returns null when the option text is %p: there is nothing to give notice of",
+    (optionPeriods) => {
+      assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionPeriods }, "option_notice"), null);
+    },
+  );
+
+  test("option_notice returns null when the notice period is 0, which is how an unset one reads", () => {
+    assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionNoticeMonths: 0 }, "option_notice"), null);
+  });
+
+  test("a Nil option raises no option task but still raises expiry and review tasks", () => {
+    const nil = { ...BASE_TENANT, optionPeriods: "Nil" };
+    assert.strictEqual(computeEventDate(nil, "option_notice"), null);
+    assert.ok(computeEventDate(nil, "lease_expiry") instanceof Date);
+    assert.ok(computeEventDate(nil, "rent_review") instanceof Date);
   });
 
   test("option_notice returns null when expiry is null", () => {
@@ -490,5 +513,78 @@ describe("groupPlannerTasksByKey", () => {
     const m = groupPlannerTasksByKey(rows);
     expect(m.size).toBe(1);
     expect(m.get("job|7|job_update_due|0")?.PlannerTaskId).toBe("new");
+  });
+});
+
+describe("option notice dates are month-end safe", () => {
+  const BASE_URL = "https://app.example.com";
+
+  test("31 August less 6 months is the last day of February, not early March", () => {
+    const d = computeEventDate({ ...BASE_TENANT, expiry: "2026-08-31", optionNoticeMonths: 6 }, "option_notice");
+    assert.ok(d instanceof Date);
+    assert.strictEqual(toIsoDateString(d), "2026-02-28");
+  });
+
+  test("and the 29th in a leap year", () => {
+    const d = computeEventDate({ ...BASE_TENANT, expiry: "2028-08-31", optionNoticeMonths: 6 }, "option_notice");
+    assert.ok(d instanceof Date);
+    assert.strictEqual(toIsoDateString(d), "2028-02-29");
+  });
+
+  test("the reminder never lands after the deadline", () => {
+    for (const expiry of ["2026-03-31", "2026-05-31", "2026-08-31", "2026-10-31", "2027-12-31"]) {
+      for (const months of [1, 3, 6, 9, 12]) {
+        const d = computeEventDate({ ...BASE_TENANT, expiry, optionNoticeMonths: months }, "option_notice");
+        assert.ok(d instanceof Date);
+        // Whole months earlier, to the same day or the last day of that month.
+        const back = new Date(d);
+        back.setUTCMonth(back.getUTCMonth() + months);
+        assert.ok(back.getTime() <= new Date(expiry).getTime() + 3 * 86_400_000, `${expiry} - ${months}m`);
+        assert.ok(d.getTime() < new Date(expiry).getTime());
+      }
+    }
+  });
+
+  test("the task description names the same clamped deadline", () => {
+    const desc = buildTenantTaskDescription(
+      { ...BASE_TENANT, expiry: "2026-08-31", optionNoticeMonths: 6 },
+      "option_notice",
+      BASE_URL,
+    );
+    assert.ok(desc.includes("Option deadline: 28/02/2026"), desc);
+  });
+});
+
+describe("leaseTaskPlan: no lease tasks for a schedule nobody has signed off (PLAN D7)", () => {
+  const signed = { ...BASE_TENANT, tenantId: 1, scheduleSignedOff: true };
+  const unsigned = { ...BASE_TENANT, tenantId: 2, scheduleSignedOff: false };
+  const unsignedQuiet = { ...BASE_TENANT, tenantId: 3, scheduleSignedOff: false };
+  const row = (EntityId: number, Status: string, TriggerType = "lease_expiry", LeadTimeDays = 90) => ({
+    EntityId,
+    EntityType: "tenant",
+    Id: EntityId * 10,
+    LeadTimeDays,
+    PlannerTaskId: `task-${EntityId}`,
+    Status,
+    TriggerType,
+  });
+
+  test("only signed-off tenancies are eligible for new tasks", () => {
+    const plan = leaseTaskPlan([signed, unsigned, unsignedQuiet], []);
+    assert.deepStrictEqual(plan.eligible.map((t) => t.tenantId), [1]);
+  });
+
+  test("an unsigned tenancy with an active task has it removed", () => {
+    const plan = leaseTaskPlan([signed, unsigned, unsignedQuiet], [row(1, "active"), row(2, "active"), row(2, "active", "rent_review", 60)]);
+    assert.deepStrictEqual(plan.removeFor, [2]);
+  });
+
+  test("a resolved task is already gone, and a signed-off tenancy's tasks stay", () => {
+    const plan = leaseTaskPlan([signed, unsigned], [row(1, "active"), row(2, "resolved")]);
+    assert.deepStrictEqual(plan.removeFor, []);
+  });
+
+  test("nothing to do for no tenancies", () => {
+    assert.deepStrictEqual(leaseTaskPlan([], []), { eligible: [], removeFor: [] });
   });
 });

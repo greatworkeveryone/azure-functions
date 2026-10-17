@@ -6,10 +6,13 @@
 // pattern as purchaseOrders.test.ts.
 
 import assert from "node:assert";
+import { JOB_KINDS } from "../jobKinds";
 
 // ── Mirrors of production logic ──────────────────────────────────────────────
 
-const ALLOWED_KINDS = ["facilities", "maintenance"] as const;
+// The list itself is imported, so this mirror can't drift from jobs.ts; the real
+// handler is covered in functions/jobs.admin.test.ts.
+const ALLOWED_KINDS = JOB_KINDS;
 
 /** Returns an error string if the Kind value should be rejected, null if it
  *  passes. Mirrors the Kind branch of validateUpsertBody. An omitted Kind
@@ -42,6 +45,10 @@ test("validateKind accepts facilities", () => {
 
 test("validateKind accepts maintenance", () => {
   assert.strictEqual(validateKind("maintenance"), null);
+});
+
+test("validateKind accepts admin", () => {
+  assert.strictEqual(validateKind("admin"), null);
 });
 
 test("validateKind passes when Kind is omitted (undefined)", () => {

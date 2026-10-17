@@ -50,10 +50,19 @@ describe("parseDecisionFilters", () => {
     expect(ok("actorUserId=7&buildingId=5&tenantId=42")).toMatchObject({ actorUserId: 7, buildingId: 5, tenantId: 42 });
   });
 
+  it("reads the job and the contractor as whole numbers too", () => {
+    expect(ok("jobId=9&contractorId=3")).toMatchObject({ contractorId: 3, jobId: 9 });
+    expect(ok("jobId=9")).not.toHaveProperty("contractorId");
+    expect(ok("contractorId=3")).not.toHaveProperty("jobId");
+    expect(ok("jobId=&contractorId=")).toEqual({ exceptionsOnly: false, format: "json", sort: "occurredAt" });
+  });
+
   it.each(["abc", "1.5", "-3", "0", "99999999999", "7;--"])("refuses %s as an id", (bad) => {
     expect(error(`actorUserId=${encodeURIComponent(bad)}`)).toMatch(/actorUserId must be a whole number/);
     expect(error(`buildingId=${encodeURIComponent(bad)}`)).toMatch(/buildingId/);
     expect(error(`tenantId=${encodeURIComponent(bad)}`)).toMatch(/tenantId/);
+    expect(error(`jobId=${encodeURIComponent(bad)}`)).toMatch(/jobId must be a whole number/);
+    expect(error(`contractorId=${encodeURIComponent(bad)}`)).toMatch(/contractorId must be a whole number/);
   });
 
   it("treats an action ending in a dot as a prefix and anything else as exact", () => {
@@ -101,6 +110,71 @@ describe("buildDecisionWhere", () => {
     );
     expect(whereSql).not.toMatch(/2026|quote|\b42\b/);
     expect(params.map((p) => p.name)).toEqual(["From", "To", "ActorUserId", "Action", "BuildingId", "TenantId"]);
+  });
+
+  it("binds the job and the contractor too: no value is ever written into the SQL", () => {
+    const { params, whereSql } = buildDecisionWhere(ok("jobId=90210&contractorId=31337&buildingId=5"));
+
+    expect(whereSql).not.toMatch(/90210|31337/);
+    expect(params).toEqual([
+      { name: "BuildingId", type: TYPES.Int, value: 5 },
+      { name: "JobId", type: TYPES.Int, value: 90210 },
+      { name: "ContractorId", type: TYPES.Int, value: 31337 },
+    ]);
+  });
+
+  describe("by job", () => {
+    it("is an equality on the JobId column, bound", () => {
+      const { params, whereSql } = buildDecisionWhere(ok("jobId=9"));
+
+      expect(whereSql).toBe("WHERE JobId = @JobId");
+      expect(params).toEqual([{ name: "JobId", type: TYPES.Int, value: 9 }]);
+    });
+  });
+
+  describe("by contractor", () => {
+    const CLAUSE =
+      "(TRY_CAST(JSON_VALUE([After], '$.contractorId') AS INT) = @ContractorId OR TRY_CAST(JSON_VALUE([Before], '$.contractorId') AS INT) = @ContractorId)";
+
+    it("reads the id the row carries in `after` or in `before`, bound, in brackets so it can't swallow the other filters", () => {
+      const { params, whereSql } = buildDecisionWhere(ok("contractorId=3"));
+
+      expect(whereSql).toBe(`WHERE ${CLAUSE}`);
+      expect(params).toEqual([{ name: "ContractorId", type: TYPES.Int, value: 3 }]);
+    });
+
+    it("stays inside its brackets when other filters join it with AND", () => {
+      const { whereSql } = buildDecisionWhere(ok("jobId=9&contractorId=3&exceptionsOnly=true"));
+
+      expect(whereSql).toBe(`WHERE JobId = @JobId AND ${CLAUSE} AND IsException = 1`);
+    });
+
+    // The ledger can't be run here, so this reads the clause the way SQL Server
+    // would: a row matches when either column's JSON holds the id.
+    const matches = (sql: string, row: { after: unknown; before: unknown }, id: number): boolean => {
+      const terms = [...sql.matchAll(/TRY_CAST\(JSON_VALUE\(\[(After|Before)\], '\$\.contractorId'\) AS INT\) = @ContractorId/g)];
+      return terms.some((term) => {
+        const json = (term[1] === "After" ? row.after : row.before) as { contractorId?: unknown } | null;
+        return json?.contractorId === id;
+      });
+    };
+
+    it("finds a deletion written before `after` was filled in, through `before`", () => {
+      const { whereSql } = buildDecisionWhere(ok("contractorId=3"));
+      const oldDeletion = { after: null, before: { amount: 500, contractorId: 3, contractorName: "Acme", quoteNumber: "QT-9-1" } };
+
+      expect(matches(whereSql, oldDeletion, 3)).toBe(true);
+      expect(matches(whereSql, oldDeletion, 8)).toBe(false);
+    });
+
+    it("finds a row through `after`, and a contractor swap through the old contractor in `before`", () => {
+      const { whereSql } = buildDecisionWhere(ok("contractorId=3"));
+
+      expect(matches(whereSql, { after: { contractorId: 3 }, before: null }, 3)).toBe(true);
+      expect(matches(whereSql, { after: { contractorId: 8 }, before: { contractorId: 3 } }, 3)).toBe(true);
+      expect(matches(whereSql, { after: { contractorId: 8 }, before: { contractorId: 9 } }, 3)).toBe(false);
+      expect(matches(whereSql, { after: null, before: null }, 3)).toBe(false);
+    });
   });
 
   it("matches the DATETIME2(3) column's scale so the index can seek", () => {

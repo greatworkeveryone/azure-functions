@@ -56,6 +56,21 @@ describe("refreshMyobRecord", () => {
     expect(res.jsonBody.proposals[0].paid).toEqual({ balanceDue: 0, state: "paid" });
   });
 
+  it("keys the rate limit to the person asking, so one person can't use up everyone's checks", async () => {
+    await refreshMyobRecord(post(BODY), ctx);
+    expect(checkRateLimit).toHaveBeenCalledWith("refreshMyobRecord:ray-oid", { limit: 10, windowMs: 60_000 });
+  });
+
+  it("never reads back an exception proposal, even one with a MYOB uid; only the latest verified one per record", async () => {
+    proposalsForSubject.mockResolvedValue([
+      { lastReadBackAt: null, myobSnapshot: null, myobUid: "a", operation: "orders.update", proposalId: 9, state: "exception" },
+      { lastReadBackAt: null, myobSnapshot: null, myobUid: "b", operation: "orders.create", proposalId: 8, state: "exception" },
+      { lastReadBackAt: null, myobSnapshot: null, myobUid: "a", operation: "orders.create", proposalId: 5, state: "verified" },
+    ]);
+    await refreshMyobRecord(post(BODY), ctx);
+    expect(readBackRows.mock.calls[0][1].map((row: { proposalId: number }) => row.proposalId)).toEqual([5]);
+  });
+
   it("reads nothing while the read-back is off, and answers with what Floorplan last saw", async () => {
     delete process.env.MYOB_READBACK_ENABLED;
     const res = await refreshMyobRecord(post(BODY), ctx);

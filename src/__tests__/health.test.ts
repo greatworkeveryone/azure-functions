@@ -41,7 +41,7 @@ beforeEach(() => {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM STRING_SPLIT/.test(sql)) {
       return [
-        { Error: null, FinishedAt: new Date("2026-10-14T03:00:05Z"), Name: "cleanupAttachmentsTimer", Outcome: "ok", StartedAt: new Date("2026-10-14T03:00:00Z") },
+        { Error: null, FinishedAt: new Date("2026-10-14T03:00:05Z"), Name: "ledgerVerifyTimer", Outcome: "ok", StartedAt: new Date("2026-10-14T03:00:00Z") },
         { Error: null, FinishedAt: null, Name: "plannerSyncTimer", Outcome: null, StartedAt: null },
       ];
     }
@@ -96,7 +96,7 @@ describe("health?deep=true", () => {
     const body = (await health(deep, ctx)).jsonBody as { timers: { lastRun: unknown; name: string }[] };
     expect(body.timers).toContainEqual({
       lastRun: { error: null, finishedAt: "2026-10-14T03:00:05.000Z", outcome: "ok", startedAt: "2026-10-14T03:00:00.000Z" },
-      name: "cleanupAttachmentsTimer",
+      name: "ledgerVerifyTimer",
     });
     expect(body.timers).toContainEqual({ lastRun: null, name: "plannerSyncTimer" });
   });

@@ -43,22 +43,24 @@ describe("listDigestUsers", () => {
 describe("listWaitingApprovals", () => {
   it("reads quotes and incoming invoices that have not finished their approvals, on live jobs", async () => {
     db.executeQuery
-      .mockResolvedValueOnce([{ Amount: "4840.00", BuildingID: 1, BuildingName: "Tower A", CreatedAt: new Date("2026-10-12T01:00:00Z"), JobID: 20, QuoteID: 7, Status: "pending", Title: "Replace pump" }])
-      .mockResolvedValueOnce([{ Amount: null, BuildingID: null, BuildingName: null, CreatedAt: new Date("2026-10-11T01:00:00Z"), JobID: 21, JobInvoiceID: 9, Status: "approved", Title: "Fix door" }]);
+      .mockResolvedValueOnce([{ Amount: "4840.00", BuildingID: 1, BuildingName: "Tower A", CreatedAt: new Date("2026-10-12T01:00:00Z"), JobID: 20, Kind: "maintenance", QuoteID: 7, Status: "pending", Title: "Replace pump" }])
+      .mockResolvedValueOnce([{ Amount: null, BuildingID: null, BuildingName: null, CreatedAt: new Date("2026-10-11T01:00:00Z"), JobID: 21, JobInvoiceID: 9, Kind: "admin", Status: "approved", Title: "Fix door" }]);
     const rows = await listWaitingApprovals(conn);
     const [quoteSql, invoiceSql] = calls().map((c) => c[1]);
     expect(quoteSql).toMatch(/FROM dbo\.Quotes/);
     expect(quoteSql).toMatch(/Status IN \('pending', 'awaiting_approval', 'awaiting_director'\)/);
     expect(quoteSql).toMatch(/j\.Status = 'Awaiting Approval'/);
     expect(quoteSql).toMatch(/IsArchived = 0/);
+    expect(quoteSql).toMatch(/j\.Kind/);
+    expect(invoiceSql).toMatch(/j\.Kind/);
     expect(invoiceSql).toMatch(/FROM dbo\.JobInvoices/);
     expect(invoiceSql).toMatch(/Direction = 'incoming'/);
     expect(invoiceSql).toMatch(/Status IN \('pending', 'awaiting_approval', 'approved'\)/);
     expect(invoiceSql).toMatch(/IsArchived = 0/);
     expect(invoiceSql).toMatch(/j\.Status <> 'Done'/);
     expect(rows).toEqual([
-      { amount: 4840, buildingId: 1, buildingName: "Tower A", createdAt: new Date("2026-10-12T01:00:00Z"), id: 7, jobId: 20, jobTitle: "Replace pump", status: "pending", subject: "quote" },
-      { amount: null, buildingId: null, buildingName: null, createdAt: new Date("2026-10-11T01:00:00Z"), id: 9, jobId: 21, jobTitle: "Fix door", status: "approved", subject: "invoice" },
+      { amount: 4840, buildingId: 1, buildingName: "Tower A", createdAt: new Date("2026-10-12T01:00:00Z"), id: 7, jobId: 20, jobKind: "maintenance", jobTitle: "Replace pump", status: "pending", subject: "quote" },
+      { amount: null, buildingId: null, buildingName: null, createdAt: new Date("2026-10-11T01:00:00Z"), id: 9, jobId: 21, jobKind: "admin", jobTitle: "Fix door", status: "approved", subject: "invoice" },
     ]);
   });
 });
@@ -66,20 +68,26 @@ describe("listWaitingApprovals", () => {
 describe("listDueJobs", () => {
   it("asks for jobs due before the end of today in Darwin, with the bound as a parameter", async () => {
     db.executeQuery.mockResolvedValue([
-      { AssignedToUserID: 1, BuildingName: "Tower A", ExpectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), JobID: 30, Title: "Paint stairwell" },
+      { AssignedToUserID: 1, BuildingName: "Tower A", ExpectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), JobID: 30, Kind: "admin", Title: "Paint stairwell" },
     ]);
     const jobs = await listDueJobs(conn, NOW);
     expect(lastSql()).toMatch(/FROM dbo\.Jobs/);
     expect(lastSql()).toMatch(/IsArchived = 0/);
     expect(lastSql()).toMatch(/Status <> 'Done'/);
     expect(lastSql()).toMatch(/AssignedToUserID IS NOT NULL/);
+    expect(lastSql()).toMatch(/j\.Kind/);
     expect(lastSql()).toMatch(/ExpectedProgressUpdate < @Before/);
     expect(lastSql()).not.toMatch(/CAST\s*\(\s*j?\.?ExpectedProgressUpdate/i);
     // 00:00 on the 15th in Darwin is 14:30 UTC on the 14th.
     expect(lastParam("Before")).toMatchObject({ type: TYPES.DateTime2, value: new Date("2026-10-14T14:30:00Z") });
     expect(jobs).toEqual([
-      { assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), jobId: 30, title: "Paint stairwell" },
+      { assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), jobId: 30, kind: "admin", title: "Paint stairwell" },
     ]);
+  });
+
+  it("reads a row with no kind as facilities, like the column's default", async () => {
+    db.executeQuery.mockResolvedValue([{ AssignedToUserID: 1, BuildingName: null, ExpectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), JobID: 31, Title: "Mow lawn" }]);
+    expect((await listDueJobs(conn, NOW))[0].kind).toBe("facilities");
   });
 });
 

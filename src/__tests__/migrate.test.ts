@@ -1,7 +1,8 @@
 /// <reference types="jest" />
 // The migration runner against a mocked connection (DL-11): one transaction
 // per file, an applock around the run, SHA-256 checksums, an explicit target.
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 jest.mock("../db", () => ({
@@ -15,7 +16,7 @@ jest.mock("../db", () => ({
 
 import { checkMigrations, runMigrations, startupMigrationMode } from "../migrate";
 import { parseMigrateArgs, resolveMigrationTarget } from "../migrate-cli";
-import { findDestructiveStatements, migrationChecksum, migrationFromSql, validateMigration } from "../migrate-files";
+import { findDestructiveStatements, loadMigrations, migrationChecksum, migrationFromSql, validateMigration } from "../migrate-files";
 import type { MigrationFile } from "../migrate-files";
 
 const db = jest.requireMock("../db") as Record<
@@ -288,5 +289,52 @@ describe("validateMigration and the destructive scan", () => {
     ["message", "PRINT 'Nothing to DELETE FROM here';"],
   ])("ignores %s", (_label, sql) => {
     expect(findDestructiveStatements(sql)).toEqual([]);
+  });
+});
+
+// The runner applies what loadMigrations returns, to production by hand. Demo
+// data lives in migrations/seeding/ and in any file named *_seed_*; neither may
+// ever reach it (database-safety rule 3: migrations are additive and boring).
+describe("loadMigrations", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "floorplan-migrations-"));
+    mkdirSync(join(dir, "seeding"));
+    writeFileSync(join(dir, "001_a.sql"), "CREATE TABLE dbo.A (Id INT);");
+    writeFileSync(join(dir, "002_seed_x.sql"), "INSERT INTO dbo.A (Id) VALUES (1);");
+    writeFileSync(join(dir, "seeding", "003_b.sql"), "CREATE TABLE dbo.B (Id INT);");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  it("returns no file whose name contains _seed_", async () => {
+    const names = (await loadMigrations(dir)).map((f) => f.name);
+    expect(names).not.toContain("002_seed_x.sql");
+    expect(names.filter((name) => name.includes("_seed_"))).toEqual([]);
+  });
+
+  it("returns nothing from a sub-directory", async () => {
+    const names = (await loadMigrations(dir)).map((f) => f.name);
+    expect(names).not.toContain("003_b.sql");
+    expect(names).not.toContain("seeding");
+    expect(names.filter((name) => name.includes("/") || name.includes("seeding"))).toEqual([]);
+  });
+
+  it("is left with the top-level migration, parsed as the runner will apply it", async () => {
+    const files = await loadMigrations(dir);
+    expect(files.map((f) => f.name)).toEqual(["001_a.sql"]);
+    expect(files[0].batches).toEqual(["CREATE TABLE dbo.A (Id INT);"]);
+    expect(files[0].checksum).toBe(migrationChecksum("CREATE TABLE dbo.A (Id INT);"));
+  });
+
+  it("holds for the repository's own migrations folder: its seeding/ files are never loaded", async () => {
+    const names = (await loadMigrations(MIGRATIONS_DIR)).map((f) => f.name);
+    const seeding = readdirSync(join(MIGRATIONS_DIR, "seeding"));
+    expect(seeding.length).toBeGreaterThan(0);
+    for (const name of seeding) expect(names).not.toContain(name);
+    expect(names.filter((name) => name.includes("_seed_"))).toEqual([]);
   });
 });

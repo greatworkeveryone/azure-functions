@@ -1,7 +1,17 @@
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { getGraphToken } from "./graph";
+import { PLANNER_SYNC_DISABLED_MESSAGE, plannerSyncEnabled } from "./plannerFlag";
 import type { TriggerType } from "./plannerHelpers";
+
+// Every Graph call below is behind PLANNER_SYNC_ENABLED (see plannerFlag.ts).
+// The orchestrators (reconcilers, timer, resolveActivePlannerTasks) check it first
+// so they do no work at all when it is off; these guards are the backstop that
+// stops a stray caller reaching Planner. They throw rather than return, because a
+// fake task id would be written into dbo.PlannerTasks.
+function requirePlannerSyncEnabled(operation: string): void {
+  if (!plannerSyncEnabled()) throw new Error(`${operation}: ${PLANNER_SYNC_DISABLED_MESSAGE}`);
+}
 
 export interface PlanConfig {
   planId: string;
@@ -64,6 +74,7 @@ export function getPlanConfig(triggerType: TriggerType): PlanConfig {
 }
 
 export async function graphGetGroupMembers(groupId: string): Promise<string[]> {
+  requirePlannerSyncEnabled("graphGetGroupMembers");
   const token = await getGraphToken();
   const resp = await fetch(
     `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members?$select=id`,
@@ -89,6 +100,7 @@ export interface CreatePlannerTaskParams {
 export async function graphCreatePlannerTask(
   params: CreatePlannerTaskParams,
 ): Promise<string> {
+  requirePlannerSyncEnabled("graphCreatePlannerTask");
   const token = await getGraphToken();
   const { planId, bucketId, title, dueDate, assigneeIds, description } = params;
 
@@ -149,6 +161,7 @@ export async function graphCreatePlannerTask(
 export async function graphGetPlannerTask(
   taskId: string,
 ): Promise<{ etag: string } | null> {
+  requirePlannerSyncEnabled("graphGetPlannerTask");
   const token = await getGraphToken();
   const resp = await fetch(
     `https://graph.microsoft.com/v1.0/planner/tasks/${encodeURIComponent(taskId)}`,
@@ -167,6 +180,7 @@ export async function graphCompletePlannerTask(
   taskId: string,
   etag: string,
 ): Promise<void> {
+  requirePlannerSyncEnabled("graphCompletePlannerTask");
   const token = await getGraphToken();
   const resp = await fetch(
     `https://graph.microsoft.com/v1.0/planner/tasks/${encodeURIComponent(taskId)}`,
@@ -191,6 +205,7 @@ export async function resolveActivePlannerTasks(
   entityId: number,
   triggerTypes: TriggerType[],
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   if (triggerTypes.length === 0) return;
 
   let connection;

@@ -29,8 +29,8 @@ const MAY_REACH_PIPELINE = new Set([
   "myob/draft.ts",
   "myob/proposalHttp.ts",
   "myob/propose.ts",
-  // The read-back sync reads Floorplan's own records back (GET only, plan M10).
-  "myob/readback.ts",
+  // The read-back's GET-only client (plan M10); myob-readback-readonly.test.ts keeps it GET-only.
+  "myob/readbackClient.ts",
   "myob/send.ts",
   "myob/sendOutcome.ts",
   "myob/sendSteps.ts",
