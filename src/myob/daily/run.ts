@@ -36,19 +36,24 @@ export const MAX_WINDOW_DAYS = 14;
  * lost; at most MAX_WINDOW_DAYS. With no such run, from the previous business
  * morning: Monday's first email covers the weekend.
  */
-export function dailyWindow(now: Date, env: NodeJS.ProcessEnv = process.env, lastCovered: Date | null = null): { since: Date; until: Date } {
+export function dailyWindow(
+  now: Date,
+  env: NodeJS.ProcessEnv = process.env,
+  lastCovered: Date | null = null,
+): { gapSince: Date | null; since: Date; until: Date } {
   const holidays = holidaysFromEnv(env);
   const until = new Date(`${darwinDateKey(now)}T07:30:00+09:30`);
   if (lastCovered) {
     const covered = new Date(`${darwinDateKey(lastCovered)}T07:30:00+09:30`);
     const earliest = new Date(until.getTime() - MAX_WINDOW_DAYS * DAY_MS);
-    return { since: covered >= until ? until : covered < earliest ? earliest : covered, until };
+    if (covered < earliest) return { gapSince: covered, since: earliest, until };
+    return { gapSince: null, since: covered >= until ? until : covered, until };
   }
   for (let back = 1; back <= 14; back += 1) {
     const key = darwinDateKey(new Date(until.getTime() - back * DAY_MS));
-    if (isBusinessDay(key, holidays)) return { since: new Date(`${key}T07:30:00+09:30`), until };
+    if (isBusinessDay(key, holidays)) return { gapSince: null, since: new Date(`${key}T07:30:00+09:30`), until };
   }
-  return { since: new Date(until.getTime() - DAY_MS), until };
+  return { gapSince: null, since: new Date(until.getTime() - DAY_MS), until };
 }
 
 export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
@@ -104,8 +109,8 @@ export async function runMyobDaily(
     return report;
   }
 
-  const { since, until } = dailyWindow(options.now ?? new Date(), env, await deps.lastCovered(connection, options.dryRun));
-  const facts = await deps.load(connection, since, until);
+  const { gapSince, since, until } = dailyWindow(options.now ?? new Date(), env, await deps.lastCovered(connection, options.dryRun));
+  const facts: DailyFacts = { ...(await deps.load(connection, since, until)), gapSince, since, until };
   if (facts.calls.length >= MAX_CALL_ROWS) options.log(`myob daily: ${MAX_CALL_ROWS} MYOB calls or more in the window; the email shows the first ${MAX_CALL_ROWS}`);
   const baseUrl = appBaseUrl(env);
   const probe = buildMyobDailyEmail(facts, { baseUrl, firstName: "there", overriddenFrom: null });

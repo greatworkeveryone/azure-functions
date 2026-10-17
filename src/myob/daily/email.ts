@@ -18,6 +18,7 @@ import { myobApiBase } from "../../myob-endpoints";
 import { darwinDisplayDate, darwinStamp } from "../darwinClock";
 import { callScope } from "./callScope";
 import { controlLine } from "./controlLines";
+import { redactUnregisteredFiles } from "./redact";
 import type { DailyFacts, MyobCall, ProposalEvent } from "./types";
 
 export interface DailyEmailOptions {
@@ -28,6 +29,8 @@ export interface DailyEmailOptions {
   firstName: string;
   /** Most call lines shown; the rest are "and N more". */
   maxCallLines?: number;
+  /** The configured company file (MYOB_COMPANY_FILE_ID): never printed in error text unless registered. */
+  configuredFile?: string | null;
   /** The real address when DEV_EMAIL_OVERRIDE redirected this email. */
   overriddenFrom: string | null;
 }
@@ -94,12 +97,16 @@ export function buildMyobDailyEmail(facts: DailyFacts, options: DailyEmailOption
   const registered = new Set(facts.files.map((file) => file.id.toLowerCase()));
   const names = new Map(facts.files.map((file) => [file.id.toLowerCase(), file.name ?? file.id]));
   const apiBase = options.apiBase ?? myobApiBase();
-  const events = facts.events.filter((event) => registered.has(event.companyFileId.toLowerCase()));
-  const controls = facts.controls.filter((event) => registered.has(event.companyFileId.toLowerCase()));
-  const calls = facts.calls.filter((call) => {
-    const scope = callScope(call.method, call.path, apiBase);
-    return scope.kind === "account" || (scope.kind === "file" && registered.has(scope.file));
-  });
+  const known = [options.configuredFile === undefined ? (process.env.MYOB_COMPANY_FILE_ID ?? "") : (options.configuredFile ?? "")].map((id) => id.trim()).filter(Boolean);
+  const redact = (text: string | null) => (text ? redactUnregisteredFiles(text, registered, known) : text);
+  const events = facts.events.filter((event) => registered.has(event.companyFileId.toLowerCase())).map((event) => ({ ...event, reason: redact(event.reason) }));
+  const controls = facts.controls.filter((event) => registered.has(event.companyFileId.toLowerCase())).map((event) => ({ ...event, reason: redact(event.reason) }));
+  const calls = facts.calls
+    .filter((call) => {
+      const scope = callScope(call.method, call.path, apiBase);
+      return scope.kind === "account" || (scope.kind === "file" && registered.has(scope.file));
+    })
+    .map((call) => ({ ...call, errorMessage: redact(call.errorMessage) }));
   if (events.length === 0 && controls.length === 0 && calls.length === 0) return null;
 
   const created = events.filter((event) => event.action === "myob.push" && event.operation.endsWith(".create"));
@@ -121,6 +128,12 @@ export function buildMyobDailyEmail(facts: DailyFacts, options: DailyEmailOption
     `What Floorplan did in MYOB from ${darwinStamp(facts.since)} to ${darwinStamp(facts.until)} (Darwin time): ${summary}.`,
     `Company files: ${files}.`,
   ];
+  if (facts.gapSince) {
+    lines.push(
+      "",
+      `This email could not be sent since ${darwinStamp(facts.gapSince)}. This one covers the last ${Math.round((facts.until.getTime() - facts.since.getTime()) / 86_400_000)} days; earlier activity is in the MYOB log: ${link(options.baseUrl, "/admin/myob")}`,
+    );
+  }
   const section = (title: string, body: string[]) => body.length > 0 && lines.push("", title, ...body);
   section(`Records created in MYOB (${created.length})`, createdLines(created, options.baseUrl));
   section(
