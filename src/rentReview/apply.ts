@@ -4,7 +4,8 @@
 //
 //   1. lock the tenant row (UPDLOCK); C4: its ScheduleVersion is the one the
 //      calc was worked on, else 409 stale_schedule; C3: the schedule is signed
-//      off, else 422 not_signed_off
+//      off, else 422 not_signed_off, unless a director overrode C3 with a reason
+//      (at SUBMIT, carried in the calc, or now; rentReview/directorOverride.ts)
 //   2. write the step through the schedule engine (cpiValue, the same-base
 //      cpiValuePrev, ratePercent, resolution applied, reviewId; or the exact
 //      rate an override needs, rentReview/stepPlan.ts), closing the row before a
@@ -30,6 +31,7 @@ import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import { diffSteps, parseSteps, type ScheduledRateStep } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { parseBasis } from "./basis";
+import { type DirectorOverride, recordDirectorOverride, signOffFacts, storedOverride } from "./directorOverride";
 import { RentReviewError } from "./http";
 import { stepOnDate } from "./method";
 import {
@@ -50,9 +52,14 @@ export interface ApplyInput {
   actor: Extract<LedgerActor, { kind: "user" }>;
   /** Tenants.UpdatedById and the change log's ChangedById (the caller's Entra oid). */
   actorOid: string;
-  /** "auto_in_bounds" on SUBMIT's one step; "approved" on APPROVE. */
-  approvalBasis: "approved" | "auto_in_bounds";
+  /** "auto_in_bounds" on SUBMIT's one step; "director_override" when a director's
+   *  C5 override made it one step; "approved" on APPROVE. */
+  approvalBasis: "approved" | "auto_in_bounds" | "director_override";
   calc: RentReviewCalc;
+  /** The caller is a director: a refused C3 then says a director may override it. */
+  director?: boolean;
+  /** A director's override made now (APPROVE): C3 is ledgered here with its facts. */
+  directorOverride?: DirectorOverride | null;
   correlationId: string;
   /** The rent being applied: the override, else the computed one. */
   chosenNewAnnual: number;
@@ -100,8 +107,16 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
   if (!tenancy) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
   refuseClosedTenancy(tenancy);
   if (Number(tenancy.ScheduleVersion ?? 0) !== calc.scheduleVersion) throw staleSchedule(input.from === "awaiting_approval");
-  if (!scheduleSignOffFromRow(tenancy)) {
-    throw new RentReviewError("not_signed_off", "This tenancy's schedule isn't signed off yet — sign it off, then apply");
+  // C3, or a director's override of it: made at SUBMIT (it rides in the calc) or now.
+  const signOff = scheduleSignOffFromRow(tenancy);
+  const stored = signOff ? null : storedOverride(calc, "not_signed_off");
+  const overrideNow = !signOff && !stored && input.directorOverride?.checks.has("not_signed_off") === true ? input.directorOverride : null;
+  if (!signOff && !stored && !overrideNow) {
+    throw new RentReviewError(
+      "not_signed_off",
+      "This tenancy's schedule isn't signed off yet — sign it off, then apply",
+      input.director ? { directorCanOverride: true } : {},
+    );
   }
 
   const buildingId = Number(tenancy.BuildingId);
@@ -189,6 +204,21 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
 
   const outcome = { appliedPercent: input.chosenPercent, newAnnual: input.chosenNewAnnual, oldAnnual: calc.currentAnnual };
   const nextReviewDate = next?.after ?? before.nextReviewDate;
+  if (overrideNow) {
+    await recordDirectorOverride(connection, {
+      actor: input.actor,
+      buildingId,
+      check: "not_signed_off",
+      correlationId: input.correlationId,
+      facts: await signOffFacts(connection, tenancy),
+      reason: overrideNow.reason,
+      reviewId,
+      tenantId,
+    });
+  }
+  const signOffRecord = signOff
+    ? { at: signOff.at, by: signOff.by }
+    : { overriddenBy: stored?.by ?? { name: input.actor.name, userId: input.actor.userId }, reason: stored?.reason ?? overrideNow?.reason ?? null };
   await ledger.record(connection, {
     action: "rent_review.apply",
     actor: input.actor,
@@ -197,6 +227,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
       representation: written.representation,
       rentPerAnnumCache: cacheRent ? "written" : "kept: it is the schedule's starting rent",
       scheduleChanges,
+      signOff: signOffRecord,
       step,
       tenancy: {
         lastReviewDate: scheduledFor,

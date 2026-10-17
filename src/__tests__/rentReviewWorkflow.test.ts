@@ -739,3 +739,101 @@ describe("L6: a rent the schedule can't hold is refused at calculate and at subm
     expect(escalations.raiseApprovalEscalation).not.toHaveBeenCalled();
   });
 });
+
+// ── A2: a director overrides a check, with a reason ───────────────────────────
+
+describe("A2: directors override C3 and C5 with a reason, ledgered as rent_review.director_override", () => {
+  const UNSIGNED = { ScheduleSignedOffAt: null, ScheduleSignedOffById: null, ScheduleSignedOffByName: null };
+  const overrides = () => world.ledgerRows().filter((row) => row.Action === "rent_review.director_override");
+
+  it("applies a review although its schedule isn't signed off (C3), recording the sign-off status", async () => {
+    await calculated({ tenant: UNSIGNED });
+    world.state.ledger.push({ Action: "schedule.sign_off_cleared", ActorName: "Bo Manager", LedgerId: 500, OccurredAt: "2026-10-01T02:00:00.000Z", Reason: "Fixed the July row", SubjectId: "7", SubjectType: "tenancy" });
+    as(PEOPLE.dee);
+    const res = await submit({ directorOverride: { checks: ["not_signed_off"], reason: "Lease checked by hand; sign-off after the audit" } });
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ applied: true, review: { state: "approved" } });
+    const [c3] = overrides();
+    expect(c3).toMatchObject({ ActorUserId: 10, IsException: true, Reason: "Lease checked by hand; sign-off after the audit", RuleApplied: "C3_schedule_sign_off" });
+    expect(c3.after).toEqual({ check: "C3", code: "not_signed_off", outcome: "applied although the schedule isn't signed off" });
+    expect(c3.computed).toEqual({
+      lastSignOffEvent: { action: "schedule.sign_off_cleared", at: "2026-10-01T02:00:00.000Z", by: "Bo Manager", reason: "Fixed the July row" },
+      scheduleSignedOff: false,
+      scheduleVersion: 4,
+    });
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.apply")?.after).toMatchObject({
+      signOff: { overriddenBy: { name: "Dee Director", userId: 10 }, reason: "Lease checked by hand; sign-off after the audit" },
+    });
+  });
+
+  it("applies an out-of-band result in one step on a director's C5 override, approval basis director_override", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } });
+    as(PEOPLE.dee);
+    const res = await submit({ directorOverride: { checks: ["out_of_band"], reason: "The fit-out deal: 20% was agreed in the heads of agreement" } });
+    expect(res.jsonBody).toMatchObject({ applied: true, review: { approval: { basis: "director_override" }, state: "approved" } });
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.submit")?.RuleApplied).toBe("director_override");
+    const [c5] = overrides();
+    expect(c5).toMatchObject({ IsException: true, RuleApplied: "C5_sanity_band" });
+    expect(c5.computed).toEqual({ appliedPercent: 20, band: { maxPercent: 15, minPercent: -5 } });
+    expect(escalations.raiseApprovalEscalation).not.toHaveBeenCalled();
+  });
+
+  it("refuses an override from anyone but a director, ledgered as denied", async () => {
+    await calculated({ tenant: UNSIGNED });
+    as(PEOPLE.cy);
+    const res = await submit({ directorOverride: { checks: ["not_signed_off"], reason: "Please" } });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toMatchObject({ code: "forbidden" });
+    expect(world.ledgerRows()).toEqual([expect.objectContaining({ Action: "denied", ActorUserId: 9, RuleApplied: "director_override_not_director" })]);
+    expect(world.review("rev-1").State).toBe("in_progress");
+  });
+
+  it("tells a director, and only a director, that C3 can be overridden", async () => {
+    await calculated({ tenant: UNSIGNED });
+    expect((await submit()).jsonBody).toEqual({ code: "not_signed_off", error: "This tenancy's schedule isn't signed off yet — sign it off, then apply" });
+    as(PEOPLE.dee);
+    expect((await submit()).jsonBody).toMatchObject({ code: "not_signed_off", directorCanOverride: true });
+  });
+
+  it("needs a reason and known checks", async () => {
+    await calculated({ tenant: UNSIGNED });
+    as(PEOPLE.dee);
+    expect((await submit({ directorOverride: { checks: ["not_signed_off"] } })).jsonBody).toMatchObject({ code: "reason_required" });
+    expect((await submit({ directorOverride: { checks: ["ratchet"], reason: "x" } })).jsonBody).toMatchObject({ code: "bad_request" });
+  });
+
+  it("carries a C3 override made at submit through to APPROVE, so the approver needn't be a director", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { ...UNSIGNED, CpiCapPercent: null } });
+    as(PEOPLE.dee);
+    expect((await submit({ directorOverride: { checks: ["not_signed_off"], reason: "Sign-off after the audit" } })).jsonBody).toMatchObject({ applied: false });
+    as(PEOPLE.cy);
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(overrides()).toHaveLength(1);
+  });
+
+  it("lets an approving director override C3 at APPROVE when the schedule lost its sign-off after submit", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } });
+    as(PEOPLE.bo);
+    await submit();
+    Object.assign(world.tenant(7), UNSIGNED);
+    as(PEOPLE.cy);
+    expect((await approve()).jsonBody).toMatchObject({ code: "not_signed_off" });
+    expect((await approve({ directorOverride: { checks: ["not_signed_off"], reason: "x" } })).jsonBody).toMatchObject({ code: "forbidden" });
+    as(PEOPLE.dee);
+    const res = await approve({ directorOverride: { checks: ["not_signed_off"], reason: "Verified against the lease today" } });
+    expect(res.status).toBe(200);
+    expect(overrides()).toEqual([expect.objectContaining({ ActorUserId: 10, RuleApplied: "C3_schedule_sign_off" })]);
+    const decided = actions().lastIndexOf("rent_review.approve");
+    expect(actions().slice(decided, decided + 3)).toEqual(["rent_review.approve", "rent_review.director_override", "rent_review.apply"]);
+  });
+
+  it("keeps refusing a decrease on the lease's own ratchet, director or not (C9, WP26c)", async () => {
+    await calculated();
+    as(PEOPLE.dee);
+    const res = await submit({ directorOverride: { checks: ["out_of_band"], reason: "Hardship" }, override: { newAnnual: 120000, reason: "Hardship" } });
+    expect(res.jsonBody).toMatchObject({ code: "ratchet" });
+    expect((res.jsonBody as { error: string }).error).toMatch(/a director can't override the lease's ratchet here yet/);
+  });
+});
+

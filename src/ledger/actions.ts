@@ -117,13 +117,16 @@ export const LEDGER_ACTIONS = {
   // is the exception and carries the reason (PLAN §3.12 names the code). A submit
   // whose basis departs from the lease writes rent_review.basis_departure, the
   // lease's own result beside the rent submitted (the basis edits behind it
-  // carried their reasons). Waive, cancel and revert are exceptions with a
-  // reason; return needs its note.
+  // carried their reasons). A director overriding a check (C3 sign-off, C5 the
+  // sanity band; Connor, 17 Oct) writes rent_review.director_override, an
+  // exception with the reason, naming the check and its facts. Waive, cancel
+  // and revert are exceptions with a reason; return needs its note.
   "rent_review.apply": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.approve": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.basis_departure": { exception: true, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.calculate": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.cancel": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.director_override": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
   "rent_review.index_available": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.index_pending": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.override": { exception: true, reasonRequired: true, subjects: ["rent_review"] },

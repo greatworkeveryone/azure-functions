@@ -1,6 +1,6 @@
 // POST /api/approveRentReview   (PLAN §3.1 APPROVE, C6, C7, WP26)
 //
-//   { reviewId, rowVersion }
+//   { reviewId, rowVersion, directorOverride?: { checks: ["not_signed_off"], reason } }
 //   200 { review, nextReview }
 //
 // A second person approves a review waiting for approval, and it is applied
@@ -21,7 +21,11 @@
 //               then cfo, then director; higher levels may approve lower), else
 //               403 approval_level, ledgered as denied
 //   C4, C3      as APPLY: 409 stale_schedule ("return it so it can be calculated
-//               again"), 422 not_signed_off
+//               again"), 422 not_signed_off (with directorCanOverride for a
+//               director). A director may override C3 with
+//               directorOverride: { checks: ["not_signed_off"], reason }, ledgered as
+//               rent_review.director_override with the sign-off facts; a C3
+//               override made at submit already rides in the calc
 // Ledgered as rent_review.approve and rent_review.apply in the same transaction.
 // After the commit: caches, E2/E3 end as approved (the preparer is told), the next
 // review is scheduled, and the rent_review Planner tasks complete while Planner is on.
@@ -42,6 +46,7 @@ import { chosenFigures, parseCalc } from "../rentReviewCalc";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision } from "../rentReview/afterDecision";
 import { applyReview } from "../rentReview/apply";
+import { readDirectorOverride } from "../rentReview/directorOverride";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
 import { basisEditorsSinceCommence, dutiesOf, requiredApprovalRole } from "../rentReview/escalations";
@@ -83,6 +88,7 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
     const body = await readJsonObject(request);
     const reviewId = readReviewId(body.reviewId);
     const rowVersion = readRowVersion(body.rowVersion);
+    const directorOverride = readDirectorOverride(body.directorOverride, ["not_signed_off"]);
 
     connection = await createRequestConnection(token);
     const caller = await resolveCaller(request, connection);
@@ -134,6 +140,10 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
         const part: SodPart | null =
           duties.preparedBy === userId ? "prepared" : duties.keyedBy === userId ? "keyed" : duties.basisEditors.includes(userId) ? "basis" : null;
         const director = caller.roles.includes(AppRole.DIRECTOR);
+        if (directorOverride && !director) {
+          const message = "Only a director can override a rent review's checks";
+          throw new RentReviewError("forbidden", message, {}, refusal("denied", "director_override_not_director", message));
+        }
         if (part && !director) {
           const { message, rule } = SOD_WORDS[part];
           throw new RentReviewError("sod_blocked", message, {}, refusal("sod_blocked", rule, message));
@@ -165,6 +175,8 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
           approvalBasis: "approved",
           calc,
           chosenNewAnnual: chosen,
+          director,
+          directorOverride,
           chosenPercent,
           correlationId,
           from: "awaiting_approval",

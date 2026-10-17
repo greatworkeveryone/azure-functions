@@ -182,6 +182,12 @@ export class ReviewWorld {
         .map((r) => Number(r.ActorUserId));
       return [...new Set(ids)].map((id) => ({ ActorUserId: id }));
     }
+    if (/^SELECT TOP 1 Action, OccurredAt, ActorName, Reason\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
+      const found = this.state.ledger
+        .filter((r) => r.SubjectType === "tenancy" && r.SubjectId === p.TenantId && String(r.Action).startsWith("schedule.sign_off"))
+        .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+      return found ? [{ Action: found.Action, ActorName: found.ActorName, OccurredAt: new Date(String(found.OccurredAt)), Reason: found.Reason ?? null }] : [];
+    }
     if (/INSERT INTO dbo\.RentScheduleChangeLog/.test(sql)) {
       this.state.changeLog.push({ ...p });
       return [];

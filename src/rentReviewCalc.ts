@@ -106,6 +106,8 @@ export interface RentReviewCalc {
   /** The basis terms this review was worked on that differ from the lease's
    *  (leaseDepartures): any makes it a departure, written as an `other` row. */
   departures?: string[];
+  /** Checks a director overrode at SUBMIT that APPLY honours later (C3 sign-off). */
+  directorOverrides?: StoredOverride[];
   /** Set by submit when the basis departs from the lease: the result on the
    *  lease's own terms, to set beside the rent submitted (M3). */
   leaseTerms?: LeaseTermsResult;
@@ -121,6 +123,14 @@ export interface RentReviewCalc {
 }
 
 export type { CascadeRow };
+
+/** A check a director overrode, as the calc carries it to APPLY (rentReview/directorOverride.ts). */
+export interface StoredOverride {
+  at: string;
+  by: { name: string; userId: number | null };
+  check: "not_signed_off" | "out_of_band";
+  reason: string;
+}
 
 /** A review worked on the lease's own terms instead of its basis: the rent and
  *  the charges that follow it, or why it can't be worked out. */

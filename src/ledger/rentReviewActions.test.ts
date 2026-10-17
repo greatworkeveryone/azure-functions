@@ -12,6 +12,7 @@ const WP26_CODES = [
   "rent_review.basis_departure",
   "rent_review.calculate",
   "rent_review.cancel",
+  "rent_review.director_override",
   "rent_review.index_available",
   "rent_review.index_pending",
   "rent_review.override",
@@ -63,6 +64,12 @@ describe("the rent review action codes", () => {
   it("WP26: a basis departure is an exception without a reason of its own (the basis edits carried theirs)", () => {
     expect(LEDGER_ACTIONS["rent_review.basis_departure"]).toMatchObject({ exception: true, reasonRequired: false });
     expect(() => assertLedgerEntry(entry("rent_review.basis_departure"))).not.toThrow();
+  });
+
+  it("WP26: a director's override of a check is an exception that needs its reason", () => {
+    expect(LEDGER_ACTIONS["rent_review.director_override"]).toMatchObject({ exception: true, reasonRequired: true });
+    expect(() => assertLedgerEntry(entry("rent_review.director_override"))).toThrow(/reason is required/);
+    expect(() => assertLedgerEntry(entry("rent_review.director_override", { reason: "Lease checked by hand" }))).not.toThrow();
   });
 
   it("WP26: takes the CPI timer's system actor for index_available", () => {
