@@ -20,8 +20,14 @@ const MIGRATIONS = [
   "129_email_intake_watermark.sql",
   "133_email_archive_columns.sql",
   "134_invoice_attachments.sql",
+  "135_attachment_archive.sql",
+  "136_building_category_owner.sql",
+  "139_keys_rowversion.sql",
+  "137_job_decision_requests.sql",
   "125_myob_reference_cache.sql",
   "126_myob_proposals.sql",
+  "119_defects_periods.sql",
+  "120_service_schedules.sql",
 ];
 
 // Destructive-looking phrases that change no data themselves: the trigger that
@@ -65,10 +71,13 @@ describe.each(MIGRATIONS)("migration %s", (file) => {
     }
   });
 
-  it("adds columns only as NULLable or with a default", () => {
+  it("adds columns only as NULLable, with a default, or as a ROWVERSION", () => {
     const code = stripComments(raw);
     const adds = code.match(/ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+(?!CONSTRAINT\b)[^;]+;/gi) ?? [];
     for (const add of adds) {
+      // The server stamps a ROWVERSION on every row itself (096, 101, 139), so a statement that
+      // adds nothing but one needs neither NULL nor a default and cannot fail on existing rows.
+      if (/^ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+\w+\s+ROWVERSION\s*;$/i.test(add)) continue;
       expect(add).toMatch(/(?<!NOT\s)NULL\b|\bDEFAULT\b/i);
     }
   });
@@ -166,6 +175,16 @@ describe("migrations 123 and 129 match the code that uses them", () => {
 
   it("123 refuses, rather than skips, a unique index it can't build", () => {
     expect(stripComments(read("123_graph_subscriptions.sql"))).toMatch(/HAVING COUNT\(\*\) > 1\)\s*BEGIN\s*;THROW 51123/);
+  });
+});
+
+describe("migration 135 matches the code that uses it", () => {
+  it("adds Attachments.ArchivedAt and ArchivedBy, nullable, which archiveTenancyDocument stamps", () => {
+    const code = stripComments(read("135_attachment_archive.sql"));
+    expect(code).toMatch(/ALTER TABLE dbo\.Attachments ADD ArchivedAt DATETIME2 NULL;/);
+    expect(code).toMatch(/ALTER TABLE dbo\.Attachments ADD ArchivedBy NVARCHAR\(255\) NULL;/);
+    const source = readFileSync(join(__dirname, "..", "functions", "archiveTenancyDocument.ts"), "utf8");
+    expect(source).toMatch(/UPDATE dbo\.Attachments SET ArchivedAt = SYSUTCDATETIME\(\), ArchivedBy = @By/);
   });
 });
 

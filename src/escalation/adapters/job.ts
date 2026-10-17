@@ -5,6 +5,7 @@
 import { TYPES } from "tedious";
 import { executeQuery } from "../../db";
 import { holidaysFromEnv } from "../businessTime";
+import { DECISION_PENDING_POLICY } from "../decisionRows";
 import { normaliseRole, ROLES } from "../roles";
 import { jobConditionActive } from "./jobRules";
 import { loadJobFacts } from "./jobFacts";
@@ -70,6 +71,8 @@ export const jobAdapter: EscalationAdapter = {
   // The dashboard flag follows the escalations: set while any escalation on the
   // job is still waiting for someone to pick it up, clear once none is. Runs in
   // the engine's transaction, so the flag and the escalation change together.
+  // A decision request that has only just been asked is not an escalation yet, so
+  // it does not flag the job; once it has been moved up (it has a parent) it does.
   async onChange(connection, escalation) {
     const jobId = Number(escalation.subjectId);
     if (!Number.isInteger(jobId)) return;
@@ -78,7 +81,8 @@ export const jobAdapter: EscalationAdapter = {
       `UPDATE dbo.Jobs
        SET EscalatedAt = CASE
              WHEN EXISTS (SELECT 1 FROM dbo.Escalations e
-                          WHERE e.SubjectType = 'job' AND e.SubjectId = @SubjectId AND e.Status = 'open')
+                          WHERE e.SubjectType = 'job' AND e.SubjectId = @SubjectId AND e.Status = 'open'
+                            AND (e.PolicyKey <> @DecisionPolicy OR e.ParentEscalationId IS NOT NULL))
              THEN COALESCE(EscalatedAt, SYSUTCDATETIME())
              ELSE NULL
            END
@@ -86,6 +90,7 @@ export const jobAdapter: EscalationAdapter = {
       [
         { name: "JobID", type: TYPES.Int, value: jobId },
         { name: "SubjectId", type: TYPES.NVarChar, value: String(jobId) },
+        { name: "DecisionPolicy", type: TYPES.NVarChar, value: DECISION_PENDING_POLICY },
       ],
     );
   },

@@ -39,6 +39,7 @@ const post = (value: unknown): HttpRequest => ({ json: async () => value }) as u
 const FRONTEND_FEATURE_KEYS = [
   "activity",
   "assets",
+  "decisionJobs",
   "escalations",
   "finance",
   "incoming",
@@ -81,6 +82,14 @@ describe("upsertFeatureFlag: feature keys", () => {
       const response = await upsertFeatureFlag(post({ featureKey: "assets", roleName, visibility: "preview" }), context);
       expect(response.status).toBe(200);
     }
+  });
+
+  it("lets Admin / Accounts decision jobs be staged per role: preview for directors first, hidden for the rest", async () => {
+    for (const [roleName, visibility] of [["director", "preview"], ["admin", "preview"], ["facilities", "hidden"], ["accounts", "hidden"]]) {
+      const response = await upsertFeatureFlag(post({ featureKey: "decisionJobs", roleName, visibility }), context);
+      expect(response.status).toBe(200);
+    }
+    expect(db.executeQuery).toHaveBeenCalledTimes(4);
   });
 
   it("still rejects a key the frontend does not know", async () => {

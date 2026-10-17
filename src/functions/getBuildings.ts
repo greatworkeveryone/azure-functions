@@ -33,14 +33,14 @@ const BUILDING_COLUMNS = `
   ThirdPartySystem_BuildingID, RegionID, Region, NLA, InvoicingAddress,
   ContactPhoneNumber, Levels, Active, LastModifiedDate,
   WRsLastSyncedAt, LastSyncedAt, CreatedAt, UpdatedAt,
-  HeroImageUrl
+  HeroImageUrl, Category, OwnerName
 `;
 
 export function clearBuildingsCache(): void {
   buildingsCache = null;
 }
 
-async function getBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function getBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 

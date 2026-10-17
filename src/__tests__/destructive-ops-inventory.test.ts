@@ -47,6 +47,7 @@ const REVIEWED_TIMERS: Record<string, string> = {
   escalationSweepTimer: "escalationSweep — writes only its own Escalations rows, and only when ESCALATION_SWEEP_ENABLED is \"true\"",
   ledgerVerifyTimer: "ledgerVerifyTimer.ts — read-only digest verification of the ledger tables",
   accessReportTimer: "accessReportTimer.ts — reads AccessEvents and AppUsers, sends mail, writes nothing; off unless ACCESS_REPORT_ENABLED is \"true\"",
+  schedulerTimer: "schedulerTimer.ts — reads ServiceSchedules and DefectsPeriods; creates jobs, asset links and run rows selected positively by schedule id, idempotent on (ScheduleId, DueDate); off unless SCHEDULER_ENABLED is \"true\", SCHEDULER_DRY_RUN writes nothing (sprint F2)",
   digestTimer: "digestTimer.ts — reads only, sends mail; off unless DIGEST_ENABLED or DIGEST_DRY_RUN is \"true\"",
 };
 

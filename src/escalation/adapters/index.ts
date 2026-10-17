@@ -3,16 +3,20 @@
 // system health escalatable; other packages register their own from their own
 // modules with registerAdapter.
 
+import { defectsPeriodAdapter } from "./defectsPeriod";
 import { jobAdapter } from "./job";
 import { registerAdapter } from "./registry";
 import { rentReviewAdapter } from "./rentReview";
 import { scheduleChangeAdapter } from "./scheduleChange";
+import { serviceScheduleAdapter } from "./serviceSchedule";
 import { systemAdapter } from "./system";
 import { tenancyAdapter } from "./tenancy";
 
+registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);
 registerAdapter(rentReviewAdapter);
 registerAdapter(scheduleChangeAdapter);
+registerAdapter(serviceScheduleAdapter);
 registerAdapter(systemAdapter);
 registerAdapter(tenancyAdapter);
 

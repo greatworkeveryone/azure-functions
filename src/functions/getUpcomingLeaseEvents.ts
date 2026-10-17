@@ -6,6 +6,7 @@
 //   200 { asOf, days, events: LeaseEvent[], pendingChanges: { count, items } }
 //   LeaseEvent  { kind: "review" | "expiry" | "option_deadline",
 //                 tenantId, buildingId, tenantName, date, overdue,
+//                 scheduleSignedOff (whether the tenancy's schedule is signed off, D7),
 //                 review rows also: state, reviewId, method, ownerUserId, ownerName }
 //
 //   review           every open review dated inside the window or already past
@@ -48,12 +49,12 @@ const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).joi
 
 // Names and dates only: this list is the whole of what the feed reads about a tenancy.
 const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Expiry,
-    t.OptionPeriods, t.OptionNoticeMonths
+    t.OptionPeriods, t.OptionNoticeMonths, t.ScheduleSignedOffAt
   FROM dbo.Tenants t
   WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.Expiry IS NOT NULL`;
 
 const REVIEWS_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method, r.OwnerUserId,
-    t.BuildingId, t.LegalName, t.TradingName, u.DisplayName AS OwnerName
+    t.BuildingId, t.LegalName, t.TradingName, t.ScheduleSignedOffAt, u.DisplayName AS OwnerName
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
@@ -115,6 +116,7 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       expiry: sqlDateToIso(row.Expiry),
       optionNoticeMonths: row.OptionNoticeMonths === null || row.OptionNoticeMonths === undefined ? null : Number(row.OptionNoticeMonths),
       optionPeriods: typeof row.OptionPeriods === "string" ? row.OptionPeriods : null,
+      scheduleSignedOff: Boolean(row.ScheduleSignedOffAt),
       tenantId: Number(row.TenantId),
       tenantName: tenantDisplayName(row),
     }));
@@ -124,6 +126,7 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       ownerName: typeof row.OwnerName === "string" ? row.OwnerName : null,
       ownerUserId: row.OwnerUserId === null || row.OwnerUserId === undefined ? null : Number(row.OwnerUserId),
       reviewId: String(row.ReviewId),
+      scheduleSignedOff: Boolean(row.ScheduleSignedOffAt),
       scheduledFor: sqlDateToIso(row.ScheduledFor) ?? "",
       state: row.State as RentReviewState,
       tenantId: Number(row.TenantId),

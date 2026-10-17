@@ -13,6 +13,7 @@ jest.mock("../auth", () => {
     errorResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Error" }, status: 500 }),
     extractToken: jest.fn().mockReturnValue("mock-token"),
     requireRole: jest.fn().mockResolvedValue(null),
+    rolesForRequest: jest.fn().mockResolvedValue(["accounts_manager"]),
     unauthorizedResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Unauthorized" }, status: 401 }),
     verifiedIdentityFromRequest: jest.fn().mockResolvedValue({ email: "m@rp.com", name: "Mia Manager", oid: "oid-mia" }),
   };
@@ -33,7 +34,7 @@ jest.mock("../ledger/actor", () => ({
 jest.mock("../tenant-register-cache", () => ({ invalidateTenantAndBuilding: jest.fn() }));
 
 import { AppRole } from "../auth";
-import { SIGN_OFF_ROLES } from "../scheduleSignOff";
+import { requireSignOffRole, SIGN_OFF_ROLES } from "../scheduleSignOff";
 import "../functions/signOffTenancySchedule";
 import "../functions/revokeTenancyScheduleSignOff";
 
@@ -44,7 +45,12 @@ const handlers = new Map<string, Handler>(
 const signOff = (body: unknown) => handlers.get("signOffTenancySchedule")!(jsonRequest(body), context);
 const revoke = (body: unknown) => handlers.get("revokeTenancyScheduleSignOff")!(jsonRequest(body), context);
 
-const auth = require("../auth") as { extractToken: jest.Mock; requireRole: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
+const auth = require("../auth") as {
+  extractToken: jest.Mock;
+  requireRole: jest.Mock;
+  rolesForRequest: jest.Mock;
+  verifiedIdentityFromRequest: jest.Mock;
+};
 const db = require("../db") as {
   beginTransaction: jest.Mock;
   commitTransaction: jest.Mock;
@@ -93,6 +99,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   auth.extractToken.mockReturnValue("mock-token");
   auth.requireRole.mockResolvedValue(null);
+  auth.rolesForRequest.mockResolvedValue(["accounts_manager"]);
   auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "m@rp.com", name: "Mia Manager", oid: "oid-mia" });
   ledger.record.mockResolvedValue(undefined);
   db.executeQuery.mockResolvedValue([]);
@@ -115,20 +122,36 @@ describe("who may sign a schedule off", () => {
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
-  it("the real role check admits those three, admin who passes every gate, and nobody else", async () => {
+  it("refuses a caller whose only role is admin: signing off is an accountable statement, not a technical power", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    expect((await signOff({ TenantId: 1 })).status).toBe(403);
+    expect((await revoke({ Reason: "x", TenantId: 1 })).status).toBe(403);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it.each(["director", "cfo", "accounts_manager"])("admits an admin who is also %s", async (role) => {
+    auth.rolesForRequest.mockResolvedValue(["admin", role]);
+    answer(UNSIGNED);
+    expect((await signOff({ TenantId: 1 })).status).toBe(200);
+  });
+
+  it("the real role check admits those three and nobody else, admin included", async () => {
     const names = ["DEV_ROLE_OVERRIDE_ENABLED", "AZURE_FUNCTIONS_ENVIRONMENT", "WEBSITE_INSTANCE_ID"] as const;
     const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
     process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
     delete process.env.WEBSITE_INSTANCE_ID;
     jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    auth.requireRole.mockImplementation(realAuth.requireRole);
+    auth.rolesForRequest.mockImplementation(realAuth.rolesForRequest);
     try {
       const result: string[] = [];
       for (const role of ["admin", "director", "cfo", "accounts_manager", "accounts", "facilities_manager", "facilities", "user"]) {
+        realAuth.clearRoleCache();
         const request = { headers: { get: (key: string) => (key.toLowerCase() === "x-dev-roles" ? role : null) } } as unknown as HttpRequest;
-        if ((await realAuth.requireRole(request, SIGN_OFF_ROLES)) === null) result.push(role);
+        if ((await requireSignOffRole(request)) === null) result.push(role);
       }
-      expect(result).toEqual(["admin", "director", "cfo", "accounts_manager"]);
+      expect(result).toEqual(["director", "cfo", "accounts_manager"]);
     } finally {
       jest.restoreAllMocks();
       for (const name of names) {
@@ -185,6 +208,30 @@ describe("signOffTenancySchedule", () => {
     const res = await signOff({ TenantId: 1 });
     expect(res.status).toBe(409);
     expect(sqlRun(/UPDATE dbo\.Tenants/)).toHaveLength(0);
+  });
+
+  it("will not sign off an archived tenancy: it is out of the register, so restore it first (409, nothing written)", async () => {
+    answer({ ...UNSIGNED, ArchivedAt: new Date("2026-10-14T00:00:00Z") });
+    const res = await signOff({ TenantId: 1 });
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toMatchObject({ code: "TENANCY_ARCHIVED" });
+    expect((res.jsonBody as { error: string }).error).toMatch(/archived/i);
+    expect(sqlRun(/UPDATE dbo\.Tenants/)).toHaveLength(0);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("locks the row with its ArchivedAt, so the refusal is decided under the lock", async () => {
+    answer(UNSIGNED);
+    await signOff({ TenantId: 1 });
+    expect(sqlRun(/WITH \(UPDLOCK/)[0][1]).toContain("ArchivedAt");
+  });
+
+  it("an unarchived tenancy that was signed off before it was archived is still signed off, not asked again", async () => {
+    answer({ ...SIGNED, ArchivedAt: null });
+    const res = await signOff({ TenantId: 1 });
+    expect(res.jsonBody).toMatchObject({ code: "ALREADY_SIGNED_OFF" });
   });
 
   it("will not sign off what is already signed off, and says by whom", async () => {
@@ -251,6 +298,15 @@ describe("revokeTenancyScheduleSignOff", () => {
     expect(res.status).toBe(400);
     expect((res.jsonBody as { error: string }).error).toMatch(/reason/i);
     expect(sqlRun(/UPDATE dbo\.Tenants/)).toHaveLength(0);
+  });
+
+  it("will not take the sign-off back from an archived tenancy either: restore it first", async () => {
+    answer({ ...SIGNED, ArchivedAt: new Date("2026-10-14T00:00:00Z") });
+    const res = await revoke({ Reason: "x", TenantId: 1 });
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toMatchObject({ code: "TENANCY_ARCHIVED" });
+    expect(sqlRun(/UPDATE dbo\.Tenants/)).toHaveLength(0);
+    expect(ledger.record).not.toHaveBeenCalled();
   });
 
   it("says so when there is nothing to revoke", async () => {

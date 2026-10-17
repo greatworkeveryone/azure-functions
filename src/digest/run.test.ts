@@ -29,8 +29,8 @@ const authority: AuthorityFacts = {
 const person = (userId: number, over: Partial<DigestUser> = {}): DigestUser => ({
   email: `user${userId}@example.test`, name: `Person ${userId}`, optedOut: false, role: "facilities", userId, ...over,
 });
-const due = (assignedToUserId: number, jobId = assignedToUserId * 100): DueJob => ({
-  assignedToUserId, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-13T14:30:00Z"), jobId, title: "Paint stairwell",
+const due = (assignedToUserId: number, jobId = assignedToUserId * 100, kind = "facilities"): DueJob => ({
+  assignedToUserId, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-13T14:30:00Z"), jobId, kind, title: "Paint stairwell",
 });
 const facts = (over: Partial<DigestFacts> = {}): DigestFacts => ({ dueJobs: [], escalations: [], overdueKeys: [], users: [], waitingApprovals: [], ...over });
 
@@ -46,6 +46,15 @@ describe("when nothing needs anyone", () => {
     const report = await runDigest(conn, options(), d);
     expect(d.send).not.toHaveBeenCalled();
     expect(report).toMatchObject({ errors: [], nothingToSend: 2, sent: 0 });
+  });
+});
+
+describe("when only Admin / Accounts work is waiting", () => {
+  it("sends no email: those jobs are not on the digest's contractor lines", async () => {
+    const d = deps(facts({ dueJobs: [due(1, 100, "admin")], users: [person(1)] }));
+    const report = await runDigest(conn, options(), d);
+    expect(d.send).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ errors: [], nothingToSend: 1, sent: 0 });
   });
 });
 

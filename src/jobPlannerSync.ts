@@ -18,7 +18,8 @@
 
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
-import { closeConnection, createServiceConnection, executeQuery } from "./db";
+import { closeConnection, createServiceConnection, executeQuery, type SqlRow } from "./db";
+import { runsContractorFlow } from "./jobKinds";
 import {
   getPlanConfig,
   graphCompletePlannerTask,
@@ -44,6 +45,10 @@ import {
 } from "./plannerHelpers";
 
 type LogFn = (msg: string) => void;
+
+/** Planner follows the contractor and money flow. An Admin / Accounts job has
+ *  neither (plan D2), so no job sync creates, updates or completes a task for one. */
+const followsPlanner = (job: SqlRow): boolean => runsContractorFlow(job.Kind);
 
 /** Persist a failed Graph attempt onto an existing PlannerTasks row so the
  *  job-detail UI surfaces it via the `lastError` field. Failure to write
@@ -254,7 +259,7 @@ export async function syncJobOnchargePending(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
             j.IsOnchargeable, j.OnchargeAmount, j.OnchargeNotes,
             COALESCE(b.BuildingName, '') AS BuildingName,
             (SELECT TOP 1 1 FROM dbo.JobInvoices ji
@@ -266,6 +271,7 @@ export async function syncJobOnchargePending(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerOnchargeJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -305,7 +311,7 @@ export async function syncJobAwaitingAccounts(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -316,6 +322,7 @@ export async function syncJobAwaitingAccounts(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -356,7 +363,7 @@ export async function syncJobAwaitingFacilitiesApproval(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -367,6 +374,7 @@ export async function syncJobAwaitingFacilitiesApproval(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,
@@ -406,7 +414,7 @@ export async function syncJobStalled(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.IsStalled, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
             au.EntraOid AS AssignedToEntraOid
@@ -418,6 +426,7 @@ export async function syncJobStalled(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const awaitingRole = r.AwaitingRole as string | null;
   const job: PlannerStalledJobRow = {
     jobId: r.JobID as number,
@@ -465,7 +474,7 @@ export async function syncJobDirectorApproval(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status,
+    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid,
             (SELECT COUNT(*) FROM dbo.JobInvoices ji
@@ -481,6 +490,7 @@ export async function syncJobDirectorApproval(
   );
   if (rows.length === 0) return;
   const r = rows[0];
+  if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
     title: r.Title as string,

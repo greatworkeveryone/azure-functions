@@ -20,6 +20,7 @@ export type LedgerSubjectType =
   | "comm_template"
   | "correspondence"
   | "email"
+  | "defects_period"
   | "escalation"
   | "incentive"
   | "invoice"
@@ -36,6 +37,7 @@ export type LedgerSubjectType =
   | "rate_step"
   | "rent_review"
   | "schedule_change"
+  | "service_schedule"
   | "tenancy";
 
 export type LedgerActor =

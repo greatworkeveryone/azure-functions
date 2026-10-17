@@ -90,6 +90,13 @@ export const LEDGER_ACTIONS = {
   "schedule.recompute_next_review": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.terms_edit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // Tenancy archive (D4): a tenancy or a lease document leaves the register
+  // without being destroyed; only an empty draft is ever hard-deleted.
+  "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+  "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
@@ -120,6 +127,24 @@ export const LEDGER_ACTIONS = {
   "rent_review.commence": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.open_window": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.schedule": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  // Defects liability periods (sprint F1, LAUNCH-READINESS §5). Booking planned
+  // maintenance inside a blocking period is an exception with a reason: RP may
+  // be paying for work the builder owes.
+  "defects_period.archive": { exception: true, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.create": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.restore": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.update": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "job.defects_override": { exception: true, reasonRequired: true, subjects: ["job"] },
+
+  // Service schedules (sprint F2, WP50). Job generation itself is not a
+  // decision (the schedule was); the run rows record it.
+  "service_schedule.archive": { exception: true, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.create": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  // A manager closing out a due date without a Floorplan job (UX review E4).
+  "service_schedule.mark_serviced": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.restore": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.skip_due": { exception: true, reasonRequired: true, subjects: ["service_schedule"] },
+  "service_schedule.update": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
 
   // Rent reviews (WP26): calculate -> submit -> approve -> apply, and return,
   // waive, cancel, revert. The subject is the review; scope columns carry the
@@ -160,6 +185,14 @@ export const LEDGER_ACTIONS = {
   "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
+
+  // Decision requests (jobs plan A1). The subject is the job the question is about
+  // and `after` is the request itself; the escalation that chases it writes its own
+  // rows beside, under the same correlation id. Taking a question back is the one
+  // exception: a person decided it needed no answer, and says why. The answers
+  // (slice A2) add their own codes.
+  "decision.requested": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "decision.withdrawn": { exception: true, reasonRequired: true, subjects: ["job"] },
 
   // Access-pattern monitoring (beta sprint S10, decision 15). The subject is the
   // person (UserID, or Entra oid when they have no AppUsers row); the actor of an

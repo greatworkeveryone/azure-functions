@@ -14,6 +14,7 @@ import { Sentry } from "./sentry";
 export const TIMER_NAMES = [
   "accessReportTimer",
   "digestTimer",
+  "schedulerTimer",
   "escalationSweepTimer",
   "ledgerVerifyTimer",
   "parseEmailsDailyRetry",

@@ -20,6 +20,8 @@ import { checkRateLimit } from "../rateLimit";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope } from "../ledger/moneyDecisions";
+import { leaseDocumentRefusal, tenancyOfDocument } from "../tenancy-records";
+import { DECISION_FILE_REFUSAL, requestsAboutAttachment } from "../jobDecisions/store";
 import {
   detachRefusal,
   isMoneyLinkTable,
@@ -579,6 +581,17 @@ async function handleDeleteAttachment(
     const links = await moneyLinksOf(connection, attachmentId);
     if (links.length > 0) {
       return { status: 422, jsonBody: { error: linkedFileRefusal(links) } };
+    }
+    // A lease document is archived, never deleted (D4, DL-19): the cascade
+    // would also drop its TenancyAttachments link with no record kept.
+    const tenancy = await tenancyOfDocument(connection, attachmentId);
+    if (tenancy) {
+      return { status: 422, jsonBody: { error: leaseDocumentRefusal(tenancy) } };
+    }
+    // The file a decision request is about stays with it (jobs plan A1): the
+    // decision keeps pointing at it, and the foreign key would refuse the delete.
+    if ((await requestsAboutAttachment(connection, attachmentId)).length > 0) {
+      return { status: 422, jsonBody: { error: DECISION_FILE_REFUSAL } };
     }
 
     // Only a file uploaded to this row is the row's to delete. A claimed email
