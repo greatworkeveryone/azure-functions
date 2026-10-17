@@ -858,6 +858,7 @@ describe("invoice reversals and deletions", () => {
   });
 
   describe("deleteJobInvoice", () => {
+    const PAYMENTS_MSG = "This invoice has payments recorded against it";
     const remove = () => deleteJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
 
     it("writes one invoice.delete exception row whose `before` is a snapshot of what was deleted", async () => {
@@ -962,22 +963,32 @@ describe("invoice reversals and deletions", () => {
         "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first.",
         "myob_invoice_protected",
       ],
-      ["paid", {}, [{ Status: "paid" }], "Cannot delete an invoice that has been paid.", "paid_invoice_protected"],
-      [
-        "with a payment pending",
-        {},
-        [{ Status: "pending" }],
-        "Cannot delete an invoice with a payment recorded against it.",
-        "paid_invoice_protected",
-      ],
-    ])("an invoice %s is protected: 400, recorded as a refused attempt, nothing deleted", async (_label, over, payments, error, rule) => {
+      ["paid", {}, [{ Status: "paid" }], PAYMENTS_MSG, "paid_invoice_protected"],
+      ["with a payment pending", {}, [{ Status: "pending" }], PAYMENTS_MSG, "paid_invoice_protected"],
+    ])("an invoice %s is protected: refused, recorded as a refused attempt, nothing deleted", async (_label, over, payments, error, rule) => {
       mockSql([APP_USER, JOB_BUILDING, { match: /FROM Payments WHERE JobInvoiceID = @Id/, rows: payments }, row(over)]);
 
       const res = await remove();
 
-      expect(res).toEqual({ jsonBody: { error }, status: 400 });
+      expect(res).toEqual({ jsonBody: { error }, status: error === PAYMENTS_MSG ? 409 : 400 });
       expect(calls()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: rule, subjectId: "5" })]);
       expect(ran(/DELETE FROM JobInvoices/)).toBe(false);
+    });
+
+    it("answers 409, not 500, when the DELETE hits the Payments foreign key (SQL 547)", async () => {
+      mockSql([
+        APP_USER,
+        JOB_BUILDING,
+        { match: /DELETE FROM JobInvoices/, reject: Object.assign(new Error("conflicted with FK_Payments_JobInvoices"), { number: 547 }) },
+        row(),
+      ]);
+
+      const res = await remove();
+
+      expect(res).toEqual({ jsonBody: { error: PAYMENTS_MSG }, status: 409 });
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      expect(db.rollbackTransaction).toHaveBeenCalled();
+      expect(calls()).toHaveLength(0);
     });
 
     it("404s an unknown invoice, writing nothing", async () => {
