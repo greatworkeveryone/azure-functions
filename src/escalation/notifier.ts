@@ -20,7 +20,8 @@ import { formatDarwinDateTime } from "../ledger/darwinTime";
 import { getAdapter } from "./adapters/registry";
 import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "./config";
 import { buildDecisionEmail } from "./decisionEmail";
-import { askedOfIds, namedTargetIds } from "./decisionRows";
+import { askedOfIds, ladderOf, namedTargetIds } from "./decisionRows";
+import { buildNextStepEmail } from "./nextStepEmail";
 import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
@@ -66,9 +67,20 @@ const NOTE_IN_EMAIL_MAX = 300;
 
 function excludedUserIds(row: EscalationRow): Set<number> {
   const excluded = new Set<number>();
-  if (row.raisedByUserId !== null) excluded.add(row.raisedByUserId);
   const named = row.context?.excludeUserIds;
   if (Array.isArray(named)) for (const id of named) if (typeof id === "number") excluded.add(id);
+  const ladder = ladderOf(row.context);
+  if (ladder === null) {
+    if (row.raisedByUserId !== null) excluded.add(row.raisedByUserId);
+    return excluded;
+  }
+  // A next step's ladder is about its owner, not about whoever handed it on. The owner is
+  // not told that their own step has moved up to their manager, though they are told it at
+  // their own level; and the person who handed it on is not told of what they did at that
+  // level, but is eligible further up, as the ladder already treats them (they may well be
+  // the only manager there is).
+  if (ladder.userId !== null && row.targetUserId !== ladder.userId) excluded.add(ladder.userId);
+  if (row.level <= 1 && row.raisedByUserId !== null) excluded.add(row.raisedByUserId);
   return excluded;
 }
 
@@ -141,8 +153,9 @@ function reasonLine(row: EscalationRow): string[] {
 }
 
 /** Subject and body for one email. Plain text; the link is the point of it. A
- *  decision request has its own wording (decisionEmail.ts); `askedOf` names the
- *  people it was asked of for that. */
+ *  decision request has its own wording (decisionEmail.ts) and so has a next step
+ *  (nextStepEmail.ts); `askedOf` names the people it was asked of, or handed to, for
+ *  those. */
 export function buildEmail(
   kind: NotifyEvent | "fyi" | "resolved",
   row: EscalationRow,
@@ -151,6 +164,8 @@ export function buildEmail(
 ): { body: string; subject: string } {
   const decision = buildDecisionEmail(kind, row, link, askedOf);
   if (decision) return decision;
+  const nextStep = buildNextStepEmail(kind, row, link, askedOf);
+  if (nextStep) return nextStep;
   const prefix: Record<typeof kind, string> = {
     follow_up: "New email on an escalation",
     fyi: "FYI, moved up",

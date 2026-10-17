@@ -11,6 +11,7 @@
 // inbox, since that is where the request lands.
 
 import { AppRole } from "../auth";
+import { FLAG_ROLES } from "../jobTransitionGuard";
 
 /** Mirror of EDIT_JOBS_ROLES in functions/jobs.ts. */
 export const ASK_FOR_DECISION_ROLES = [
@@ -44,3 +45,35 @@ export const DECISION_MAKER_ROLES: readonly string[] = [
   AppRole.FACILITIES,
   AppRole.FACILITIES_APPROVAL,
 ];
+
+// ── Answering, and doing what the answer hands on (jobs plan A2) ─────────────
+
+/**
+ * Who may call the endpoints that answer a decision request and mark its next step
+ * done: whoever can be asked, since an answer is the asked person's and a step lands
+ * in the escalation inbox of the person it is handed to. This is the gate only.
+ * Whether THIS person may answer THIS request is for the request to say (standing.ts:
+ * the people named, or whoever holds the role now), and whether they may finish THIS
+ * step is for the step to say (owner, or a manager and above).
+ */
+export const RESPOND_TO_DECISION_ROLES: readonly AppRole[] = [
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
+  AppRole.ADMIN,
+  AppRole.CFO,
+  AppRole.DIRECTOR,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+];
+
+export const COMPLETE_NEXT_STEP_ROLES: readonly AppRole[] = RESPOND_TO_DECISION_ROLES;
+
+/** AppUsers.Role values a next step may be handed to: those that can open the
+ *  escalation inbox, where it lands. The baseline `user` role cannot, so a step handed
+ *  to one would never be seen. */
+export const NEXT_STEP_OWNER_ROLES: readonly string[] = DECISION_MAKER_ROLES;
+
+/** "A manager and above": who may mark ANY next step done, not only their own. It is
+ *  FLAG_ROLES of the job guard (jobTransitionGuard.ts), the rule that already means
+ *  this for jobs, so the two cannot drift. */
+export const MANAGER_AND_ABOVE_ROLES: readonly string[] = FLAG_ROLES;

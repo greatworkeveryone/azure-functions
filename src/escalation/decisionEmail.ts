@@ -9,7 +9,7 @@
 // made, and it never carries more than the question and the job it is about.
 
 import { formatDarwinDateTime } from "../ledger/darwinTime";
-import { decisionOf } from "./decisionRows";
+import { decisionOf, type DecisionNote } from "./decisionRows";
 import type { NotifyEvent } from "./notifier";
 import { roleLabel } from "./roles";
 import type { EscalationRow } from "./types";
@@ -20,10 +20,15 @@ const QUESTION_IN_EMAIL_MAX = 1500;
 
 const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}...` : text);
 
-function headline(kind: DecisionEmailKind, row: EscalationRow, emergency: boolean): string {
+const dayFirst = (dateKey: string): string => dateKey.split("-").reverse().join("/");
+
+function headline(kind: DecisionEmailKind, row: EscalationRow, emergency: boolean, reask: DecisionNote["reaskOf"] = null): string {
   const raiser = row.raisedByKind === "system" ? "Floorplan" : row.raisedByName;
   switch (kind) {
     case "raise":
+      if (reask) {
+        return `A question that was put off until ${dayFirst(reask.deferredUntil)} is due again.${reask.askedBy ? ` It was first asked by ${reask.askedBy}.` : ""}`;
+      }
       return emergency
         ? `This is an emergency. ${raiser} has raised it and needs you to call them now. Floorplan will not chase it.`
         : `${raiser} has asked for a decision in Floorplan.`;
@@ -39,9 +44,10 @@ function headline(kind: DecisionEmailKind, row: EscalationRow, emergency: boolea
   }
 }
 
-function subjectPrefix(kind: DecisionEmailKind, row: EscalationRow, emergency: boolean): string {
+function subjectPrefix(kind: DecisionEmailKind, row: EscalationRow, emergency: boolean, reask: boolean = false): string {
   switch (kind) {
     case "raise":
+      if (reask) return row.urgent ? "URGENT decision due again" : "Decision due again";
       return emergency ? "EMERGENCY decision needed" : row.urgent ? "URGENT decision needed" : "Decision needed";
     case "reminder":
     case "follow_up":
@@ -70,7 +76,7 @@ export function buildDecisionEmail(
   if (!decision) return null;
 
   const label = decision.jobLabel ?? row.summary;
-  const lines = ["Hi,", "", headline(kind, row, decision.callThem), "", `Question: ${clip(decision.question, QUESTION_IN_EMAIL_MAX)}`, `Job: ${label}`];
+  const lines = ["Hi,", "", headline(kind, row, decision.callThem, decision.reaskOf), "", `Question: ${clip(decision.question, QUESTION_IN_EMAIL_MAX)}`, `Job: ${label}`];
   if (askedOf.length > 0) lines.push(`Asked of: ${askedOf.join(", ")}`);
   lines.push(`Raised by: ${row.raisedByKind === "system" ? "Floorplan (automatic)" : row.raisedByName}`);
   if (kind !== "resolved" && decision.respondBy) lines.push(`Respond by: ${formatDarwinDateTime(decision.respondBy)} Darwin time`);
@@ -79,6 +85,6 @@ export function buildDecisionEmail(
 
   return {
     body: `${lines.join("\n")}\n`,
-    subject: `${subjectPrefix(kind, row, decision.callThem)}: ${label}`.slice(0, 250),
+    subject: `${subjectPrefix(kind, row, decision.callThem, decision.reaskOf !== null)}: ${label}`.slice(0, 250),
   };
 }

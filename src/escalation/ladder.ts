@@ -5,7 +5,9 @@
 //  1. The target is the first ladder level, at or after the starting position,
 //     with at least one active user, leaving out the raiser and, for authority
 //     escalations, the people who prepared or created the subject. Empty
-//     levels are skipped.
+//     levels are skipped. One exception, asked for by the caller (`namedKeepRaiser`):
+//     when the ladder is about the very person the named level is for (a next step's
+//     owner is both), that level keeps them.
 //  2. The `raiser_manager` token takes the raiser's manager role (roles.ts).
 //  3. With nobody eligible on a fresh escalation (the only director raised it),
 //     the target is the directors and NoIndependentTarget is set, so everyone
@@ -115,6 +117,10 @@ export interface ResolveInput {
   fromLevel?: number;
   kind: EscalationKind;
   ladder: readonly LadderEntry[];
+  /** A level of named people (`userTarget`) keeps the raiser, who is the person the
+   *  ladder is about and so who that level is for (a next step's owner). Left out,
+   *  the raiser is never one of the people named, as for a decision request. */
+  namedKeepRaiser?: boolean;
   /** What to do when nobody is eligible at or after fromLevel: aim at the
    *  directors and flag it (rule 3), or report that there is nowhere to go. */
   onNoTarget: "directors" | "none";
@@ -163,12 +169,14 @@ export function resolveTarget(input: ResolveInput): ResolvedTarget | null {
   if (levels.length === 0) throw new LadderError("empty_ladder", "This policy has no levels to send an escalation to");
 
   const raiser = input.raiser ?? null;
-  const excluded = new Set<number>();
-  if (typeof raiser?.userId === "number") excluded.add(raiser.userId);
+  const prepared = new Set<number>();
   if (input.kind === "authority") {
-    for (const id of input.excludeUserIds ?? []) excluded.add(id);
+    for (const id of input.excludeUserIds ?? []) prepared.add(id);
   }
-  const eligible = (user: DirectoryUser): boolean => !excluded.has(user.userId) && !sameAddress(user.email, raiser?.email);
+  const isRaiser = (user: DirectoryUser): boolean =>
+    (typeof raiser?.userId === "number" && raiser.userId === user.userId) || sameAddress(user.email, raiser?.email);
+  const eligible = (user: DirectoryUser, level: Pick<ExpandedLevel, "source">): boolean =>
+    !prepared.has(user.userId) && ((input.namedKeepRaiser === true && level.source === "user_target") || !isRaiser(user));
 
   const fromLevel = Math.max(1, Math.trunc(input.fromLevel ?? 1));
   const skippedLevels: number[] = [];
@@ -178,7 +186,7 @@ export function resolveTarget(input: ResolveInput): ResolvedTarget | null {
 
     const users = input.activeUsers
       .filter((user) => (level.role === null ? level.userIds.includes(user.userId) : normaliseRole(user.role) === level.role))
-      .filter(eligible)
+      .filter((user) => eligible(user, level))
       .sort(byName);
 
     let fallbackEmails: string[] = [];
@@ -219,7 +227,10 @@ export function resolveTarget(input: ResolveInput): ResolvedTarget | null {
 
   // Rule 3. Aim at the directors, who may include nobody but the raiser.
   const top = levels[levels.length - 1];
-  const directors = input.activeUsers.filter((user) => normaliseRole(user.role) === ROLES.director).filter(eligible).sort(byName);
+  const directors = input.activeUsers
+    .filter((user) => normaliseRole(user.role) === ROLES.director)
+    .filter((user) => eligible(user, { source: "role" }))
+    .sort(byName);
   if (typeof input.preferredUserId === "number" && !directors.some((user) => user.userId === input.preferredUserId)) {
     throw new LadderError("target_not_eligible", "That person isn't at the level this escalation goes to");
   }

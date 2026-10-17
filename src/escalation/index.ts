@@ -10,8 +10,9 @@
 // to wire up (it will resolve the escalation in the decision's own transaction).
 // The engine never decides for the domain, and its resolve refuses authority
 // escalations from the inbox. A domain that writes its own rows beside the
-// escalation raises it with raiseWithin and ends it with withdrawWithin, on a
-// transaction it owns (the decision requests of jobs plan A1 do).
+// escalation raises it with raiseWithin and ends it with withdrawWithin or
+// resolveWithin, on a transaction it owns (the decision requests and next steps of
+// jobs plan A1 and A2 do).
 
 export {
   acknowledge,
@@ -22,6 +23,7 @@ export {
   raise,
   raiseWithin,
   resolve,
+  resolveWithin,
   SWEEP_ACTOR,
   withdraw,
   withdrawWithin,
@@ -35,6 +37,7 @@ export type {
   RaiseResult,
   RaiseWithinResult,
   ResolveInput,
+  ResolveWithinInput,
   WithdrawInput,
 } from "./engine";
 export { registerAdapter } from "./adapters";

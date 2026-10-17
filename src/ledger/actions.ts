@@ -146,10 +146,22 @@ export const LEDGER_ACTIONS = {
   // Decision requests (jobs plan A1). The subject is the job the question is about
   // and `after` is the request itself; the escalation that chases it writes its own
   // rows beside, under the same correlation id. Taking a question back is the one
-  // exception: a person decided it needed no answer, and says why. The answers
-  // (slice A2) add their own codes.
+  // exception: a person decided it needed no answer, and says why.
   "decision.requested": { exception: false, reasonRequired: false, subjects: ["job"] },
   "decision.withdrawn": { exception: true, reasonRequired: true, subjects: ["job"] },
+
+  // The answers (jobs plan A2). The subject is the job; `after` is the decision and
+  // `reason` is its rationale, which every answer must give. Approve, deny, defer
+  // and revise are what the platform is for, so none is an exception. A next step
+  // ends two ways: the owner (or a manager) marks it done, with an optional note, or
+  // a later decision on the job replaces it. The escalations they end write their
+  // own rows beside, under the same correlation id.
+  "decision.approve": { exception: false, reasonRequired: true, subjects: ["job"] },
+  "decision.defer": { exception: false, reasonRequired: true, subjects: ["job"] },
+  "decision.deny": { exception: false, reasonRequired: true, subjects: ["job"] },
+  "decision.next_step_done": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "decision.next_step_replaced": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "decision.revise": { exception: false, reasonRequired: true, subjects: ["job"] },
 
   // Access-pattern monitoring (beta sprint S10, decision 15). The subject is the
   // person (UserID, or Entra oid when they have no AppUsers row); the actor of an

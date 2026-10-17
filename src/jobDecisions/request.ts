@@ -1,5 +1,6 @@
 // Reading a decision request's input, and the one error type the decision
-// request code throws for anything the person asking can act on (jobs plan A1).
+// request code throws for anything the person asking (or answering, or finishing a
+// next step: jobs plan A2) can act on (jobs plan A1).
 // Pure: no I/O. The endpoints turn a RequestError, and the TierError of tiers.ts,
 // into the response.
 //
@@ -30,21 +31,39 @@ export const WITHDRAW_REASON_MAX_CHARS = 1000;
 export const MAX_DECISION_MAKERS = 25;
 
 export type RequestErrorCode =
+  | "already_done"
   | "already_pending"
   | "attachment_not_on_job"
   | "bad_request"
   | "decision_maker_is_requester"
   | "decision_maker_role_not_allowed"
   | "decision_maker_unknown"
+  | "defer_until_invalid"
+  | "defer_until_not_a_working_day"
+  | "defer_until_past"
+  | "defer_until_required"
+  | "defer_until_too_far"
   | "forbidden"
   | "job_closed"
   | "job_not_found"
+  | "next_step_owner_required"
+  | "next_step_owner_role_empty"
+  | "next_step_owner_role_not_allowed"
+  | "next_step_owner_unknown"
+  | "next_step_required"
+  | "no_next_step"
+  | "not_a_decision_maker"
   | "not_an_admin_job"
   | "not_found"
+  | "not_next_step_owner"
   | "not_pending"
+  | "outcome_invalid"
+  | "rationale_required"
   | "reason_required"
   | "role_has_no_one"
-  | "stale";
+  | "stale"
+  | "step_replaced"
+  | "unexpected_defer_until";
 
 /** What the person asking got wrong, or got too late. `details` is merged into the
  *  response body (the request that is already pending, say). */

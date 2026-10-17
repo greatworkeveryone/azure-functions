@@ -16,15 +16,14 @@ const entry = (action: LedgerEntryInput["action"], over: Partial<LedgerEntryInpu
 });
 
 describe("the decision request action codes", () => {
-  it("has exactly the two of A1, both about a job", () => {
-    expect(Object.keys(LEDGER_ACTIONS).filter((code) => code.startsWith("decision.")).sort()).toEqual([...CODES]);
+  it("has the two of A1, both about a job (the answers of A2 are in decisionActions.test.ts)", () => {
     for (const code of CODES) {
       expect(LEDGER_ACTIONS[code].subjects).toEqual(["job"]);
       expect(code.length).toBeLessThanOrEqual(64);
     }
   });
 
-  it("asks for a reason only to take a question back, which is also the one that shows as an exception", () => {
+  it("asks for a reason to take a question back, which shows as an exception; asking needs none", () => {
     expect(LEDGER_ACTIONS["decision.withdrawn"]).toMatchObject({ exception: true, reasonRequired: true });
     expect(LEDGER_ACTIONS["decision.requested"]).toMatchObject({ exception: false, reasonRequired: false });
   });

@@ -2,7 +2,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ESCALATION_ROLES } from "../escalation/http";
-import { ASK_FOR_DECISION_ROLES, DECISION_MAKER_ROLES, READ_DECISION_REQUEST_ROLES } from "./roles";
+import { FLAG_ROLES } from "../jobTransitionGuard";
+import {
+  ASK_FOR_DECISION_ROLES,
+  COMPLETE_NEXT_STEP_ROLES,
+  DECISION_MAKER_ROLES,
+  MANAGER_AND_ABOVE_ROLES,
+  NEXT_STEP_OWNER_ROLES,
+  READ_DECISION_REQUEST_ROLES,
+  RESPOND_TO_DECISION_ROLES,
+} from "./roles";
 
 // The two job role lists are copies of the ones in functions/jobs.ts, which that
 // file does not export. They are read from its source so they cannot drift.
@@ -40,5 +49,30 @@ describe("who can be asked", () => {
     expect(names(DECISION_MAKER_ROLES)).toEqual(names(ESCALATION_ROLES));
     expect(DECISION_MAKER_ROLES).toContain("cfo");
     expect(DECISION_MAKER_ROLES).not.toContain("user");
+  });
+});
+
+describe("who may answer a decision request, and who may finish a next step (A2)", () => {
+  it("the gate is whoever can be asked: the roles that can open the escalation inbox, never the baseline user", () => {
+    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(DECISION_MAKER_ROLES));
+    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(RESPOND_TO_DECISION_ROLES).not.toContain("user");
+    expect(names(COMPLETE_NEXT_STEP_ROLES)).toEqual(names(RESPOND_TO_DECISION_ROLES));
+  });
+
+  it("a next step may be handed to whoever can open the escalation inbox, where it lands", () => {
+    expect(names(NEXT_STEP_OWNER_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(NEXT_STEP_OWNER_ROLES).not.toContain("user");
+  });
+
+  it("'a manager and above' is the job guard's own list (FLAG_ROLES): the managers, the CFO, directors and admin", () => {
+    expect(MANAGER_AND_ABOVE_ROLES).toBe(FLAG_ROLES);
+    expect(names(MANAGER_AND_ABOVE_ROLES)).toEqual(["accounts_manager", "admin", "cfo", "director", "facilities_manager"]);
+    expect(MANAGER_AND_ABOVE_ROLES).not.toContain("facilities");
+    expect(MANAGER_AND_ABOVE_ROLES).not.toContain("accounts");
+  });
+
+  it("every manager and above can reach the endpoint that finishes a step", () => {
+    for (const role of MANAGER_AND_ABOVE_ROLES) expect(COMPLETE_NEXT_STEP_ROLES).toContain(role);
   });
 });

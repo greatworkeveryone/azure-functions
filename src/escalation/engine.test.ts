@@ -16,6 +16,7 @@ import {
   raise,
   raiseWithin,
   resolve,
+  resolveWithin,
   SWEEP_ACTOR,
   withdraw,
   withdrawWithin,
@@ -201,6 +202,10 @@ const POLICIES: Record<string, EscalationPolicy> = {
     policyKey: "job.decision_pending",
   }),
   "job.manual": policy({ ladder: [{ token: "raiser_manager", slaHours: 8 }, { role: "director", slaHours: 16 }], policyKey: "job.manual" }),
+  "job.next_step": policy({
+    ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }],
+    policyKey: "job.next_step",
+  }),
   "job.stalled_unacknowledged": policy({
     ladder: [{ role: "facilities_manager", slaHours: 16 }, { role: "director", slaHours: 16 }],
     policyKey: "job.stalled_unacknowledged",
@@ -1389,5 +1394,308 @@ describe("withdrawWithin: the request's own domain ends the escalation", () => {
     await db.rollbackTransaction({} as never);
 
     expect(rowOf(escalation.escalationId).status).toBe("open");
+  });
+});
+
+// ── Answering a request, and handing a step on (jobs plan A2) ────────────────
+
+const ALANA = user(9, "Alana", "accounts");
+const GUS = user(10, "Gus", "accounts");
+const ELI = user(6, "Eli", "director");
+
+describe("resolveWithin: the request's own domain answers the escalation", () => {
+  const answer = (escalationId: number, over: Partial<Parameters<typeof resolveWithin>[1]> = {}) =>
+    resolveWithin(conn, { actor: actorOf(CAM), correlationId: GUID, escalationId, note: "The invoice is a duplicate.", now: NOW, resolutionCode: "deny", ...over });
+
+  it("ends it as resolved with the domain's code and note, on the caller's transaction, and writes its ledger row under the caller's correlation id", async () => {
+    const { escalation } = await askForDecision();
+    await db.beginTransaction({} as never);
+    events.length = 0;
+    db.commitTransaction.mockClear();
+    ledger.mockClear();
+
+    const done = await answer(escalation.escalationId);
+
+    expect(done).toMatchObject({
+      resolutionCode: "deny",
+      resolutionNote: "The invoice is a duplicate.",
+      resolvedAt: NOW,
+      resolvedByName: "Cam",
+      resolvedByUserId: CAM.userId,
+      status: "resolved",
+    });
+    expect(events).toEqual(["onChange", "ledger"]);
+    expect(ledgerCalls()[0]).toMatchObject({
+      action: "escalation.resolve",
+      after: { resolutionCode: "deny", status: "resolved" },
+      before: { status: "open" },
+      correlationId: GUID,
+      jobId: 12,
+      reason: "The invoice is a duplicate.",
+    });
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("ends an authority escalation, which resolve refuses: it ends with the decision, and this is the decision", async () => {
+    const { escalation } = await askForDecision();
+    await expect(resolve(conn, { actor: actorOf(CAM), escalationId: escalation.escalationId })).rejects.toMatchObject({ code: "authority_resolve" });
+
+    expect((await answer(escalation.escalationId)).status).toBe("resolved");
+  });
+
+  it("emails no one: the person who asked is told in the app, by the row ending, not by mail", async () => {
+    const { escalation } = await askForDecision();
+    jest.mocked(notifyRaiserResolved).mockClear();
+    jest.mocked(notifyTargets).mockClear();
+
+    await answer(escalation.escalationId);
+
+    expect(notifyRaiserResolved).not.toHaveBeenCalled();
+    expect(notifyTargets).not.toHaveBeenCalled();
+    expect(notifyPreviousLevel).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the row for the person who answered: they were never its target", async () => {
+    const { escalation } = await askForDecision();
+    await answer(escalation.escalationId);
+    expect(rowOf(escalation.escalationId)).toMatchObject({ acknowledgedAt: null, acknowledgedByUserId: null, targetUserId: null });
+  });
+
+  it("ends it at any level, and even if somebody had acknowledged it", async () => {
+    const { escalation } = await askForDecision();
+    Object.assign(rowOf(escalation.escalationId), { acknowledgedByUserId: CAM.userId, status: "acknowledged" });
+    expect((await answer(escalation.escalationId)).status).toBe("resolved");
+
+    mockWorld.rows.clear();
+    mockWorld.users = [ADAM, BEA, CAM, DEE, FAY, ALANA];
+    const first = await askForDecision({ actor: actorOf(ALANA) });
+    const { next } = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: first.escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    expect(next.level).toBe(2);
+    expect((await answer(next.escalationId)).status).toBe("resolved");
+  });
+
+  it("takes a code of 1 to 32 characters, and says so before it touches anything", async () => {
+    const { escalation } = await askForDecision();
+    ledger.mockClear();
+    for (const resolutionCode of ["", "   ", "x".repeat(33)]) {
+      await expect(answer(escalation.escalationId, { resolutionCode })).rejects.toMatchObject({ code: "bad_request", message: "resolutionCode must be 1 to 32 characters" });
+    }
+    expect((await answer(escalation.escalationId, { resolutionCode: "x".repeat(32) })).resolutionCode).toBe("x".repeat(32));
+    expect(rowOf(escalation.escalationId).status).toBe("resolved");
+  });
+
+  it("takes no note, a trimmed one, and refuses one too long for the column", async () => {
+    const { escalation } = await askForDecision();
+    await expect(answer(escalation.escalationId, { note: "n".repeat(2001) })).rejects.toMatchObject({ code: "bad_request" });
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+    const done = await answer(escalation.escalationId, { note: undefined });
+    expect(done.resolutionNote).toBeNull();
+  });
+
+  it("refuses a row that has already ended (409), and one that is not there (404)", async () => {
+    const { escalation } = await askForDecision();
+    await answer(escalation.escalationId);
+    await expect(answer(escalation.escalationId)).rejects.toMatchObject({ code: "not_live", status: 409 });
+    await expect(answer(9999)).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+
+  it("is a 409 on a stale version, changing nothing", async () => {
+    const { escalation } = await askForDecision();
+    ledger.mockClear();
+    await expect(answer(escalation.escalationId, { expectedRowVersion: "stale" })).rejects.toMatchObject({ code: "stale", status: 409 });
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+    expect(ledger).not.toHaveBeenCalled();
+  });
+
+  it("rolls back with the caller's writes when the ledger fails", async () => {
+    const { escalation } = await askForDecision();
+    await db.beginTransaction({} as never);
+    ledger.mockRejectedValueOnce(new Error("ledger unavailable"));
+
+    await expect(answer(escalation.escalationId)).rejects.toThrow("ledger unavailable");
+    await db.rollbackTransaction({} as never);
+
+    expect(rowOf(escalation.escalationId)).toMatchObject({ resolutionCode: null, status: "open" });
+  });
+});
+
+describe("a next step is chased through its owner's manager", () => {
+  beforeEach(() => {
+    mockWorld.users = [ADAM, BEA, CAM, DEE, FAY, ALANA, GUS];
+  });
+
+  const handOn = (over: Partial<Parameters<typeof raise>[1]> = {}) =>
+    raiseWithin(conn, {
+      actor: actorOf(DEE),
+      ladderRaiser: { role: "accounts", userId: ALANA.userId },
+      now: NOW,
+      policyKey: "job.next_step",
+      subjectId: "12",
+      subjectType: "job",
+      userTargets: [ALANA.userId],
+      ...over,
+    });
+
+  it("goes to the owner, raised by whoever handed it on, with whose ladder it is kept in its context", async () => {
+    const { created, escalation } = await handOn();
+
+    expect(created).toBe(true);
+    expect(escalation).toMatchObject({
+      kind: "attention",
+      level: 1,
+      noIndependentTarget: false,
+      raisedByName: "Dee",
+      raisedByUserId: DEE.userId,
+      targetRole: "accounts",
+      targetUserId: ALANA.userId,
+    });
+    expect(escalation.context).toMatchObject({ ladder: { role: "accounts", userId: ALANA.userId }, userTargets: [ALANA.userId] });
+  });
+
+  it("moves up to the OWNER's manager, then to a director: not to the manager of whoever handed it on", async () => {
+    const { escalation } = await handOn();
+
+    const second = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    expect(second.next).toMatchObject({ level: 2, parentEscalationId: escalation.escalationId, targetRole: "accounts_manager" });
+    expect(second.next.context).toMatchObject({ ladder: { role: "accounts", userId: ALANA.userId } });
+
+    const third = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: second.next.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    expect(third.next).toMatchObject({ level: 3, targetRole: "director" });
+  });
+
+  it("would have moved up to the other directors, and never to Alana's accounts manager, without it: the control", async () => {
+    mockWorld.users = [ADAM, BEA, CAM, DEE, ELI, FAY, ALANA, GUS];
+    const { escalation } = await handOn({ ladderRaiser: undefined });
+
+    const second = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    // Dee is the raiser, so her "manager" is the other directors.
+    expect(second.next).toMatchObject({ level: 2, targetRole: "director" });
+    expect(second.next.context).not.toHaveProperty("ladder");
+  });
+
+  it("has nowhere to move up to for a lone director's step without it: no one independent of the raiser", async () => {
+    const { escalation } = await handOn({ ladderRaiser: undefined });
+    await expect(escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true })).rejects.toMatchObject({
+      code: "no_further_level",
+    });
+  });
+
+  it("can be handed to the person handing it on: a decision-maker who will do it themselves", async () => {
+    const { escalation } = await handOn({ ladderRaiser: { role: "director", userId: DEE.userId }, userTargets: [DEE.userId] });
+    expect(escalation).toMatchObject({ level: 1, targetRole: "director", targetUserId: DEE.userId });
+  });
+
+  it("is handed to everyone in a role when the step is a role's: no one person, and the role's own manager above them", async () => {
+    const { escalation } = await handOn({ ladderRaiser: { role: "accounts", userId: null }, userTargets: [ALANA.userId, GUS.userId] });
+    expect(escalation).toMatchObject({ level: 1, targetRole: null, targetUserId: null });
+    expect(escalation.context).toMatchObject({ ladder: { role: "accounts", userId: null }, userTargets: [9, 10] });
+
+    const up = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    expect(up.next.targetRole).toBe("accounts_manager");
+  });
+
+  it("is chased by the policy's SLA at the manager's level, and by the caller's moment at the owner's", async () => {
+    const due = new Date("2026-10-20T07:30:00Z");
+    const { escalation } = await handOn({ dueAt: due });
+    expect(escalation.dueAt?.toISOString()).toBe(due.toISOString());
+
+    const { next } = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
+    expect(next.dueAt?.toISOString()).toBe("2026-10-13T07:00:00.000Z"); // 16 business hours from Monday 09:00 Darwin
+  });
+
+  it("keeps no ladder in the context when none was given, or a blank role", async () => {
+    const plain = await handOn({ ladderRaiser: undefined });
+    expect(plain.escalation.context).not.toHaveProperty("ladder");
+    mockWorld.rows.clear();
+    const blank = await handOn({ ladderRaiser: { role: "  ", userId: null } });
+    expect(blank.escalation.context).not.toHaveProperty("ladder");
+  });
+});
+
+describe("a next step is done on the job, not claimed, resolved or withdrawn from the inbox", () => {
+  beforeEach(() => {
+    mockWorld.users = [ADAM, BEA, CAM, DEE, FAY, ALANA];
+  });
+
+  const handedOn = () =>
+    raise(conn, {
+      actor: actorOf(DEE),
+      ladderRaiser: { role: "accounts", userId: ALANA.userId },
+      now: NOW,
+      policyKey: "job.next_step",
+      skipConditionCheck: true,
+      subjectId: "12",
+      subjectType: "job",
+      userTargets: [ALANA.userId],
+    });
+
+  it("refuses to acknowledge it: claiming it would stop it moving up while nobody had done anything", async () => {
+    const { escalation } = await handedOn();
+    ledger.mockClear();
+
+    await expect(acknowledge(conn, { actor: actorOf(ALANA), escalationId: escalation.escalationId })).rejects.toMatchObject({
+      code: "bad_request",
+      message: "A next step is done, not acknowledged. Open the job and mark it done.",
+    });
+
+    expect(rowOf(escalation.escalationId)).toMatchObject({ acknowledgedAt: null, status: "open" });
+    expect(ledger).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resolve it, pointing at the job, though it is an attention escalation", async () => {
+    const { escalation } = await handedOn();
+    ledger.mockClear();
+
+    await expect(resolve(conn, { actor: actorOf(ALANA), escalationId: escalation.escalationId, resolutionCode: "action_taken" })).rejects.toMatchObject({
+      code: "authority_resolve",
+      details: { deepLink: "/jobs?jobId=12", subjectId: "12", subjectType: "job" },
+      message: expect.stringContaining("mark the step done"),
+      status: 422,
+    });
+
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+    expect(ledger).not.toHaveBeenCalled();
+  });
+
+  it("refuses the generic withdraw, which would end the chase with the step still open", async () => {
+    const { escalation } = await handedOn();
+    ledger.mockClear();
+
+    await expect(withdraw(conn, { actor: actorOf(DEE), escalationId: escalation.escalationId, reason: "not needed" })).rejects.toMatchObject({
+      code: "bad_request",
+      message: expect.stringContaining("done from the job"),
+    });
+
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+    expect(ledger).not.toHaveBeenCalled();
+  });
+
+  it("still lets the step's own domain end it, by resolving or withdrawing it within its transaction", async () => {
+    const first = await handedOn();
+    expect((await resolveWithin(conn, { actor: actorOf(ALANA), escalationId: first.escalation.escalationId, resolutionCode: "next_step_done" })).status).toBe("resolved");
+
+    mockWorld.rows.clear();
+    const second = await handedOn();
+    expect((await withdrawWithin(conn, { actor: actorOf(DEE), escalationId: second.escalation.escalationId, reason: "Replaced by a later decision" })).status).toBe("withdrawn");
+  });
+
+  it("is still tidied up by the sweep when its step is no longer open (condition cleared)", async () => {
+    const { escalation } = await handedOn();
+    const done = await autoResolve(conn, { escalationId: escalation.escalationId, now: NOW });
+    expect(done).toMatchObject({ resolutionCode: "condition_cleared", status: "withdrawn" });
+  });
+
+  it("can still be pushed further up by its owner", async () => {
+    const { escalation } = await handedOn();
+    const { next } = await escalateFurther(conn, { actor: actorOf(ALANA), escalationId: escalation.escalationId, mode: "next_level", now: NOW, note: "I need a decision from Accounts" });
+    expect(next).toMatchObject({ level: 2, targetRole: "accounts_manager" });
+  });
+
+  it("asks the job adapter whether the step is still open when it is raised, unless the caller just checked", async () => {
+    jobAdapter.isConditionActive.mockResolvedValue(false);
+    await expect(
+      raise(conn, { actor: actorOf(DEE), now: NOW, policyKey: "job.next_step", subjectId: "12", subjectType: "job", userTargets: [ALANA.userId] }),
+    ).rejects.toMatchObject({ code: "condition_not_met" });
+    expect(jobAdapter.isConditionActive).toHaveBeenCalledWith(conn, { policyKey: "job.next_step", subjectId: "12", subjectType: "job" }, NOW);
   });
 });

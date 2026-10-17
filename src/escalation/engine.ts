@@ -1,7 +1,9 @@
 // The escalation engine (PLAN §3.7, D4): raise, acknowledge, resolve, withdraw,
 // escalate further and auto-resolve. It wraps a domain's state and never makes
 // the domain's decision: an authority escalation ends when the decision is made,
-// and the engine's resolve refuses it.
+// and the engine's resolve refuses it. A domain that owns the end of its own
+// escalation (a decision request, a next step) raises it with raiseWithin and ends
+// it with resolveWithin or withdrawWithin, in its own transaction.
 //
 // Every operation is one transaction that holds the escalation row, changes it,
 // lets the subject's adapter keep its own flags in step, and writes its row in the
@@ -21,12 +23,12 @@ import "./adapters";
 import { requireAdapter, type EscalationAdapter } from "./adapters/registry";
 import { addClockHours, holidaysFromEnv } from "./businessTime";
 import { fallbackEmailsByRole } from "./config";
-import { isDecisionRow } from "./decisionRows";
+import { isDecisionRow, isNextStepRow, ladderOf, type LadderRaiser } from "./decisionRows";
 import { EscalationError, isUniqueViolation } from "./errors";
 import { LadderError, resolveTarget, type AuthorityRouteStep, type ResolvedTarget } from "./ladder";
 import { notifyPreviousLevel, notifyRaiserResolved, notifyTargets, type NotifyEvent, type NotifyOptions } from "./notifier";
 import { getPolicy } from "./policies";
-import { roleLabel } from "./roles";
+import { normaliseRole, roleLabel } from "./roles";
 import {
   findLiveEscalation,
   getEscalationRow,
@@ -152,10 +154,20 @@ function raiserFor(actor: LedgerActor, users: readonly DirectoryUser[]) {
   return { email: users.find((user) => user.userId === actor.userId)?.email ?? null, role: actor.role, userId: actor.userId };
 }
 
-function raiserOf(row: Pick<EscalationRow, "raisedByKind" | "raisedByUserId">, users: readonly DirectoryUser[]) {
+/** The person (or role) the ladder treats as the raiser. A row that says whose ladder
+ *  it is (a next step: the owner's manager, not the manager of whoever handed it on)
+ *  names them in its context; otherwise it is whoever raised it. */
+function raiserOf(row: Pick<EscalationRow, "context" | "raisedByKind" | "raisedByUserId">, users: readonly DirectoryUser[]) {
+  const ladder = ladderOf(row.context);
+  if (ladder) return ladderPerson(ladder, users);
   if (row.raisedByKind !== "user" || row.raisedByUserId === null) return null;
   const person = users.find((user) => user.userId === row.raisedByUserId);
   return { email: person?.email ?? null, role: person?.role ?? null, userId: row.raisedByUserId };
+}
+
+function ladderPerson(ladder: LadderRaiser, users: readonly DirectoryUser[]) {
+  const person = ladder.userId === null ? undefined : users.find((user) => user.userId === ladder.userId);
+  return { email: person?.email ?? null, role: ladder.role, userId: ladder.userId };
 }
 
 function contextNumbers(context: EscalationRow["context"], key: string): number[] {
@@ -183,6 +195,13 @@ export interface RaiseInput {
   excludeUserIds?: readonly number[];
   /** Appended to the subject's name: "Job #12 · Leaking roof — Needs an owner". */
   headline?: string;
+  /** Whose ladder this is, when that is not the raiser's: `raiser_manager` is the
+   *  manager of this role, and this person (if one) is left out of every level but a
+   *  named one. For an escalation about someone else's duty: a next step is chased
+   *  through its owner's manager, though a decision-maker handed it on. Kept in the
+   *  row's context, so the sweep moves it up the same ladder. Left out, the ladder
+   *  is the raiser's. */
+  ladderRaiser?: LadderRaiser;
   note?: string | null;
   notify?: NotifyOptions;
   now?: Date;
@@ -274,6 +293,9 @@ async function planRaise(connection: Connection, input: RaiseInput): Promise<{ e
   if (existing) return { existing };
 
   const users = await listActiveUsers(connection);
+  const ladderRaiser = input.ladderRaiser
+    ? { role: normaliseRole(input.ladderRaiser.role), userId: input.ladderRaiser.userId }
+    : null;
   let target: ResolvedTarget | null;
   try {
     target = resolveTarget({
@@ -283,9 +305,10 @@ async function planRaise(connection: Connection, input: RaiseInput): Promise<{ e
       fallbackEmails: fallbackEmailsByRole(),
       kind: policy.kind,
       ladder: policy.ladder,
+      namedKeepRaiser: ladderRaiser !== null,
       onNoTarget: "directors",
       preferredUserId: input.preferredUserId,
-      raiser: raiserFor(input.actor, users),
+      raiser: ladderRaiser ? ladderPerson(ladderRaiser, users) : raiserFor(input.actor, users),
       userTargets: input.userTargets,
     });
   } catch (error) {
@@ -300,6 +323,7 @@ async function planRaise(connection: Connection, input: RaiseInput): Promise<{ e
     ...(input.context ?? {}),
     ...(excludeUserIds.length > 0 ? { excludeUserIds } : {}),
     ...(userTargets.length > 0 ? { userTargets } : {}),
+    ...(ladderRaiser && ladderRaiser.role !== "" ? { ladder: ladderRaiser } : {}),
   };
 
   const values: NewEscalation = {
@@ -436,9 +460,12 @@ export async function acknowledge(connection: Connection, input: AcknowledgeInpu
     }
     requireStatus(row, ["open"]);
     // A decision is answered, not acknowledged: claiming it would stop it moving
-    // up while nobody had decided anything.
+    // up while nobody had decided anything. Likewise a next step is done.
     if (isDecisionRow(row)) {
       throw new EscalationError("bad_request", "A decision request is answered, not acknowledged. Open the job and respond to it.", { current: row });
+    }
+    if (isNextStepRow(row)) {
+      throw new EscalationError("bad_request", "A next step is done, not acknowledged. Open the job and mark it done.", { current: row });
     }
     const adapter = requireAdapter(row.subjectType);
 
@@ -489,6 +516,15 @@ export async function resolve(connection: Connection, input: ResolveInput): Prom
     const row = await lockRow(connection, input.escalationId, input.expectedRowVersion);
     requireStatus(row, LIVE_STATUSES);
     const adapter = requireAdapter(row.subjectType);
+    // A next step ends when it is marked done on the job: resolving it here would
+    // end the chase with the step still open and nobody looking at it.
+    if (isNextStepRow(row)) {
+      throw new EscalationError("authority_resolve", "This is a next step, so it can't be resolved from here. Open the job and mark the step done.", {
+        deepLink: adapter.deepLink(row.subjectId),
+        subjectId: row.subjectId,
+        subjectType: row.subjectType,
+      });
+    }
     if (row.kind === "authority") {
       const path = adapter.deepLink(row.subjectId);
       throw new EscalationError(
@@ -551,6 +587,9 @@ async function withdrawWork(connection: Connection, input: WithdrawInput, reason
   if (isDecisionRow(row) && !endedByDomain) {
     throw new EscalationError("bad_request", "A decision request is withdrawn from the request itself, not from here.", { current: row });
   }
+  if (isNextStepRow(row) && !endedByDomain) {
+    throw new EscalationError("bad_request", "A next step is done from the job, not withdrawn from here.", { current: row });
+  }
   if (row.status === "acknowledged" && !endedByDomain) {
     throw new EscalationError("not_live", `${row.acknowledgedByName ?? "Someone"} has already acknowledged this, so it can't be withdrawn. Ask them to resolve it.`, { current: row });
   }
@@ -601,6 +640,68 @@ export async function withdraw(connection: Connection, input: WithdrawInput): Pr
 export async function withdrawWithin(connection: Connection, input: WithdrawInput): Promise<EscalationRow> {
   const reason = withdrawReason(input);
   await withdrawWork(connection, input, reason, true);
+  return reload(connection, input.escalationId);
+}
+
+// ── resolve, within the subject's own transaction ───────────────────────────
+
+/** Dbo.Escalations.ResolutionCode is NVARCHAR(32). */
+export const RESOLUTION_CODE_MAX_CHARS = 32;
+
+export interface ResolveWithinInput {
+  actor: LedgerActor;
+  /** Shared with the other ledger rows of the operation this is part of. */
+  correlationId?: string;
+  escalationId: number;
+  expectedRowVersion?: string;
+  /** Why it ended, in the domain's own words (a decision's rationale). */
+  note?: string | null;
+  now?: Date;
+  /** The domain's own code for how it ended (a decision's outcome), stored as the
+   *  row's ResolutionCode: 1 to 32 characters. */
+  resolutionCode: string;
+}
+
+/**
+ * `resolve`, for the subject's own domain ending the escalation inside its own
+ * transaction: a decision request is answered, and the chase on it ends in the same
+ * commit that records the answer. An authority escalation ends no other way. The
+ * domain decides, so a row somebody had acknowledged ends too, and the row is not
+ * claimed for anyone. Nobody is emailed: telling people is the domain's to do (a
+ * decision tells the person who asked in the app, not by email). The caller owns the
+ * transaction; permissions are the caller's to have checked.
+ */
+export async function resolveWithin(connection: Connection, input: ResolveWithinInput): Promise<EscalationRow> {
+  const code = input.resolutionCode.trim();
+  if (code === "" || code.length > RESOLUTION_CODE_MAX_CHARS) {
+    throw new EscalationError("bad_request", `resolutionCode must be 1 to ${RESOLUTION_CODE_MAX_CHARS} characters`);
+  }
+  const note = trimNote(input.note);
+  const now = input.now ?? new Date();
+
+  const row = await lockRow(connection, input.escalationId, input.expectedRowVersion);
+  requireStatus(row, LIVE_STATUSES);
+  const adapter = requireAdapter(row.subjectType);
+
+  await applyChanges(connection, row, {
+    ResolutionCode: code,
+    ResolutionNote: note,
+    ResolvedAt: now,
+    ResolvedByName: actorName(input.actor),
+    ResolvedByUserId: actorUserId(input.actor),
+    Status: "resolved",
+  });
+  const updated = await reload(connection, row.escalationId);
+  await adapter.onChange?.(connection, updated);
+  await record(
+    connection,
+    ledgerEntry("escalation.resolve", input.actor, updated, adapter, {
+      after: { ...snapshot(updated), resolutionCode: code },
+      before: snapshot(row),
+      correlationId: input.correlationId,
+      reason: note,
+    }),
+  );
   return reload(connection, input.escalationId);
 }
 
@@ -713,6 +814,7 @@ function resolveFurther(
     fromLevel: mode === "next_level" ? row.level + 1 : row.level,
     kind: row.kind,
     ladder: policy.ladder,
+    namedKeepRaiser: ladderOf(row.context) !== null,
     // A flagged escalation (nobody independent) stays flagged when it is repeated.
     onNoTarget: mode === "same_level" && row.noIndependentTarget ? "directors" : "none",
     preferredUserId,

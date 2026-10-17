@@ -56,10 +56,9 @@ describe("137_job_decision_requests.sql is additive and safe to run twice", () =
     expect(migrationFromSql(FILE, raw)).toMatchObject({ transactional: true, transactionNote: null });
   });
 
-  it("creates the requests table and no JobDecisions table (that is slice A2, migration 138)", () => {
+  it("creates the requests table and no JobDecisions table (that is migration 138's)", () => {
     expect(code).toMatch(/CREATE TABLE dbo\.JobDecisionRequests/);
     expect(code).not.toMatch(/JobDecisions\b/);
-    expect(readdirSync(DIR).some((f) => f.startsWith("138_"))).toBe(false);
     expect(readdirSync(DIR).filter((f) => f.startsWith("137_"))).toEqual([FILE]);
   });
 });

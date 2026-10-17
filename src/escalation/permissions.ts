@@ -11,7 +11,7 @@
 // The inbox query (store.ts buildListWhere) expresses the same visibility in
 // SQL; keep the two in step.
 
-import { isDecisionRow, namedTargetIds } from "./decisionRows";
+import { isDecisionRow, isNextStepRow, namedTargetIds } from "./decisionRows";
 import { EscalationError } from "./errors";
 import { isAbove, normaliseRole, ROLES, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { EscalationRow, Viewer } from "./types";
@@ -98,14 +98,16 @@ export interface ActionAvailability {
 /** What the viewer can do with this row right now, for the inbox's buttons. */
 export function availableActions(viewer: Viewer, row: EscalationRow): ActionAvailability {
   const live = row.status === "open" || row.status === "acknowledged";
+  // A decision request is answered and a next step is done, on the job: the engine
+  // refuses to acknowledge, resolve or withdraw either from here, and so do the buttons.
+  const domainEnds = isDecisionRow(row) || isNextStepRow(row);
   return {
-    // A decision request is answered, not acknowledged (engine.acknowledge refuses it).
-    acknowledge: live && row.status === "open" && !isDecisionRow(row) && canAct(viewer, row),
+    acknowledge: live && row.status === "open" && !domainEnds && canAct(viewer, row),
     escalateFurther: live && canEscalateFurther(viewer, row),
     // Authority escalations end with the decision on the subject.
-    resolve: live && row.kind === "attention" && canAct(viewer, row),
+    resolve: live && row.kind === "attention" && !domainEnds && canAct(viewer, row),
     // A decision request is withdrawn from the request, which ends this too.
-    withdraw: row.status === "open" && !isDecisionRow(row) && canWithdraw(viewer, row),
+    withdraw: row.status === "open" && !domainEnds && canWithdraw(viewer, row),
   };
 }
 

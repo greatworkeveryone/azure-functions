@@ -374,3 +374,77 @@ describe("roles", () => {
     expect(isAbove("director", null)).toBe(false);
   });
 });
+
+// ── A level of named people keeps the raiser (jobs plan A2) ──────────────────
+
+describe("a level of named people keeps the raiser only when the ladder is about them (namedKeepRaiser)", () => {
+  const NEXT_STEP: LadderEntry[] = [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }];
+  const person = (u: DirectoryUser) => ({ email: u.email, role: u.role, userId: u.userId });
+
+  it("leaves the raiser out of the people named when the caller says nothing, as for a decision request: nobody asks themselves", () => {
+    const target = resolve({ ladder: NEXT_STEP, raiser: person(DEE), userTargets: [DEE.userId, CAM.userId] });
+    expect(target?.users).toEqual([CAM]);
+    expect(target).toMatchObject({ targetUserId: CAM.userId });
+  });
+
+  it("keeps them when asked to: a next step's owner is the person the ladder is about, and the level is theirs", () => {
+    const target = resolve({ ladder: NEXT_STEP, namedKeepRaiser: true, raiser: person(DEE), userTargets: [DEE.userId] });
+    expect(target).toMatchObject({ level: 1, source: "user_target", targetUserId: DEE.userId });
+    expect(target?.users).toEqual([DEE]);
+  });
+
+  it("still leaves the raiser out of every role level, so a step is never escalated to the person it is about", () => {
+    const target = resolve({
+      fromLevel: 2,
+      ladder: [{ userTarget: true }, { role: "facilities_manager", slaHours: 16 }],
+      namedKeepRaiser: true,
+      raiser: person(ADAM),
+      userTargets: [ADAM.userId],
+    });
+    expect(target?.users).toEqual([BEA]);
+  });
+
+  it("goes to the manager of the person the ladder is about: a step for an accounts person moves up to the accounts manager, then a director", () => {
+    const ladderPerson = { email: GUS.email, role: "accounts", userId: GUS.userId };
+    const first = resolve({ ladder: NEXT_STEP, namedKeepRaiser: true, raiser: ladderPerson, userTargets: [GUS.userId] });
+    expect(first).toMatchObject({ level: 1, targetUserId: GUS.userId });
+
+    const second = resolve({ fromLevel: 2, ladder: NEXT_STEP, namedKeepRaiser: true, raiser: ladderPerson, userTargets: [GUS.userId] });
+    expect(second).toMatchObject({ level: 2, role: "accounts_manager", slaHours: 16, source: "raiser_manager" });
+    expect(second?.users).toEqual([CAM]);
+
+    const third = resolve({ fromLevel: 3, ladder: NEXT_STEP, namedKeepRaiser: true, raiser: ladderPerson, userTargets: [GUS.userId] });
+    expect(third).toMatchObject({ level: 3, role: "director" });
+    expect(third?.users).toEqual([DEE, ELI]);
+  });
+
+  it("is a role's manager too, when the step is for a whole role and no one person: the ladder is the role's", () => {
+    const second = resolve({ fromLevel: 2, ladder: NEXT_STEP, namedKeepRaiser: true, raiser: { role: "facilities", userId: null }, userTargets: [FAY.userId] });
+    expect(second).toMatchObject({ level: 2, role: "facilities_manager" });
+    expect(second?.users).toEqual([ADAM, BEA]);
+  });
+
+  it("does not escalate a director's step to that director: the other directors are the next level", () => {
+    const second = resolve({ fromLevel: 2, ladder: NEXT_STEP, namedKeepRaiser: true, raiser: person(DEE), userTargets: [DEE.userId] });
+    expect(second).toMatchObject({ level: 2, role: "director" });
+    expect(second?.users).toEqual([ELI]);
+  });
+
+  it("still leaves out whoever prepared the subject of an authority escalation, named or not, whatever it is asked", () => {
+    const target = resolve({
+      excludeUserIds: [CAM.userId],
+      kind: "authority",
+      ladder: [{ userTarget: true }],
+      namedKeepRaiser: true,
+      raiser: person(FAY),
+      userTargets: [CAM.userId, DEE.userId],
+    });
+    expect(target?.users).toEqual([DEE]);
+  });
+
+  it("changes nothing for the people asked a decision request, who are never the asker", () => {
+    const target = resolve({ ladder: NEXT_STEP, raiser: person(GUS), userTargets: [CAM.userId, DEE.userId] });
+    expect(target?.users).toEqual([CAM, DEE]);
+    expect(target).toMatchObject({ role: null, targetUserId: null });
+  });
+});

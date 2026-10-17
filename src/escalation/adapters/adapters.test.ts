@@ -151,6 +151,41 @@ describe("the job adapter", () => {
     expect(await jobAdapter.isConditionActive(conn, ref("job.manual"), NOW)).toBe(true);
   });
 
+  describe("a next step (job.next_step, jobs plan A2)", () => {
+    const ref = (subjectId = "12") => ({ policyKey: "job.next_step", subjectId, subjectType: "job" });
+
+    it("holds while the job is live and a decision on it has handed on a step that is not closed", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ IsOpen: 1 }]);
+
+      expect(await jobAdapter.isConditionActive(conn, ref(), NOW)).toBe(true);
+
+      const [, sql, params] = lastCall();
+      expect(sql).toContain("FROM dbo.JobDecisions d");
+      expect(sql).toContain("d.NextStep IS NOT NULL AND d.NextStepClosedAt IS NULL");
+      expect(sql).toContain("j.IsArchived = 0 AND j.Status <> N'Done'");
+      expect(params).toEqual([{ name: "JobID", type: TYPES.Int, value: 12 }]);
+    });
+
+    it("no longer holds once the step is closed, or the job is archived or done", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ IsOpen: 0 }]);
+      expect(await jobAdapter.isConditionActive(conn, ref(), NOW)).toBe(false);
+      db.executeQuery.mockResolvedValueOnce([]);
+      expect(await jobAdapter.isConditionActive(conn, ref(), NOW)).toBe(false);
+    });
+
+    it("is not asked of the job's own facts: one query, about the decisions, not the job", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ IsOpen: 1 }]);
+      await jobAdapter.isConditionActive(conn, ref(), NOW);
+      expect(db.executeQuery).toHaveBeenCalledTimes(1);
+      expect(lastCall()[1]).not.toContain("dbo.JobInvoices");
+    });
+
+    it("never holds for a subject that isn't a job", async () => {
+      expect(await jobAdapter.isConditionActive(conn, ref("abc"), NOW)).toBe(false);
+      expect(db.executeQuery).not.toHaveBeenCalled();
+    });
+  });
+
   describe("keeping Jobs.EscalatedAt in step (the dashboard flag)", () => {
     it("sets it while any escalation on the job is open, and clears it when none is", async () => {
       db.executeQuery.mockResolvedValueOnce([]);
@@ -167,16 +202,17 @@ describe("the job adapter", () => {
         { name: "JobID", type: TYPES.Int, value: 12 },
         { name: "SubjectId", type: TYPES.NVarChar, value: "12" },
         { name: "DecisionPolicy", type: TYPES.NVarChar, value: "job.decision_pending" },
+        { name: "NextStepPolicy", type: TYPES.NVarChar, value: "job.next_step" },
       ]);
     });
 
-    it("does not count a decision request that has only been asked: it flags the job once it has moved up", async () => {
+    it("does not count a decision request that has only been asked, nor a next step that has only been handed on: either flags the job once it has moved up", async () => {
       db.executeQuery.mockResolvedValueOnce([]);
 
       await jobAdapter.onChange?.(conn, { subjectId: "12" } as never);
 
       const sql = lastCall()[1] as string;
-      expect(sql).toContain("(e.PolicyKey <> @DecisionPolicy OR e.ParentEscalationId IS NOT NULL)");
+      expect(sql).toContain("(e.PolicyKey NOT IN (@DecisionPolicy, @NextStepPolicy) OR e.ParentEscalationId IS NOT NULL)");
     });
 
     it("leaves acknowledged escalations out of the flag: acknowledging clears it", async () => {

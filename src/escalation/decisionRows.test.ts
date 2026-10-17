@@ -43,10 +43,27 @@ describe("decisionOf", () => {
       callThem: false,
       jobLabel: "Job #12 · Superseded lighting invoice · 25 Temira Crescent",
       question: "Pay the superseded invoice?",
+      reaskOf: null,
       requestId: 7,
       respondBy: new Date("2026-10-20T07:30:00.000Z"),
       tier: "soon",
     });
+  });
+
+  it("reads a deferred question coming round again: who first asked, which decision it follows and the day it was put off to", () => {
+    const reaskOf = { askedBy: "Alana", decisionId: 4, deferredUntil: "2026-10-23" };
+    expect(decisionOf(row({ context: { decision: { ...decision, reaskOf } } }))?.reaskOf).toEqual(reaskOf);
+    expect(decisionOf(row({ context: { decision: { ...decision, reaskOf: { decisionId: 4, deferredUntil: "2026-10-23" } } } }))?.reaskOf).toEqual({
+      askedBy: "",
+      decisionId: 4,
+      deferredUntil: "2026-10-23",
+    });
+  });
+
+  it("reads no re-ask from a block that is not one", () => {
+    for (const reaskOf of [null, "yes", 4, {}, { decisionId: "4", deferredUntil: "2026-10-23" }, { decisionId: 4 }]) {
+      expect(decisionOf(row({ context: { decision: { ...decision, reaskOf } } }))?.reaskOf).toBeNull();
+    }
   });
 
   it("reads an emergency, which has no deadline", () => {
