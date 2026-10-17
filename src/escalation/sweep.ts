@@ -5,6 +5,9 @@
 //  1. Attention escalations whose condition has cleared end (condition_cleared).
 //  2. Open escalations past their SLA move up a level, or are repeated as a
 //     reminder at the top (autoReescalate on the policy decides).
+//     Then the rows that carry a reminder schedule (a decision request's) are
+//     emailed when one of their times has come: no new row, and not a row that has
+//     just moved up (reminders.ts).
 //  3. Jobs that meet a job policy and have no live escalation for it get one:
 //     stalled and unacknowledged, unassigned, quote not back, invoice waiting,
 //     past due. A policy switched off in dbo.EscalationPolicies is skipped, and
@@ -42,6 +45,7 @@ import {
   type SweepJobPolicy,
 } from "./adapters/jobRules";
 import { countExhaustedNotifications, SYSTEM_SUBJECTS } from "./adapters/system";
+import { dueReminder } from "./reminders";
 import { eventForRetry, isRetryDue, notifyTargets, type NotifyEvent, type NotifyOptions, type NotifyOutcome } from "./notifier";
 import { getPolicy } from "./policies";
 import { latestKey, latestTimesBySubject, listLiveEscalations, type LatestEscalationTimes } from "./store";
@@ -67,6 +71,8 @@ export interface SweepReport {
   notificationsRetried: number;
   raised: number;
   reminded: number;
+  /** Scheduled reminders emailed to the people a row is for (a decision request's). */
+  scheduledReminders: number;
   /** Conditions a person already dealt with, so not raised again. */
   skippedAsHandled: number;
   superseded: number;
@@ -137,6 +143,7 @@ class Run {
       notificationsRetried: 0,
       raised: 0,
       reminded: 0,
+      scheduledReminders: 0,
       skippedAsHandled: 0,
       superseded: 0,
       truncated: false,
@@ -255,6 +262,33 @@ async function moveUpOverdue(run: Run): Promise<void> {
       });
       if (mode === "next_level") run.report.superseded += 1;
       else run.report.reminded += 1;
+    });
+  }
+}
+
+// ── 2b. Scheduled reminders ──────────────────────────────────────────────────
+
+async function sendScheduledReminders(run: Run): Promise<void> {
+  for (const row of await run.deps.listLiveEscalations(run.connection)) {
+    if (!dueReminder(row, run.now)) continue;
+    if (!run.take()) return;
+
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would remind the people on #${row.escalationId} ${row.policyKey} on ${row.subjectType} ${row.subjectId}`);
+      run.report.scheduledReminders += 1;
+      continue;
+    }
+    await run.attempt(`reminding on escalation #${row.escalationId}`, async () => {
+      // A reminder that goes through costs the row no attempts; one that fails does,
+      // and the next run tries again (the row is still due) until one gets through.
+      const outcome = await run.deps.notifyTargets(run.connection, row, "reminder", { ...run.notifyOptions(), countAttempts: "failures" });
+      if (outcome.state === "sent") {
+        run.report.scheduledReminders += 1;
+      } else if (outcome.state === "failed") {
+        throw new Error(outcome.error ?? "the reminder could not be sent");
+      } else {
+        run.options.log(`escalationSweep: no reminder sent on #${row.escalationId} (${outcome.state}${outcome.error ? `: ${outcome.error}` : ""})`);
+      }
     });
   }
 }
@@ -494,6 +528,7 @@ export async function runSweep(
   const steps: [string, (run: Run) => Promise<void>][] = [
     ["ending cleared conditions", endClearedConditions],
     ["moving up overdue escalations", moveUpOverdue],
+    ["sending scheduled reminders", sendScheduledReminders],
     ["raising for jobs", raiseForJobs],
     ["restarting on follow-up emails", restartOnFollowUps],
     ["retrying notifications", retryNotifications],
@@ -515,7 +550,7 @@ export async function runSweep(
   const r = run.report;
   options.log(
     `escalationSweep: ${options.dryRun ? "DRY RUN (nothing written), would" : "done,"} raised=${r.raised} superseded=${r.superseded} reminded=${r.reminded} ` +
-      `autoResolved=${r.autoResolved} followUps=${r.followUps} notificationsRetried=${r.notificationsRetried} ` +
+      `scheduledReminders=${r.scheduledReminders} autoResolved=${r.autoResolved} followUps=${r.followUps} notificationsRetried=${r.notificationsRetried} ` +
       `healthRaised=${r.healthRaised} healthResolved=${r.healthResolved} skippedAsHandled=${r.skippedAsHandled} ` +
       `errors=${r.errors.length}${r.truncated ? " (stopped at the action limit; the rest waits for the next run)" : ""}`,
   );

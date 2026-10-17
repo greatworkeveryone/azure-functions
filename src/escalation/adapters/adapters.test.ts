@@ -166,7 +166,17 @@ describe("the job adapter", () => {
       expect(params).toEqual([
         { name: "JobID", type: TYPES.Int, value: 12 },
         { name: "SubjectId", type: TYPES.NVarChar, value: "12" },
+        { name: "DecisionPolicy", type: TYPES.NVarChar, value: "job.decision_pending" },
       ]);
+    });
+
+    it("does not count a decision request that has only been asked: it flags the job once it has moved up", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+
+      await jobAdapter.onChange?.(conn, { subjectId: "12" } as never);
+
+      const sql = lastCall()[1] as string;
+      expect(sql).toContain("(e.PolicyKey <> @DecisionPolicy OR e.ParentEscalationId IS NOT NULL)");
     });
 
     it("leaves acknowledged escalations out of the flag: acknowledging clears it", async () => {

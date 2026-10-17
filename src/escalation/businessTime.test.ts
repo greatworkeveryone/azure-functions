@@ -1,16 +1,24 @@
 /// <reference types="jest" />
 import {
+  addBusinessDays,
   addBusinessHours,
+  addCalendarDays,
   addClockHours,
   addWallHours,
+  businessDayEnd,
+  businessDayStart,
   businessDaysToHours,
   businessHoursElapsed,
   darwinDateKey,
   darwinMinuteOfDay,
   holidaysFromEnv,
   isBusinessDay,
+  isDateKey,
+  nextBusinessDay,
+  nextBusinessHoursInstant,
   NO_HOLIDAYS,
   parseHolidays,
+  previousBusinessDay,
 } from "./businessTime";
 
 // 2026-10-12 is a Monday, so 13 Tue, 14 Wed, 15 Thu, 16 Fri, 17 Sat, 18 Sun, 19 Mon.
@@ -240,5 +248,131 @@ describe("Darwin calendar helpers", () => {
   it("gives the Darwin minute of the day", () => {
     expect(darwinMinuteOfDay(darwin("2026-10-12 15:00"))).toBe(15 * 60);
     expect(darwinMinuteOfDay(darwin("2026-10-12 00:05"))).toBe(5);
+  });
+});
+
+// ── Calendar days and the business day's edges (decision-request tiers) ─────
+
+const days = (...dates: string[]) => parseHolidays(dates.join(",")).holidays;
+
+describe("isDateKey", () => {
+  it("accepts only a real YYYY-MM-DD date", () => {
+    expect(isDateKey("2026-10-12")).toBe(true);
+    expect(isDateKey("2028-02-29")).toBe(true);
+    for (const bad of ["2026-02-29", "2026-13-01", "2026-10-32", "12/10/2026", "2026-1-5", "", " 2026-10-12", null, undefined, 20261012]) {
+      expect(isDateKey(bad)).toBe(false);
+    }
+  });
+});
+
+describe("addCalendarDays", () => {
+  it("moves a date by whole days, across month and year ends and in either direction", () => {
+    expect(addCalendarDays("2026-10-12", 7)).toBe("2026-10-19");
+    expect(addCalendarDays("2026-10-31", 1)).toBe("2026-11-01");
+    expect(addCalendarDays("2026-12-31", 1)).toBe("2027-01-01");
+    expect(addCalendarDays("2026-03-01", -1)).toBe("2026-02-28");
+    expect(addCalendarDays("2028-03-01", -1)).toBe("2028-02-29");
+    expect(addCalendarDays("2026-10-12", 0)).toBe("2026-10-12");
+  });
+
+  it("refuses a part of a day and text that is not a date", () => {
+    expect(() => addCalendarDays("2026-10-12", 1.5)).toThrow(RangeError);
+    expect(() => addCalendarDays("tomorrow", 1)).toThrow(RangeError);
+  });
+});
+
+describe("nextBusinessDay and previousBusinessDay", () => {
+  it("return a business day as it is", () => {
+    expect(nextBusinessDay("2026-10-12", NO_HOLIDAYS)).toBe("2026-10-12");
+    expect(previousBusinessDay("2026-10-16", NO_HOLIDAYS)).toBe("2026-10-16");
+  });
+
+  it("skip the weekend in each direction", () => {
+    expect(nextBusinessDay("2026-10-17", NO_HOLIDAYS)).toBe("2026-10-19");
+    expect(nextBusinessDay("2026-10-18", NO_HOLIDAYS)).toBe("2026-10-19");
+    expect(previousBusinessDay("2026-10-17", NO_HOLIDAYS)).toBe("2026-10-16");
+    expect(previousBusinessDay("2026-10-18", NO_HOLIDAYS)).toBe("2026-10-16");
+  });
+
+  it("skip public holidays, a run of them included", () => {
+    expect(nextBusinessDay("2026-10-19", days("2026-10-19"))).toBe("2026-10-20");
+    expect(previousBusinessDay("2026-10-19", days("2026-10-19"))).toBe("2026-10-16");
+    // Good Friday through Easter Monday style long weekend
+    const long = days("2026-10-16", "2026-10-19");
+    expect(nextBusinessDay("2026-10-16", long)).toBe("2026-10-20");
+    expect(previousBusinessDay("2026-10-19", long)).toBe("2026-10-15");
+  });
+
+  it("say so when a holiday list has swallowed the calendar", () => {
+    const everyDay = new Set<string>();
+    for (let i = 0; i < 8000; i += 1) everyDay.add(addCalendarDays("2016-01-01", i));
+    expect(() => nextBusinessDay("2026-10-12", everyDay)).toThrow(RangeError);
+    expect(() => previousBusinessDay("2026-10-12", everyDay)).toThrow(RangeError);
+  });
+});
+
+describe("addBusinessDays", () => {
+  it("counts business days strictly after the date", () => {
+    expect(addBusinessDays("2026-10-12", 0, NO_HOLIDAYS)).toBe("2026-10-12");
+    expect(addBusinessDays("2026-10-12", 1, NO_HOLIDAYS)).toBe("2026-10-13");
+    expect(addBusinessDays("2026-10-12", 5, NO_HOLIDAYS)).toBe("2026-10-19");
+  });
+
+  it("starts from a weekend or a holiday as if from the day before it", () => {
+    expect(addBusinessDays("2026-10-16", 1, NO_HOLIDAYS)).toBe("2026-10-19");
+    expect(addBusinessDays("2026-10-17", 1, NO_HOLIDAYS)).toBe("2026-10-19");
+    expect(addBusinessDays("2026-10-18", 1, NO_HOLIDAYS)).toBe("2026-10-19");
+    expect(addBusinessDays("2026-10-16", 1, days("2026-10-19"))).toBe("2026-10-20");
+    expect(addBusinessDays("2026-10-12", 3, days("2026-10-14"))).toBe("2026-10-16");
+  });
+
+  it("refuses a negative or part of a day", () => {
+    expect(() => addBusinessDays("2026-10-12", -1, NO_HOLIDAYS)).toThrow(RangeError);
+    expect(() => addBusinessDays("2026-10-12", 0.5, NO_HOLIDAYS)).toThrow(RangeError);
+  });
+});
+
+describe("businessDayStart and businessDayEnd", () => {
+  it("are 08:30 and 17:00 Darwin", () => {
+    expect(show(businessDayStart("2026-10-12"))).toBe("2026-10-12 08:30");
+    expect(show(businessDayEnd("2026-10-12"))).toBe("2026-10-12 17:00");
+    expect(businessDayStart("2026-10-12").toISOString()).toBe("2026-10-11T23:00:00.000Z");
+    expect(businessDayEnd("2026-10-12").toISOString()).toBe("2026-10-12T07:30:00.000Z");
+  });
+
+  it("do not depend on whether the day is a business day", () => {
+    expect(show(businessDayEnd("2026-10-17"))).toBe("2026-10-17 17:00");
+    expect(() => businessDayStart("17/10/2026")).toThrow(RangeError);
+  });
+});
+
+describe("nextBusinessHoursInstant", () => {
+  const next = (start: string, holidays = NO_HOLIDAYS) => show(nextBusinessHoursInstant(darwin(start), holidays));
+
+  it("returns an instant inside business hours as it is, to the minute", () => {
+    expect(next("2026-10-12 08:30")).toBe("2026-10-12 08:30");
+    expect(next("2026-10-12 12:47")).toBe("2026-10-12 12:47");
+    expect(next("2026-10-12 16:59")).toBe("2026-10-12 16:59");
+  });
+
+  it("waits for opening before it, and for the next business day from 17:00", () => {
+    expect(next("2026-10-12 06:15")).toBe("2026-10-12 08:30");
+    expect(next("2026-10-12 08:29")).toBe("2026-10-12 08:30");
+    expect(next("2026-10-12 17:00")).toBe("2026-10-13 08:30");
+    expect(next("2026-10-12 23:59")).toBe("2026-10-13 08:30");
+  });
+
+  it("moves a weekend or a holiday to the next business morning", () => {
+    expect(next("2026-10-16 18:00")).toBe("2026-10-19 08:30");
+    expect(next("2026-10-17 12:00")).toBe("2026-10-19 08:30");
+    expect(next("2026-10-18 03:00")).toBe("2026-10-19 08:30");
+    expect(next("2026-10-19 12:00", days("2026-10-19"))).toBe("2026-10-20 08:30");
+    expect(next("2026-10-16 18:00", days("2026-10-19"))).toBe("2026-10-20 08:30");
+  });
+
+  it("is a new Date, never the one passed in", () => {
+    const start = darwin("2026-10-12 12:00");
+    expect(nextBusinessHoursInstant(start, NO_HOLIDAYS)).not.toBe(start);
+    expect(nextBusinessHoursInstant(start, NO_HOLIDAYS).getTime()).toBe(start.getTime());
   });
 });
