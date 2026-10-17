@@ -240,6 +240,9 @@ function installDatabase(): void {
       mockWorld.events.push("job flag");
       return [];
     }
+    // Nothing here has been answered (jobs plan A2 reads the decision beside the request).
+    if (/FROM dbo\.JobDecisions WHERE RequestId = @RequestId/.test(text)) return [];
+    if (/SELECT TOP 1 .* FROM dbo\.JobDecisions WHERE JobId = @JobId ORDER BY DecisionId DESC/.test(text)) return [];
     if (/FROM dbo\.Attachments WHERE Id = @AttachmentId AND JobID = @JobID/.test(text)) {
       return mockWorld.attachments.get(p.AttachmentId as number) === p.JobID ? [{ Id: p.AttachmentId }] : [];
     }
