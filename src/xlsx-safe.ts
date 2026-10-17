@@ -56,7 +56,11 @@ export function assertSafeXlsx(buffer: Buffer, limits: XlsxLimits = DEFAULT_XLSX
   const end = findEnd(buffer);
   const count = buffer.readUInt16LE(end + 10);
   if (count > limits.maxEntries) throw new XlsxRejectedError(TOO_LARGE);
-  let cursor = buffer.readUInt32LE(end + 16);
+  const directoryStart = buffer.readUInt32LE(end + 16);
+  // The directory must end exactly at the end record and hold exactly the entries it declares:
+  // JSZip reads every central entry it finds, and shifts offsets when there are bytes before the zip.
+  if (buffer.readUInt16LE(end + 8) !== count || directoryStart + buffer.readUInt32LE(end + 12) !== end) throw new XlsxRejectedError(UNREADABLE);
+  let cursor = directoryStart;
   let total = 0;
   for (let index = 0; index < count; index += 1) {
     if (cursor + 46 > buffer.length || buffer.readUInt32LE(cursor) !== CENTRAL_SIGNATURE) throw new XlsxRejectedError(UNREADABLE);
@@ -75,4 +79,5 @@ export function assertSafeXlsx(buffer: Buffer, limits: XlsxLimits = DEFAULT_XLSX
     if (size > cap) throw new XlsxRejectedError(TOO_LARGE);
     total += size;
   }
+  if (cursor !== end) throw new XlsxRejectedError(UNREADABLE);
 }

@@ -7,11 +7,14 @@
 
 import { addDays, nextDueAfter } from "./facilitiesRules";
 import type { DefectsPeriodApi } from "./defectsPeriods";
+import type { SchedulerMode } from "./schedulerMode";
 import { seriesOf, type ScheduleApi } from "./serviceSchedules";
 
 export type ServiceStatus = "job_open" | "overdue" | "scheduled";
 
 export interface OverviewService {
+  /** The job made for this overdue due date was archived: there is nothing to chase, only the outcome to record. */
+  archivedJobId: number | null;
   category: string;
   contractorName: string | null;
   dueDate: string;
@@ -66,6 +69,8 @@ export interface MaintenanceOverview {
   days: number;
   /** Any live schedule exists (in this scope): the page may say "scheduled servicing". */
   hasSchedules: boolean;
+  /** What the daily scheduler is doing: the page only promises jobs when this is "live". */
+  schedulerMode: SchedulerMode;
   /** Live schedules set up in this scope, whether or not anything is due in the window. */
   scheduleCount: number;
   /** Jobs the scheduler created, so the plain jobs list can leave them out. */
@@ -101,6 +106,7 @@ export interface OverviewInput {
   periods: DefectsPeriodApi[];
   runs: OverviewRun[];
   scheduleCount: number;
+  schedulerMode: SchedulerMode;
   schedules: ScheduleApi[];
   today: string;
 }
@@ -113,7 +119,9 @@ const isOpenJob = (run: OverviewRun | undefined): run is OverviewRun =>
 function servicesFor(schedule: ScheduleApi, runs: OverviewRun[], today: string, until: string): OverviewService[] {
   const current = runs.find((run) => run.serviceScheduleId === schedule.serviceScheduleId && run.dueDate === schedule.nextDue);
   const open = isOpenJob(current) ? current : undefined;
+  const archivedJobId = schedule.overdue && current?.jobId != null && current.jobArchived ? current.jobId : null;
   const base = {
+    archivedJobId: null,
     category: schedule.category,
     contractorName: schedule.contractorName,
     intervalCount: schedule.intervalCount,
@@ -128,7 +136,8 @@ function servicesFor(schedule: ScheduleApi, runs: OverviewRun[], today: string, 
       ...base,
       dueDate: schedule.nextDue,
       generatesOn: schedule.generatesOn,
-      jobId: open?.jobId ?? (schedule.overdue ? current?.jobId ?? null : null),
+      archivedJobId,
+      jobId: open?.jobId ?? (schedule.overdue && archivedJobId === null ? current?.jobId ?? null : null),
       jobStatus: open?.jobStatus ?? null,
       occurrence: 0,
       status: schedule.overdue ? "overdue" : open ? "job_open" : "scheduled",
@@ -220,6 +229,7 @@ export function assembleOverview(input: OverviewInput): MaintenanceOverview {
     days: input.days,
     hasSchedules: input.hasSchedules,
     scheduleCount: input.scheduleCount,
+    schedulerMode: input.schedulerMode,
     scheduledJobIds: [...new Set(input.runs.map((run) => run.jobId).filter((id): id is number => id !== null))],
     today: input.today,
     until,
