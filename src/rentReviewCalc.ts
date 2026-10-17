@@ -89,6 +89,9 @@ export interface RentReviewCalc {
   computedBy: { name: string; userId: number | null };
   cpi?: CalcCpi;
   currentAnnual: number;
+  /** The basis terms this review was worked on that differ from the lease's
+   *  (leaseDepartures): any makes it a departure, written as an `other` row. */
+  departures?: string[];
   fixedPercent?: number;
   manual?: { explanation: string; newAnnual: number };
   method: CalcMethod;

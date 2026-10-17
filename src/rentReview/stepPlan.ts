@@ -16,12 +16,15 @@
 // CPI row to the lease's cap and floor and holds every review row of a ratchet
 // lease at no decrease, using the tenancy's own terms. A computed CPI result on
 // the lease's terms is written as the CPI row it is (both index values on it).
-// Anything the engine would compute differently — an override, a basis that
-// departs from the lease — is written as a rate the engine reproduces to the
-// cent: first on the review's own method, then, when the lease's CPI cap or
-// floor would clamp that rate, as an `other` row (which nothing clamps), still
-// carrying the index pair for the record. A rent the engine can't reproduce at
-// all (a decrease on a ratchet lease) is refused by the caller before this.
+// A CPI review that departs from the lease (an override, or a basis edited away
+// from it) is written as an `other` row with the exact rate the engine
+// reproduces to the cent: nothing clamps an `other` row, and it keeps both
+// index values, so the next CPI row still ratios against this review's index
+// (the engine's baseline is the last row that carries one). A CPI row written as
+// a bare rate would drop the index and break that chain. A fixed review is its
+// fixed row, else a fixed row at the exact rate, else an `other` row. A rent the
+// engine can't reproduce at all (a decrease on a ratchet lease, a change past
+// 100%) is refused: at calculate and submit, so nobody approves one.
 
 import {
   closeOpenPredecessor,
@@ -189,9 +192,10 @@ export function exactRate(
 export type Representation =
   /** The method as it stands: a CPI row with both index values, a fixed row with its %. */
   | "natural"
-  /** The review's method with an exact rate (a CPI row without its index pair, so the rate stands). */
+  /** A fixed row with an exact rate (an override of a fixed review). */
   | "method_rate"
-  /** An `other` row with an exact rate, which no lease cap or floor clamps. */
+  /** An `other` row with an exact rate, which no lease cap or floor clamps; a
+   *  CPI review's keeps both index values. */
   | "other_rate";
 
 export interface RepresentInput {
@@ -201,6 +205,9 @@ export interface RepresentInput {
   currentAnnual: number;
   /** CPI reviews: the two index values the review was worked from. */
   cpi?: { current: number; previous: number } | null;
+  /** The rent isn't the lease's own result: an override, or a basis that departs
+   *  from the lease. A CPI review is then never written as a CPI row. */
+  departs?: boolean;
   /** The review's method and, for a natural row, its own value. */
   method: "cpi" | "fixed" | "other";
   /** The natural row's rate: the applied % for CPI (informational), the lease % for fixed. */
@@ -223,7 +230,7 @@ export function representStep(input: RepresentInput): RepresentResult {
     return row && !row.pending && row.annual === target ? { ok: true, representation, row, simulation, step } : null;
   };
 
-  if (input.method === "cpi" && cpi) {
+  if (input.method === "cpi" && cpi && !input.departs) {
     const natural = accept(
       appliedStep(base, reviewId, { cpiValue: cpi.current, cpiValuePrev: cpi.previous, methodKind: "cpi", ratePercent: input.naturalRate }),
       "natural",
@@ -232,11 +239,7 @@ export function representStep(input: RepresentInput): RepresentResult {
   } else if (input.method === "fixed") {
     const natural = accept(appliedStep(base, reviewId, { methodKind: "fixed", ratePercent: input.naturalRate }), "natural");
     if (natural) return natural;
-  }
-
-  const prev = cpi ? { cpiValuePrev: cpi.previous } : {};
-  if (input.method !== "other") {
-    const make = (ratePercent: number) => appliedStep(base, reviewId, { ...prev, methodKind: input.method, ratePercent });
+    const make = (ratePercent: number) => appliedStep(base, reviewId, { methodKind: "fixed", ratePercent });
     const rate = exactRate(context, make, input.currentAnnual, target);
     const found = rate === null ? null : accept(make(rate), "method_rate");
     if (found) return found;

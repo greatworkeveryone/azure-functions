@@ -18,7 +18,7 @@ import {
   waivedStep,
   type ScheduleContext,
 } from "../rentReview/stepPlan";
-import { diffSteps, type ScheduledRateStep, type ScheduleTerms } from "../scheduledRateStepLogic";
+import { computeScheduleRows, diffSteps, type ScheduledRateStep, type ScheduleTerms } from "../scheduledRateStepLogic";
 
 const COMMENCE: ScheduledRateStep = {
   baseRentPerAnnum: 100000,
@@ -118,23 +118,45 @@ describe("representStep: how an approved rent is written", () => {
     expect(result.row.annual).toBe(103000);
   });
 
-  it("writes an override inside the lease's bounds as a CPI rate the engine reproduces", () => {
-    const result = represent(102500);
-    expect(result).toMatchObject({ ok: true, representation: "method_rate" });
+  it("writes a CPI override, even one inside the lease's bounds, as an `other` rate that keeps both index values (M1)", () => {
+    const result = represent(102500, { departs: true });
+    expect(result).toMatchObject({ ok: true, representation: "other_rate" });
     if (!result.ok) return;
-    expect(result.step.cpiValue).toBeUndefined();
-    expect(result.step.cpiValuePrev).toBe(100);
-    expect(result.step.methodKind).toBe("cpi");
+    expect(result.step).toMatchObject({ cpiValue: 103, cpiValuePrev: 100, methodKind: "other", resolution: "applied", reviewId: "rev-1" });
     expect(result.row.annual).toBe(102500);
   });
 
-  it("writes an override below the lease's floor as an `other` rate, which nothing clamps, keeping the index pair for the record", () => {
+  it("writes an override below the lease's floor as an `other` rate, which nothing clamps, keeping the index pair", () => {
     // The lease floors CPI at 2%; the agreed rent is a 1% rise.
-    const result = represent(101000);
+    const result = represent(101000, { departs: true });
     expect(result).toMatchObject({ ok: true, representation: "other_rate" });
     if (!result.ok) return;
     expect(result.step).toMatchObject({ cpiValue: 103, cpiValuePrev: 100, methodKind: "other" });
     expect(result.row.annual).toBe(101000);
+  });
+
+  it("writes a basis departure the lease's cap would clamp as an unclamped `other` rate with the pair (M1)", () => {
+    // The basis took the cap away; the lease's terms cap CPI at 2%, so a CPI row would be held to 102,000.
+    const capped = context([COMMENCE, REVIEW], { cpiCapPercent: 2, cpiFloorPercent: null, reviewRatchet: false });
+    const result = represent(103000, { context: capped, departs: true });
+    expect(result).toMatchObject({ ok: true, representation: "other_rate" });
+    if (!result.ok) return;
+    expect(result.step).toMatchObject({ cpiValue: 103, cpiValuePrev: 100, methodKind: "other" });
+    expect(result.row.annual).toBe(103000);
+  });
+
+  it("never writes a CPI review as a bare rate: a departing review is not written as its CPI row even when the figures agree", () => {
+    const result = represent(103000, { departs: true });
+    expect(result).toMatchObject({ ok: true, representation: "other_rate" });
+  });
+
+  it("writes a fixed override as a fixed row at the exact rate", () => {
+    const result = represent(103333.33, { cpi: null, departs: true, method: "fixed", naturalRate: 3 });
+    expect(result).toMatchObject({ ok: true, representation: "method_rate" });
+    if (!result.ok) return;
+    expect(result.step).toMatchObject({ methodKind: "fixed" });
+    expect(result.step.cpiValue).toBeUndefined();
+    expect(result.row.annual).toBe(103333.33);
   });
 
   it("can't write a decrease on a ratchet lease at all (the caller refuses it first)", () => {
@@ -170,6 +192,45 @@ describe("representStep: how an approved rent is written", () => {
       expect(result).toMatchObject({ ok: true });
       if (result.ok) expect(result.row.annual).toBe(target);
     }
+  });
+});
+
+// The review's scenario s1 (scratchpad review-tmp/scripts/s1.js): a CPI review
+// overridden to 102,000 on a lease capped at 5%, then next year's CPI row keyed
+// by hand with only its new index value, as the schedule editor prefills it.
+describe("M1: an overridden CPI review keeps the index chain (scenario s1)", () => {
+  const lease: ScheduleTerms = { cpiCapPercent: 5, cpiFloorPercent: null, reviewRatchet: false };
+  const commencement: ScheduledRateStep = { baseRentPerAnnum: 100000, cpiValue: 130, effectiveFrom: "2024-07-01", id: "c", methodKind: "commencement", ratePercent: 0, sqm: 250 };
+  const r25: ScheduledRateStep = { effectiveFrom: "2025-07-01", id: "r25", methodKind: "cpi", ratePercent: 0 };
+  const r26: ScheduledRateStep = { effectiveFrom: "2026-07-01", id: "r26", methodKind: "cpi", ratePercent: 0 };
+  const ctx: ScheduleContext = { fallbackAnnual: 0, fallbackSqm: 250, lease, steps: [commencement, r25, r26] };
+
+  it("writes the override as an `other` row carrying 134 / 130, so 2026 ratios 138 / 134, not 138 / 130", () => {
+    const placed = reviewRow(ctx.steps, { method: "cpi", newStepId: "new", reviewId: "R25", scheduledFor: "2025-07-01", stepId: "r25" });
+    if (!placed.ok) throw new Error("no row");
+    const current = simulate(ctx, waivedStep(placed.base, "R25")).row?.annual as number;
+    expect(current).toBe(100000);
+    const result = representStep({
+      base: placed.base,
+      context: ctx,
+      cpi: { current: 134, previous: 130 },
+      currentAnnual: current,
+      departs: true,
+      method: "cpi",
+      naturalRate: 3.0769,
+      reviewId: "R25",
+      target: 102000,
+    });
+    expect(result).toMatchObject({ ok: true, representation: "other_rate" });
+    if (!result.ok) return;
+    expect(result.step).toMatchObject({ cpiValue: 134, cpiValuePrev: 130, methodKind: "other" });
+    expect(result.row.annual).toBe(102000);
+
+    const keyed = result.simulation.placed.steps.map((step) => (step.id === "r26" ? { ...step, cpiValue: 138 } : step));
+    const next = computeScheduleRows(keyed, 0, 250, lease).find((row) => row.step.id === "r26");
+    expect(next?.cpiBaseline).toBe(134);
+    expect(next?.appliedPercent).toBe(Math.round((138 / 134 - 1) * 1_000_000) / 10_000);
+    expect(next?.annual).toBe(Math.round(102000 * (138 / 134) * 100) / 100);
   });
 });
 

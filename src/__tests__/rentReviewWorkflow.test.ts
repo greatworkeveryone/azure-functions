@@ -505,7 +505,7 @@ describe("approveRentReview", () => {
     expect(world.review("rev-1").State).toBe("awaiting_approval");
   });
 
-  it("applies an approved override as a rate the engine reproduces to the cent", async () => {
+  it("applies an approved override as an `other` rate the engine reproduces to the cent, keeping the index pair (M1)", async () => {
     await calculated();
     as(PEOPLE.bo);
     await submit({ override: { newAnnual: 125555.55, reason: "Negotiated" } });
@@ -513,10 +513,12 @@ describe("approveRentReview", () => {
     const res = await approve();
     expect(reviewBody(res).outcome).toMatchObject({ newAnnual: 125555.55 });
     const tenant = world.tenant(7);
-    const rows = computeScheduleRows(parseSteps(String(tenant.ScheduledRateSteps)), 0, 400, { cpiCapPercent: 5, cpiFloorPercent: 1, reviewRatchet: true });
+    const steps = parseSteps(String(tenant.ScheduledRateSteps));
+    const rows = computeScheduleRows(steps, 0, 400, { cpiCapPercent: 5, cpiFloorPercent: 1, reviewRatchet: true });
     expect(rows.at(-1)?.annual).toBe(125555.55);
+    expect(steps.find((step) => step.id === STEP_IDS.review)).toMatchObject({ cpiValue: 103.2, cpiValuePrev: 100, methodKind: "other", resolution: "applied" });
     expect(tenant.RentPerAnnum).toBe(125555.55);
-    expect(world.ledgerRows().find((r) => r.Action === "rent_review.apply")?.after).toMatchObject({ representation: "method_rate" });
+    expect(world.ledgerRows().find((r) => r.Action === "rent_review.apply")?.after).toMatchObject({ representation: "other_rate" });
   });
 
   it("only approves a review that is waiting for approval", async () => {

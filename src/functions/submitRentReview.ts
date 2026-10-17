@@ -164,8 +164,8 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
       const scope = { buildingId, correlationId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
       const differenceAnnual = override ? r2(override.newAnnual - calc.newAnnual) : 0;
       const submitted: RentReviewCalc = override
-        ? { ...calc, override: { differenceAnnual, newAnnual: override.newAnnual, reason: override.reason }, sanity }
-        : { ...calc, override: undefined, sanity };
+        ? { ...calc, departures, override: { differenceAnnual, newAnnual: override.newAnnual, reason: override.reason }, sanity }
+        : { ...calc, departures, override: undefined, sanity };
       const chosenFigures = { appliedPercent: chosenPercent, currentAnnual: calc.currentAnnual, newAnnual: chosen };
 
       if (reasons.length === 0) {

@@ -25,12 +25,14 @@ import type { SqlRow } from "../db";
 import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
-import type { RentReviewCalc } from "../rentReviewCalc";
+import { leaseDepartures, type RentReviewCalc } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
-import { diffSteps, parseSteps } from "../scheduledRateStepLogic";
+import { diffSteps, parseSteps, type ScheduledRateStep } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
+import { parseBasis } from "./basis";
 import { RentReviewError } from "./http";
-import { derivedNextReview, refuseClosedTenancy, scheduleOf, tenancyReviewFields, writeTenancyForReview } from "./reviewTenancy";
+import { stepOnDate } from "./method";
+import { derivedNextReview, leaseTermsOf, refuseClosedTenancy, scheduleOf, tenancyReviewFields, writeTenancyForReview } from "./reviewTenancy";
 import { rentPerAnnumIsCache, representStep, reviewRow, simulate, stepChanges, waivedStep } from "./stepPlan";
 import { lockTenancyForReview, totalOccupancySqm } from "./store";
 import { markApproved, type Person } from "./transitions";
@@ -61,6 +63,14 @@ export interface ApplyResult {
   scheduleVersion: number;
   stepId: string;
   tenantId: number;
+}
+
+/** The terms the review departs from the lease on: what submit stored with the
+ *  calc, else worked out again from the review's basis and the lease. */
+function departuresOf(calc: RentReviewCalc, review: SqlRow, tenancy: SqlRow, steps: ScheduledRateStep[], scheduledFor: string): string[] {
+  if (Array.isArray(calc.departures)) return calc.departures;
+  if (calc.method === "other") return [];
+  return leaseDepartures(calc.method, parseBasis(review.Basis) ?? {}, leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor)));
 }
 
 const staleSchedule = (approving: boolean): RentReviewError =>
@@ -107,6 +117,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
     context,
     cpi: calc.cpi ? { current: calc.cpi.current, previous: calc.cpi.previous } : null,
     currentAnnual: calc.currentAnnual,
+    departs: calc.override !== undefined || departuresOf(calc, review, tenancy, steps, scheduledFor).length > 0,
     method: calc.method,
     naturalRate: calc.method === "fixed" ? (calc.fixedPercent ?? 0) : calc.appliedPercent,
     reviewId,
