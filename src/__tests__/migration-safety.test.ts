@@ -21,6 +21,8 @@ const MIGRATIONS = [
   "134_invoice_attachments.sql",
   "125_myob_reference_cache.sql",
   "126_myob_proposals.sql",
+  "119_defects_periods.sql",
+  "120_service_schedules.sql",
 ];
 
 // Destructive-looking phrases that change no data themselves: the trigger that

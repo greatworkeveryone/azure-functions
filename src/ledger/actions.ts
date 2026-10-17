@@ -107,6 +107,24 @@ export const LEDGER_ACTIONS = {
   "rent_review.commence": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.open_window": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.schedule": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  // Defects liability periods (sprint F1, LAUNCH-READINESS §5). Booking planned
+  // maintenance inside a blocking period is an exception with a reason: RP may
+  // be paying for work the builder owes.
+  "defects_period.archive": { exception: true, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.create": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.restore": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "defects_period.update": { exception: false, reasonRequired: false, subjects: ["defects_period"] },
+  "job.defects_override": { exception: true, reasonRequired: true, subjects: ["job"] },
+
+  // Service schedules (sprint F2, WP50). Job generation itself is not a
+  // decision (the schedule was); the run rows record it.
+  "service_schedule.archive": { exception: true, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.create": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  // A manager closing out a due date without a Floorplan job (UX review E4).
+  "service_schedule.mark_serviced": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.restore": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
+  "service_schedule.skip_due": { exception: true, reasonRequired: true, subjects: ["service_schedule"] },
+  "service_schedule.update": { exception: false, reasonRequired: false, subjects: ["service_schedule"] },
 
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one

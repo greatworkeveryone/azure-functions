@@ -1,4 +1,5 @@
 import { AppRole } from "../auth";
+import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
 
 // Who may read the Decision history of a subject: whoever may already read that
 // subject through its own endpoint. Each list is copied from the endpoint named
@@ -40,12 +41,15 @@ const PAYMENT_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIREC
 
 // getMyobControls in functions/getMyobControls.ts (the CFO's MYOB switches and link)
 const MYOB_CONTROL_READ = [AppRole.CFO] as const;
+// getDefectsPeriods / getDefectsPeriod: VIEW_FACILITIES_ROLES in facilitiesRoles.ts (sprint F)
+const FACILITIES_READ = VIEW_FACILITIES_ROLES;
 
 const DEFAULT_READ = [AppRole.DIRECTOR] as const;
 
 // A Map, not an object: subjectType comes from the query string and a plain
 // object would answer "constructor" with Object.prototype's function.
 const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
+  ["defects_period", FACILITIES_READ],
   ["invoice", INVOICE_AND_PO_READ],
   ["job", JOB_READ],
   ["myob_control", MYOB_CONTROL_READ],
@@ -56,6 +60,7 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["quote", QUOTE_READ],
   // A review is read through getRentReview, which has the tenancy's own gate.
   ["rent_review", TENANCY_READ],
+  ["service_schedule", FACILITIES_READ],
   ["tenancy", TENANCY_READ],
 ]);
 
