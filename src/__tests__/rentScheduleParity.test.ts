@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { todayInDarwin } from "../darwinDate";
+import { ancillariesByRow } from "../rentReview/cascade";
 import {
   type Charges,
   chargedOn,
@@ -12,7 +13,9 @@ import {
   type RowAncillaries,
 } from "../scheduleCharges";
 import {
+  type CarparkScheduleGroup,
   computeScheduleRows,
+  type MiscFee,
   resolveCurrentRent,
   resolveScheduleAnnual,
   type ScheduledRateStep,
@@ -51,6 +54,8 @@ interface CurrentCheck {
 
 /** WP26c: the charge timeline over the rows (src/scheduleCharges.ts). */
 interface ChargesExpected {
+  /** v4: each row's car park and misc fee figures, worked from input.carparkGroups and input.miscFees. */
+  ancillaries?: RowAncillaries[];
   forgone?: Array<{ byCharge: Charges; reliefId: string; total: number }>;
   on?: Array<{ chargedRent: number | null; day: string; leaseRent: number | null; reliefIds: string[]; stepId: string | null }>;
   over?: Array<{ charged: Charges; from: string; lease: Charges; to: string }>;
@@ -62,8 +67,11 @@ interface ParityCase {
   expected: { charges?: ChargesExpected; current: CurrentCheck[]; rows: ExpectedRow[] };
   input: {
     ancillaries?: RowAncillaries[];
+    /** v4: the groups and fees themselves; each engine's ancillariesByRow turns them into input.ancillaries. */
+    carparkGroups?: CarparkScheduleGroup[];
     fallbackAnnual: number;
     fallbackSqm: number;
+    miscFees?: MiscFee[];
     pending?: PendingChangeMarker[];
     reliefs?: RentRelief[];
     steps: ScheduledRateStep[];
@@ -87,6 +95,13 @@ describe("rent schedule parity fixtures (backend engine)", () => {
     assert.ok(cases.some((c) => (c.input.pending ?? []).length > 0));
     assert.ok(cases.some((c) => c.input.steps.some((step) => step.ratchetExempt)));
     assert.ok(cases.some((c) => c.expected.rows.some((row) => row.pendingReason === "awaiting_review")));
+  });
+
+  it("covers the WP26c review: a fixed rent above a lease that fell, and car parks and misc fees worked from their groups and fees", () => {
+    assert.ok(cases.some((c) => (c.input.reliefs ?? []).some((relief) => relief.kind === "fixed_rent") && c.input.steps.some((step) => step.methodKind === "cpi")));
+    const fromGroups = cases.filter((c) => c.input.carparkGroups && c.input.miscFees && c.expected.charges?.ancillaries);
+    assert.ok(fromGroups.length >= 1, "no case starts from car park groups and misc fees");
+    assert.ok(fromGroups.some((c) => (c.input.miscFees ?? []).some((fee) => fee.endsAt)), "no fee ends inside the schedule");
   });
 
   describe.each(cases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
@@ -135,13 +150,19 @@ describe("rent schedule parity fixtures (backend engine)", () => {
 
     const charges = c.expected.charges;
     if (!charges) return;
+    const ancillaries =
+      c.input.carparkGroups || c.input.miscFees ? ancillariesByRow(rows, c.input.carparkGroups ?? [], c.input.miscFees ?? []) : c.input.ancillaries;
     const input = {
-      ancillaries: c.input.ancillaries,
+      ancillaries,
       fallbackAnnual: c.input.fallbackAnnual,
       pending: c.input.pending ?? [],
       reliefs: c.input.reliefs ?? [],
     };
     const schedule = computeCharges(rows, input);
+
+    if (charges.ancillaries) it("works each row's car parks and misc fees from the groups and fees, each on its own days", () => {
+      assert.deepStrictEqual(ancillaries, charges.ancillaries);
+    });
 
     it("lays the ratified reliefs over the rows: lease and charged figures, period by period", () => {
       assert.deepStrictEqual(schedule.periods, charges.periods);
