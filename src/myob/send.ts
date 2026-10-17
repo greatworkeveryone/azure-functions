@@ -11,9 +11,9 @@
 //   3. record (transaction): sendOutcome.ts; a refusal inside Floorplan
 //      (controls off, dry run, master switch, period rule) returns the
 //      proposal to approved, to be sent again once allowed
-// A push still marked pushed after PUSH_STALE_MS can't be running (each MYOB
-// call times out at 30 s) and may be sent again: the lookup by number links
-// the record if the first try created it.
+// A push still marked pushed after PUSH_STALE_MS (pushState.ts) can't be
+// running and may be sent again: the lookup by number links the record if the
+// first try created it.
 
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
@@ -24,6 +24,7 @@ import { canonicalJson } from "./hash";
 import type { Person } from "./propose";
 import { checkPreviewTime, ProposalError } from "./proposalErrors";
 import { proposalDrift } from "./payloads";
+import { pushInFlight } from "./pushState";
 import { getProposal, latestVerifiedForUid, updateProposal, type ProposalRow } from "./proposalsStore";
 import { outcomeAction, outcomeFields, outcomeMessage } from "./sendOutcome";
 import { pushApproved, type MyobPurchases, type PushResult } from "./sendSteps";
@@ -52,11 +53,7 @@ export interface SendOutcome {
   proposal: ProposalRow;
 }
 
-/** Longer than any push can take: find, create and read back, each retried at most once, at 30 s a call. */
-export const PUSH_STALE_MS = 5 * 60_000;
 const SENDABLE = new Set(["proposed", "approved", "exception", "pushed"]);
-const inFlight = (proposal: ProposalRow, now: Date) =>
-  proposal.state === "pushed" && proposal.pushedAt !== null && now.getTime() - Date.parse(proposal.pushedAt) <= PUSH_STALE_MS;
 const samePerson = (proposal: ProposalRow, person: Person) =>
   proposal.proposedByOid ? proposal.proposedByOid === person.oid : proposal.proposedBy === person.name;
 
@@ -87,7 +84,7 @@ async function approve(deps: SendDeps, person: Person, input: SendInput): Promis
     const proposal = await getProposal(tx, input.proposalId, true);
     if (!proposal) throw new ProposalError(404, "That MYOB proposal doesn't exist");
     if (!SENDABLE.has(proposal.state)) throw new ProposalError(409, `This proposal is ${proposal.state}; there is nothing to send.`);
-    if (inFlight(proposal, now)) throw new ProposalError(409, "This proposal is being sent to MYOB now. Reload in a minute to see what MYOB said.");
+    if (pushInFlight(proposal, now)) throw new ProposalError(409, "This proposal is being sent to MYOB now. Reload in a minute to see what MYOB said.");
     if (proposal.rowVersion !== input.expectedRowVersion) throw new ProposalError(409, "Someone else acted on this proposal since you opened it. Reload.");
     if ((await reviewRequired(tx, proposal)) && samePerson(proposal, person)) {
       throw new ProposalError(403, "A second person must approve this: you proposed it.");

@@ -12,6 +12,8 @@ import type { Person } from "./propose";
 import type { ProposalRow } from "./proposalsStore";
 
 const { executeQuery } = require("../db") as { executeQuery: jest.Mock };
+const { installFloorplanRecordLookup } = require("./floorplanRecords") as { installFloorplanRecordLookup: jest.Mock };
+const lookupInstalledOnLoad = installFloorplanRecordLookup.mock.calls.length;
 const { record } = require("../ledger") as { record: jest.Mock };
 const { buildDraft } = require("./draft") as { buildDraft: jest.Mock };
 const store = require("./proposalsStore") as Record<string, jest.Mock>;
@@ -60,6 +62,8 @@ beforeEach(() => {
   pushApproved.mockResolvedValue({ diff: [], kind: "verified", linked: false, readBack: { Number: "66Sm261014", RowVersion: "7" }, uid: UID });
 });
 
+it("installs the Floorplan-record lookup when the send pipeline loads (without it every update is refused)", () => expect(lookupInstalledOnLoad).toBe(1));
+
 describe("approve (inside Floorplan, before any MYOB call)", () => {
   it("refuses the proposer as reviewer while the control requires review", async () => {
     store.getProposal.mockResolvedValue(proposal({ proposedBy: "Johanne", proposedByOid: "cfo-oid" }));
@@ -90,7 +94,9 @@ describe("approve (inside Floorplan, before any MYOB call)", () => {
     store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-14T00:09:00.000Z", state: "pushed" }));
     await expect(send()).rejects.toMatchObject({ message: expect.stringContaining("being sent to MYOB now"), status: 409 });
     expect(pushApproved).not.toHaveBeenCalled();
-    store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-14T00:04:00.000Z", state: "pushed" }));
+    store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-13T23:56:00.000Z", state: "pushed" })); // 14 minutes: a slow push can still be running
+    await expect(send()).rejects.toMatchObject({ status: 409 });
+    store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-13T23:50:00.000Z", state: "pushed" }));
     await expect(send()).resolves.toMatchObject({ outcome: "verified" });
   });
 

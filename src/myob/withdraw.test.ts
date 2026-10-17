@@ -40,7 +40,21 @@ describe("withdrawProposal", () => {
     await expect(withdraw()).resolves.toMatchObject({ state: "withdrawn" });
   });
 
-  it.each(["pushed", "verified", "withdrawn"])("refuses a proposal that is %s", async (state) => {
+  it("refuses a proposal being sent, and lets one whose push can't still be running be withdrawn, warning MYOB may hold it", async () => {
+    store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-14T00:00:00.000Z", state: "pushed" })); // 10 minutes ago
+    await expect(withdraw()).rejects.toMatchObject({ message: expect.stringContaining("being sent to MYOB now"), status: 409 });
+    expect(store.updateProposal).not.toHaveBeenCalled();
+
+    store.getProposal.mockResolvedValue(proposal({ pushedAt: "2026-10-13T23:50:00.000Z", state: "pushed" })); // 20 minutes ago
+    await expect(withdraw(ANA, true)).resolves.toMatchObject({ state: "withdrawn" });
+    expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "myob.withdraw",
+      after: expect.objectContaining({ state: "withdrawn", warning: expect.stringContaining("MYOB may already hold") }),
+      ruleApplied: "withdrawn_after_unanswered_push",
+    }));
+  });
+
+  it.each(["verified", "withdrawn"])("refuses a proposal that is %s", async (state) => {
     store.getProposal.mockResolvedValue(proposal({ state: state as ProposalRow["state"] }));
     await expect(withdraw()).rejects.toMatchObject({ status: 409 });
     expect(store.updateProposal).not.toHaveBeenCalled();
