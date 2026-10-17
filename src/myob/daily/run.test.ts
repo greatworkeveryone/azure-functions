@@ -41,7 +41,7 @@ describe("myobDailyMode", () => {
 
 describe("dailyWindow", () => {
   it("runs from the previous business morning at 07:30 Darwin, so Monday's covers the weekend", () => {
-    expect(dailyWindow(NOW, {})).toEqual({ since: new Date("2026-10-12T22:00:00Z"), until: new Date("2026-10-13T22:00:00Z") });
+    expect(dailyWindow(NOW, {})).toEqual({ gapSince: null, since: new Date("2026-10-12T22:00:00Z"), until: new Date("2026-10-13T22:00:00Z") });
     const monday = new Date("2026-10-18T22:05:00Z"); // Monday 19/10 07:35 Darwin
     expect(dailyWindow(monday, {}).since).toEqual(new Date("2026-10-15T22:00:00Z")); // Friday 16/10 07:30
   });
@@ -50,7 +50,7 @@ describe("dailyWindow", () => {
 describe("dailyWindow from the last run that covered a day", () => {
   it("starts where the last successful run of the same kind ended, so a skipped or failed day is not lost", () => {
     const lastOk = new Date("2026-10-11T22:01:00Z"); // Monday 12/10 07:31 Darwin
-    expect(dailyWindow(NOW, {}, lastOk)).toEqual({ since: new Date("2026-10-11T22:00:00Z"), until: new Date("2026-10-13T22:00:00Z") });
+    expect(dailyWindow(NOW, {}, lastOk)).toEqual({ gapSince: null, since: new Date("2026-10-11T22:00:00Z"), until: new Date("2026-10-13T22:00:00Z") });
   });
 
   it("goes back at most 14 days, and covers nothing twice on a second run the same morning", () => {
@@ -61,6 +61,12 @@ describe("dailyWindow from the last run that covered a day", () => {
 });
 
 describe("runMyobDaily", () => {
+  it("tells the email when the window was capped after a longer gap", async () => {
+    const d = deps({ lastCovered: jest.fn().mockResolvedValue(new Date("2026-08-01T22:00:00Z")) });
+    await run(d);
+    expect(d.send).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.stringContaining("This email could not be sent since 02/08 07:30. This one covers the last 14 days"));
+  });
+
   it("asks for the last run of its own kind (live or dry run) and reads from where it ended", async () => {
     const d = deps({ lastCovered: jest.fn().mockResolvedValue(new Date("2026-10-11T22:01:00Z")) });
     await run(d);

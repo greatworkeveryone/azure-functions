@@ -69,9 +69,13 @@ describe("lastCoveredRun", () => {
   it("is the last ok run of the daily email that did a run of the same kind (live or dry run)", async () => {
     expect(await lastCoveredRun({} as never, false)).toEqual(new Date("2026-10-12T22:01:00Z"));
     const [, sql, params] = executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("TimerRuns")) as [unknown, string, { name: string; value: unknown }[]];
-    expect(sql).toMatch(/Name = N'myobDailyEmailTimer' AND Outcome = N'ok'/);
-    expect(sql).toMatch(/JSON_VALUE\(Counts, '\$\.dryRun'\)/);
-    expect(params).toContainEqual(expect.objectContaining({ name: "DryRun", value: "false" }));
+    // The exact predicate: only an ok run of this timer whose own Counts say the same kind (a morning dry run never covers the live window).
+    const where = sql.replace(/\s+/g, " ").match(/WHERE (.*) ORDER BY/)?.[1];
+    expect(where).toBe("Name = N'myobDailyEmailTimer' AND Outcome = N'ok' AND (CASE WHEN ISJSON(Counts) = 1 THEN JSON_VALUE(Counts, '$.dryRun') END) = @DryRun");
+    expect(sql.replace(/\s+/g, " ")).toMatch(/^SELECT TOP 1 StartedAt FROM dbo\.TimerRuns WHERE .* ORDER BY StartedAt DESC$/);
+    expect(params).toEqual([expect.objectContaining({ name: "DryRun", value: "false" })]);
+    await lastCoveredRun({} as never, true);
+    expect(executeQuery.mock.calls.at(-1)?.[2]).toEqual([expect.objectContaining({ name: "DryRun", value: "true" })]);
   });
 });
 

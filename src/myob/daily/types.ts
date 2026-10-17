@@ -59,6 +59,8 @@ export interface DailyFacts {
   /** Changes to Floorplan's MYOB controls, file modes and the link. */
   controls: ControlEvent[];
   events: ProposalEvent[];
+  /** Set when the window was capped: the email couldn't be sent from this morning until the window's start. */
+  gapSince?: Date | null;
   /** Company files the CFO registered (MyobCompanyFiles); nothing else is ever reported. */
   files: RegisteredFile[];
   since: Date;
