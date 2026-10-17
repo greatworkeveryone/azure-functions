@@ -31,6 +31,7 @@ import {
   computeScheduleRows,
   diffSteps,
   normaliseLegacyEnds,
+  type RatchetExemption,
   type RentScheduleMethodKind,
   type ScheduleRow,
   type ScheduledRateStep,
@@ -212,6 +213,9 @@ export interface RepresentInput {
   method: "cpi" | "fixed" | "other";
   /** The natural row's rate: the applied % for CPI (informational), the lease % for fixed. */
   naturalRate: number;
+  /** A director's override of the lease's ratchet for this row (C9, WP26c): every
+   *  way of writing it carries the exemption, so a lower rent can be written. */
+  ratchetExempt?: RatchetExemption | null;
   reviewId: string;
   /** The approved new annual rent, to the cent. */
   target: number;
@@ -224,7 +228,9 @@ export type RepresentResult =
 /** The first way of writing the step whose engine result is exactly `target`. */
 export function representStep(input: RepresentInput): RepresentResult {
   const { base, context, cpi, reviewId, target } = input;
-  const accept = (step: ScheduledRateStep, representation: Representation): RepresentResult | null => {
+  const exemption = input.ratchetExempt ?? null;
+  const accept = (candidate: ScheduledRateStep, representation: Representation): RepresentResult | null => {
+    const step = exemption ? { ...candidate, ratchetExempt: exemption } : candidate;
     const simulation = simulate(context, step);
     const row = simulation.row;
     return row && !row.pending && row.annual === target ? { ok: true, representation, row, simulation, step } : null;
@@ -239,14 +245,20 @@ export function representStep(input: RepresentInput): RepresentResult {
   } else if (input.method === "fixed") {
     const natural = accept(appliedStep(base, reviewId, { methodKind: "fixed", ratePercent: input.naturalRate }), "natural");
     if (natural) return natural;
-    const make = (ratePercent: number) => appliedStep(base, reviewId, { methodKind: "fixed", ratePercent });
+    const make = (ratePercent: number) => {
+      const step = appliedStep(base, reviewId, { methodKind: "fixed", ratePercent });
+      return exemption ? { ...step, ratchetExempt: exemption } : step;
+    };
     const rate = exactRate(context, make, input.currentAnnual, target);
     const found = rate === null ? null : accept(make(rate), "method_rate");
     if (found) return found;
   }
 
   const pair = cpi ? { cpiValue: cpi.current, cpiValuePrev: cpi.previous } : {};
-  const makeOther = (ratePercent: number) => appliedStep(base, reviewId, { ...pair, methodKind: "other", ratePercent });
+  const makeOther = (ratePercent: number) => {
+    const step = appliedStep(base, reviewId, { ...pair, methodKind: "other", ratePercent });
+    return exemption ? { ...step, ratchetExempt: exemption } : step;
+  };
   const rate = exactRate(context, makeOther, input.currentAnnual, target);
   const found = rate === null ? null : accept(makeOther(rate), "other_rate");
   return found ?? { ok: false };

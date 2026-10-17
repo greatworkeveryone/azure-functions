@@ -41,11 +41,12 @@
 
 import type { ArrearsLine } from "./rentReview/arrears";
 import type { CascadeRow } from "./rentReview/cascade";
-import { expectedRelease, previousQuarter, referenceQuarter, type CpiIndexRow } from "./rentReview/cpi";
+import { cpiReferenceRuleOf } from "./rentReview/basis";
+import { expectedRelease, previousQuarter, referenceQuarterFor, type CpiIndexRow } from "./rentReview/cpi";
 import { appliedStep, reviewRow, type ScheduleContext, simulate, waivedStep } from "./rentReview/stepPlan";
 import { writtenReview } from "./rentReview/written";
 import type { RentRelief } from "./scheduleCharges";
-import type { CarparkScheduleGroup, MiscFee, ScheduledRateStep } from "./scheduledRateStepLogic";
+import type { CarparkScheduleGroup, MiscFee, RatchetExemption, ScheduledRateStep } from "./scheduledRateStepLogic";
 
 export { arrearsFor, computeArrears, reviewChanges, type ArrearsLine, type ArrearsPart } from "./rentReview/arrears";
 
@@ -119,6 +120,10 @@ export interface RentReviewCalc {
   override?: CalcOverride;
   perMonth: number;
   perSqm: number | null;
+  /** The rent is below the current one on a lease with a ratchet (C9, WP26c):
+   *  a director overrides the ratchet for this review to approve it. The receipt
+   *  is the schedule as APPLY writes it then, the row exempt from the ratchet. */
+  ratchetOverrideNeeded?: boolean;
   sanity: SanityBand;
   scheduleVersion: number;
 }
@@ -129,7 +134,7 @@ export type { CascadeRow };
 export interface StoredOverride {
   at: string;
   by: { name: string; userId: number | null };
-  check: "not_signed_off" | "out_of_band";
+  check: "not_signed_off" | "out_of_band" | "ratchet";
   reason: string;
 }
 
@@ -207,13 +212,18 @@ export type CalcRefusalCode =
 
 /**
  * C9 on a lease with a ratchet: the schedule engine holds every review row of
- * such a lease at no decrease, so a lower rent can't be written. A director
- * override of the lease's ratchet needs a per-row exemption in the engine of
- * both repos (WP26c); until then it is refused for everyone, directors too.
+ * such a lease at no decrease, so a lower rent is written only on a row a
+ * director exempts from the ratchet (WP26c, D23: ratchetExempt, with a reason).
+ * Anyone else is refused and told a director can override it.
  */
 export const LEASE_RATCHET_MESSAGE =
-  "This lease has a ratchet, so its rent can't go down on review, and a director can't override the lease's ratchet here yet. " +
-  "To depart from the lease, a director turns the ratchet off in the lease's terms (a recorded change) and the review is calculated again.";
+  "This lease has a ratchet, so its rent can't go down on review unless a director overrides the ratchet for this review, with a reason.";
+
+/** The exemption a receipt is worked with before a director grants one (C9): the
+ *  figures are the same whoever grants it; APPLY writes the director's own. */
+export function provisionalRatchetExemption(at: string): RatchetExemption {
+  return { at, byName: "awaiting a director", reason: "Below the lease's ratchet: awaiting a director's override for this review" };
+}
 
 const money = (value: number): string => new Intl.NumberFormat("en-AU", { currency: "AUD", style: "currency" }).format(value);
 
@@ -295,7 +305,8 @@ function cpiFactor(input: CalcInput, base: ScheduledRateStep): FactorPlan | Excl
     return refused("basis_incomplete", "Set the CPI region (Australia or Darwin) on the review's basis before calculating.");
   }
   const interval = num(input.basis.intervalMonths);
-  const reference = referenceQuarter(input.scheduledFor);
+  // The basis's reference-quarter rule: the lease's, snapshotted at commence (M4).
+  const reference = referenceQuarterFor(cpiReferenceRuleOf(input.basis.referenceQuarterRule), input.scheduledFor);
   const previous = previousQuarter(reference, interval);
   const current = input.cpiRows.find((row) => row.period === reference);
   const earlier = input.cpiRows.find((row) => row.period === previous);
@@ -425,6 +436,9 @@ export function calculateReview(input: CalcInput): CalcResult {
   }
 
   const appliedPercent = input.method === "other" ? r4((newAnnual / currentAnnual - 1) * 100) : r4((factor - 1) * 100);
+  // C9 (WP26c): below the lease's ratchet the row is written exempt from it, by a
+  // director at submit; the receipt is worked as that row.
+  const belowRatchet = input.lease.reviewRatchet && newAnnual < currentAnnual;
   // The receipt is the schedule as APPLY writes this rent (rentReview/written.ts).
   const written = writtenReview({
     base: placed.base,
@@ -438,6 +452,7 @@ export function calculateReview(input: CalcInput): CalcResult {
     method: input.method,
     miscFees: input.miscFees,
     naturalRate: input.method === "fixed" ? (plan?.fixedPercent ?? 0) : appliedPercent,
+    ratchetExempt: belowRatchet ? provisionalRatchetExemption(input.computedAt) : null,
     reliefs: input.reliefs ?? [],
     reviewId: input.reviewId,
     scheduledFor: input.scheduledFor,
@@ -445,7 +460,7 @@ export function calculateReview(input: CalcInput): CalcResult {
     today: input.today,
   });
   if (!written) {
-    const why = unrepresentableRent(newAnnual, currentAnnual, input.lease.reviewRatchet);
+    const why = unrepresentableRent(newAnnual, currentAnnual, false);
     return refused(why.code, why.message);
   }
 
@@ -461,6 +476,7 @@ export function calculateReview(input: CalcInput): CalcResult {
     newAnnual,
     perMonth: r2(newAnnual / 12),
     perSqm: area > 0 ? r2(newAnnual / area) : null,
+    ...(belowRatchet ? { ratchetOverrideNeeded: true } : {}),
     sanity: sanityOf(appliedPercent, input.sanity),
     scheduleVersion: input.scheduleVersion,
     ...(plan?.cpi ? { cpi: plan.cpi } : {}),
@@ -493,6 +509,7 @@ export function approvalReasonsOf(calc: RentReviewCalc): string[] {
     ...(calc.method === "other" ? ["manual_method"] : []),
     ...((calc.departures?.length ?? 0) > 0 ? ["basis_departs_from_lease"] : []),
     ...(isReduction(calc) ? ["reduction"] : []),
+    ...(calc.ratchetOverrideNeeded ? ["ratchet"] : []),
   ];
 }
 
@@ -532,6 +549,8 @@ export function parseCalc(raw: unknown): RentReviewCalc | null {
 export interface LeaseTermsForReview {
   cpiCapPercent: number | null;
   cpiFloorPercent: number | null;
+  /** Tenants.CpiReferenceQuarterRule (M4); null or absent = the default. */
+  cpiReferenceRule?: string | null;
   cpiRegion: string | null;
   /** The lease's fixed %: Tenants.FixedReviewPercent, else the fixed step's rate. */
   fixedPercent: number | null;
@@ -548,7 +567,13 @@ export function leaseBasis(method: "cpi" | "fixed", lease: LeaseTermsForReview, 
   const common = { intervalMonths: lease.reviewIntervalMonths ?? 12, method, ratchet: lease.reviewRatchet, reviewDate };
   if (method === "fixed") return { ...common, fixedPercent: lease.fixedPercent };
   const region = lease.cpiRegion?.trim().toUpperCase() || null;
-  return { ...common, capPercent: lease.cpiCapPercent, floorPercent: lease.cpiFloorPercent, referenceQuarterRule: "quarter_before_review_date", region };
+  return {
+    ...common,
+    capPercent: lease.cpiCapPercent,
+    floorPercent: lease.cpiFloorPercent,
+    referenceQuarterRule: cpiReferenceRuleOf(lease.cpiReferenceRule ?? null),
+    region,
+  };
 }
 
 /**
@@ -566,6 +591,8 @@ export function leaseDepartures(method: CalcMethod, basis: Record<string, unknow
     const region = typeof basis.region === "string" ? basis.region.toUpperCase() : null;
     if (region !== (lease.cpiRegion?.trim().toUpperCase() || null)) departures.push("region");
     if (!sameNumber(num(basis.intervalMonths) ?? 12, lease.reviewIntervalMonths ?? 12)) departures.push("intervalMonths");
+    // M4: a basis on another reference quarter than the lease's.
+    if (cpiReferenceRuleOf(basis.referenceQuarterRule) !== cpiReferenceRuleOf(lease.cpiReferenceRule ?? null)) departures.push("referenceQuarterRule");
   }
   if (method === "fixed" && !sameNumber(num(basis.fixedPercent), lease.fixedPercent)) departures.push("fixedPercent");
   return departures;

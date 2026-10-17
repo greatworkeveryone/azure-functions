@@ -57,6 +57,7 @@ export function leaseTermsOf(row: SqlRow, stepOnReviewDate: ScheduledRateStep | 
   return {
     cpiCapPercent: decimalOf(row.CpiCapPercent),
     cpiFloorPercent: decimalOf(row.CpiFloorPercent),
+    cpiReferenceRule: typeof row.CpiReferenceQuarterRule === "string" ? row.CpiReferenceQuarterRule : null,
     cpiRegion: typeof row.CpiRegion === "string" ? row.CpiRegion : null,
     fixedPercent: leaseFixed ?? (stepOnReviewDate?.methodKind === "fixed" ? stepOnReviewDate.ratePercent : null),
     reviewIntervalMonths: decimalOf(row.ReviewIntervalMonths),

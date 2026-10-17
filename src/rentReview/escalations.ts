@@ -51,6 +51,7 @@ const REASON_WORDS: Record<string, string> = {
   manual_method: "keyed by hand",
   out_of_band: "outside the usual range",
   override: "a different rent was chosen",
+  ratchet: "below the lease's ratchet, so a director overrides it to approve",
   reduction: "the rent goes down, so a director decides",
 };
 

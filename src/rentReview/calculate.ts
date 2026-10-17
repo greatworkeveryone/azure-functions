@@ -9,8 +9,8 @@ import type { Connection } from "tedious";
 import type { SqlRow } from "../db";
 import { calculateReview, leaseDepartures, sanityBandFromEnv, type CalcMethod, type CalcResult } from "../rentReviewCalc";
 import { parseSteps } from "../scheduledRateStepLogic";
-import { parseBasis } from "./basis";
-import { previousQuarter, referenceQuarter } from "./cpi";
+import { cpiReferenceRuleOf, parseBasis } from "./basis";
+import { previousQuarter, referenceQuarterFor } from "./cpi";
 import { toReviewDto } from "./dto";
 import { stepOnDate } from "./method";
 import { leaseTermsOf, scheduleOf } from "./reviewTenancy";
@@ -35,7 +35,7 @@ export async function workOutReview(connection: Connection, input: WorkOutInput)
   const scheduledFor = toReviewDto(review, input.today).scheduledFor;
   const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
   const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
-  const reference = referenceQuarter(scheduledFor);
+  const reference = referenceQuarterFor(cpiReferenceRuleOf(basis.referenceQuarterRule), scheduledFor);
   const cpiRows =
     input.method === "cpi" && (region === "AUS" || region === "DARWIN")
       ? await loadCpiRows(connection, region, [reference, previousQuarter(reference, interval)])

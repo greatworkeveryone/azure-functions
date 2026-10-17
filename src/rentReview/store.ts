@@ -169,7 +169,7 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
 
 const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
-    t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
+    t.CpiRegion, t.CpiReferenceQuarterRule, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
     t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, b.BuildingName,
     t.ScheduleSignedOffAt, t.ScheduleSignedOffByName
   FROM dbo.Tenants t
@@ -184,7 +184,7 @@ export async function loadTenancyForReview(connection: Connection, tenantId: num
 
 const TENANCY_LOCKED_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.Status, t.ArchivedAt, t.ScheduleVersion,
     t.Commencement, t.LastReviewDate, t.LastReviewIncreasePercent, t.ReviewIntervalMonths, t.NextReviewDate,
-    t.ReviewType, t.FixedReviewPercent, t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
+    t.ReviewType, t.FixedReviewPercent, t.CpiRegion, t.CpiReferenceQuarterRule, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
     t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, t.UpdatedAt, t.UpdatedByName,
     ${SIGN_OFF_COLUMNS},
     ${RESOLVED_REVIEW_DATES_SQL}

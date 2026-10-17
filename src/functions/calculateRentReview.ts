@@ -39,6 +39,7 @@ import { canTransition, type RentReviewState } from "../rentReviewMachine";
 import type { CalcMethod } from "../rentReviewCalc";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { rowVersionHex } from "../tenancyScheduleWrite";
+import { cpiReferenceRuleOf, parseBasis } from "../rentReview/basis";
 import { workOutReview } from "../rentReview/calculate";
 import { toReviewDto } from "../rentReview/dto";
 import {
@@ -162,7 +163,7 @@ export async function calculateRentReview(request: HttpRequest, context: Invocat
             action: "rent_review.calculate",
             actor: caller.actor,
             after: result.calc,
-            ruleApplied: method === "cpi" ? "cpi_quarter_before_review_date" : method === "fixed" ? "fixed_lease_percent" : "manual",
+            ruleApplied: method === "cpi" ? `cpi_${cpiReferenceRuleOf(parseBasis(review.Basis)?.referenceQuarterRule)}` : method === "fixed" ? "fixed_lease_percent" : "manual",
           });
         }
 

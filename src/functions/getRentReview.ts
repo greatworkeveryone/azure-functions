@@ -30,8 +30,8 @@ import { extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import { parseSteps } from "../scheduledRateStepLogic";
-import { parseBasis } from "../rentReview/basis";
-import { buildCpiSuggestion, previousQuarter, referenceQuarter } from "../rentReview/cpi";
+import { cpiReferenceRuleOf, parseBasis } from "../rentReview/basis";
+import { buildCpiSuggestion, previousQuarter, referenceQuarterFor } from "../rentReview/cpi";
 import { toReviewDto, toTenancySummary } from "../rentReview/dto";
 import { readReviewId, RentReviewError, rentReviewErrorResponse, TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { loadCpiRows, loadReview, loadTenancyForReview, totalOccupancySqm } from "../rentReview/store";
@@ -68,9 +68,11 @@ export async function getRentReview(request: HttpRequest, context: InvocationCon
     const interval = typeof basis?.intervalMonths === "number" ? basis.intervalMonths : tenancy.reviewIntervalMonths;
     let cpiSuggestion = null;
     if (review.method === "cpi" && REGIONS.includes(regionText)) {
-      const reference = referenceQuarter(review.scheduledFor);
+      // The basis's rule once commenced, else the lease's (M4).
+      const rule = cpiReferenceRuleOf(basis ? basis.referenceQuarterRule : tenancyRow.CpiReferenceQuarterRule);
+      const reference = referenceQuarterFor(rule, review.scheduledFor);
       const rows = await loadCpiRows(connection, regionText, [reference, previousQuarter(reference, interval)]);
-      cpiSuggestion = buildCpiSuggestion({ intervalMonths: interval, region: regionText, reviewDate: review.scheduledFor, rows });
+      cpiSuggestion = buildCpiSuggestion({ intervalMonths: interval, region: regionText, reviewDate: review.scheduledFor, rows, rule });
     }
 
     return { jsonBody: { asOf: today, cpiSuggestion, review, step, tenancy }, status: 200 };

@@ -18,7 +18,7 @@ import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { isoTimestamp, rowVersionHex } from "../tenancyScheduleWrite";
 import { type ApproverRole, requiredApprovalRoleOf } from "./approvalLevel";
-import { parseBasis, type RentReviewBasis } from "./basis";
+import { type CpiReferenceRule, cpiReferenceRuleOf, parseBasis, type RentReviewBasis } from "./basis";
 
 export interface PersonStamp {
   at: string | null;
@@ -210,6 +210,8 @@ export interface TenancySummaryDto {
   commencement: string | null;
   cpiCapPercent: number | null;
   cpiFloorPercent: number | null;
+  /** The lease's CPI reference-quarter rule (M4; the default when the tenancy names none). */
+  cpiReferenceQuarterRule: CpiReferenceRule;
   cpiRegion: string | null;
   /** The rent in force today, from the schedule (Darwin date). */
   effectiveRentPerAnnum: number;
@@ -266,6 +268,7 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
     commencement: sqlDateToIso(row.Commencement),
     cpiCapPercent,
     cpiFloorPercent,
+    cpiReferenceQuarterRule: cpiReferenceRuleOf(row.CpiReferenceQuarterRule),
     cpiRegion: text(row.CpiRegion),
     effectiveRentPerAnnum,
     expiry: sqlDateToIso(row.Expiry),

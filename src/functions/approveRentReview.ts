@@ -1,6 +1,6 @@
 // POST /api/approveRentReview   (PLAN §3.1 APPROVE, C6, C7, WP26)
 //
-//   { reviewId, rowVersion, directorOverride?: { checks: ["not_signed_off"], reason } }
+//   { reviewId, rowVersion, directorOverride?: { checks: ["not_signed_off" | "ratchet"], reason } }
 //   200 { review, nextReview }
 //
 // A second person approves a review waiting for approval, and it is applied
@@ -29,6 +29,12 @@
 //               directorOverride: { checks: ["not_signed_off"], reason }, ledgered as
 //               rent_review.director_override with the sign-off facts; a C3
 //               override made at submit already rides in the calc
+//   C9          a rent below the current one on a lease with a ratchet needs a
+//               director's override of the ratchet (WP26c, D23): made at submit
+//               (it rides in the calc) or now, directorOverride: { checks:
+//               ["ratchet"], reason }, ledgered as rent_review.director_override
+//               with the ratchet's facts; else 422 ratchet with directorCanOverride.
+//               The applied row carries ratchetExempt
 // 409 try_again when SQL Server chose this approval as a deadlock's victim (an
 // approve and a revert on one tenancy at once); nothing was written.
 // Ledgered as rent_review.approve and rent_review.apply in the same transaction.
@@ -94,7 +100,7 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
     const body = await readJsonObject(request);
     const reviewId = readReviewId(body.reviewId);
     const rowVersion = readRowVersion(body.rowVersion);
-    const directorOverride = readDirectorOverride(body.directorOverride, ["not_signed_off"]);
+    const directorOverride = readDirectorOverride(body.directorOverride, ["not_signed_off", "ratchet"]);
 
     connection = await createRequestConnection(token);
     const caller = await resolveCaller(request, connection);

@@ -5,7 +5,10 @@
 //   1. lock the tenant row (UPDLOCK); C4: its ScheduleVersion is the one the
 //      calc was worked on, else 409 stale_schedule; C3: the schedule is signed
 //      off, else 422 not_signed_off, unless a director overrode C3 with a reason
-//      (at SUBMIT, carried in the calc, or now; rentReview/directorOverride.ts)
+//      (at SUBMIT, carried in the calc, or now; rentReview/directorOverride.ts);
+//      C9: a rent below the current one on a lease with a ratchet needs a
+//      director's override of the ratchet (at SUBMIT, carried in the calc, or
+//      now), else 422 ratchet; the row is then written with ratchetExempt
 //   2. write the step through the schedule engine (cpiValue, the same-base
 //      cpiValuePrev, ratePercent, resolution applied, reviewId; or the exact
 //      rate an override needs, rentReview/stepPlan.ts), closing the row before a
@@ -30,9 +33,9 @@ import type { SqlRow } from "../db";
 import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
-import { leaseDepartures, type RentReviewCalc, unrepresentableRent } from "../rentReviewCalc";
+import { LEASE_RATCHET_MESSAGE, leaseDepartures, type RentReviewCalc, unrepresentableRent } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
-import { diffSteps, parseSteps, type ScheduledRateStep } from "../scheduledRateStepLogic";
+import { diffSteps, parseSteps, type RatchetExemption, type ScheduledRateStep } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { parseBasis } from "./basis";
 import { type DirectorOverride, recordDirectorOverride, signOffFacts, storedOverride } from "./directorOverride";
@@ -93,6 +96,16 @@ function departuresOf(calc: RentReviewCalc, review: SqlRow, tenancy: SqlRow, ste
   return leaseDepartures(calc.method, parseBasis(review.Basis) ?? {}, leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor)));
 }
 
+/** C9's facts: the lease's ratchet would hold the rent, and by how much the review goes below it. */
+export function ratchetFacts(currentAnnual: number, chosenAnnual: number): Record<string, unknown> {
+  return {
+    chosenAnnual,
+    currentAnnual,
+    decreasePercent: Math.round((chosenAnnual / currentAnnual - 1) * 1_000_000) / 10_000,
+    leaseRatchet: true,
+  };
+}
+
 const staleSchedule = (approving: boolean): RentReviewError =>
   new RentReviewError(
     "stale_schedule",
@@ -123,6 +136,19 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
     );
   }
 
+  // C9 (WP26c, D23): below the lease's ratchet only on a row a director exempts.
+  const belowRatchet = input.chosenNewAnnual < calc.currentAnnual && isReviewRatchetOn(tenancy);
+  const storedRatchet = belowRatchet ? storedOverride(calc, "ratchet") : null;
+  const ratchetNow = belowRatchet && !storedRatchet && input.directorOverride?.checks.has("ratchet") === true ? input.directorOverride : null;
+  if (belowRatchet && !storedRatchet && !ratchetNow) {
+    throw new RentReviewError("ratchet", LEASE_RATCHET_MESSAGE, input.director ? { directorCanOverride: true } : {});
+  }
+  const ratchetExempt: RatchetExemption | null = storedRatchet
+    ? { at: storedRatchet.at, byName: storedRatchet.by.name.slice(0, 200), reason: storedRatchet.reason }
+    : ratchetNow
+      ? { at: new Date().toISOString(), byName: input.actor.name.slice(0, 200), reason: ratchetNow.reason }
+      : null;
+
   const buildingId = Number(tenancy.BuildingId);
   const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
   const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(connection, tenantId));
@@ -131,6 +157,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
     calc,
     departs: calc.override !== undefined || departuresOf(calc, review, tenancy, steps, scheduledFor).length > 0,
     newStepId: input.newStepId,
+    ratchetExempt,
     reviewId,
     schedule,
     scheduledFor,
@@ -144,7 +171,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
   // C4 has held, so the rent the calc started from is still the schedule's; check it anyway.
   if (result.kind === "stale") throw staleSchedule(input.from === "awaiting_approval");
   if (result.kind === "unrepresentable") {
-    const why = unrepresentableRent(input.chosenNewAnnual, calc.currentAnnual, isReviewRatchetOn(tenancy));
+    const why = unrepresentableRent(input.chosenNewAnnual, calc.currentAnnual, isReviewRatchetOn(tenancy) && ratchetExempt === null);
     throw new RentReviewError(why.code, why.message);
   }
   const written = result.written;
@@ -221,6 +248,18 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
       correlationId: input.correlationId,
       facts: await signOffFacts(connection, tenancy),
       reason: overrideNow.reason,
+      reviewId,
+      tenantId,
+    });
+  }
+  if (ratchetNow) {
+    await recordDirectorOverride(connection, {
+      actor: input.actor,
+      buildingId,
+      check: "ratchet",
+      correlationId: input.correlationId,
+      facts: ratchetFacts(calc.currentAnnual, input.chosenNewAnnual),
+      reason: ratchetNow.reason,
       reviewId,
       tenantId,
     });

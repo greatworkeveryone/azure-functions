@@ -7,11 +7,13 @@
 //                       the facts are the sign-off status and its last event
 //   C5 out_of_band      apply in one step although the % is outside the sanity
 //                       band (no second approver for that reason alone)
-//
-// Not in scope: C9 on a lease's own ratchet. The schedule engine holds every
-// review row of a ratchet lease at no decrease, so a director's lower rent can't
-// be written until the engine carries a per-row exemption in both repos (WP26c);
-// it stays refused for everyone.
+//   C9 ratchet          a rent below the current one although the lease (or the
+//                       review's basis) has a ratchet (WP26c, D23): the review's
+//                       schedule row is written with ratchetExempt { byName, at,
+//                       reason }, so the engine skips the lease's ratchet for that
+//                       row alone. A reduction still goes to a director's
+//                       approval (A3); the override rides in the calc from SUBMIT
+//                       to APPLY, or the approving director makes it then
 
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
@@ -30,6 +32,11 @@ const CHECKS: Record<OverridableCheck, { check: string; outcome: string; rule: s
     check: "C5",
     outcome: "applied without a second approver although the change is outside the sanity band",
     rule: "C5_sanity_band",
+  },
+  ratchet: {
+    check: "C9",
+    outcome: "the rent goes below the current one although a ratchet holds it: this review's row is exempt from the ratchet",
+    rule: "C9_ratchet",
   },
 };
 

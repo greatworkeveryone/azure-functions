@@ -14,7 +14,7 @@
 // expectedIndexAt is the quarter end plus 30 days.
 
 import { addDaysIso } from "../darwinDate";
-import { DEFAULT_REVIEW_INTERVAL_MONTHS } from "./basis";
+import { type CpiReferenceRule, DEFAULT_CPI_REFERENCE_RULE, DEFAULT_REVIEW_INTERVAL_MONTHS } from "./basis";
 
 const PERIOD_RE = /^(\d{4})-Q([1-4])$/;
 const QUARTER_END_MONTH_DAY = ["03-31", "06-30", "09-30", "12-31"] as const;
@@ -59,6 +59,19 @@ export function referenceQuarter(reviewDate: string): string {
   return shiftQuarters(quarterOf(reviewDate), -1);
 }
 
+/**
+ * The reference quarter for a review dated `reviewDate` under the lease's rule
+ * (M4): the quarter before the review date's (the default), or the latest one
+ * expected to be published before the review date (quarter end + 30 days, as
+ * expectedRelease; a release on the review date itself isn't before it).
+ */
+export function referenceQuarterFor(rule: CpiReferenceRule, reviewDate: string): string {
+  let quarter = referenceQuarter(reviewDate);
+  if (rule !== "latest_published_before_review") return quarter;
+  while (expectedRelease(quarter) >= reviewDate) quarter = shiftQuarters(quarter, -1);
+  return quarter;
+}
+
 /** The quarter the earlier index value is read from: one review interval
  *  before the reference quarter (a whole number of quarters, at least one). */
 export function previousQuarter(reference: string, intervalMonths: number | null): string {
@@ -83,7 +96,7 @@ export interface CpiSuggestion {
   previousQuarter: string;
   referenceQuarter: string;
   region: string;
-  rule: "quarter_before_review_date";
+  rule: CpiReferenceRule;
   /** The two index values; null until both quarters are published on one base. */
   values: { current: number; previous: number; referenceBase: string } | null;
 }
@@ -97,8 +110,11 @@ export function buildCpiSuggestion(input: {
   region: string;
   reviewDate: string;
   rows: readonly CpiIndexRow[];
+  /** The basis's rule (the lease's before commence); the default when left out. */
+  rule?: CpiReferenceRule;
 }): CpiSuggestion {
-  const reference = referenceQuarter(input.reviewDate);
+  const rule = input.rule ?? DEFAULT_CPI_REFERENCE_RULE;
+  const reference = referenceQuarterFor(rule, input.reviewDate);
   const previous = previousQuarter(reference, input.intervalMonths);
   const current = input.rows.find((row) => row.period === reference);
   const earlier = input.rows.find((row) => row.period === previous);
@@ -114,7 +130,7 @@ export function buildCpiSuggestion(input: {
     previousQuarter: previous,
     referenceQuarter: reference,
     region: input.region,
-    rule: "quarter_before_review_date",
+    rule,
     values: comparable
       ? { current: current.indexValue, previous: earlier.indexValue, referenceBase: current.referenceBase as string }
       : null,

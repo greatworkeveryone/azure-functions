@@ -99,6 +99,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
 import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
 import { scheduleTermsOf } from "../scheduleTerms";
@@ -253,6 +254,8 @@ interface RegisterTenantApi {
   costPerSqm: number;
   cpiCapPercent?: number;
   cpiFloorPercent?: number;
+  /** M4 (m099): the lease's CPI reference-quarter rule; absent = the default, quarter_before_review_date. */
+  cpiReferenceQuarterRule?: "latest_published_before_review" | "quarter_before_review_date";
   cpiRegion?: "AUS" | "DARWIN";
   createdAt: string;
   createdBy: UserRef;
@@ -542,6 +545,7 @@ function tenantRowToApi(
     costPerSqm,
     cpiCapPercent: asNum(row.CpiCapPercent),
     cpiFloorPercent: asNum(row.CpiFloorPercent),
+    cpiReferenceQuarterRule: asStr(row.CpiReferenceQuarterRule) as RegisterTenantApi["cpiReferenceQuarterRule"],
     cpiRegion: asStr(row.CpiRegion) as RegisterTenantApi["cpiRegion"],
     createdAt: toIso(row.CreatedAt),
     createdBy: {
@@ -690,7 +694,7 @@ const TENANT_COLUMNS = `
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
-  CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
+  CpiRegion, CpiReferenceQuarterRule, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
   SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld, SecurityDepositSteps,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
@@ -1051,7 +1055,7 @@ async function upsertRegisterTenant(
             RentPerAnnum,
             ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
             LastReviewIncreasePercent, FixedReviewPercent,
-            CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
+            CpiRegion, CpiReferenceQuarterRule, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
@@ -1069,7 +1073,7 @@ async function upsertRegisterTenant(
             @RentPerAnnum,
             @ReviewType, @ReviewIntervalMonths, @NextReviewDate, @LastReviewDate,
             @LastReviewIncreasePercent, @FixedReviewPercent,
-            @CpiRegion, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
+            @CpiRegion, @CpiReferenceQuarterRule, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
@@ -1159,6 +1163,8 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
   HoldoverTerms: TYPES.NVarChar,
   CpiCapPercent: TYPES.Decimal,
   CpiFloorPercent: TYPES.Decimal,
+  // M4 (m099): null or "" puts it back to the default (normaliseValue).
+  CpiReferenceQuarterRule: TYPES.NVarChar,
   CpiRegion: TYPES.NVarChar,
   EscalationPercent: TYPES.Decimal,
   EscalationSchedule: TYPES.NVarChar,
@@ -1197,10 +1203,13 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
 // Tenant fields the schedule computes from (PLAN WP23a). A change is ledgered
 // as schedule.terms_edit and bumps ScheduleVersion, so a review calculated
 // before the change can't be applied after it. RentPerAnnum is the schedule's
-// starting rent when no commencement row carries one, so it counts too.
+// starting rent when no commencement row carries one, so it counts too. The CPI
+// reference-quarter rule (M4, WP26c) is set at sign-off with the lease's terms
+// and decides a review's rent, so it counts as well.
 const SCHEDULE_TERM_FIELDS: Record<string, string> = {
   CpiCapPercent: "cpiCapPercent",
   CpiFloorPercent: "cpiFloorPercent",
+  CpiReferenceQuarterRule: "cpiReferenceQuarterRule",
   FixedReviewPercent: "fixedReviewPercent",
   RentPerAnnum: "rentPerAnnum",
   ReviewIntervalMonths: "reviewIntervalMonths",
@@ -1215,7 +1224,7 @@ const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", 
 
 const LOCKED_TENANT_COLUMNS = `
   TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
-  CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
+  CpiCapPercent, CpiFloorPercent, CpiReferenceQuarterRule, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
   ${SIGN_OFF_COLUMNS},
@@ -1233,6 +1242,11 @@ function comparableTerm(value: unknown): number | string | null {
 function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
   if (body.ReviewRatchet !== undefined && typeof body.ReviewRatchet !== "boolean") {
     return { status: 400, jsonBody: { error: "ReviewRatchet must be true or false" } };
+  }
+  // M4: the lease's CPI reference quarter; null or "" puts it back to the default.
+  const rule = body.CpiReferenceQuarterRule;
+  if (rule !== undefined && rule !== null && rule !== "" && !(CPI_REFERENCE_RULES as readonly unknown[]).includes(rule)) {
+    return { status: 400, jsonBody: { error: `CpiReferenceQuarterRule must be one of ${CPI_REFERENCE_RULES.join(", ")}, or null` } };
   }
   for (const col of ["CpiCapPercent", "CpiFloorPercent"]) {
     const value = body[col];
@@ -1541,6 +1555,7 @@ function buildTenantParams(
       options: DECIMAL_OPTS.FixedReviewPercent,
     },
     { name: "CpiRegion", type: TYPES.NVarChar, value: v("CpiRegion") },
+    { name: "CpiReferenceQuarterRule", type: TYPES.NVarChar, value: v("CpiReferenceQuarterRule") },
     {
       name: "CpiCapPercent",
       type: TYPES.Decimal,

@@ -23,8 +23,8 @@ import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { Sentry } from "../sentry";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
-import { parseBasis } from "./basis";
-import { previousQuarter, referenceQuarter, type CpiIndexRow } from "./cpi";
+import { type CpiReferenceRule, cpiReferenceRuleOf, parseBasis } from "./basis";
+import { previousQuarter, referenceQuarterFor, type CpiIndexRow } from "./cpi";
 import { todayInDarwin } from "../darwinDate";
 import { parseCalc } from "../rentReviewCalc";
 import { workOutReview } from "./calculate";
@@ -50,6 +50,8 @@ export interface AwaitingReview {
   /** null when the basis names no region the CPI sync stores. */
   region: "AUS" | "DARWIN" | null;
   reviewId: string;
+  /** The basis's reference-quarter rule (M4). */
+  rule: CpiReferenceRule;
   tenantId: number;
 }
 
@@ -58,7 +60,8 @@ export function awaitingReviewOf(row: Record<string, unknown>): AwaitingReview {
   const basis = parseBasis(row.Basis) ?? {};
   const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
   const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
-  const reference = referenceQuarter(sqlDateToIso(row.ScheduledFor) ?? "");
+  const rule = cpiReferenceRuleOf(basis.referenceQuarterRule);
+  const reference = referenceQuarterFor(rule, sqlDateToIso(row.ScheduledFor) ?? "");
   return {
     buildingId: Number(row.TenantBuildingId),
     ownerUserId: row.OwnerUserId === null || row.OwnerUserId === undefined ? null : Number(row.OwnerUserId),
@@ -66,6 +69,7 @@ export function awaitingReviewOf(row: Record<string, unknown>): AwaitingReview {
     referenceQuarter: reference,
     region: region === "AUS" || region === "DARWIN" ? region : null,
     reviewId: String(row.ReviewId),
+    rule,
     tenantId: Number(row.TenantId),
   };
 }
@@ -111,7 +115,7 @@ async function calculateResumed(connection: Connection, review: AwaitingReview, 
       actor: CPI_TIMER_ACTOR,
       after: result.calc,
       buildingId: review.buildingId,
-      ruleApplied: "cpi_quarter_before_review_date",
+      ruleApplied: `cpi_${review.rule}`,
       subject: { id: review.reviewId, type: "rent_review" },
       tenantId: review.tenantId,
     });

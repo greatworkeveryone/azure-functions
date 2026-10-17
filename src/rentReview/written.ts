@@ -11,7 +11,7 @@
 
 import type { RentReviewCalc } from "../rentReviewCalc";
 import type { RentRelief } from "../scheduleCharges";
-import type { CarparkScheduleGroup, MiscFee, ScheduledRateStep, ScheduleRow } from "../scheduledRateStepLogic";
+import type { CarparkScheduleGroup, MiscFee, RatchetExemption, ScheduledRateStep, ScheduleRow } from "../scheduledRateStepLogic";
 import { arrearsFor, reviewChanges, type ArrearsLine } from "./arrears";
 import { computeCascade, type CascadeBounds, type CascadeRow } from "./cascade";
 import type { ReviewSchedule } from "./reviewTenancy";
@@ -41,6 +41,8 @@ export interface WrittenReviewInput {
   miscFees: readonly MiscFee[];
   /** The CPI row's rate (informational) or the fixed %. */
   naturalRate: number;
+  /** A director's override of the lease's ratchet for this row (C9, WP26c). */
+  ratchetExempt?: RatchetExemption | null;
   /** The ratified reliefs: on the days they cover a charge, its arrears are the relieved difference (WP26c). */
   reliefs?: readonly RentRelief[];
   reviewId: string;
@@ -70,6 +72,7 @@ export function writtenReview(input: WrittenReviewInput): WrittenReview | null {
     departs: input.departs,
     method: input.method,
     naturalRate: input.naturalRate,
+    ratchetExempt: input.ratchetExempt ?? null,
     reviewId: input.reviewId,
     target: input.target,
   });
@@ -100,12 +103,23 @@ export function ancillaryAnnual(cascade: readonly CascadeRow[]): number {
   return Math.round(cascade.reduce((sum, row) => sum + row.newAnnual, 0) * 100) / 100;
 }
 
+/** What a review does to the charges that follow the rent, a year's worth (Q19):
+ *  before, after, and the increase (negative for a fall). */
+export function ancillaryChange(cascade: readonly CascadeRow[]): { current: number; increase: number; new: number } {
+  const r2 = (n: number): number => Math.round(n * 100) / 100;
+  const current = r2(cascade.reduce((sum, row) => sum + row.currentAnnual, 0));
+  const after = ancillaryAnnual(cascade);
+  return { current, increase: r2(after - current), new: after };
+}
+
 export interface StoredCalcTarget {
   /** The stored calc: its method, CPI pair, bounds and the rent it started from. */
   calc: Pick<RentReviewCalc, "appliedPercent" | "bounds" | "cpi" | "currentAnnual" | "fixedPercent" | "method">;
   departs: boolean;
   /** Id for a schedule row the review adds. */
   newStepId: string;
+  /** A director's override of the lease's ratchet for this row (C9, WP26c). */
+  ratchetExempt?: RatchetExemption | null;
   reviewId: string;
   schedule: ReviewSchedule;
   scheduledFor: string;
@@ -152,6 +166,7 @@ export function writtenFromCalc(input: StoredCalcTarget): FromCalc {
     method: calc.method,
     miscFees: schedule.miscFees,
     naturalRate: calc.method === "fixed" ? (calc.fixedPercent ?? 0) : calc.appliedPercent,
+    ratchetExempt: input.ratchetExempt ?? null,
     reliefs: schedule.reliefs,
     reviewId: input.reviewId,
     scheduledFor: input.scheduledFor,

@@ -118,6 +118,7 @@ export async function commenceRentReview(request: HttpRequest, context: Invocati
       const basis = buildBasisSnapshot({
         cpiCapPercent: decimal(tenancy.CpiCapPercent),
         cpiFloorPercent: decimal(tenancy.CpiFloorPercent),
+        cpiReferenceRule: typeof tenancy.CpiReferenceQuarterRule === "string" ? tenancy.CpiReferenceQuarterRule : null,
         cpiRegion: typeof tenancy.CpiRegion === "string" ? tenancy.CpiRegion : null,
         fixedReviewPercent: decimal(tenancy.FixedReviewPercent),
         intervalMonths: decimal(tenancy.ReviewIntervalMonths),

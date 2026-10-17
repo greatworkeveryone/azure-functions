@@ -5,7 +5,8 @@
 
 import type { Connection } from "tedious";
 import { calculateReview, leaseBasis, type LeaseTermsForReview, type LeaseTermsResult } from "../rentReviewCalc";
-import { previousQuarter, referenceQuarter } from "./cpi";
+import { cpiReferenceRuleOf } from "./basis";
+import { previousQuarter, referenceQuarterFor } from "./cpi";
 import type { ReviewSchedule } from "./reviewTenancy";
 import { loadCpiRows } from "./store";
 import { ancillaryAnnual } from "./written";
@@ -25,7 +26,7 @@ export interface LeaseTermsInput {
 export async function rentOnLeaseTerms(connection: Connection, input: LeaseTermsInput): Promise<LeaseTermsResult> {
   const basis = leaseBasis(input.method, input.lease, input.scheduledFor);
   const region = typeof basis.region === "string" ? basis.region : "";
-  const reference = referenceQuarter(input.scheduledFor);
+  const reference = referenceQuarterFor(cpiReferenceRuleOf(basis.referenceQuarterRule), input.scheduledFor);
   const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
   const cpiRows =
     input.method === "cpi" && (region === "AUS" || region === "DARWIN")

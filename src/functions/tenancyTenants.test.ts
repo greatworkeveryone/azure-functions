@@ -595,6 +595,63 @@ describe("upsertRegisterTenant — write integrity", () => {
     expect(tenant.rowVersion).toBe("00000000000007d1");
     expect(tenant.scheduleVersion).toBe(4);
   });
+
+  // M4 (WP26c): the lease's CPI reference-quarter rule, set with its terms at sign-off.
+  it("stores the lease's CPI reference-quarter rule as a schedule term, ledgered, and shows it on the tenant (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ CpiReferenceQuarterRule: null })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ CpiReferenceQuarterRule: "latest_published_before_review" }));
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ TenantId: 7, CpiReferenceQuarterRule: "latest_published_before_review", RowVersion: ROW_VERSION }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(updateSql()).toMatch(/CpiReferenceQuarterRule = @CpiReferenceQuarterRule/);
+    expect(updateSql()).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.terms_edit",
+      after: { cpiReferenceQuarterRule: "latest_published_before_review" },
+      before: { cpiReferenceQuarterRule: null },
+    });
+    expect((res.jsonBody as { tenant: Record<string, unknown> }).tenant.cpiReferenceQuarterRule).toBe("latest_published_before_review");
+  });
+
+  it("puts the rule back to the default with an empty string (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ CpiReferenceQuarterRule: "latest_published_before_review" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow());
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, CpiReferenceQuarterRule: "" }), ctx);
+    const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+    expect(update?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "CpiReferenceQuarterRule", value: null })]));
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({ after: { cpiReferenceQuarterRule: null }, before: { cpiReferenceQuarterRule: "latest_published_before_review" } });
+  });
+
+  it.each([["quarter_before_review"], ["latest"], [3]])("refuses %p as a reference-quarter rule before touching the database (M4)", async (rule) => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, CpiReferenceQuarterRule: rule }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe(
+      "CpiReferenceQuarterRule must be one of quarter_before_review_date, latest_published_before_review, or null",
+    );
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("takes the rule on create (M4)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 42 }])
+      .mockResolvedValueOnce([{ TenantId: 42, BuildingId: 5, LegalName: "Acme", Status: "current" }]);
+    const res = await handlers.upsertRegisterTenant(
+      makeRequest({ BuildingId: 5, CpiReferenceQuarterRule: "latest_published_before_review", LegalName: "Acme" }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants"));
+    expect(insert?.[1]).toMatch(/@CpiReferenceQuarterRule/);
+    expect(insert?.[2]).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "CpiReferenceQuarterRule", value: "latest_published_before_review" })]),
+    );
+  });
 });
 
 // ── upsertRegisterTenant: review terms and next review (PLAN WP23b) ─────────

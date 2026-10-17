@@ -383,6 +383,14 @@ describe("what commencing does", () => {
     });
   });
 
+  it("snapshots the lease's own CPI reference-quarter rule (M4, WP26c)", async () => {
+    tenancy = tenancyRow({ CpiReferenceQuarterRule: "latest_published_before_review" });
+    await commence();
+    expect(JSON.parse(callsMatching(db.executeQuery, /UPDATE dbo\.RentReviews/)[0].params.Basis as string)).toMatchObject({
+      referenceQuarterRule: "latest_published_before_review",
+    });
+  });
+
   it("snapshots a fixed review's percentage, and a market review's empty clause and deadlines", async () => {
     tenancy = tenancyRow({ FixedReviewPercent: 3.5, ReviewType: "Fixed" });
     await commence();

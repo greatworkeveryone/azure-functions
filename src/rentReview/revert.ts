@@ -20,7 +20,9 @@
 //      restored, ScheduleVersion + 1 (sign-off kept), NextReviewDate re-derived
 //      with this review's date open again
 //   6. rent_review.revert in the ledger: an exception, with the reason and the
-//      annual increase undone as its financialImpact
+//      annual increase undone as its financialImpact: the rent's and that of
+//      every charge that followed it (AHAC, car parks, misc fees; Q19,
+//      computed.ancillary)
 
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
@@ -43,6 +45,7 @@ import {
   writeTenancyForReview,
 } from "./reviewTenancy";
 import { undoChanges } from "./stepPlan";
+import { ancillaryChange } from "./written";
 import { lockTenancyForReview, otherOpenReview, reviewForUpdate } from "./store";
 import { markCancelled, markReverted } from "./transitions";
 
@@ -249,6 +252,8 @@ export async function revertReview(connection: Connection, input: RevertInput): 
     tenantId,
   });
 
+  // Q19: the increase undone is the rent's and that of every charge that followed it.
+  const ancillary = ancillaryChange(appliedCascade(appliedCalc));
   const arrears =
     oldAnnual !== null && newAnnual !== null && appliedAt
       ? arrearsFor(
@@ -282,9 +287,10 @@ export async function revertReview(connection: Connection, input: RevertInput): 
       tenancy: now,
     },
     buildingId,
+    computed: { ancillary },
     correlationId: input.correlationId,
-    // The annual increase undone: at risk until the review is decided again.
-    financialImpact: oldAnnual !== null && newAnnual !== null ? Math.round((newAnnual - oldAnnual) * 100) / 100 : null,
+    // The annual increase undone, the rent and every charge that followed it: at risk until the review is decided again.
+    financialImpact: oldAnnual !== null && newAnnual !== null ? Math.round((newAnnual - oldAnnual + ancillary.increase) * 100) / 100 : null,
     reason: input.reason,
     ruleApplied: "revert_from_change_log",
     subject: { id: reviewId, type: "rent_review" },

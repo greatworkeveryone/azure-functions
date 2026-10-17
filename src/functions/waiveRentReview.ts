@@ -19,9 +19,10 @@
 //   tenancy     archived 422 tenancy_archived, vacated 422 tenancy_vacated
 //   409 step_settled when another review already settled the row on its date
 // Ledgered as rent_review.waive (an exception, with the reason) with
-// financialImpact = the annual increase forgone: the calc's, or worked out now
-// for a CPI or fixed review that wasn't calculated (null when it can't be: no
-// index yet, or a manual or market review). After the commit: caches, the
+// financialImpact = the annual increase forgone, the rent's and that of every
+// charge that follows it (AHAC, car parks, misc fees; Q19, computed.ancillary):
+// the calc's, or worked out now for a CPI or fixed review that wasn't calculated
+// (null when it can't be: no index yet, or a manual or market review). After the commit: caches, the
 // review's escalations end as "waived", and the next review is scheduled.
 //
 // Gates: REVIEW_APPROVE_ROLES (rentReview/http.ts, frontend waiveRentReview),
@@ -37,13 +38,13 @@ import * as ledger from "../ledger";
 import { requireMoneyContext } from "../moneyGate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
-import { calculateReview, parseCalc, sanityBandFromEnv, type CalcMethod } from "../rentReviewCalc";
+import { appliedCascade, calculateReview, parseCalc, sanityBandFromEnv, type CalcMethod } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import { diffSteps, parseSteps, type RentScheduleMethodKind, type ScheduledRateStep } from "../scheduledRateStepLogic";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision } from "../rentReview/afterDecision";
-import { parseBasis } from "../rentReview/basis";
-import { previousQuarter, referenceQuarter } from "../rentReview/cpi";
+import { cpiReferenceRuleOf, parseBasis } from "../rentReview/basis";
+import { previousQuarter, referenceQuarterFor } from "../rentReview/cpi";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
 import {
@@ -63,10 +64,13 @@ import { derivedNextReview, refuseClosedTenancy, scheduleOf, tenancyReviewFields
 import { placeStep, reviewRow, stepChanges, waivedStep } from "../rentReview/stepPlan";
 import { inTransaction, loadCpiRows, loadReview, lockTenancyForReview, reviewForUpdate, totalOccupancySqm } from "../rentReview/store";
 import { markWaived } from "../rentReview/transitions";
+import { ancillaryChange } from "../rentReview/written";
 
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 
-/** The annual increase the waive gives up, and where the figure came from. */
+/** The annual increase the waive gives up, and where the figure came from: the
+ *  rent's and that of every charge that follows it (AHAC, car parks, misc fees,
+ *  Q19), as the review would have changed them. */
 async function forgoneIncrease(
   connection: Connection,
   review: SqlRow,
@@ -78,9 +82,10 @@ async function forgoneIncrease(
   const stored = parseCalc(review.Calc);
   if (stored) {
     const chosen = stored.override?.newAnnual ?? stored.newAnnual;
+    const ancillary = ancillaryChange(appliedCascade(stored));
     return {
-      computed: { currentAnnual: stored.currentAnnual, newAnnual: chosen, source: "calc" },
-      impact: r2(chosen - stored.currentAnnual),
+      computed: { ancillary, currentAnnual: stored.currentAnnual, newAnnual: chosen, source: "calc" },
+      impact: r2(chosen - stored.currentAnnual + ancillary.increase),
     };
   }
   const method = String(review.Method);
@@ -88,14 +93,14 @@ async function forgoneIncrease(
   const basis = parseBasis(review.Basis) ?? {};
   const scheduledFor = sqlDateToIso(review.ScheduledFor) ?? "";
   const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
-  const reference = referenceQuarter(scheduledFor);
+  const reference = referenceQuarterFor(cpiReferenceRuleOf(basis.referenceQuarterRule), scheduledFor);
   const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
   const cpiRows =
     method === "cpi" && (region === "AUS" || region === "DARWIN") ? await loadCpiRows(connection, region, [reference, previousQuarter(reference, interval)]) : [];
   const schedule = scheduleOf(tenancy, steps, totalSqm);
   const estimate = calculateReview({
     basis,
-    carparkGroups: [],
+    carparkGroups: schedule.carparkGroups,
     computedAt: new Date().toISOString(),
     computedBy: { name: "estimate", userId: null },
     cpiRows,
@@ -108,7 +113,7 @@ async function forgoneIncrease(
       workflowLiveFrom: schedule.context.lease.workflowLiveFrom ?? null,
     },
     method: method as CalcMethod,
-    miscFees: [],
+    miscFees: schedule.miscFees,
     newStepId: randomUUID(),
     reviewId: String(review.ReviewId),
     sanity: sanityBandFromEnv(),
@@ -119,9 +124,10 @@ async function forgoneIncrease(
     today,
   });
   if (estimate.kind !== "calc") return { computed: null, impact: null };
+  const ancillary = ancillaryChange(estimate.calc.cascade);
   return {
-    computed: { currentAnnual: estimate.calc.currentAnnual, newAnnual: estimate.calc.newAnnual, source: "estimate" },
-    impact: r2(estimate.calc.newAnnual - estimate.calc.currentAnnual),
+    computed: { ancillary, currentAnnual: estimate.calc.currentAnnual, newAnnual: estimate.calc.newAnnual, source: "estimate" },
+    impact: r2(estimate.calc.newAnnual - estimate.calc.currentAnnual + ancillary.increase),
   };
 }
 

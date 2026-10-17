@@ -394,12 +394,19 @@ describe("submitRentReview: refusals", () => {
     expect(res.jsonBody).toMatchObject({ code: "not_signed_off", error: "This tenancy's schedule isn't signed off yet — sign it off, then apply" });
   });
 
-  it("refuses a decrease on a ratchet lease, even from a director (C9: the schedule couldn't hold it)", async () => {
+  it("sends a decrease below the lease's ratchet to the directors, waiting for the ratchet's override (C9, WP26c)", async () => {
     await calculated();
-    as(PEOPLE.dee);
     const res = await submit({ override: { newAnnual: 120000, reason: "Agreed reduction" } });
-    expect(res.status).toBe(422);
-    expect(res.jsonBody).toMatchObject({ code: "ratchet" });
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ applied: false, review: { state: "awaiting_approval" } });
+    expect(JSON.parse(String(world.review("rev-1").Calc))).toMatchObject({ override: { newAnnual: 120000 }, ratchetOverrideNeeded: true });
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.submit")).toMatchObject({ RuleApplied: "override+reduction+ratchet" });
+    expect(escalations.raiseApprovalEscalation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reasons: ["override", "reduction", "ratchet"], startAtRole: "director" }),
+    );
+    // Nothing reaches the schedule until a director overrides the ratchet.
+    expect(parseSteps(String(world.tenant(7).ScheduledRateSteps)).find((step) => step.id === STEP_IDS.review)?.resolution).toBeUndefined();
   });
 
   it("lets only a director, with a reason, go below a ratchet the basis adds where the lease has none (C9)", async () => {
@@ -724,13 +731,13 @@ describe("L6: a rent the schedule can't hold is refused at calculate and at subm
     expect(actions()).toEqual([]);
   });
 
-  it("refuses at calculate a decrease a departing basis worked out on a ratchet lease", async () => {
+  it("works out a decrease a departing basis gives on a ratchet lease, marked as needing a director's override (C9, WP26c)", async () => {
     seed(world, { cpi: [100, 98], review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })) } });
     const res = await calculate();
-    expect(res.status).toBe(422);
-    expect(res.jsonBody).toMatchObject({ code: "ratchet" });
-    expect((res.jsonBody as { error: string }).error).toMatch(/can't override the lease's ratchet here yet/);
-    expect(world.review("rev-1").Calc).toBeNull();
+    expect(res.status).toBe(200);
+    const calc = JSON.parse(String(world.review("rev-1").Calc)) as { currentAnnual: number; newAnnual: number; ratchetOverrideNeeded?: boolean };
+    expect(calc.newAnnual).toBe(Math.round(calc.currentAnnual * 0.98 * 100) / 100);
+    expect(calc.ratchetOverrideNeeded).toBe(true);
   });
 
   it("refuses at submit an override the schedule can't hold, leaving the review in progress with nothing ledgered", async () => {
@@ -803,7 +810,7 @@ describe("A2: directors override C3 and C5 with a reason, ledgered as rent_revie
     await calculated({ tenant: UNSIGNED });
     as(PEOPLE.dee);
     expect((await submit({ directorOverride: { checks: ["not_signed_off"] } })).jsonBody).toMatchObject({ code: "reason_required" });
-    expect((await submit({ directorOverride: { checks: ["ratchet"], reason: "x" } })).jsonBody).toMatchObject({ code: "bad_request" });
+    expect((await submit({ directorOverride: { checks: ["c10"], reason: "x" } })).jsonBody).toMatchObject({ code: "bad_request" });
   });
 
   it("carries a C3 override made at submit through to APPROVE, so the approver needn't be a director", async () => {
@@ -832,12 +839,13 @@ describe("A2: directors override C3 and C5 with a reason, ledgered as rent_revie
     expect(actions().slice(decided, decided + 3)).toEqual(["rent_review.approve", "rent_review.director_override", "rent_review.apply"]);
   });
 
-  it("keeps refusing a decrease on the lease's own ratchet, director or not (C9, WP26c)", async () => {
+  it("takes only the ratchet check as the ratchet's override: another leaves the review waiting for it (C9, WP26c)", async () => {
     await calculated();
     as(PEOPLE.dee);
     const res = await submit({ directorOverride: { checks: ["out_of_band"], reason: "Hardship" }, override: { newAnnual: 120000, reason: "Hardship" } });
-    expect(res.jsonBody).toMatchObject({ code: "ratchet" });
-    expect((res.jsonBody as { error: string }).error).toMatch(/a director can't override the lease's ratchet here yet/);
+    expect(res.jsonBody).toMatchObject({ applied: false, review: { state: "awaiting_approval" } });
+    expect(JSON.parse(String(world.review("rev-1").Calc))).toMatchObject({ ratchetOverrideNeeded: true });
+    expect(overrides()).toEqual([]);
   });
 });
 
@@ -965,10 +973,13 @@ describe("L7: a review waiting for its index comes back calculated, and its owne
   });
 
   it("is left in progress for its owner when the calculation is refused, and says why", async () => {
-    seed(world, { review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })), ExpectedIndexAt: addDaysIso(TODAY, -5), State: "awaiting_index" }, cpi: [100, 98] });
+    // Last year's review was never settled, so this one can't be worked out yet.
+    const rows = steps();
+    rows[1] = { effectiveFrom: LAST_YEAR, effectiveTo: REVIEW_DATE, id: STEP_IDS.lastYear, methodKind: "cpi", ratePercent: 0 };
+    seed(world, { review: { ExpectedIndexAt: addDaysIso(TODAY, -5), State: "awaiting_index" }, tenant: { ScheduledRateSteps: JSON.stringify(rows) } });
     const report = await resumeAwaitingIndex({} as never, timer);
     expect(report).toMatchObject({ calculated: 0, resumed: 1 });
-    expect(report.notCalculated).toEqual([{ reviewId: "rev-1", why: expect.stringMatching(/^ratchet: /) }]);
+    expect(report.notCalculated).toEqual([{ reviewId: "rev-1", why: expect.stringMatching(/^earlier_review_pending: /) }]);
     expect(world.review("rev-1")).toMatchObject({ Calc: null, State: "in_progress" });
     const review = toReviewDto((await loadReview({} as never, "rev-1")) as never, TODAY);
     expect(review.indexArrived).toEqual({ at: expect.any(String), referenceQuarter: REFERENCE });

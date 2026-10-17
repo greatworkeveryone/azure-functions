@@ -1,7 +1,7 @@
 // POST /api/submitRentReview   (PLAN §3.1 SUBMIT, D3, WP26)
 //
 //   { reviewId, rowVersion, override?: { newAnnual, reason },
-//     directorOverride?: { checks: ["not_signed_off" | "out_of_band"], reason } }
+//     directorOverride?: { checks: ["not_signed_off" | "out_of_band" | "ratchet"], reason } }
 //   200 { review, applied, nextReview? }
 //
 // Sends a calculated review on. In one transaction, under update locks on the
@@ -23,11 +23,18 @@
 //               director_override). Each check overridden is its own
 //               rent_review.director_override row, an exception with its facts.
 //               Anyone else sending one is 403 forbidden, ledgered as denied
-//   C9          a new rent below the current one on a lease with a ratchet is
-//               refused (422 ratchet): the schedule engine holds every review of
-//               a ratchet lease at no decrease, so it could not hold that rent. A
-//               director may still go below a ratchet the review's basis adds
-//               (and the lease doesn't) with an override and its reason.
+//   C9          a new rent below the current one on a lease with a ratchet needs a
+//               director's override of the ratchet, with a reason (D23, WP26c).
+//               Anyone may submit it: as a reduction it waits for a director (A3),
+//               with "ratchet" among its reasons and calc.ratchetOverrideNeeded,
+//               and the approving director overrides the ratchet then
+//               (approveRentReview). A director submitting may override it now,
+//               directorOverride: { checks: ["ratchet"], reason }: its own
+//               rent_review.director_override row, riding in the calc to APPLY.
+//               Either way the receipt is the review's row as APPLY writes it, with
+//               ratchetExempt. A ratchet only the review's basis adds (the lease has
+//               none): a director goes below it with an override of the rent and
+//               its reason, or the ratchet check; anyone else is refused (422 ratchet).
 // Then:
 //   one step    a CPI or fixed result, inside the band, on the lease's own terms
 //               (an unchanged fixed %), with no override: APPLY now
@@ -69,19 +76,19 @@ import { requireMoneyContext } from "../moneyGate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
 import {
-  LEASE_RATCHET_MESSAGE,
   leaseDepartures,
   parseCalc,
+  provisionalRatchetExemption,
   sanityBandFromEnv,
   sanityOf,
   type RentReviewCalc,
   unrepresentableRent,
 } from "../rentReviewCalc";
-import { parseSteps } from "../scheduledRateStepLogic";
+import { parseSteps, type RatchetExemption } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision, type NextReviewRef } from "../rentReview/afterDecision";
-import { applyReview } from "../rentReview/apply";
+import { applyReview, ratchetFacts } from "../rentReview/apply";
 import { parseBasis } from "../rentReview/basis";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
@@ -136,7 +143,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
     const reviewId = readReviewId(body.reviewId);
     const rowVersion = readRowVersion(body.rowVersion);
     const override = readOverride(body.override);
-    const directorOverride = readDirectorOverride(body.directorOverride, ["not_signed_off", "out_of_band"]);
+    const directorOverride = readDirectorOverride(body.directorOverride, ["not_signed_off", "out_of_band", "ratchet"]);
 
     connection = await createRequestConnection(token);
     const caller = await resolveCaller(request, connection);
@@ -203,13 +210,23 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
         const basis = parseBasis(review.Basis) ?? {};
         const scheduledFor = sqlDateToIso(review.ScheduledFor) ?? "";
 
-        // C9: a decrease where a ratchet forbids one.
-        if (chosen < calc.currentAnnual) {
-          if (isReviewRatchetOn(tenancy)) throw new RentReviewError("ratchet", LEASE_RATCHET_MESSAGE);
-          if (basis.ratchet === true && !(override && caller.roles.includes(AppRole.DIRECTOR))) {
-            throw new RentReviewError("ratchet", "This review's basis has a ratchet, so the rent can't go down unless a director overrides it with a reason.");
-          }
+        // C9: a decrease where a ratchet holds the rent (D23, WP26c). Below the
+        // lease's own ratchet the review's row is written exempt from it once a
+        // director overrides it: now (only a director gets here with an override)
+        // or at APPROVE. Until then the receipt is that row, provisionally.
+        const ratchetOverride = directorOverride?.checks.has("ratchet") === true;
+        const belowLeaseRatchet = chosen < calc.currentAnnual && isReviewRatchetOn(tenancy);
+        const belowBasisRatchet = chosen < calc.currentAnnual && basis.ratchet === true && !belowLeaseRatchet;
+        if (belowBasisRatchet && !ratchetOverride && !(override && director)) {
+          throw new RentReviewError("ratchet", "This review's basis has a ratchet, so the rent can't go down unless a director overrides it with a reason.");
         }
+        const ratchetOverridden = ratchetOverride && (belowLeaseRatchet || belowBasisRatchet);
+        const overriddenAt = new Date().toISOString();
+        const ratchetExempt: RatchetExemption | null = !belowLeaseRatchet
+          ? null
+          : ratchetOverridden && directorOverride
+            ? { at: overriddenAt, byName: caller.actor.name.slice(0, 200), reason: directorOverride.reason }
+            : provisionalRatchetExemption(overriddenAt);
 
         const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
         const lease = leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor));
@@ -222,6 +239,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
           calc,
           departs: override !== null || departures.length > 0,
           newStepId: randomUUID(),
+          ratchetExempt,
           reviewId,
           schedule,
           scheduledFor,
@@ -234,7 +252,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
         }
         if (worked.kind === "stale") throw new RentReviewError("stale_schedule", "The schedule changed since this was calculated — calculate again");
         if (worked.kind === "unrepresentable") {
-          const why = unrepresentableRent(chosen, calc.currentAnnual, isReviewRatchetOn(tenancy));
+          const why = unrepresentableRent(chosen, calc.currentAnnual, ratchetExempt === null && isReviewRatchetOn(tenancy));
           throw new RentReviewError(why.code, why.message);
         }
         const receipt = worked.written;
@@ -247,6 +265,8 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
           ...(departures.length > 0 ? ["basis_departs_from_lease"] : []),
           // A3: a new rent below the current one is never applied in one step.
           ...(chosen < calc.currentAnnual ? ["reduction"] : []),
+          // C9: below the lease's ratchet, a director overrides it to approve.
+          ...(belowLeaseRatchet && !ratchetOverridden ? ["ratchet"] : []),
         ];
         const buildingId = Number(tenancy.BuildingId);
         const scope = { buildingId, correlationId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
@@ -288,9 +308,15 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
             }
           : // The computed rent's receipt again, its arrears to today.
             { ...calc, arrears: receipt.arrears, cascade: receipt.cascade, departures, override: undefined, sanity, ...(leaseTerms ? { leaseTerms } : {}) };
-        if (signOffOverridden && directorOverride) {
+        // C9: the rent waits for a director's override of the lease's ratchet.
+        if (belowLeaseRatchet && !ratchetOverridden) submitted.ratchetOverrideNeeded = true;
+        else delete submitted.ratchetOverrideNeeded;
+        // Overrides APPLY honours at APPROVE (C3, C9): they ride in the calc.
+        if (directorOverride && (signOffOverridden || ratchetOverridden)) {
+          const by = { name: caller.actor.name, userId: caller.actor.userId };
           submitted.directorOverrides = [
-            { at: new Date().toISOString(), by: { name: caller.actor.name, userId: caller.actor.userId }, check: "not_signed_off", reason: directorOverride.reason },
+            ...(signOffOverridden ? [{ at: overriddenAt, by, check: "not_signed_off" as const, reason: directorOverride.reason }] : []),
+            ...(ratchetOverridden ? [{ at: overriddenAt, by, check: "ratchet" as const, reason: directorOverride.reason }] : []),
           ];
         }
         const chosenFigures = { appliedPercent: chosenPercent, currentAnnual: calc.currentAnnual, newAnnual: chosen };
@@ -305,6 +331,9 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
               check: "out_of_band",
               facts: { appliedPercent: chosenPercent, band: { maxPercent: sanity.maxPercent, minPercent: sanity.minPercent } },
             });
+          }
+          if (ratchetOverridden) {
+            await recordDirectorOverride(db, { ...base, check: "ratchet", facts: { ...ratchetFacts(calc.currentAnnual, chosen), leaseRatchet: belowLeaseRatchet } });
           }
         };
 
