@@ -7,6 +7,8 @@
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { executeQuery, type SqlRow } from "./db";
+import { loadJobForMoney } from "./moneyJob-db";
+import { jobMoneyRefusal } from "./moneyRules";
 
 export const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -41,7 +43,9 @@ export interface QuoteRejectionInput {
 
 export type QuoteDecisionOutcome =
   | { ok: true; jobId: number; quote: SqlRow; previousStatus?: string }
-  | { ok: false; status: 404 | 409; error: string };
+  | { ok: false; status: 404 | 409; error: string }
+  /** A job rule refused the decision (J3): the caller ledgers it as `denied`. */
+  | { code: string; error: string; jobId: number; ok: false; status: 409 | 422 };
 
 // A decision taken from an email reply is weaker evidence than one clicked in
 // the app, so the audit trail says so and names who replied.
@@ -88,6 +92,20 @@ export async function approveDirectorQuote(
   if (status !== "awaiting_director") {
     return { ok: false, status: 409, error: "Quote must be in awaiting_director state" };
   }
+  // J3: the job still takes money decisions (not done, archived or internal),
+  // and has no other approved quote: Jobs.ApprovedQuoteID is never overwritten.
+  // Read under lock, so the write lands on the state checked.
+  const moneyJob = await loadJobForMoney(connection, jobId);
+  const jobRefusal =
+    (moneyJob ? jobMoneyRefusal(moneyJob) : null) ??
+    (moneyJob?.hasApprovedQuote
+      ? {
+          code: "quote_already_approved",
+          message: "This job already has an approved quote. Deselect it before approving another.",
+          status: 409 as const,
+        }
+      : null);
+  if (jobRefusal) return { code: jobRefusal.code, error: jobRefusal.message, jobId, ok: false, status: jobRefusal.status === 422 ? 422 : 409 };
 
   const updated = await executeQuery(
     connection,

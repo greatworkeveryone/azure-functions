@@ -11,6 +11,7 @@ import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedRespon
 import { requireMoneyContext } from "../moneyGate";
 import { adminRefusal, holdsAdmin } from "../moneyRules";
 import { isTestJob } from "../testRecords";
+import { refuseMoneyChange } from "../moneyJob-db";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { contractorFacts, jobScope, paymentEdit, paymentFacts, withContractorId } from "../ledger/moneyDecisions";
@@ -483,6 +484,18 @@ async function upsertPayment(
         return { status: 404, jsonBody: { error: "Payment not found" } };
       }
       const existing = existingRows[0];
+      // Decision 4 (J3 review): admin changes a payment on test records only.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, existing.JobID as number)));
+      if (adminBar) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: typeof Amount === "number" ? "payment.amount_change" : "payment.edit",
+          jobId: existing.JobID as number,
+          refusal: adminBar,
+          state: { status: (existing.Status as string | null) ?? null },
+          subject: { id: PaymentID, type: "payment" },
+        });
+      }
       const existingInvoiceId = (existing.JobInvoiceID as number | null) ?? null;
       const amountChanges =
         typeof Amount === "number" && toCents(Amount) !== toCents(Number(existing.Amount));

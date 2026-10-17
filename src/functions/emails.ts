@@ -36,6 +36,8 @@ import { contractorFacts, jobScope, ledgerReason, quoteFacts } from "../ledger/m
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
 import { parseMoneyField } from "../money";
+import { amountRefusal, jobMoneyRefusal, refusalResponse } from "../moneyRules";
+import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { linkDirectorReply } from "../email/director-reply-link";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
@@ -369,8 +371,12 @@ export async function promoteEmailToQuote(
     const amount = parseMoneyField(rawAmount, "Amount");
     if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
     const Amount = amount.value;
-    // CreatedBy is derived from the verified token; body field is ignored.
-    const CreatedBy = callerOid;
+    // J3: a quote is added with an amount above $0, by email as by hand.
+    const badAmount = amountRefusal(Amount, "Amount", true);
+    if (badAmount) return refusalResponse(badAmount);
+    // CreatedBy is derived from the verified token, by name: separation of
+    // duties compares it with the approver's name (J3). Body field is ignored.
+    const CreatedBy = identity.name;
 
     connection = await createRequestConnection(token);
 
@@ -392,64 +398,89 @@ export async function promoteEmailToQuote(
       };
     }
 
-    const seqRows = await executeQuery(
-      connection,
-      "SELECT ISNULL(MAX(Seq), 0) + 1 AS NextSeq FROM Quotes WHERE JobID = @JobID",
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
-    );
-    const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
-    const quoteNumber = formatDocNumber({
-      prefix: "QT",
-      jobId,
-      acronym: nameToAcronym(ContractorName ?? ""),
-      seq: nextSeq,
-    });
+    // J3: the quote, its number and the email flip commit together, on a job
+    // read under lock that still takes money records.
+    await beginTransaction(connection);
+    try {
+      const moneyJob = await loadJobForMoney(connection, jobId);
+      if (!moneyJob) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Job not found" } };
+      }
+      const jobRefusal = jobMoneyRefusal(moneyJob);
+      if (jobRefusal) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "quote.create",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob.status, sourceEmailId: EmailID },
+          subject: { id: jobId, type: "job" },
+        });
+      }
 
-    // Only mark as needing AI validation when the email was actually AI-classified as
-    // a quote. If the user promoted it manually (email classified as something else),
-    // stamp AIValidatedAt immediately so the banner never appears.
-    const needsAIValidation = (email.AIClassification as string | null) === "quote";
-    const inserted = await executeQuery(
-      connection,
-      needsAIValidation
-        ? `INSERT INTO Quotes
-             (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-              Notes, SourceEmailID, ReceivedAt, CreatedBy)
-           OUTPUT INSERTED.QuoteID
-           VALUES
-             (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-              @Notes, @EmailID, @ReceivedAt, @CreatedBy);`
-        : `INSERT INTO Quotes
-             (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-              Notes, SourceEmailID, ReceivedAt, CreatedBy, AIValidatedAt, AIValidatedBy)
-           OUTPUT INSERTED.QuoteID
-           VALUES
-             (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-              @Notes, @EmailID, @ReceivedAt, @CreatedBy, SYSUTCDATETIME(), @AIValidatedBy);`,
-      [
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
-        { name: "Seq", type: TYPES.Int, value: nextSeq },
-        { name: "ContractorID", type: TYPES.Int, value: ContractorID ?? null },
-        { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
-        { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
-        { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
-        { name: "EmailID", type: TYPES.Int, value: EmailID },
-        { name: "ReceivedAt", type: TYPES.DateTime2, value: email.ReceivedAt ?? null },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
-        ...(needsAIValidation ? [] : [{ name: "AIValidatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null }]),
-      ],
-    );
-    const newQuoteId = inserted[0].QuoteID as number;
+      const seqRows = await executeQuery(
+        connection,
+        "SELECT ISNULL(MAX(Seq), 0) + 1 AS NextSeq FROM Quotes WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+      const nextSeq = (seqRows[0]?.NextSeq as number) ?? 1;
+      const quoteNumber = formatDocNumber({
+        prefix: "QT",
+        jobId,
+        acronym: nameToAcronym(ContractorName ?? ""),
+        seq: nextSeq,
+      });
 
-    await executeQuery(
-      connection,
-      `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
-       WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
+      // Only mark as needing AI validation when the email was actually AI-classified as
+      // a quote. If the user promoted it manually (email classified as something else),
+      // stamp AIValidatedAt immediately so the banner never appears.
+      const needsAIValidation = (email.AIClassification as string | null) === "quote";
+      const inserted = await executeQuery(
+        connection,
+        needsAIValidation
+          ? `INSERT INTO Quotes
+               (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
+                Notes, SourceEmailID, ReceivedAt, CreatedBy)
+             OUTPUT INSERTED.QuoteID
+             VALUES
+               (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy);`
+          : `INSERT INTO Quotes
+               (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
+                Notes, SourceEmailID, ReceivedAt, CreatedBy, AIValidatedAt, AIValidatedBy)
+             OUTPUT INSERTED.QuoteID
+             VALUES
+               (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy, SYSUTCDATETIME(), @AIValidatedBy);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
+          { name: "Seq", type: TYPES.Int, value: nextSeq },
+          { name: "ContractorID", type: TYPES.Int, value: ContractorID ?? null },
+          { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+          { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+          { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
+          { name: "EmailID", type: TYPES.Int, value: EmailID },
+          { name: "ReceivedAt", type: TYPES.DateTime2, value: email.ReceivedAt ?? null },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          ...(needsAIValidation ? [] : [{ name: "AIValidatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null }]),
+        ],
+      );
+      const newQuoteId = inserted[0].QuoteID as number;
 
-    return { status: 200, jsonBody: { quoteId: newQuoteId, jobId } };
+      await executeQuery(
+        connection,
+        `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
+         WHERE EmailID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: EmailID }],
+      );
+      await commitTransaction(connection);
+
+      return { status: 200, jsonBody: { quoteId: newQuoteId, jobId } };
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
   } catch (error: any) {
     context.error("promoteEmailToQuote failed:", error.message);
     return errorResponse("Promote email failed", error.message);
@@ -727,8 +758,12 @@ export async function promoteEmailToInvoice(
     const amount = parseMoneyField(rawAmount, "Amount");
     if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
     const Amount = amount.value;
-    // CreatedBy is derived from the verified token; body field is ignored.
-    const CreatedBy = callerOid;
+    // J3: an invoice is added with an amount above $0, by email as by hand.
+    const badAmount = amountRefusal(Amount, "Amount", true);
+    if (badAmount) return refusalResponse(badAmount);
+    // CreatedBy is derived from the verified token, by name: separation of
+    // duties compares it with the approver's name (J3). Body field is ignored.
+    const CreatedBy = identity.name;
 
     connection = await createRequestConnection(token);
 
@@ -736,34 +771,61 @@ export async function promoteEmailToInvoice(
     const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
     if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
 
-    const inserted = await executeQuery(
-      connection,
-      `INSERT INTO JobInvoices
-         (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
-       OUTPUT INSERTED.JobInvoiceID
-       VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
-      [
-        { name: "JobID", type: TYPES.Int, value: JobID },
-        { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
-        { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
-        { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
-        { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
-        { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
-        { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
-        { name: "EmailID", type: TYPES.Int, value: EmailID },
-        { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
-      ],
-    );
-    const invoiceId = inserted[0].JobInvoiceID as number;
+    // J3: the invoice and the email flip commit together, on a job read under
+    // lock that still takes money records. An emailed invoice is a
+    // contractor's (incoming), so a done job needs its reopen (decision 18
+    // lets only outgoing invoices through).
+    await beginTransaction(connection);
+    try {
+      const moneyJob = await loadJobForMoney(connection, JobID);
+      if (!moneyJob) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Job not found" } };
+      }
+      const jobRefusal = jobMoneyRefusal(moneyJob, { outgoingInvoice: false });
+      if (jobRefusal) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.create",
+          jobId: JobID,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob.status, sourceEmailId: EmailID },
+          subject: { id: JobID, type: "job" },
+        });
+      }
 
-    await executeQuery(
-      connection,
-      `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
-       WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
+      const inserted = await executeQuery(
+        connection,
+        `INSERT INTO JobInvoices
+           (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+         OUTPUT INSERTED.JobInvoiceID
+         VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
+        [
+          { name: "JobID", type: TYPES.Int, value: JobID },
+          { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+          { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
+          { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
+          { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
+          { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
+          { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
+          { name: "EmailID", type: TYPES.Int, value: EmailID },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+        ],
+      );
+      const invoiceId = inserted[0].JobInvoiceID as number;
 
-    return { status: 200, jsonBody: { invoiceId } };
+      await executeQuery(
+        connection,
+        `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
+         WHERE EmailID = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: EmailID }],
+      );
+      await commitTransaction(connection);
+
+      return { status: 200, jsonBody: { invoiceId } };
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
   } catch (error: any) {
     context.error("promoteEmailToInvoice failed:", error.message);
     return errorResponse("Promote email to invoice failed", error.message);
@@ -1163,6 +1225,11 @@ export async function recordEmailQuoteDecision(
     if (!outcome.ok) {
       await rollbackTransaction(conn);
       inTransaction = false;
+      if ("code" in outcome) {
+        // A job rule refused the director's decision (J3): a refused attempt.
+        await recordRefusal(conn, operator, { id: QuoteID, type: "quote" }, { attempted, code: outcome.code, message: outcome.error }, outcome.jobId);
+        return { status: outcome.status, jsonBody: { code: outcome.code, error: outcome.error } };
+      }
       return { status: outcome.status, jsonBody: { error: outcome.error } };
     }
 

@@ -130,6 +130,36 @@ describe("upsertPayment: recording a payment", () => {
   });
 });
 
+describe("upsertPayment: editing a payment (decision 4)", () => {
+  it("refuses admin editing a real record's payment, ledgered", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    mockSql([
+      APP_USER,
+      JOB_BUILDING,
+      NO_TEST_FLAG,
+      { match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ Amount: 400, JobID: 9, JobInvoiceID: 5, MyobID: null, PaymentID: 11, Status: "pending" }] },
+      PAYMENT_SCOPE,
+    ]);
+
+    const res = await call("upsertPayment", { Amount: 300, PaymentID: 11 });
+
+    expect(res).toMatchObject({ jsonBody: { code: "admin_test_records_only" }, status: 403 });
+    expect(wrote(/UPDATE Payments SET/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "payment.amount_change" }), ruleApplied: "admin_test_records_only" }),
+    ]);
+  });
+
+  it("lets accounts edit the notes on a pending payment", async () => {
+    mockSql([
+      APP_USER,
+      { match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ Amount: 400, JobID: 9, JobInvoiceID: 5, MyobID: null, PaymentID: 11, Status: "pending" }] },
+      STORED,
+    ]);
+    expect((await call("upsertPayment", { Notes: "Paid by EFT", PaymentID: 11 })).status).toBe(200);
+  });
+});
+
 describe("markPaymentPaid", () => {
   const markPaid = () => call("markPaymentPaid", { PaymentID: 11 });
 

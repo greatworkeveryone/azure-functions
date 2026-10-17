@@ -33,11 +33,18 @@ export interface RefusalSubject {
   type: RefusalSubjectType;
 }
 
+/**
+ * Attempts recorded only when refused (J3 review): adding or editing a quote,
+ * invoice or purchase order is not itself a ledgered decision, but one the
+ * money rules refuse (a done, internal or archived job; a paid invoice) is.
+ */
+export type RefusedOnlyAttempt = "invoice.create" | "invoice.edit" | "payment.edit" | "po.edit" | "quote.create" | "quote.edit";
+
 export interface Refusal {
   /** `denied` unless the refusal is a self-approval block. */
   action?: "denied" | "sod_blocked";
   /** The decision that was refused, e.g. "quote.director_approve". */
-  attempted: LedgerAction;
+  attempted: LedgerAction | RefusedOnlyAttempt;
   /** Short reason code, stored as the row's rule: "role_not_permitted". */
   code: string;
   /** The sentence the caller was shown, stored as the row's reason. */

@@ -130,12 +130,21 @@ describe("upsertQuote: creating", () => {
     ["an internal job", { IsInternal: true }, 422, "internal_job"],
     ["a done job", { Status: "Done" }, 409, "job_done"],
     ["an archived job", { IsArchived: true }, 409, "job_archived"],
-  ])("refuses a quote on %s", async (_label, over, status, code) => {
-    mockSql([APP_USER, job(over), CREATED]);
+  ])("refuses a quote on %s, ledgering the refused attempt against the job", async (_label, over, status, code) => {
+    mockSql([APP_USER, JOB_BUILDING, job(over), CREATED]);
     const res = await create({ Amount: 500 });
     expect(res.status).toBe(status);
     expect(res.jsonBody).toMatchObject({ code });
     expect(wrote(/INSERT INTO Quotes/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.create" }), ruleApplied: code, subjectId: "9", subjectType: "job" }),
+    ]);
+  });
+
+  it("a missing amount is plain validation: answered, not ledgered", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job(), CREATED]);
+    await create({});
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
   });
 });
 
@@ -172,6 +181,14 @@ describe("upsertQuote: editing", () => {
       expect((await edit({ Amount })).status).toBe(422);
     }
     expect(wrote(/UPDATE Quotes/)).toBe(false);
+  });
+
+  it("an edit on a done job is ledgered against the quote (J3 review)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Done" }), quote(), QUOTE_SCOPE]);
+    await edit({ Notes: "x" });
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.edit" }), ruleApplied: "job_done", subjectId: "7", subjectType: "quote" }),
+    ]);
   });
 
   it("refuses editing a quote on a done job", async () => {
@@ -248,6 +265,20 @@ describe("directorApproveQuote", () => {
   it("approves a quote someone else added and selected", async () => {
     mockSql([APP_USER, JOB_BUILDING, awaiting(), { match: /OUTPUT inserted\.QuoteID/, rows: [{ QuoteID: 7 }] }, { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] }]);
     expect((await directorApprove()).status).toBe(200);
+  });
+
+  it.each([
+    ["a done job", { Status: "Done" }, 409, "job_done"],
+    ["a job that already has another approved quote", { HasApprovedQuote: 1 }, 409, "quote_already_approved"],
+  ])("refuses on %s: nothing written, the refused attempt ledgered", async (_label, over, status, code) => {
+    mockSql([APP_USER, JOB_BUILDING, awaiting(), job(over), QUOTE_SCOPE, { match: /OUTPUT inserted\.QuoteID/, rows: [{ QuoteID: 7 }] }]);
+
+    expect(await directorApprove()).toMatchObject({ jsonBody: { code }, status });
+    expect(wrote(/UPDATE Quotes/)).toBe(false);
+    expect(wrote(/UPDATE Jobs/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.director_approve" }), ruleApplied: code }),
+    ]);
   });
 
   it("decision 17: a director who added the quote and gave its first approval still approves it", async () => {

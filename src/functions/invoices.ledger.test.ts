@@ -1283,14 +1283,23 @@ describe("an outgoing invoice raised after the job is done (decision 18)", () =>
     expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
   });
 
-  it("an incoming invoice on a done job still needs the reopen: 409, nothing written", async () => {
-    mockSql([APP_USER, DONE_JOB, { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] }, STORED]);
+  it("an incoming invoice on a done job still needs the reopen: 409, nothing written, the refused attempt ledgered", async () => {
+    mockSql([APP_USER, JOB_BUILDING, DONE_JOB, { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] }, STORED]);
 
     const res = await upsertJobInvoice(makeRequest({ Amount: 750, ContractorName: "Acme", JobID: 9 }), ctx);
 
     expect(res).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
     expect(ran(/INSERT INTO JobInvoices/)).toBe(false);
-    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "denied",
+        before: { attempted: "invoice.create", direction: "incoming", jobStatus: "Done" },
+        buildingId: 5,
+        jobId: 9,
+        ruleApplied: "job_done",
+        subjectType: "job",
+      }),
+    ]);
   });
 });
 

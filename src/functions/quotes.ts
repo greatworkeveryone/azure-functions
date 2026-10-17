@@ -29,7 +29,7 @@ import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome"
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
 import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
-import { loadJobForMoney } from "../moneyJob-db";
+import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { resolveActivePlannerTasks } from "../planner";
@@ -187,8 +187,13 @@ export async function upsertQuote(
         }
         const jobRefusal = jobMoneyRefusal(moneyJob);
         if (jobRefusal) {
-          await rollbackTransaction(connection).catch(() => {});
-          return refusalResponse(jobRefusal);
+          return await refuseMoneyChange(connection, request, {
+            attempted: "quote.create",
+            jobId: JobID,
+            refusal: jobRefusal,
+            state: { jobStatus: moneyJob.status },
+            subject: { id: JobID, type: "job" },
+          });
         }
         const acronym =
           typeof ContractorID === "number"
@@ -352,8 +357,13 @@ export async function upsertQuote(
       const moneyJob = await loadJobForMoney(connection, jobId);
       const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
       if (jobRefusal) {
-        await rollbackTransaction(connection).catch(() => {});
-        return refusalResponse(jobRefusal);
+        return await refuseMoneyChange(connection, request, {
+          attempted: "quote.edit",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob?.status ?? null, status: before.Status ?? null },
+          subject: { id: QuoteID, type: "quote" },
+        });
       }
 
       const effects = decideApprovalAmountEdit(
@@ -1534,6 +1544,17 @@ export async function directorApproveQuote(
       });
       if (!outcome.ok) {
         await rollbackTransaction(connection).catch(() => {});
+        if ("code" in outcome) {
+          // A job rule refused it (J3), ledgered in a transaction of its own.
+          await recordRefusal(
+            connection,
+            actor,
+            { id: QuoteID, type: "quote" },
+            { attempted: "quote.director_approve", code: outcome.code, message: outcome.error, state: { status: "awaiting_director" } },
+            outcome.jobId,
+          );
+          return { status: outcome.status, jsonBody: { code: outcome.code, error: outcome.error } };
+        }
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
       const scope = await jobScope(connection, outcome.jobId);

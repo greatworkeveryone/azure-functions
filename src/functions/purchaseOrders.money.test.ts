@@ -177,6 +177,19 @@ describe("upsertPurchaseOrder: editing", () => {
     expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "po.markers_reset", ruleApplied: "payee_changed", subjectId: "99" })]);
   });
 
+  it.each([
+    ["done", { Status: "Done" }, 409, "job_done"],
+    ["archived", { IsArchived: true }, 409, "job_archived"],
+    ["internal", { IsInternal: true }, 422, "internal_job"],
+  ])("an edit on a %s job is refused and ledgered against the PO (J3 review)", async (_label, over, status, code) => {
+    mockSql([APP_USER, JOB_BUILDING, job(over), po(), { match: /FROM PurchaseOrders s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
+    expect(await call("upsertPurchaseOrder", { PurchaseOrderID: 99, Scope: "x" })).toMatchObject({ jsonBody: { code }, status });
+    expect(wrote(/UPDATE PurchaseOrders/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.edit" }), ruleApplied: code, subjectId: "99", subjectType: "purchase_order" }),
+    ]);
+  });
+
   it("refuses a cost of $0 or a cleared cost, and edits on a done job", async () => {
     mockSql([APP_USER, job({ Status: "Work" }), po()]);
     expect((await call("upsertPurchaseOrder", { CostNotToExceed: null, PurchaseOrderID: 99 })).status).toBe(422);
@@ -219,5 +232,14 @@ describe("markPurchaseOrderMyobCreated (decision 4)", () => {
   it("lets a manager mark it", async () => {
     mockSql([APP_USER, JOB_BUILDING, po(), STORED]);
     expect((await call("markPurchaseOrderMyobCreated", { id: 99, jobId: 9 })).status).toBe(200);
+  });
+  it("refuses admin un-marking a real record too, ledgered", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, po({ MyobCreatedAt: new Date(), MyobCreatedBy: "Abby" }), PO_SCOPE]);
+    expect(await call("unmarkPurchaseOrderMyobCreated", { id: 99, jobId: 9 })).toMatchObject({ jsonBody: { code: "admin_test_records_only" }, status: 403 });
+    expect(wrote(/SET MyobCreatedAt = NULL/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.unmark_myob_created" }), ruleApplied: "admin_test_records_only" }),
+    ]);
   });
 });

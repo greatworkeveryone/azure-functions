@@ -16,7 +16,7 @@ import {
   type MoneyRefusal,
   refusalResponse,
 } from "../moneyRules";
-import { loadJobForMoney } from "../moneyJob-db";
+import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import { requireMoneyContext } from "../moneyGate";
@@ -413,8 +413,13 @@ export async function upsertJobInvoice(
         }
         const jobRefusal = jobMoneyRefusal(moneyJob, { outgoingInvoice: Direction === "outgoing" });
         if (jobRefusal) {
-          await rollbackTransaction(connection).catch(() => {});
-          return refusalResponse(jobRefusal);
+          return await refuseMoneyChange(connection, request, {
+            attempted: "invoice.create",
+            jobId: JobID,
+            refusal: jobRefusal,
+            state: { direction: Direction === "outgoing" ? "outgoing" : "incoming", jobStatus: moneyJob.status },
+            subject: { id: JobID, type: "job" },
+          });
         }
         const raisedAfterClose = moneyJob.status === "Done" && Direction === "outgoing";
         const raiser = raisedAfterClose ? await resolveLedgerActor(request, connection) : null;
@@ -606,8 +611,13 @@ export async function upsertJobInvoice(
       const moneyJob = await loadJobForMoney(connection, jobId);
       const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob, { outgoingInvoice: staysOutgoing }) : null;
       if (jobRefusal) {
-        await rollbackTransaction(connection).catch(() => {});
-        return refusalResponse(jobRefusal);
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.edit",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob?.status ?? null, status: before.Status ?? null },
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
       }
 
       const effects = decideApprovalAmountEdit(
@@ -623,11 +633,16 @@ export async function upsertJobInvoice(
       // Once money has been paid against the invoice, what it was for and who
       // it pays are facts someone acted on (J3).
       if ((effects.amountChanged || effects.contractorChanged) && (await paymentCount(connection, JobInvoiceID)) > 0) {
-        await rollbackTransaction(connection).catch(() => {});
-        return refusalResponse({
-          code: "invoice_paid",
-          message: "Payments are recorded against this invoice, so its amount and contractor can't change.",
-          status: 409,
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.edit",
+          jobId,
+          refusal: {
+            code: "invoice_paid",
+            message: "Payments are recorded against this invoice, so its amount and contractor can't change.",
+            status: 409,
+          },
+          state: { amount: before.Amount ?? null, status: before.Status ?? null },
+          subject: { id: JobInvoiceID, type: "invoice" },
         });
       }
 
@@ -1136,6 +1151,19 @@ async function directorApproveJobInvoice(
           jobId,
         );
         return { status: 400, jsonBody: { error } };
+      }
+      // J3: the job still takes money decisions (an outgoing invoice after
+      // Done included, decision 18), read under lock.
+      const moneyJob = await loadJobForMoney(connection, jobId);
+      const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob, { outgoingInvoice: invoice.Direction === "outgoing" }) : null;
+      if (jobRefusal) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.director_approve",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob?.status ?? null, status },
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
       }
 
       await executeQuery(
@@ -1786,6 +1814,19 @@ async function unmarkJobInvoiceMyobCreated(
 
       const jobId = invoice.JobID as number;
       const invoiceNumber = (invoice.InvoiceNumber as string | null) ?? `#${JobInvoiceID}`;
+
+      // Decision 4 (J3 review): admin un-marks in MYOB on test records only, as it marks.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, jobId)));
+      if (adminBar) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.unmark_myob_created",
+          jobId,
+          refusal: adminBar,
+          state: { status: (invoice.Status as string | null) ?? null },
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
+      }
 
       await executeQuery(
         connection,

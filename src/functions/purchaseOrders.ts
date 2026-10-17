@@ -57,7 +57,7 @@ import {
   purchaseOrderQuoteRefusal,
   refusalResponse,
 } from "../moneyRules";
-import { loadJobForMoney } from "../moneyJob-db";
+import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import type { LedgerActor } from "../ledger/types";
@@ -415,8 +415,13 @@ export async function upsertPurchaseOrder(
       const moneyJob = await loadJobForMoney(connection, jobId);
       const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
       if (jobRefusal) {
-        await rollbackTransaction(connection).catch(() => {});
-        return refusalResponse(jobRefusal);
+        return await refuseMoneyChange(connection, request, {
+          attempted: "po.edit",
+          jobId,
+          refusal: jobRefusal,
+          state: { jobStatus: moneyJob?.status ?? null },
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
       }
 
       const effects = decidePurchaseOrderEdit(
@@ -1213,6 +1218,17 @@ async function unmarkPurchaseOrderMyobCreated(
         return { status: 404, jsonBody: { error: "Purchase order not found" } };
       }
       const po = rows[0];
+      // Decision 4 (J3 review): admin un-marks in MYOB on test records only, as it marks.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, jobId)));
+      if (adminBar) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "po.unmark_myob_created",
+          jobId,
+          refusal: adminBar,
+          subject: { id, type: "purchase_order" },
+        });
+      }
       if (po.CompletedAt) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.

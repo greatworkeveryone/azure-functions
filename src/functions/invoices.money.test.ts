@@ -177,6 +177,50 @@ describe("upsertJobInvoice: creating", () => {
     mockSql([APP_USER, job({ Status: "Done" }), invoice({ Direction: "incoming" }), PAYMENTS(0), STORED]);
     expect(await call("upsertJobInvoice", { Direction: "outgoing", JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
   });
+
+  it("decision 18: turning an outgoing invoice incoming on a done job is refused with 409", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Done" }), invoice({ Direction: "outgoing" }), PAYMENTS(0), STORED]);
+    expect(await call("upsertJobInvoice", { Direction: "incoming", JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
+    expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+  });
+});
+
+// J3 review: a refusal that is a control on money is ledgered on the create
+// and edit paths too; a malformed amount is plain validation and is not.
+describe("upsertJobInvoice: control refusals are ledgered", () => {
+  it.each([
+    ["internal", { IsInternal: true }, "internal_job"],
+    ["done", { Status: "Done" }, "job_done"],
+    ["archived", { IsArchived: true }, "job_archived"],
+  ])("creating on an %s job: one `denied` row against the job", async (_label, over, code) => {
+    mockSql([APP_USER, JOB_BUILDING, job(over)]);
+    await call("upsertJobInvoice", { Amount: 500, JobID: 9 });
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "invoice.create" }), ruleApplied: code, subjectId: "9", subjectType: "job" }),
+    ]);
+  });
+
+  it("editing on a done job: one `denied` row against the invoice", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Done" }), invoice(), INVOICE_SCOPE]);
+    await call("upsertJobInvoice", { JobInvoiceID: 5, Notes: "x" });
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "invoice.edit" }), ruleApplied: "job_done", subjectId: "5", subjectType: "invoice" }),
+    ]);
+  });
+
+  it("changing the amount of an invoice with payments: one `denied` row, invoice_paid", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job(), invoice(), PAYMENTS(1), INVOICE_SCOPE]);
+    expect(await call("upsertJobInvoice", { Amount: 9000, JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "invoice_paid" }, status: 409 });
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "invoice.edit" }), ruleApplied: "invoice_paid", subjectType: "invoice" }),
+    ]);
+  });
+
+  it("a missing amount is plain validation: answered, not ledgered", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job()]);
+    await call("upsertJobInvoice", { JobID: 9 });
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+  });
 });
 
 describe("upsertJobInvoice: editing", () => {
@@ -213,6 +257,21 @@ describe("upsertJobInvoice: editing", () => {
 });
 
 describe("approveJobInvoice", () => {
+  it.each([
+    ["done (incoming)", { Status: "Done" }, 409, "job_done"],
+    ["archived", { IsArchived: true }, 409, "job_archived"],
+    ["internal", { IsInternal: true }, 422, "internal_job"],
+  ])("refuses an invoice on a %s job, writing nothing", async (_label, over, status, code) => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, job(over), invoice(), INVOICE_SCOPE]);
+    expect(await call("approveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code }, status });
+    expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+  });
+
+  it("approves an outgoing invoice on a done job (decision 18)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, job({ Status: "Done" }), invoice({ Direction: "outgoing" }), STORED]);
+    expect((await call("approveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
+  });
+
   it("approves a pending invoice someone else added", async () => {
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, job(), invoice(), STORED]);
     expect((await call("approveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
@@ -237,6 +296,24 @@ describe("directorApproveJobInvoice", () => {
 
   it("approves an invoice someone else added and approved at stage 1", async () => {
     mockSql([APP_USER, JOB_BUILDING, stageOne(), STORED]);
+    expect((await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
+  });
+
+  it.each([
+    ["done (incoming)", { Status: "Done" }, 409, "job_done"],
+    ["archived", { IsArchived: true }, 409, "job_archived"],
+    ["internal", { IsInternal: true }, 422, "internal_job"],
+  ])("refuses the director approval on a %s job: nothing written, ledgered", async (_label, over, status, code) => {
+    mockSql([APP_USER, JOB_BUILDING, job(over), stageOne(), INVOICE_SCOPE]);
+    expect(await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code }, status });
+    expect(wrote(/SET Status = 'director_approved'/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "invoice.director_approve" }), ruleApplied: code }),
+    ]);
+  });
+
+  it("gives the director approval to an outgoing invoice on a done job (decision 18)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Done" }), stageOne({ Direction: "outgoing" }), STORED]);
     expect((await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
   });
 
@@ -298,5 +375,14 @@ describe("markJobInvoiceMyobCreated (decision 4)", () => {
     mockSql([APP_USER, JOB_BUILDING, { match: /COL_LENGTH/, rows: [{ Len: 1 }] }, { match: /SELECT IsTest FROM Jobs/, rows: [{ IsTest: true }] }, ready, STORED]);
     expect((await call("markJobInvoiceMyobCreated", { JobInvoiceID: 5 })).status).toBe(200);
     expect(paramsOf(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/).CreatedBy).toBe("Dana Director");
+  });
+  it("refuses admin un-marking a real record too, ledgered", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, invoice({ MyobCreatedAt: new Date(), Status: "approved" }), INVOICE_SCOPE]);
+    expect(await call("unmarkJobInvoiceMyobCreated", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "admin_test_records_only" }, status: 403 });
+    expect(wrote(/SET MyobCreatedAt = NULL/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "invoice.unmark_myob_created" }), ruleApplied: "admin_test_records_only" }),
+    ]);
   });
 });

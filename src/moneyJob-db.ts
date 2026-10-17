@@ -2,8 +2,12 @@
 // the row locked until commit, so the J3 rules (moneyRules.ts) decide on the
 // state the write will land on.
 
+import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
-import { executeQuery } from "./db";
+import { executeQuery, rollbackTransaction } from "./db";
+import { resolveLedgerActor } from "./ledger/actor";
+import { recordRefusal, type Refusal, type RefusalSubject } from "./ledger/refusals";
+import { type MoneyRefusal, refusalResponse } from "./moneyRules";
 
 export interface MoneyJob {
   buildingId: number | null;
@@ -39,4 +43,29 @@ export async function loadJobForMoney(connection: Connection, jobId: number): Pr
     jobId,
     status: String(row.Status ?? ""),
   };
+}
+
+/**
+ * A control refusal on a money create or edit (J3 review): the decision's own
+ * transaction is rolled back, the refused attempt is ledgered in a transaction
+ * of its own (`denied`, recordRefusal), and the refusal is the answer. Plain
+ * validation (an amount that isn't one) is answered without a row.
+ */
+export async function refuseMoneyChange(
+  connection: Connection,
+  request: HttpRequest,
+  input: { attempted: Refusal["attempted"]; jobId: number; refusal: MoneyRefusal; state?: Record<string, unknown>; subject: RefusalSubject },
+): Promise<HttpResponseInit> {
+  await rollbackTransaction(connection).catch(() => {});
+  const actor = await resolveLedgerActor(request, connection).catch(() => null);
+  if (actor) {
+    await recordRefusal(
+      connection,
+      actor,
+      input.subject,
+      { attempted: input.attempted, code: input.refusal.code, message: input.refusal.message, state: input.state },
+      input.jobId,
+    );
+  }
+  return refusalResponse(input.refusal);
 }
