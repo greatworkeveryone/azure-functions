@@ -20,7 +20,6 @@ import {
   commitTransaction,
   createRequestConnection,
   executeQuery,
-  rollbackTransaction,
   SqlParam,
   SqlRow,
 } from "../db";
@@ -99,7 +98,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
-import { deletionRefusal, readTenancyFacts } from "../tenancy-records";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import {
   deleteInfoSheetRow,
   deleteInfoSheetSection,
@@ -2003,11 +2002,10 @@ async function deleteTenantNote(
 }
 
 // ── POST /api/deleteRegisterTenant ───────────────────────────────────────────
-// Hard-deletes an empty draft only (D4, DL-04): no rent schedule, no areas, no
-// documents, no jobs. Anything else answers 422 "… Archive it instead." (jobs
-// keep their 400 "Reassign first"), because ON DELETE CASCADE would take its
-// occupancies, history, notes, reviews, change log and document links with it.
-// The facts are read under lock and the delete is ledgered in one transaction.
+// Body { TenantId }. Hard-deletes an empty draft only (D4, DL-04); anything a
+// tenancy holds or has had recorded against it answers 422 "… Archive it
+// instead." (jobs keep their 400 "Reassign first"). The rule, the lock and the
+// ledger row live in deleteTenancyDraft, shared with deleteTenant.
 
 async function deleteRegisterTenant(
   request: HttpRequest,
@@ -2015,63 +2013,15 @@ async function deleteRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  let body: Record<string, any> | null = null;
-  try {
-    body = (await request.json()) as Record<string, any>;
-    const tenantId = body?.TenantId;
-    if (typeof tenantId !== "number") {
-      return { status: 400, jsonBody: { error: "TenantId (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-    const actor = await resolveLedgerActor(request, connection);
-    if (!actor) return unauthorizedResponse();
-
-    await beginTransaction(connection);
-    try {
-      const facts = await readTenancyFacts(connection, tenantId);
-      if (!facts) {
-        await rollbackTransaction(connection).catch(() => {});
-        return { status: 404, jsonBody: { error: "Tenancy not found" } };
-      }
-      const refusal = deletionRefusal(facts);
-      if (refusal) {
-        await rollbackTransaction(connection).catch(() => {});
-        return { status: refusal.status, jsonBody: { error: refusal.error } };
-      }
-      await executeQuery(
-        connection,
-        "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-        [{ name: "Id", type: TYPES.Int, value: tenantId }],
-      );
-      await ledger.record(connection, {
-        action: "tenancy.delete_draft",
-        actor,
-        buildingId: facts.buildingId,
-        subject: { id: tenantId, type: "tenancy" },
-      });
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection).catch(() => {});
-      throw err;
-    }
-    invalidateTenant(tenantId);
-    return { status: 200, jsonBody: { deleted: true, tenantId } };
-  } catch (error: any) {
-    const formatted = formatSqlError(error);
-    context.error("deleteRegisterTenant failed", {
-      error: formatted,
-      payload: summariseBody(body),
-      stack: error?.stack,
-    });
-    return errorResponse("Delete register tenant failed", formatted);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantId?: unknown } | null;
+  const tenantId = body?.TenantId;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantId (number) required" } };
   }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteRegisterTenant");
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────

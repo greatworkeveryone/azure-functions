@@ -65,14 +65,33 @@ const post = (body: unknown, query: Record<string, string> = {}) =>
   ({ headers: { get: () => null }, json: async () => body, query: new URLSearchParams(query) }) as unknown as HttpRequest;
 
 let tenant: Record<string, unknown> | null;
+let optional: Record<string, unknown>;
 let documentRow: Record<string, unknown> | null;
 beforeEach(() => {
   jest.clearAllMocks();
   auth.requireRole.mockResolvedValue(null);
-  tenant = { ArchivedAt: null, BuildingId: 3, Documents: 0, Jobs: 0, LegalName: "Acme Pty Ltd", Occupancies: 0, ScheduledRateSteps: "[]" };
+  tenant = {
+    ArchivedAt: null,
+    BuildingId: 3,
+    Carparks: 0,
+    Decisions: 0,
+    Documents: 0,
+    Jobs: 0,
+    Keys: 0,
+    LegalName: "Acme Pty Ltd",
+    Notes: 0,
+    Occupancies: 0,
+    OccupancyHistory: 0,
+    RentReviews: 0,
+    ScheduleChanges: 0,
+    ScheduledRateSteps: "[]",
+    Vacancies: 0,
+  };
+  optional = { DefectsPeriods: 0, SignedOff: 0 };
   documentRow = { ArchivedAt: null, OriginalName: "lease.pdf" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return tenant ? [tenant] : [];
+    if (/ScheduleSignedOffAt/.test(sql)) return [optional];
     if (/FROM dbo\.TenancyAttachments ta WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return documentRow ? [documentRow] : [];
     return [];
   });
@@ -138,20 +157,63 @@ describe("archiveTenant / unarchiveTenant", () => {
   });
 });
 
+// A hard delete cascades (RentReviews, RentScheduleChangeLog, TenancyAttachments,
+// occupancies, notes, history) and strands DecisionLedger rows, so it is allowed
+// only for a tenancy nothing has been recorded against. Each condition below is
+// tested on its own so that dropping any one of them fails.
+const DRAFT_HOLDINGS: [string, Record<string, unknown>, string][] = [
+  ["schedule rows", { ScheduledRateSteps: '[{"id":"s1","effectiveFrom":"2024-07-01","ratePercent":0}]' }, "a rent schedule"],
+  ["unreadable schedule text", { ScheduledRateSteps: "{not json" }, "a rent schedule"],
+  ["a schedule that isn't a list", { ScheduledRateSteps: '{"id":"s1"}' }, "a rent schedule"],
+  ["occupancies", { Occupancies: 2 }, "2 areas"],
+  ["occupancy history", { OccupancyHistory: 1 }, "area history"],
+  ["notes", { Notes: 1 }, "1 note"],
+  ["rent reviews", { RentReviews: 1 }, "1 rent review"],
+  ["rent schedule change log rows", { ScheduleChanges: 4 }, "rent schedule history"],
+  ["lease documents", { Documents: 1 }, "1 document"],
+  ["keys", { Keys: 2 }, "2 keys"],
+  ["vacancies", { Vacancies: 1 }, "1 vacancy"],
+  ["car parks", { Carparks: 3 }, "3 car parks"],
+  ["decision ledger rows", { Decisions: 1 }, "decision history"],
+  ["a schedule sign-off", { SignedOff: 1 }, "a schedule sign-off"],
+  ["defects periods", { DefectsPeriods: 2 }, "2 defects periods"],
+];
+
+// Tables a hard delete would cascade into or strand, each read under a range lock
+// inside the delete's transaction so nothing can be added between check and delete.
+const LOCKED_CHILD_READS: [string, RegExp][] = [
+  ["Jobs", /FROM dbo\.Jobs j WITH \(HOLDLOCK\) WHERE j\.TenantID = t\.TenantId/],
+  ["Keys", /FROM dbo\.Keys k WITH \(HOLDLOCK\) WHERE k\.TenancyId = t\.TenantId/],
+  ["Vacancies", /FROM dbo\.Vacancies v WITH \(HOLDLOCK\) WHERE v\.TenancyId = t\.TenantId/],
+  ["TenantOccupancies", /FROM dbo\.TenantOccupancies o WITH \(HOLDLOCK\) WHERE o\.TenantId = t\.TenantId/],
+  ["TenantOccupancyHistory", /FROM dbo\.TenantOccupancyHistory h WITH \(HOLDLOCK\) WHERE h\.TenantId = t\.TenantId/],
+  ["TenantNotes", /FROM dbo\.TenantNotes n WITH \(HOLDLOCK\) WHERE n\.TenantId = t\.TenantId/],
+  ["RentReviews", /FROM dbo\.RentReviews r WITH \(HOLDLOCK\) WHERE r\.TenantId = t\.TenantId/],
+  ["RentScheduleChangeLog", /FROM dbo\.RentScheduleChangeLog c WITH \(HOLDLOCK\) WHERE c\.TenantId = t\.TenantId/],
+  ["TenancyAttachments", /FROM dbo\.TenancyAttachments ta WITH \(HOLDLOCK\) WHERE ta\.TenantId = t\.TenantId/],
+  ["Carparks", /FROM dbo\.Carparks cp WITH \(HOLDLOCK\) WHERE cp\.TenantId = t\.TenantId/],
+  ["DecisionLedger (subject)", /FROM dbo\.DecisionLedger d WITH \(HOLDLOCK\) WHERE d\.SubjectType = N'tenancy' AND d\.SubjectId = @IdText/],
+  ["DecisionLedger (scope)", /FROM dbo\.DecisionLedger d2 WITH \(HOLDLOCK\) WHERE d2\.TenantId = t\.TenantId/],
+];
+
 describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft is hard-deleted", (name) => {
   const body = name === "deleteTenant" ? { TenantID: 7 } : { TenantId: 7 };
 
-  it.each([
-    [{ ScheduledRateSteps: '[{"id":"s1","effectiveFrom":"2024-07-01","ratePercent":0}]' }, "a rent schedule"],
-    [{ Occupancies: 2 }, "2 areas"],
-    [{ Documents: 1 }, "1 document"],
-  ])("refuses (422) a tenancy with %p and says archive instead", async (over, part) => {
+  it("is gated on the same roles as the other delete route", async () => {
+    await handlers[name](post(body), ctx);
+    expect(auth.requireRole.mock.calls[0][1]).toEqual([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  });
+
+  it.each(DRAFT_HOLDINGS)("refuses (422) a tenancy with %s, says archive instead, deletes and ledgers nothing", async (_label, over, part) => {
     tenant = { ...tenant, ...over };
+    optional = { ...optional, ...over };
     const res = await handlers[name](post(body), ctx);
     expect(res.status).toBe(422);
     expect(res.jsonBody.error).toBe(`Acme Pty Ltd has ${part}, so it can't be deleted. Archive it instead.`);
     expect(ran(/DELETE FROM dbo\.Tenants/)).toBe(false);
     expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 
   it("names everything it has", async () => {
@@ -160,20 +222,70 @@ describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft
     expect(res.jsonBody.error).toBe("Acme Pty Ltd has a rent schedule, 1 area and 3 documents, so it can't be deleted. Archive it instead.");
   });
 
+  it.each(["[]", "null", "", null])("treats schedule text %p as no schedule", async (steps) => {
+    tenant = { ...tenant, ScheduledRateSteps: steps };
+    expect((await handlers[name](post(body), ctx)).status).toBe(200);
+  });
+
   it("still refuses a tenancy jobs refer to (400, as before)", async () => {
     tenant = { ...tenant, Jobs: 2 };
     const res = await handlers[name](post(body), ctx);
     expect(res.status).toBe(400);
     expect(res.jsonBody.error).toMatch(/Reassign first/);
+    expect(ran(/DELETE FROM dbo\.Tenants/)).toBe(false);
   });
 
-  it("deletes an empty draft inside one transaction and ledgers it", async () => {
+  it("answers 404 for an unknown tenancy", async () => {
+    tenant = null;
+    expect((await handlers[name](post(body), ctx)).status).toBe(404);
+    expect(ran(/DELETE FROM dbo\.Tenants/)).toBe(false);
+  });
+
+  it.each(LOCKED_CHILD_READS)("reads %s under a range lock before deleting", async (_table, pattern) => {
+    await handlers[name](post(body), ctx);
+    const facts = sqlOf(/FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/);
+    expect(facts).toMatch(pattern);
+    expect(order(/FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+    const params = db.executeQuery.mock.calls.find((c: unknown[]) => /FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/.test(String(c[1])))?.[2];
+    expect(params).toEqual(expect.arrayContaining([expect.objectContaining({ name: "IdText", value: "7" })]));
+  });
+
+  it("reads the sign-off and defects periods only where those exist (migrations 097 and 119)", async () => {
+    await handlers[name](post(body), ctx);
+    const optionalSql = sqlOf(/ScheduleSignedOffAt/);
+    expect(optionalSql).toMatch(/IF COL_LENGTH\(N'dbo\.Tenants', N'ScheduleSignedOffAt'\) IS NOT NULL/);
+    expect(optionalSql).toMatch(/ScheduleSignedOffAt IS NOT NULL/);
+    expect(optionalSql).toMatch(/IF OBJECT_ID\(N'dbo\.DefectsPeriods', N'U'\) IS NOT NULL/);
+    expect(optionalSql).toMatch(/FROM dbo\.DefectsPeriods WITH \(HOLDLOCK\) WHERE TenantId = @Id/);
+    expect(order(/ScheduleSignedOffAt/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("deletes an empty draft inside one transaction and ledgers it with what was deleted", async () => {
     const res = await handlers[name](post(body), ctx);
     expect(res.status).toBe(200);
-    expect(sqlOf(/FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/)).toMatch(/dbo\.TenancyAttachments/);
-    expect(order(/DELETE FROM dbo\.Tenants/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
-    expect(ledger.record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "tenancy.delete_draft", subject: { id: 7, type: "tenancy" } }));
-    expect(db.commitTransaction).toHaveBeenCalled();
+    expect(sqlOf(/DELETE FROM dbo\.Tenants/)).toMatch(/DELETE FROM dbo\.Tenants WHERE TenantId = @Id/);
+    expect(order(/DELETE FROM dbo\.Tenants/)).toBeGreaterThan(order(/ScheduleSignedOffAt/));
+    expect(order(/DELETE FROM dbo\.Tenants/)).toBeGreaterThan(order(/FROM dbo\.Tenants t WITH \(UPDLOCK, HOLDLOCK\)/));
+    expect(ledger.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "tenancy.delete_draft",
+        before: { buildingId: 3, legalName: "Acme Pty Ltd" },
+        buildingId: 3,
+        subject: { id: 7, type: "tenancy" },
+      }),
+    );
+    expect(ledger.record.mock.invocationCallOrder[0]).toBeGreaterThan(order(/DELETE FROM dbo\.Tenants/));
+    expect(ledger.record.mock.invocationCallOrder[0]).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+    expect(cache.invalidateTenant).toHaveBeenCalledWith(7);
+  });
+
+  it("rolls back, deleting nothing for good, when the ledger write fails", async () => {
+    ledger.record.mockRejectedValueOnce(new Error("ledger down"));
+    const res = await handlers[name](post(body), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 });
 

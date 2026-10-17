@@ -10,10 +10,8 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
-import { record } from "../ledger";
-import { resolveLedgerActor } from "../ledger/actor";
-import { deletionRefusal, readTenancyFacts } from "../tenancy-records";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
@@ -221,8 +219,8 @@ async function loadLegacyTenant(connection: any, id: number) {
 }
 
 // ── POST /api/deleteTenant ──────────────────────────────────────────────────
-// Refuses when the tenant is linked to any job. ON DELETE CASCADE handles
-// occupancies/notes/history/reviews under the new schema.
+// Body { TenantID }. The older route to the same rule as deleteRegisterTenant
+// (D4): same roles, and only an empty draft is deleted, by deleteTenancyDraft.
 
 async function deleteTenant(
   request: HttpRequest,
@@ -230,59 +228,15 @@ async function deleteTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  try {
-    const body = (await request.json()) as any;
-    const { TenantID } = body ?? {};
-    if (typeof TenantID !== "number") {
-      return { status: 400, jsonBody: { error: "TenantID (number) required" } };
-    }
-
-    // Same rule as deleteRegisterTenant (D4): only an empty draft is deleted.
-    connection = await createRequestConnection(token);
-    const actor = await resolveLedgerActor(request, connection);
-    if (!actor) return unauthorizedResponse();
-
-    await beginTransaction(connection);
-    try {
-      const facts = await readTenancyFacts(connection, TenantID);
-      if (!facts) {
-        await rollbackTransaction(connection).catch(() => {});
-        return { status: 404, jsonBody: { error: "Tenancy not found" } };
-      }
-      const refusal = deletionRefusal(facts);
-      if (refusal) {
-        await rollbackTransaction(connection).catch(() => {});
-        return { status: refusal.status, jsonBody: { error: refusal.error } };
-      }
-      await executeQuery(
-        connection,
-        "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-        [{ name: "Id", type: TYPES.Int, value: TenantID }],
-      );
-      await record(connection, {
-        action: "tenancy.delete_draft",
-        actor,
-        buildingId: facts.buildingId,
-        subject: { id: TenantID, type: "tenancy" },
-      });
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection).catch(() => {});
-      throw err;
-    }
-
-    invalidateTenant(TenantID);
-    return { status: 200, jsonBody: { deleted: true, tenantId: TenantID } };
-  } catch (error: any) {
-    context.error("deleteTenant failed:", error.message);
-    return errorResponse("Delete tenant failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantID?: unknown } | null;
+  const tenantId = body?.TenantID;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantID (number) required" } };
   }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteTenant");
 }
 
 app.http("getTenants",   { methods: ["GET"],  authLevel: "anonymous", handler: getTenants });
