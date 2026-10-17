@@ -21,6 +21,7 @@ const MIGRATIONS = [
   "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
   "136_building_category_owner.sql",
+  "137_job_decision_requests.sql",
   "125_myob_reference_cache.sql",
   "126_myob_proposals.sql",
   "119_defects_periods.sql",
