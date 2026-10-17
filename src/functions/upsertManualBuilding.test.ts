@@ -34,6 +34,7 @@ jest.mock("../db", () => {
 jest.mock("./getBuildings", () => ({ clearBuildingsCache: jest.fn() }));
 
 import { AppRole } from "../auth";
+import { resetBuildingCategoryColumnProbe } from "../buildingCategoryColumn";
 import { clearBuildingsCache } from "./getBuildings";
 import { upsertManualBuilding } from "./upsertManualBuilding";
 
@@ -49,10 +50,13 @@ const db = require("../db") as {
 };
 const auth = require("../auth") as { requireRole: jest.Mock };
 const context = new InvocationContext();
+const log = jest.spyOn(context, "log").mockImplementation(() => undefined);
 
+/** Unless a route says otherwise, migration 136 is applied (the column probe finds Category). */
 function route(routes: Array<{ match: RegExp; rows?: Row[] }>): void {
+  const withProbe = [...routes, { match: /COL_LENGTH/i, rows: [{ Len: 20 }] }];
   db.executeQuery.mockImplementation(async (_connection: unknown, sql: string) => {
-    const hit = routes.find((r) => r.match.test(sql));
+    const hit = withProbe.find((r) => r.match.test(sql));
     return hit?.rows ?? [];
   });
 }
@@ -81,6 +85,7 @@ function routeCreate(after: Row = stored()): void {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  resetBuildingCategoryColumnProbe();
   auth.requireRole.mockResolvedValue(null);
   db.executeQuery.mockResolvedValue([]);
 });
@@ -110,6 +115,26 @@ describe("upsertManualBuilding: create", () => {
     const [pick] = queries(/MIN\(BuildingID\)/i);
     expect(pick[1]).toMatch(/WHERE\s+BuildingID\s*<=\s*0/i);
     expect(paramsOf(queries(/INSERT INTO dbo\.Buildings/i)[0]).NewId).toBe(-4);
+  });
+
+  it("takes the id range lock before it checks the name, so two admins adding one name cannot both pass", async () => {
+    routeCreate();
+
+    await upsertManualBuilding(post({ category: "residence", name: "24 Gunbar St" }), context);
+
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    const lockAt = sqls.findIndex((sql) => /MIN\(BuildingID\)/i.test(sql));
+    const nameAt = sqls.findIndex((sql) => /BuildingName\s*=\s*@Name/i.test(sql));
+    expect(sqls[lockAt]).toMatch(/WITH \(UPDLOCK, HOLDLOCK\)/);
+    expect(nameAt).toBeGreaterThan(lockAt);
+  });
+
+  it("logs who created which building", async () => {
+    routeCreate();
+
+    await upsertManualBuilding(post({ category: "residence", name: "24 Gunbar St", ownerName: "Paolo" }), context);
+
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/Connor created building -4 \(category=residence, owner=Paolo\)/));
   });
 
   it("defaults the category to commercial and the address to the name", async () => {
@@ -220,6 +245,32 @@ describe("upsertManualBuilding: update", () => {
     expect(paramsOf(queries(/UPDATE dbo\.Buildings/i)[0]).OwnerName).toBeNull();
   });
 
+  it("refuses to rename a building to a name another building already has, and updates nothing", async () => {
+    route([
+      { match: /UPDLOCK/i, rows: [stored()] },
+      { match: /BuildingName\s*=\s*@Name/i, rows: [{ BuildingID: 12 }] },
+    ]);
+
+    const response = await upsertManualBuilding(post({ buildingId: -4, name: "Alpha House" }), context);
+
+    expect(response.status).toBe(409);
+    expect(paramsOf(queries(/BuildingName\s*=\s*@Name/i)[0])).toMatchObject({ ExceptId: -4, Name: "Alpha House" });
+    expect(queries(/UPDATE dbo\.Buildings/i)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(clearBuildingsCache).not.toHaveBeenCalled();
+  });
+
+  it("logs who updated which building", async () => {
+    route([
+      { match: /UPDLOCK/i, rows: [stored()] },
+      { match: /SELECT[^]*FROM dbo\.Buildings[^]*WHERE BuildingID = @BuildingId/i, rows: [stored({ OwnerName: "Carlo" })] },
+    ]);
+
+    await upsertManualBuilding(post({ buildingId: -4, ownerName: "Carlo" }), context);
+
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/Connor updated building -4 \(category=residence, owner=Carlo\)/));
+  });
+
   it("is a 404 when the manual building does not exist", async () => {
     route([{ match: /UPDLOCK/i, rows: [] }]);
 
@@ -236,6 +287,24 @@ describe("upsertManualBuilding: update", () => {
 
     expect(response.status).toBe(400);
     expect(queries(/UPDATE dbo\.Buildings/i)).toHaveLength(0);
+  });
+});
+
+describe("upsertManualBuilding: before migration 136 is applied", () => {
+  it.each([
+    ["create", { category: "residence", name: "24 Gunbar St" }],
+    ["update", { buildingId: -4, ownerName: "Paolo" }],
+  ])("%s: says in plain words to apply the migration, and writes nothing", async (_label, body) => {
+    route([{ match: /COL_LENGTH/i, rows: [{ Len: null }] }]);
+
+    const response = await upsertManualBuilding(post(body), context);
+
+    expect(response.status).toBe(409);
+    expect((response.jsonBody as { error: string }).error).toBe("Buildings cannot be edited until migration 136 is applied");
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(queries(/INSERT INTO dbo\.Buildings|UPDATE dbo\.Buildings/i)).toHaveLength(0);
+    expect(clearBuildingsCache).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
   });
 });
 
