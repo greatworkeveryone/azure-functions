@@ -115,6 +115,35 @@ export function miscFeeRunning(rows: readonly ScheduleRow[], fee: MiscFee): numb
   return running;
 }
 
+// ── Every row (the charge timeline, scheduleCharges.ts) ──────────────────────
+
+/**
+ * Each row's car park and misc fee totals for a year, as the frontend's
+ * schedules show them on that row: car parks at 12 times each group's rounded
+ * monthly rate, misc fees at each fee's amount times its periods a year, to the
+ * cent. Null where none has started on the row (or every fee has ended).
+ */
+export function ancillariesByRow(
+  rows: readonly ScheduleRow[],
+  carparkGroups: readonly CarparkScheduleGroup[],
+  miscFees: readonly MiscFee[],
+): Array<{ carparks: number | null; miscFees: number | null }> {
+  return rows.map((_row, index) => {
+    const through = rows.slice(0, index + 1);
+    let carparks: number | null = null;
+    for (const group of carparkGroups) {
+      const monthly = carparkRunning(through, group);
+      if (monthly !== null) carparks = r2((carparks ?? 0) + r2(monthly) * 12);
+    }
+    let fees: number | null = null;
+    for (const fee of miscFees) {
+      const amount = miscFeeRunning(through, fee);
+      if (amount !== null) fees = r2((fees ?? 0) + r2(amount * (PERIODS_PER_YEAR[fee.frequency] ?? 1)));
+    }
+    return { carparks, miscFees: fees };
+  });
+}
+
 // ── The review row ───────────────────────────────────────────────────────────
 
 /** The lease's bounds as the review applies them, for the notes. */

@@ -21,6 +21,7 @@ import {
   type MiscFee,
   type ScheduledRateStep,
 } from "../scheduledRateStepLogic";
+import { scheduleTermsOf } from "../scheduleTerms";
 import { RentReviewError, tenancyArchived } from "./http";
 import type { ScheduleContext } from "./stepPlan";
 
@@ -75,11 +76,8 @@ export function scheduleOf(row: SqlRow, steps: ScheduledRateStep[], totalSqm: nu
     context: {
       fallbackAnnual: decimalOf(row.RentPerAnnum) ?? 0,
       fallbackSqm: totalSqm,
-      lease: {
-        cpiCapPercent: decimalOf(row.CpiCapPercent),
-        cpiFloorPercent: decimalOf(row.CpiFloorPercent),
-        reviewRatchet: isReviewRatchetOn(row),
-      },
+      // The lease's cap, floor and ratchet, and REVIEW_WORKFLOW_LIVE_FROM (M2).
+      lease: scheduleTermsOf(row),
       steps,
     },
     miscFees: parseMiscFees(row.MiscFees as string | null | undefined),

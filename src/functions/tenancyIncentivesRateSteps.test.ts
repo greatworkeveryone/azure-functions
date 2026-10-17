@@ -425,6 +425,46 @@ describe("upsertScheduledRateStep", () => {
     const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
     expect(res.status).toBe(500);
   });
+
+  // WP26c: a ratchet exemption is a director's override, written by a review.
+  describe("a ratchet exemption (C9, D23)", () => {
+    const exemption = { at: "2026-07-03T01:00:00.000Z", byName: "Dana Director", reason: "Agreed with the tenant" };
+    const exemptRow = { effectiveFrom: "2026-07-01", id: STEP_ID, methodKind: "cpi", ratchetExempt: exemption, ratePercent: -2 };
+    const updates = () => db.executeQuery.mock.calls.filter(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+
+    it("can't be added by editing a row", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([{ ...exemptRow, ratchetExempt: undefined }]) }]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: exemptRow })), ctx);
+      expect(res.status).toBe(403);
+      expect((res.jsonBody as { error: string }).error).toMatch(/director's override/);
+      expect(updates()).toHaveLength(0);
+      expect(db.rollbackTransaction).toHaveBeenCalled();
+    });
+
+    it("can't be changed by editing a row", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ step: { ...exemptRow, ratchetExempt: { ...exemption, reason: "Something else" } } })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect(updates()).toHaveLength(0);
+    });
+
+    it("rides along unchanged when the row is edited, and can be taken off", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      const kept = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: { ...exemptRow, note: "checked" } })), ctx);
+      expect(kept.status).toBe(200);
+      expect((kept.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toEqual(exemption);
+
+      db.executeQuery.mockReset();
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      const { ratchetExempt: _gone, ...withoutIt } = exemptRow;
+      const removed = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: withoutIt })), ctx);
+      expect(removed.status).toBe(200);
+      expect((removed.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toBeUndefined();
+    });
+  });
 });
 
 // ── deleteScheduledRateStep ─────────────────────────────────────────────────

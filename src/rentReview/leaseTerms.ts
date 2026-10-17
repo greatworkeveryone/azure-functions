@@ -43,6 +43,7 @@ export async function rentOnLeaseTerms(connection: Connection, input: LeaseTerms
       cpiCapPercent: input.schedule.context.lease.cpiCapPercent ?? null,
       cpiFloorPercent: input.schedule.context.lease.cpiFloorPercent ?? null,
       reviewRatchet: input.schedule.context.lease.reviewRatchet === true,
+      workflowLiveFrom: input.schedule.context.lease.workflowLiveFrom ?? null,
     },
     method: input.method,
     miscFees: input.schedule.miscFees,

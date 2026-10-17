@@ -749,6 +749,51 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
     expect((res.jsonBody as { tenant: { effectiveRentPerAnnum: number } }).tenant.effectiveRentPerAnnum).toBe(103000);
   });
+
+  // WP26c (M2): once reviews run through the workflow, a row keyed ahead moves
+  // the rent only when a review applies it, so its arrears are never counted twice.
+  describe("with REVIEW_WORKFLOW_LIVE_FROM set", () => {
+    const keyedAhead = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2024-07-01", id: STEP, methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2025-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    afterEach(() => {
+      delete process.env.REVIEW_WORKFLOW_LIVE_FROM;
+    });
+
+    it("keeps the rent before a review row keyed ahead until a review applies it, and says when the workflow went live", async () => {
+      process.env.REVIEW_WORKFLOW_LIVE_FROM = "2025-01-01";
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: keyedAhead }));
+      const res = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      const { tenant } = res.jsonBody as { tenant: { effectiveRentPerAnnum: number; reviewWorkflowLiveFrom: string | null } };
+      expect(tenant.effectiveRentPerAnnum).toBe(100000);
+      expect(tenant.reviewWorkflowLiveFrom).toBe("2025-01-01");
+    });
+
+    it("moves it once the row is settled, and reads every row as keyed while the setting is unset", async () => {
+      process.env.REVIEW_WORKFLOW_LIVE_FROM = "2025-01-01";
+      const applied = keyedAhead.replace('"ratePercent":3}', '"ratePercent":3,"resolution":"applied","reviewId":"rev-1"}');
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: applied }));
+      const settled = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      expect((settled.jsonBody as { tenant: { effectiveRentPerAnnum: number } }).tenant.effectiveRentPerAnnum).toBe(103000);
+
+      delete process.env.REVIEW_WORKFLOW_LIVE_FROM;
+      db.executeQuery
+        .mockResolvedValueOnce([lockedRow()])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(storedRow({ ReviewRatchet: false, ScheduledRateSteps: keyedAhead }));
+      const unset = await handlers.upsertRegisterTenant(makeRequest({ Comments: "x", TenantId: 7 }), ctx);
+      const { tenant } = unset.jsonBody as { tenant: { effectiveRentPerAnnum: number; reviewWorkflowLiveFrom: string | null } };
+      expect(tenant.effectiveRentPerAnnum).toBe(103000);
+      expect(tenant.reviewWorkflowLiveFrom).toBeNull();
+    });
+  });
 });
 
 // ── deleteRegisterTenant ────────────────────────────────────────────────────

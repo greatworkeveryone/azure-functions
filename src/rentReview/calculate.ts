@@ -56,6 +56,7 @@ export async function workOutReview(connection: Connection, input: WorkOutInput)
       cpiCapPercent: schedule.context.lease.cpiCapPercent ?? null,
       cpiFloorPercent: schedule.context.lease.cpiFloorPercent ?? null,
       reviewRatchet: schedule.context.lease.reviewRatchet === true,
+      workflowLiveFrom: schedule.context.lease.workflowLiveFrom ?? null,
     },
     manual: input.manual,
     method: input.method,

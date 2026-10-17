@@ -253,8 +253,9 @@ export interface CalcInput {
   /** Tenants.RentPerAnnum and the tenancy's area, as the schedule engine takes them. */
   fallbackAnnual: number;
   fallbackSqm: number;
-  /** The lease's terms on the tenancy: what the schedule engine computes with. */
-  lease: { cpiCapPercent: number | null; cpiFloorPercent: number | null; reviewRatchet: boolean };
+  /** The lease's terms on the tenancy: what the schedule engine computes with,
+   *  and REVIEW_WORKFLOW_LIVE_FROM (a review row keyed ahead waits for its review, M2). */
+  lease: { cpiCapPercent: number | null; cpiFloorPercent: number | null; reviewRatchet: boolean; workflowLiveFrom?: string | null };
   manual?: { explanation: string; newAnnual: number } | null;
   method: CalcMethod;
   miscFees: readonly MiscFee[];

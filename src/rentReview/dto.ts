@@ -14,6 +14,7 @@ import {
 } from "../rentReviewMachine";
 import { parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
+import { scheduleTermsOf } from "../scheduleTerms";
 import { isoTimestamp, rowVersionHex } from "../tenancyScheduleWrite";
 import { type ApproverRole, requiredApprovalRoleOf } from "./approvalLevel";
 import { parseBasis, type RentReviewBasis } from "./basis";
@@ -216,6 +217,8 @@ export interface TenancySummaryDto {
   reviewRatchet: boolean;
   /** Tenants.ReviewType as typed on the lease. */
   reviewType: string | null;
+  /** REVIEW_WORKFLOW_LIVE_FROM, or null (the schedule engine's terms.workflowLiveFrom, M2). */
+  reviewWorkflowLiveFrom: string | null;
   /** The schedule's sign-off (PLAN WP24, migration 097), so the review's checks can
    *  show C3 before submit; null when it isn't signed off. */
   scheduleSignOff: { at: string; byName: string } | null;
@@ -244,6 +247,7 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
   const cpiFloorPercent = decimalOrNull(row.CpiFloorPercent);
   const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
+  const terms = scheduleTermsOf(row);
   return {
     buildingId: Number(row.BuildingId),
     buildingName: text(row.BuildingName),
@@ -251,11 +255,7 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
     cpiCapPercent,
     cpiFloorPercent,
     cpiRegion: text(row.CpiRegion),
-    effectiveRentPerAnnum: resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSqm, today, {
-      cpiCapPercent,
-      cpiFloorPercent,
-      reviewRatchet,
-    }).annual,
+    effectiveRentPerAnnum: resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSqm, today, terms).annual,
     expiry: sqlDateToIso(row.Expiry),
     fixedReviewPercent: decimalOrNull(row.FixedReviewPercent),
     lastReviewDate: sqlDateToIso(row.LastReviewDate),
@@ -263,6 +263,7 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
     reviewIntervalMonths: whole(row.ReviewIntervalMonths),
     reviewRatchet,
     reviewType: text(row.ReviewType),
+    reviewWorkflowLiveFrom: terms.workflowLiveFrom,
     scheduleSignOff: signOffOf(row),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     status: String(row.Status ?? ""),

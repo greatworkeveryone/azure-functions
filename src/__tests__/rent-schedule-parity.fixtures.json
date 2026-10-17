@@ -1,6 +1,6 @@
 {
-  "about": "Rent schedule parity fixtures (PLAN WP23a/WP23b). Identical in command-centre and rpcc-functions; Jest asserts them against FE computeRentSchedule/resolveScheduleRent and BE computeScheduleRows/resolveScheduleAnnual. input.terms (optional) are the lease's cpiCapPercent, cpiFloorPercent and reviewRatchet. rawPercent/appliedPercent are a review's increase before and after cap, floor and ratchet, to 4 dp. 'frontend' blocks cover car parks, misc fees and incentives, which only the frontend computes today. Expected values are derived by hand from the rules, not captured from either engine.",
-  "version": 2,
+  "about": "Rent schedule parity fixtures (PLAN WP23a/WP23b). Identical in command-centre and rpcc-functions; Jest asserts them against FE computeRentSchedule/resolveScheduleRent and BE computeScheduleRows/resolveScheduleAnnual. input.terms (optional) are the lease's cpiCapPercent, cpiFloorPercent and reviewRatchet. rawPercent/appliedPercent are a review's increase before and after cap, floor and ratchet, to 4 dp. 'frontend' blocks cover car parks, misc fees and incentives, which only the frontend computes today. Expected values are derived by hand from the rules, not captured from either engine. Version 3 (PLAN WP26c): input.terms.workflowLiveFrom is REVIEW_WORKFLOW_LIVE_FROM (an unsettled review row dated on or after it is pending, awaiting_review); a step's ratchetExempt { at, byName, reason } is a director's override of the lease's ratchet for that row only; input.reliefs are ratified rent reliefs { id, from, to (inclusive), kind percent | amount | fixed_rent, value, scope } laid over the rows, input.pending are changes awaiting a director { requestId, kind, from, to, summary }, input.ancillaries the car park and misc fee totals a year per row. 'charges' blocks are asserted against BE computeCharges / chargedOn / chargesOver / reliefForgone (src/scheduleCharges.ts) and their frontend mirror: periods (lease and charged figures a year, cut where the row in force or the reliefs change; from null = the stored base rent, to exclusive, null = open), rowPending (each row's pending requestIds), on (the period in force on a day), over (pro rata by day on a 365-day year, each slice to the cent) and forgone (one relief's charge forgone over its own days).",
+  "version": 3,
   "cases": [
     {
       "name": "two open-ended rows: the later row is current",
@@ -2265,6 +2265,1882 @@
             "annual": 100000
           }
         ]
+      }
+    },
+    {
+      "name": "rent relief: a percentage off the rent charges less for its days, a review inside it still moves the lease rent, and the day after it ends the charge is the lease's again",
+      "input": {
+        "steps": [
+          {
+            "id": "r1-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "r1-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "r1-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 104,
+            "cpiValuePrev": 100
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "reliefs": [
+          {
+            "id": "rel-1",
+            "from": "2026-01-01",
+            "to": "2026-12-31",
+            "kind": "percent",
+            "value": 50,
+            "scope": [
+              "rent",
+              "ahac"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 107120,
+            "monthly": 8926.67,
+            "sqm": 100,
+            "sqmRate": 1071.2,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 4,
+            "appliedPercent": 4,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 107120
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2024-07-01",
+              "to": "2025-07-01",
+              "stepId": "r1-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            },
+            {
+              "from": "2025-07-01",
+              "to": "2026-01-01",
+              "stepId": "r1-b",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              }
+            },
+            {
+              "from": "2026-01-01",
+              "to": "2026-07-01",
+              "stepId": "r1-b",
+              "reliefIds": [
+                "rel-1"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 51500
+              }
+            },
+            {
+              "from": "2026-07-01",
+              "to": "2027-01-01",
+              "stepId": "r1-c",
+              "reliefIds": [
+                "rel-1"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 107120
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 53560
+              }
+            },
+            {
+              "from": "2027-01-01",
+              "to": null,
+              "stepId": "r1-c",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 107120
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 107120
+              }
+            }
+          ],
+          "rowPending": [
+            [],
+            [],
+            []
+          ],
+          "on": [
+            {
+              "day": "2025-12-31",
+              "stepId": "r1-b",
+              "leaseRent": 103000,
+              "chargedRent": 103000,
+              "reliefIds": []
+            },
+            {
+              "day": "2026-01-01",
+              "stepId": "r1-b",
+              "leaseRent": 103000,
+              "chargedRent": 51500,
+              "reliefIds": [
+                "rel-1"
+              ]
+            },
+            {
+              "day": "2026-12-31",
+              "stepId": "r1-c",
+              "leaseRent": 107120,
+              "chargedRent": 53560,
+              "reliefIds": [
+                "rel-1"
+              ]
+            },
+            {
+              "day": "2027-01-01",
+              "stepId": "r1-c",
+              "leaseRent": 107120,
+              "chargedRent": 107120,
+              "reliefIds": []
+            }
+          ],
+          "over": [
+            {
+              "from": "2026-01-01",
+              "to": "2027-01-01",
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 105076.93
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 52538.47
+              }
+            }
+          ],
+          "forgone": [
+            {
+              "reliefId": "rel-1",
+              "total": 52538.46,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 52538.46
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "rent relief: an amount off the rent and a fixed rent for a while; a relief never takes the charge below $0",
+      "input": {
+        "steps": [
+          {
+            "id": "r2-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 60000,
+            "ratePercent": 0
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 0,
+        "reliefs": [
+          {
+            "id": "rel-a",
+            "from": "2024-09-01",
+            "to": "2024-11-30",
+            "kind": "amount",
+            "value": 12000,
+            "scope": [
+              "rent"
+            ]
+          },
+          {
+            "id": "rel-b",
+            "from": "2025-01-01",
+            "to": "2025-03-31",
+            "kind": "fixed_rent",
+            "value": 30000,
+            "scope": [
+              "rent"
+            ]
+          },
+          {
+            "id": "rel-c",
+            "from": "2025-06-01",
+            "to": "2025-06-30",
+            "kind": "amount",
+            "value": 100000,
+            "scope": [
+              "rent"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 60000,
+            "monthly": 5000,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2024-10-01T00:00:00Z",
+            "today": "2024-10-01",
+            "kind": "row",
+            "effectiveFrom": "2024-07-01",
+            "annual": 60000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2024-07-01",
+              "to": "2024-09-01",
+              "stepId": "r2-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              }
+            },
+            {
+              "from": "2024-09-01",
+              "to": "2024-12-01",
+              "stepId": "r2-a",
+              "reliefIds": [
+                "rel-a"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 48000
+              }
+            },
+            {
+              "from": "2024-12-01",
+              "to": "2025-01-01",
+              "stepId": "r2-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              }
+            },
+            {
+              "from": "2025-01-01",
+              "to": "2025-04-01",
+              "stepId": "r2-a",
+              "reliefIds": [
+                "rel-b"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 30000
+              }
+            },
+            {
+              "from": "2025-04-01",
+              "to": "2025-06-01",
+              "stepId": "r2-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              }
+            },
+            {
+              "from": "2025-06-01",
+              "to": "2025-07-01",
+              "stepId": "r2-a",
+              "reliefIds": [
+                "rel-c"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 0
+              }
+            },
+            {
+              "from": "2025-07-01",
+              "to": null,
+              "stepId": "r2-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 60000
+              }
+            }
+          ],
+          "rowPending": [
+            []
+          ],
+          "on": [
+            {
+              "day": "2024-11-30",
+              "stepId": "r2-a",
+              "leaseRent": 60000,
+              "chargedRent": 48000,
+              "reliefIds": [
+                "rel-a"
+              ]
+            },
+            {
+              "day": "2024-12-01",
+              "stepId": "r2-a",
+              "leaseRent": 60000,
+              "chargedRent": 60000,
+              "reliefIds": []
+            },
+            {
+              "day": "2025-02-15",
+              "stepId": "r2-a",
+              "leaseRent": 60000,
+              "chargedRent": 30000,
+              "reliefIds": [
+                "rel-b"
+              ]
+            },
+            {
+              "day": "2025-06-15",
+              "stepId": "r2-a",
+              "leaseRent": 60000,
+              "chargedRent": 0,
+              "reliefIds": [
+                "rel-c"
+              ]
+            }
+          ],
+          "over": [
+            {
+              "from": "2024-09-01",
+              "to": "2024-12-01",
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 14958.9
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 11967.12
+              }
+            }
+          ],
+          "forgone": [
+            {
+              "reliefId": "rel-a",
+              "total": 2991.78,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 2991.78
+              }
+            },
+            {
+              "reliefId": "rel-b",
+              "total": 7397.26,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 7397.26
+              }
+            },
+            {
+              "reliefId": "rel-c",
+              "total": 4931.51,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 4931.51
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "rent relief: a percentage can cover AHAC, car parks and misc fees as well as the rent",
+      "input": {
+        "steps": [
+          {
+            "id": "r3-a",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 120000,
+            "ratePercent": 0,
+            "ahacBasePerAnnum": 6000,
+            "sqm": 200
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 200,
+        "ancillaries": [
+          {
+            "carparks": 7200,
+            "miscFees": 2400
+          }
+        ],
+        "reliefs": [
+          {
+            "id": "rel-3",
+            "from": "2025-03-01",
+            "to": "2025-05-31",
+            "kind": "percent",
+            "value": 25,
+            "scope": [
+              "rent",
+              "ahac",
+              "carparks",
+              "misc_fees"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 120000,
+            "monthly": 10000,
+            "sqm": 200,
+            "sqmRate": 600,
+            "ahacAnnual": 6000,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-04-01T00:00:00Z",
+            "today": "2025-04-01",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 120000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2025-01-01",
+              "to": "2025-03-01",
+              "stepId": "r3-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": 6000,
+                "carparks": 7200,
+                "miscFees": 2400,
+                "rent": 120000
+              },
+              "charged": {
+                "ahac": 6000,
+                "carparks": 7200,
+                "miscFees": 2400,
+                "rent": 120000
+              }
+            },
+            {
+              "from": "2025-03-01",
+              "to": "2025-06-01",
+              "stepId": "r3-a",
+              "reliefIds": [
+                "rel-3"
+              ],
+              "lease": {
+                "ahac": 6000,
+                "carparks": 7200,
+                "miscFees": 2400,
+                "rent": 120000
+              },
+              "charged": {
+                "ahac": 4500,
+                "carparks": 5400,
+                "miscFees": 1800,
+                "rent": 90000
+              }
+            },
+            {
+              "from": "2025-06-01",
+              "to": null,
+              "stepId": "r3-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": 6000,
+                "carparks": 7200,
+                "miscFees": 2400,
+                "rent": 120000
+              },
+              "charged": {
+                "ahac": 6000,
+                "carparks": 7200,
+                "miscFees": 2400,
+                "rent": 120000
+              }
+            }
+          ],
+          "rowPending": [
+            []
+          ],
+          "on": [
+            {
+              "day": "2025-03-01",
+              "stepId": "r3-a",
+              "leaseRent": 120000,
+              "chargedRent": 90000,
+              "reliefIds": [
+                "rel-3"
+              ]
+            },
+            {
+              "day": "2025-06-01",
+              "stepId": "r3-a",
+              "leaseRent": 120000,
+              "chargedRent": 120000,
+              "reliefIds": []
+            }
+          ],
+          "over": [
+            {
+              "from": "2025-03-01",
+              "to": "2025-06-01",
+              "lease": {
+                "ahac": 1512.33,
+                "carparks": 1814.79,
+                "miscFees": 604.93,
+                "rent": 30246.58
+              },
+              "charged": {
+                "ahac": 1134.25,
+                "carparks": 1361.1,
+                "miscFees": 453.7,
+                "rent": 22684.93
+              }
+            }
+          ],
+          "forgone": [
+            {
+              "reliefId": "rel-3",
+              "total": 8544.65,
+              "byCharge": {
+                "ahac": 378.08,
+                "carparks": 453.69,
+                "miscFees": 151.23,
+                "rent": 7561.65
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "pending changes (a relief awaiting a director, a review awaiting approval) mark the rows they touch and change no figure",
+      "input": {
+        "steps": [
+          {
+            "id": "p-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "p-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "p-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "pending": [
+          {
+            "requestId": "req-1",
+            "kind": "relief",
+            "from": "2025-03-01",
+            "to": "2025-08-31",
+            "summary": "Rent relief: 50% off the rent, 01-Mar-25 to 31-Aug-25"
+          },
+          {
+            "requestId": "rev-9",
+            "kind": "rent_review",
+            "from": "2026-07-01",
+            "to": null,
+            "summary": "Rent review 01-Jul-26, awaiting approval"
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 106090,
+            "monthly": 8840.83,
+            "sqm": 100,
+            "sqmRate": 1060.9,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-04-01T00:00:00Z",
+            "today": "2025-04-01",
+            "kind": "row",
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2024-07-01",
+              "to": "2025-07-01",
+              "stepId": "p-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            },
+            {
+              "from": "2025-07-01",
+              "to": "2026-07-01",
+              "stepId": "p-b",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              }
+            },
+            {
+              "from": "2026-07-01",
+              "to": null,
+              "stepId": "p-c",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 106090
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 106090
+              }
+            }
+          ],
+          "rowPending": [
+            [
+              "req-1"
+            ],
+            [
+              "req-1"
+            ],
+            [
+              "rev-9"
+            ]
+          ],
+          "on": [
+            {
+              "day": "2025-04-01",
+              "stepId": "p-a",
+              "leaseRent": 100000,
+              "chargedRent": 100000,
+              "reliefIds": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "rent relief over a schedule's stored base rent (no commencement row) carries on over its first review",
+      "input": {
+        "steps": [
+          {
+            "id": "r5-a",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 4
+          }
+        ],
+        "fallbackAnnual": 50000,
+        "fallbackSqm": 0,
+        "reliefs": [
+          {
+            "id": "rel-5",
+            "from": "2026-05-01",
+            "to": "2026-08-31",
+            "kind": "percent",
+            "value": 20,
+            "scope": [
+              "rent"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 52000,
+            "monthly": 4333.33,
+            "sqm": 0,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": true,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 4,
+            "appliedPercent": 4,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2026-06-01T00:00:00Z",
+            "today": "2026-06-01",
+            "kind": "base",
+            "annual": 50000
+          },
+          {
+            "now": "2026-07-01T00:00:00Z",
+            "today": "2026-07-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 52000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": null,
+              "to": "2026-05-01",
+              "stepId": null,
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 50000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 50000
+              }
+            },
+            {
+              "from": "2026-05-01",
+              "to": "2026-07-01",
+              "stepId": null,
+              "reliefIds": [
+                "rel-5"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 50000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 40000
+              }
+            },
+            {
+              "from": "2026-07-01",
+              "to": "2026-09-01",
+              "stepId": "r5-a",
+              "reliefIds": [
+                "rel-5"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 52000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 41600
+              }
+            },
+            {
+              "from": "2026-09-01",
+              "to": null,
+              "stepId": "r5-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 52000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 52000
+              }
+            }
+          ],
+          "rowPending": [
+            []
+          ],
+          "on": [
+            {
+              "day": "2026-06-01",
+              "stepId": null,
+              "leaseRent": 50000,
+              "chargedRent": 40000,
+              "reliefIds": [
+                "rel-5"
+              ]
+            },
+            {
+              "day": "2026-09-01",
+              "stepId": "r5-a",
+              "leaseRent": 52000,
+              "chargedRent": 52000,
+              "reliefIds": []
+            }
+          ],
+          "over": [
+            {
+              "from": "2026-05-01",
+              "to": "2026-09-01",
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 17189.04
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 13751.23
+              }
+            }
+          ],
+          "forgone": [
+            {
+              "reliefId": "rel-5",
+              "total": 3437.81,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 3437.81
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "two reliefs on one charge on one day (a request refuses it): the one starting first applies",
+      "input": {
+        "steps": [
+          {
+            "id": "r6-a",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "reliefs": [
+          {
+            "id": "rel-b",
+            "from": "2025-03-01",
+            "to": "2025-03-31",
+            "kind": "percent",
+            "value": 50,
+            "scope": [
+              "rent"
+            ]
+          },
+          {
+            "id": "rel-a",
+            "from": "2025-02-01",
+            "to": "2025-03-15",
+            "kind": "percent",
+            "value": 10,
+            "scope": [
+              "rent"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-03-10T00:00:00Z",
+            "today": "2025-03-10",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 100000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2025-01-01",
+              "to": "2025-02-01",
+              "stepId": "r6-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            },
+            {
+              "from": "2025-02-01",
+              "to": "2025-03-01",
+              "stepId": "r6-a",
+              "reliefIds": [
+                "rel-a"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 90000
+              }
+            },
+            {
+              "from": "2025-03-01",
+              "to": "2025-03-16",
+              "stepId": "r6-a",
+              "reliefIds": [
+                "rel-a"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 90000
+              }
+            },
+            {
+              "from": "2025-03-16",
+              "to": "2025-04-01",
+              "stepId": "r6-a",
+              "reliefIds": [
+                "rel-b"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 50000
+              }
+            },
+            {
+              "from": "2025-04-01",
+              "to": null,
+              "stepId": "r6-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            }
+          ],
+          "rowPending": [
+            []
+          ],
+          "on": [
+            {
+              "day": "2025-03-10",
+              "stepId": "r6-a",
+              "leaseRent": 100000,
+              "chargedRent": 90000,
+              "reliefIds": [
+                "rel-a"
+              ]
+            },
+            {
+              "day": "2025-03-20",
+              "stepId": "r6-a",
+              "leaseRent": 100000,
+              "chargedRent": 50000,
+              "reliefIds": [
+                "rel-b"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a director's ratchet exemption lets one review row lower the rent; the lease's ratchet still holds the next row",
+      "input": {
+        "steps": [
+          {
+            "id": "e-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "e-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 98,
+            "cpiValuePrev": 100,
+            "ratchetExempt": {
+              "at": "2025-07-15",
+              "byName": "Dana Director",
+              "reason": "Directors pass the CPI fall on to the tenant"
+            }
+          },
+          {
+            "id": "e-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0,
+            "cpiValue": 97
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "terms": {
+          "reviewRatchet": true
+        }
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 98000,
+            "monthly": 8166.67,
+            "sqm": 100,
+            "sqmRate": 980,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": -2,
+            "appliedPercent": -2,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 98000,
+            "monthly": 8166.67,
+            "sqm": 100,
+            "sqmRate": 980,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": -1.0204,
+            "appliedPercent": 0,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": true
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-01T00:00:00Z",
+            "today": "2025-08-01",
+            "kind": "row",
+            "effectiveFrom": "2025-07-01",
+            "annual": 98000
+          },
+          {
+            "now": "2026-08-01T00:00:00Z",
+            "today": "2026-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 98000
+          }
+        ]
+      }
+    },
+    {
+      "name": "once the review workflow is live, a review row keyed ahead stays pending until a review applies it, so the rent before it carries on",
+      "input": {
+        "steps": [
+          {
+            "id": "k-a",
+            "effectiveFrom": "2024-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "k-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "k-c",
+            "effectiveFrom": "2026-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3,
+            "resolution": "applied",
+            "reviewId": "rev-c"
+          },
+          {
+            "id": "k-d",
+            "effectiveFrom": "2027-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0
+          },
+          {
+            "id": "k-e",
+            "effectiveFrom": "2028-07-01",
+            "methodKind": "fixed",
+            "ratePercent": 3
+          },
+          {
+            "id": "k-f",
+            "effectiveFrom": "2029-07-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 120000,
+            "ratePercent": 0
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "terms": {
+          "workflowLiveFrom": "2026-01-01"
+        }
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2024-07-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 103000,
+            "monthly": 8583.33,
+            "sqm": 100,
+            "sqmRate": 1030,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2026-07-01",
+            "annual": 106090,
+            "monthly": 8840.83,
+            "sqm": 100,
+            "sqmRate": 1060.9,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": 3,
+            "appliedPercent": 3,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2027-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "awaiting_review",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2028-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "awaiting_review",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2029-07-01",
+            "annual": 120000,
+            "monthly": 10000,
+            "sqm": 100,
+            "sqmRate": 1200,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2027-08-01T00:00:00Z",
+            "today": "2027-08-01",
+            "kind": "row",
+            "effectiveFrom": "2026-07-01",
+            "annual": 106090
+          },
+          {
+            "now": "2029-08-01T00:00:00Z",
+            "today": "2029-08-01",
+            "kind": "row",
+            "effectiveFrom": "2029-07-01",
+            "annual": 120000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2024-07-01",
+              "to": "2025-07-01",
+              "stepId": "k-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            },
+            {
+              "from": "2025-07-01",
+              "to": "2026-07-01",
+              "stepId": "k-b",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 103000
+              }
+            },
+            {
+              "from": "2026-07-01",
+              "to": "2029-07-01",
+              "stepId": "k-c",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 106090
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 106090
+              }
+            },
+            {
+              "from": "2029-07-01",
+              "to": null,
+              "stepId": "k-f",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 120000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 120000
+              }
+            }
+          ],
+          "rowPending": [
+            [],
+            [],
+            [],
+            [],
+            [],
+            []
+          ],
+          "on": [
+            {
+              "day": "2028-08-01",
+              "stepId": "k-c",
+              "leaseRent": 106090,
+              "chargedRent": 106090,
+              "reliefIds": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "rent relief while a review row is still pending applies to the rent that carries on (a rent-free month)",
+      "input": {
+        "steps": [
+          {
+            "id": "q-a",
+            "effectiveFrom": "2025-01-01",
+            "methodKind": "commencement",
+            "baseRentPerAnnum": 100000,
+            "ratePercent": 0,
+            "sqm": 100
+          },
+          {
+            "id": "q-b",
+            "effectiveFrom": "2025-07-01",
+            "methodKind": "cpi",
+            "ratePercent": 0
+          }
+        ],
+        "fallbackAnnual": 0,
+        "fallbackSqm": 100,
+        "reliefs": [
+          {
+            "id": "rel-9",
+            "from": "2025-08-01",
+            "to": "2025-08-31",
+            "kind": "percent",
+            "value": 100,
+            "scope": [
+              "rent"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "effectiveFrom": "2025-01-01",
+            "annual": 100000,
+            "monthly": 8333.33,
+            "sqm": 100,
+            "sqmRate": 1000,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": false,
+            "pendingReason": null,
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          },
+          {
+            "effectiveFrom": "2025-07-01",
+            "annual": 0,
+            "monthly": 0,
+            "sqm": 100,
+            "sqmRate": 0,
+            "ahacAnnual": null,
+            "areaMissing": false,
+            "pending": true,
+            "pendingReason": "cpi_index_missing",
+            "rawPercent": null,
+            "appliedPercent": null,
+            "capApplied": false,
+            "floorApplied": false,
+            "ratchetApplied": false
+          }
+        ],
+        "current": [
+          {
+            "now": "2025-08-15T00:00:00Z",
+            "today": "2025-08-15",
+            "kind": "row",
+            "effectiveFrom": "2025-01-01",
+            "annual": 100000
+          }
+        ],
+        "charges": {
+          "periods": [
+            {
+              "from": "2025-01-01",
+              "to": "2025-08-01",
+              "stepId": "q-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            },
+            {
+              "from": "2025-08-01",
+              "to": "2025-09-01",
+              "stepId": "q-a",
+              "reliefIds": [
+                "rel-9"
+              ],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 0
+              }
+            },
+            {
+              "from": "2025-09-01",
+              "to": null,
+              "stepId": "q-a",
+              "reliefIds": [],
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 100000
+              }
+            }
+          ],
+          "rowPending": [
+            [],
+            []
+          ],
+          "on": [
+            {
+              "day": "2025-08-15",
+              "stepId": "q-a",
+              "leaseRent": 100000,
+              "chargedRent": 0,
+              "reliefIds": [
+                "rel-9"
+              ]
+            }
+          ],
+          "over": [
+            {
+              "from": "2025-08-01",
+              "to": "2025-09-01",
+              "lease": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 8493.15
+              },
+              "charged": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 0
+              }
+            }
+          ],
+          "forgone": [
+            {
+              "reliefId": "rel-9",
+              "total": 8493.15,
+              "byCharge": {
+                "ahac": null,
+                "carparks": null,
+                "miscFees": null,
+                "rent": 8493.15
+              }
+            }
+          ]
+        }
       }
     }
   ]

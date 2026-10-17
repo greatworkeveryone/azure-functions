@@ -20,8 +20,9 @@ import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { computeScheduleRows, parseSteps, resolveCurrentRent } from "../scheduledRateStepLogic";
+import { scheduleTermsOf } from "../scheduleTerms";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
-import { decimalOf, isReviewRatchetOn } from "./reviewTenancy";
+import { decimalOf } from "./reviewTenancy";
 import { rentPerAnnumIsCache } from "./stepPlan";
 import { inTransaction } from "./store";
 
@@ -63,8 +64,7 @@ export function planRentCache(row: SqlRow, today: string): RentCachePlan {
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
   if (!rentPerAnnumIsCache(steps)) return { kind: "skip", why: "RentPerAnnum is now the schedule's starting rent, not a cache" };
   const cached = decimalOf(row.RentPerAnnum);
-  const terms = { cpiCapPercent: decimalOf(row.CpiCapPercent), cpiFloorPercent: decimalOf(row.CpiFloorPercent), reviewRatchet: isReviewRatchetOn(row) };
-  const current = resolveCurrentRent(computeScheduleRows(steps, cached ?? 0, 0, terms), cached ?? 0, today);
+  const current = resolveCurrentRent(computeScheduleRows(steps, cached ?? 0, 0, scheduleTermsOf(row)), cached ?? 0, today);
   const reviewId = String(row.ReviewId);
   if (current.kind !== "row" || current.row.step.reviewId !== reviewId || current.row.step.resolution !== "applied") {
     return { kind: "skip", why: "the row in force today isn't this review's any more" };

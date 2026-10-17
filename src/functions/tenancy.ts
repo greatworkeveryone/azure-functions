@@ -98,6 +98,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { scheduleTermsOf } from "../scheduleTerms";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import {
   CLEAR_SIGN_OFF_SQL,
@@ -298,6 +299,9 @@ interface RegisterTenantApi {
   reviewIntervalMonths?: number;
   /** "No rent decreases on review" — the schedule holds every review at ≥ 0%. */
   reviewRatchet: boolean;
+  /** REVIEW_WORKFLOW_LIVE_FROM, or null: the schedule engine's terms.workflowLiveFrom
+   *  (an unsettled review row dated on or after it waits for its review, WP26c M2). */
+  reviewWorkflowLiveFrom: string | null;
   reviewState: "amber" | "green" | "grey" | "red";
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
@@ -476,12 +480,9 @@ function tenantRowToApi(
   // schedule row says (Darwin date), or the stored value with no schedule.
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
   const today = todayInDarwin();
-  const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
-  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, {
-    cpiCapPercent: asNum(row.CpiCapPercent) ?? null,
-    cpiFloorPercent: asNum(row.CpiFloorPercent) ?? null,
-    reviewRatchet,
-  });
+  const terms = scheduleTermsOf(row);
+  const reviewRatchet = terms.reviewRatchet === true;
+  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, terms);
   const effectiveRentPerAnnum = resolved.annual;
   const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
@@ -560,6 +561,7 @@ function tenantRowToApi(
     rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
     reviewRatchet,
+    reviewWorkflowLiveFrom: terms.workflowLiveFrom,
     reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
     rowVersion: rowVersionHex(row.RowVersion),
@@ -2462,6 +2464,11 @@ function changeLogRowToApi(row: SqlRow) {
 
 const STEP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
+/** The row keeps the exemption it had, exactly (key order aside). */
+function ratchetExemptionKept(before: ScheduledRateStep["ratchetExempt"], after: ScheduledRateStep["ratchetExempt"]): boolean {
+  return !!before && !!after && before.at === after.at && before.byName === after.byName && before.reason === after.reason;
+}
+
 async function upsertScheduledRateStep(
   request: HttpRequest,
   context: InvocationContext,
@@ -2500,6 +2507,17 @@ async function upsertScheduledRateStep(
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
+        // A ratchet exemption is a director's override (C9, D23), written only by
+        // a rent review approved with the lease's ratchet overridden. An edit may
+        // keep one as it is or take it off (the ratchet then holds the row again),
+        // never add or change one.
+        if (step.ratchetExempt && !ratchetExemptionKept(oldStep?.ratchetExempt, step.ratchetExempt)) {
+          return {
+            error: "A ratchet exemption is a director's override: it is written when a director approves a rent review with the lease's ratchet overridden, not by editing the row",
+            kind: "reject",
+            status: 403,
+          };
+        }
         // Adding a row closes the open-ended row before it (effectiveTo is exclusive).
         const { closed, steps: withClosed } = closeOpenPredecessor(existing, step);
         const next = normaliseLegacyEnds(upsertStep(withClosed, step));

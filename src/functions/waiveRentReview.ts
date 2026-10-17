@@ -105,6 +105,7 @@ async function forgoneIncrease(
       cpiCapPercent: schedule.context.lease.cpiCapPercent ?? null,
       cpiFloorPercent: schedule.context.lease.cpiFloorPercent ?? null,
       reviewRatchet: schedule.context.lease.reviewRatchet === true,
+      workflowLiveFrom: schedule.context.lease.workflowLiveFrom ?? null,
     },
     method: method as CalcMethod,
     miscFees: [],
