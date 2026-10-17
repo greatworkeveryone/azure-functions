@@ -119,3 +119,35 @@ describe("recordReadback", () => {
     expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "myob.discrepancy", ruleApplied: "cleared" }));
   });
 });
+
+describe("a hand edit in MYOB, read back twice (the baseline is the read-back after sending, never the last snapshot)", () => {
+  it("stays a discrepancy and keeps the old version on the second read, so Update in MYOB stays refused", async () => {
+    const sent = { ...SENT, JournalMemo: "FP 66Sm261014 · proposed Ray · approved Johanne" };
+    let row = proposal({ myobRowVersion: "7", myobStatus: "Open", payload: sent, readBack: { ...sent, RowVersion: "7", Status: "Open" } });
+    store.getProposal.mockImplementation(async () => ({ ...row }));
+    store.updateProposal.mockImplementation(async (_tx: unknown, _id: number, _v: string, fields: Record<string, unknown>) => {
+      const json = (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value);
+      row = {
+        ...row,
+        discrepancy: "Discrepancy" in fields ? json(fields.Discrepancy) : row.discrepancy,
+        myobRowVersion: (fields.MyobRowVersion as string | undefined) ?? row.myobRowVersion,
+        myobSnapshot: "MyobSnapshot" in fields ? json(fields.MyobSnapshot) : row.myobSnapshot,
+        myobStatus: (fields.MyobStatus as string | undefined) ?? row.myobStatus,
+      };
+      return { ...row };
+    });
+    executeQuery.mockResolvedValue([]);
+    const edited = { ...sent, JournalMemo: "Johanne: do not pay", RowVersion: "8", Status: "Open" };
+    const get = jest.fn().mockResolvedValue(edited);
+
+    for (const read of [1, 2]) {
+      const outcome = await readBackProposal({} as never, row, SYSTEM, NOW, fakeMyob(get));
+      await recordReadback({} as never, 5, outcome, SYSTEM, NOW);
+      expect({ read, version: row.myobRowVersion }).toEqual({ read, version: "7" });
+      expect(row.discrepancy).toMatchObject({ fields: [expect.objectContaining({ label: "Memo", myob: "Johanne: do not pay" })] });
+    }
+    expect(row.myobSnapshot).toMatchObject({ JournalMemo: "Johanne: do not pay" });
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+});
+

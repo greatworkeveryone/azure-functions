@@ -18,9 +18,9 @@ const SENT = {
   Supplier: { UID: "s" },
 };
 const MYOB_SAW = { ...SENT, RowVersion: "7", Status: "Open" };
-const verdict = (myob: Record<string, unknown>) =>
+const verdict = (myob: Record<string, unknown>, lastSeen: Record<string, unknown> = MYOB_SAW) =>
   compareReadback({
-    floorplanLastTouch: null, kind: "Order", lastSeen: MYOB_SAW, myob, now: new Date("2026-10-14T03:00:00Z"), previousStatus: "Open",
+    floorplanLastTouch: null, kind: "Order", lastSeen, myob, now: new Date("2026-10-14T03:00:00Z"), previousStatus: "Open",
     sent: SENT, sentLabels: { supplier: "ACME" },
   });
 
@@ -35,6 +35,29 @@ describe("a hand edit in MYOB to something Floorplan writes, outside the headlin
     const v = verdict({ ...MYOB_SAW, ...edit, RowVersion: "8" });
     expect(v.discrepancy?.fields).toEqual([expect.objectContaining({ label })]);
     expect(v.advanceVersion).toBe(false);
+  });
+
+  it("sees a line added that isn't a transaction line (only the record diff can)", () => {
+    const v = verdict({ ...MYOB_SAW, Lines: [...SENT.Lines, { Description: "Johanne: hold", Type: "Header" }], RowVersion: "8" });
+    expect(v.discrepancy?.fields).toEqual([expect.objectContaining({ field: "Lines", floorplan: "1 line", label: "Lines", myob: "2 lines" })]);
+    expect(v.advanceVersion).toBe(false);
+  });
+
+  it.each([
+    ["the freight tax code", { FreightTaxCode: { UID: "t-other" } }, "Freight tax code"],
+  ])("sees a change to %s", (_label, edit, label) => {
+    const v = verdict({ ...MYOB_SAW, ...edit, RowVersion: "8" });
+    expect(v.discrepancy?.fields).toEqual([expect.objectContaining({ label })]);
+    expect(v.advanceVersion).toBe(false);
+  });
+
+  it("sees a line moved to another job (its Job UID), but not the job being renamed", () => {
+    const withJob = (uid: string, name: string) => ({ ...MYOB_SAW, Lines: [{ ...SENT.Lines[0], Job: { Name: name, Number: "J1", UID: uid } }] });
+    const moved = verdict({ ...withJob("job-2", "Roof"), RowVersion: "8" }, withJob("job-1", "Roof"));
+    expect(moved.discrepancy?.fields).toEqual([expect.objectContaining({ field: "Lines[0].Job.UID", floorplan: "job-1", label: "Line 1 job", myob: "job-2" })]);
+    expect(moved.advanceVersion).toBe(false);
+    const renamed = verdict({ ...withJob("job-1", "Roof works"), RowVersion: "8" }, withJob("job-1", "Roof"));
+    expect(renamed).toMatchObject({ advanceVersion: true, discrepancy: null });
   });
 
   it("takes the version when only what MYOB manages itself changed", () => {
