@@ -21,10 +21,13 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../db", () => ({
+  beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),
+  commitTransaction: jest.fn().mockResolvedValue(undefined),
   createRequestConnection: jest.fn().mockResolvedValue({}),
   createServiceConnection: jest.fn().mockResolvedValue({}),
   executeQuery: jest.fn().mockResolvedValue([]),
+  rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock("../blob-storage", () => ({
@@ -196,7 +199,7 @@ describe("checkoutKeys with a signature", () => {
       context,
     );
   const baseRoutes: Array<[RegExp, unknown[]]> = [
-    [/FROM dbo\.Keys WHERE Id IN/, [{ Id: 4, IsDeleted: 0, KeyNumber: "K-004", Status: "active" }]],
+    [/FROM dbo\.Keys WITH \(UPDLOCK, ROWLOCK\)\s+WHERE Id IN/, [{ Id: 4, IsDeleted: 0, ItemType: "key", KeyNumber: "K-004", Status: "active" }]],
     [/INSERT INTO dbo\.KeyCheckoutBatches/, [{ Id: 90 }]],
   ];
   const signatureRow = (over: Record<string, unknown> = {}) => ({
