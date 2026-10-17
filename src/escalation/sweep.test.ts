@@ -10,6 +10,8 @@ import { jobConditionActive, type JobFacts } from "./adapters/jobRules";
 import type { EscalationAdapter } from "./adapters/registry";
 import { NO_HOLIDAYS } from "./businessTime";
 import { MAX_NOTIFICATION_ATTEMPTS } from "./config";
+import type { DueDeferral } from "../jobDecisions/decisionsStore";
+import type { ReaskOptions, ReaskResult } from "../jobDecisions/reask";
 import { followUpSince, runSweep, type SweepDeps, type SweepOptions, type SweepReport } from "./sweep";
 import { latestKey, type LatestEscalationTimes } from "./store";
 import type { EscalationPolicy, EscalationRow } from "./types";
@@ -122,7 +124,10 @@ interface World {
     escalateFurther: Parameters<SweepDeps["escalateFurther"]>[1][];
     notify: { event: string; id: number }[];
     raise: Parameters<SweepDeps["raise"]>[1][];
+    reask: { deferral: DueDeferral; options: ReaskOptions }[];
   };
+  /** Deferred decisions not yet asked again (what the database would list as due). */
+  deferrals: DueDeferral[];
   deps: SweepDeps;
   exhausted: number;
   jobs: JobFacts[];
@@ -135,7 +140,8 @@ const live = (row: EscalationRow): boolean => row.status === "open" || row.statu
 function makeWorld(): World {
   const world: World = {
     arrivals: new Map(),
-    calls: { autoResolve: [], escalateFurther: [], notify: [], raise: [] },
+    calls: { autoResolve: [], escalateFurther: [], notify: [], raise: [], reask: [] },
+    deferrals: [],
     deps: undefined as unknown as SweepDeps,
     exhausted: 0,
     jobs: [],
@@ -220,6 +226,7 @@ function makeWorld(): World {
       }
       return map;
     },
+    listDueDeferrals: async () => world.deferrals.map((d) => ({ ...d })),
     listLiveEscalations: async () => world.rows.filter(live).map((r) => ({ ...r })),
     loadLiveJobFacts: async () => world.jobs.filter((j) => !j.isArchived && j.status !== "Done"),
     notifyTargets: async (_c, row, event) => {
@@ -245,6 +252,12 @@ function makeWorld(): World {
       });
       world.rows.push(row);
       return { created: true, escalation: { ...row } };
+    },
+    // Like the real one: asking again stamps the deferral, so it is not due any more.
+    reaskDeferral: async (_c, deferral, options): Promise<ReaskResult> => {
+      world.calls.reask.push({ deferral, options });
+      world.deferrals = world.deferrals.filter((d) => d.decisionId !== deferral.decisionId);
+      return "asked";
     },
   };
   return world;
@@ -925,7 +938,7 @@ describe("dry run", () => {
 
     const report = await sweep(world, { dryRun: true, log });
 
-    expect(world.calls).toEqual({ autoResolve: [], escalateFurther: [], notify: [], raise: [] });
+    expect(world.calls).toEqual({ autoResolve: [], escalateFurther: [], notify: [], raise: [], reask: [] });
     expect(JSON.stringify(world.rows)).toBe(before);
     expect(report).toMatchObject({ autoResolved: 1, dryRun: true, followUps: 1, superseded: 1 });
     const lines = log.mock.calls.map((c) => c[0] as string).join("\n");
@@ -1259,5 +1272,286 @@ describe("scheduled reminders (a decision request's)", () => {
     await sweep(world, { log });
 
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/scheduledReminders=1 /));
+  });
+});
+
+// ── Deferred decisions come back (jobs plan A2) ──────────────────────────────
+
+describe("a deferred decision comes back on its day", () => {
+  // NOW is Tuesday 2026-10-13, 12:00 Darwin.
+  const deferral = (over: Partial<DueDeferral> = {}): DueDeferral => ({ decisionId: 4, deferUntil: "2026-10-13", jobId: 12, requestId: 7, ...over });
+
+  function askingWorld(): World {
+    const world = makeWorld();
+    world.policies["job.decision_pending"] = policy("job.decision_pending", {
+      kind: "authority",
+      ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }],
+    });
+    return world;
+  }
+
+  it("asks it again, once, and says so in the report and the one-line summary", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    const log = jest.fn();
+
+    const report = await sweep(world, { log });
+
+    expect(world.calls.reask).toHaveLength(1);
+    expect(world.calls.reask[0].deferral).toEqual(deferral());
+    expect(report.reasked).toBe(1);
+    expect(report.errors).toEqual([]);
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/reasked=1 /));
+  });
+
+  it("hands the asker the moment, the holidays and the send options of the run", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+
+    await sweep(world, { env: { ...ENV, ESCALATION_HOLIDAYS: "2026-10-14" } });
+
+    const { options } = world.calls.reask[0];
+    expect(options.now).toEqual(NOW);
+    expect(options.holidays?.has("2026-10-14")).toBe(true);
+    expect(options.notify).toMatchObject({ attempts: 3, backoffMs: 1000 });
+  });
+
+  it("is idempotent: run again, and it is not asked a second time", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.reasked).toBe(1);
+    expect(second.reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(1);
+  });
+
+  it("asks every deferral that is due, oldest first as the database lists them", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, deferUntil: "2026-10-09", jobId: 12 }), deferral({ decisionId: 5, deferUntil: "2026-10-13", jobId: 14 })];
+
+    const report = await sweep(world);
+
+    expect(world.calls.reask.map((c) => c.deferral.jobId)).toEqual([12, 14]);
+    expect(report.reasked).toBe(2);
+  });
+
+  it("waits for the day to open: 08:30 Darwin on the date, not midnight", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-10-13" })];
+    const sevenAm = new Date(Date.UTC(2026, 9, 13, 7, 0) - 9.5 * 3_600_000);
+    const halfPastEight = new Date(Date.UTC(2026, 9, 13, 8, 30) - 9.5 * 3_600_000);
+
+    expect((await sweep(world, { now: sevenAm })).reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(0);
+    expect((await sweep(world, { now: halfPastEight })).reasked).toBe(1);
+  });
+
+  it("does not ask on a day to come, even if the database listed it", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-10-14" })];
+
+    expect((await sweep(world)).reasked).toBe(0);
+    expect(world.calls.reask).toHaveLength(0);
+  });
+
+  it("asks one whose day went by while the sweep was off, at once", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ deferUntil: "2026-09-30" })];
+
+    expect((await sweep(world)).reasked).toBe(1);
+  });
+
+  it("does not count one the asker skipped (asked already, job closed, a request since)", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    world.deps.reaskDeferral = async (_c, d, options) => {
+      world.calls.reask.push({ deferral: d, options });
+      return "skipped";
+    };
+
+    const report = await sweep(world);
+
+    expect(world.calls.reask).toHaveLength(1);
+    expect(report.reasked).toBe(0);
+    expect(report.errors).toEqual([]);
+  });
+
+  it("reports a failure as a problem of the run and carries on with the next", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, jobId: 12 }), deferral({ decisionId: 5, jobId: 14 })];
+    const asked: number[] = [];
+    world.deps.reaskDeferral = async (_c, d) => {
+      if (d.jobId === 12) throw new Error("Nobody this question was put to can be asked any more");
+      asked.push(d.jobId);
+      return "asked";
+    };
+
+    const report = await sweep(world);
+
+    expect(asked).toEqual([14]);
+    expect(report.reasked).toBe(1);
+    expect(report.errors).toEqual(["asking job #12 again: Nobody this question was put to can be asked any more"]);
+  });
+
+  it("does not stop the other steps of the run when it cannot list the deferrals", async () => {
+    const world = askingWorld();
+    world.deps.listDueDeferrals = async () => {
+      throw new Error("deadlock victim");
+    };
+    world.jobs = [job({ assigned: false, createdAt: ago(3 * DAY), jobId: 5, statusSince: ago(3 * DAY) })];
+
+    const report = await sweep(world);
+
+    expect(report.errors).toEqual(["asking deferred decisions again: deadlock victim"]);
+    expect(raisedKeys(world)).toContain("job.unassigned:5");
+  });
+
+  it("leaves them be, and says so, while job.decision_pending is switched off or has no row", async () => {
+    for (const setup of [(w: World) => (w.policies["job.decision_pending"].active = false), (w: World) => delete w.policies["job.decision_pending"]]) {
+      const world = askingWorld();
+      setup(world);
+      world.deferrals = [deferral()];
+      const log = jest.fn();
+
+      const report = await sweep(world, { log });
+
+      expect(world.calls.reask).toHaveLength(0);
+      expect(report.reasked).toBe(0);
+      expect(report.errors).toEqual([]);
+      expect(log).toHaveBeenCalledWith(expect.stringMatching(/1 deferred decision is due, but job\.decision_pending .* so it is not asked again/));
+    }
+  });
+
+  it("says nothing about the policy when nothing is due", async () => {
+    const world = askingWorld();
+    world.policies["job.decision_pending"].active = false;
+    const log = jest.fn();
+
+    await sweep(world, { log });
+
+    expect(log).not.toHaveBeenCalledWith(expect.stringMatching(/deferred decision/));
+  });
+
+  it("in a dry run says what it would ask and asks nothing", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral()];
+    const log = jest.fn();
+
+    const report = await sweep(world, { dryRun: true, log });
+
+    expect(world.calls.reask).toHaveLength(0);
+    expect(world.deferrals).toHaveLength(1);
+    expect(report.reasked).toBe(1);
+    expect(log).toHaveBeenCalledWith("escalationSweep: would ask job #12 again (decision #4, deferred until 2026-10-13)");
+  });
+
+  it("counts against the run's allowance and finishes over the next run", async () => {
+    const world = askingWorld();
+    world.deferrals = [deferral({ decisionId: 4, jobId: 12 }), deferral({ decisionId: 5, jobId: 14 }), deferral({ decisionId: 6, jobId: 16 })];
+
+    const first = await sweep(world, { maxActions: 2 });
+    const second = await sweep(world, { maxActions: 2 });
+
+    expect(first.reasked).toBe(2);
+    expect(first.truncated).toBe(true);
+    expect(second.reasked).toBe(1);
+    expect(world.calls.reask.map((c) => c.deferral.jobId)).toEqual([12, 14, 16]);
+  });
+
+  it("leaves every other step alone: nothing due, nothing asked, no policy read for it", async () => {
+    const world = askingWorld();
+    const getPolicy = jest.spyOn(world.deps, "getPolicy");
+
+    await sweep(world);
+
+    expect(world.calls.reask).toHaveLength(0);
+    expect(getPolicy.mock.calls.map((c) => c[1])).not.toContain("job.decision_pending");
+  });
+});
+
+describe("a next step is chased on its own clock (jobs plan A2)", () => {
+  /** An open next step handed to Alana (9): attention, on the job, with a schedule. */
+  const stepRow = (over: Partial<EscalationRow> = {}): EscalationRow =>
+    esc({
+      context: { nextStep: { decisionId: 4, nextStep: "Pay it" }, schedule: { remindAt: [] }, userTargets: [9] },
+      dueAt: ago(-30),
+      kind: "attention",
+      lastNotifiedAt: ago(10),
+      policyKey: "job.next_step",
+      raisedByKind: "user",
+      raisedByName: "Dee",
+      raisedByUserId: 5,
+      subjectId: "12",
+      targetRole: "accounts",
+      targetUserId: 9,
+      ...over,
+    });
+
+  function stepWorld(): World {
+    const world = makeWorld();
+    world.policies["job.next_step"] = policy("job.next_step", { ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }] });
+    // The step is open while the world says so, as the job adapter asks the decisions table.
+    const original = world.deps.getAdapter;
+    world.deps.getAdapter = (type) => {
+      const adapter = original(type);
+      if (type !== "job" || !adapter) return adapter;
+      return { ...adapter, isConditionActive: async (c, ref, now) => (ref.policyKey === "job.next_step" ? true : adapter.isConditionActive(c, ref, now)) };
+    };
+    return world;
+  }
+
+  it("is not restarted by mail about the job, as a stalled job is: it is due when its decision said", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow()];
+    world.arrivals.set(12, ago(1));
+
+    const report = await sweep(world);
+
+    expect(report.followUps).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+  });
+
+  it("is restarted by that mail in the control case, so the test above proves something", async () => {
+    const world = stepWorld();
+    world.jobs = [job({ jobId: 12, statusSince: ago(9 * DAY) })];
+    world.rows = [esc({ dueAt: ago(-30), lastNotifiedAt: ago(10), subjectId: "12" })];
+    world.arrivals.set(12, ago(1));
+
+    expect((await sweep(world)).followUps).toBe(1);
+  });
+
+  it("moves up to the owner's manager when it is overdue, like any open attention escalation", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow({ dueAt: ago(1) })];
+
+    const report = await sweep(world);
+
+    expect(report.superseded).toBe(1);
+    expect(world.calls.escalateFurther[0]).toMatchObject({ code: "sla_breach", escalationId: 1, mode: "next_level", onlyIfOpen: true });
+  });
+
+  it("is ended as cleared when the step is no longer open (the job was closed or archived)", async () => {
+    const world = stepWorld();
+    const adapter = world.deps.getAdapter("job") as EscalationAdapter;
+    world.deps.getAdapter = (type) => (type === "job" ? { ...adapter, isConditionActive: async () => false } : null);
+    world.rows = [stepRow()];
+
+    const report = await sweep(world);
+
+    expect(report.autoResolved).toBe(1);
+    expect(world.calls.autoResolve).toHaveLength(1);
+  });
+
+  it("reminds its owner on the schedule it was raised with", async () => {
+    const world = stepWorld();
+    world.rows = [stepRow({ context: { nextStep: { decisionId: 4, nextStep: "Pay it" }, schedule: { remindAt: [ago(2).toISOString()] }, userTargets: [9] }, lastNotifiedAt: ago(30) })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
   });
 });

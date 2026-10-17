@@ -1005,6 +1005,7 @@ describe("the sweep drives the engine", () => {
         ...defaultSweepDeps,
         countExhaustedNotifications: async () => 0,
         latestEmailArrivals: async () => new Map(),
+        listDueDeferrals: async () => [],
         loadLiveJobFacts: async () => jobs.filter((j) => !j.isArchived && j.status !== "Done"),
       },
     );
