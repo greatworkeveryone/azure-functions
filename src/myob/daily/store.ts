@@ -5,12 +5,18 @@
 //   calls       MyobApiLog outcome rows (one per call: answered, refused or
 //               failed) in the window; the email drops calls for unregistered
 //               files by their path
+//   controls    the CFO's switches, a file's mode, pause/resume and the MYOB
+//               link (myob.control_change, myob.link), by INNER JOIN only for a
+//               registered file (the file is the subject, or the subject's part
+//               before ":")
 //   recipients  active users whose role is cfo
+//   lastCoveredRun  where the last successful run of the same kind ended, so a
+//               skipped or failed morning is covered by the next one
 
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery, type SqlRow } from "../../db";
-import type { DailyFacts, DailyRecipient, MyobCall, ProposalEvent } from "./types";
+import type { ControlEvent, DailyFacts, DailyRecipient, MyobCall, ProposalEvent } from "./types";
 
 /** More than a day can hold; a run that reaches it says so in the log. */
 export const MAX_CALL_ROWS = 5000;
@@ -48,6 +54,22 @@ function toEvent(row: SqlRow): ProposalEvent {
   };
 }
 
+function toControl(row: SqlRow): ControlEvent {
+  const subject = String(row.SubjectId);
+  const colon = subject.indexOf(":");
+  return {
+    action: row.Action === "myob.link" ? "myob.link" : "myob.control_change",
+    actorName: text(row.ActorName) ?? "Someone",
+    after: json(row.After),
+    before: json(row.Before),
+    companyFileId: String(row.CompanyFileId).toLowerCase(),
+    occurredAt: date(row.OccurredAt),
+    reason: text(row.Reason),
+    ruleApplied: text(row.RuleApplied),
+    scope: colon >= 0 ? subject.slice(colon + 1) : null,
+  };
+}
+
 function toCall(row: SqlRow): MyobCall {
   return {
     actorKind: String(row.ActorKind),
@@ -81,6 +103,17 @@ export async function loadDailyFacts(connection: Connection, since: Date, until:
       ORDER BY l.OccurredAt, l.LedgerId`,
     window,
   );
+  const controls = await executeQuery(
+    connection,
+    `SELECT l.Action, l.ActorName, l.OccurredAt, l.RuleApplied, l.Reason, l.[Before], l.[After], l.SubjectType, l.SubjectId, f.CompanyFileId
+       FROM dbo.DecisionLedger l
+       INNER JOIN dbo.MyobCompanyFiles f
+          ON f.CompanyFileId = CASE WHEN l.SubjectType = N'myob_control' THEN LEFT(l.SubjectId, CHARINDEX(N':', l.SubjectId + N':') - 1) ELSE l.SubjectId END
+      WHERE l.Action IN (N'myob.control_change', N'myob.link')
+        AND l.OccurredAt >= @Since AND l.OccurredAt < @Until
+      ORDER BY l.OccurredAt, l.LedgerId`,
+    window,
+  );
   const calls = await executeQuery(
     connection,
     `SELECT TOP (${MAX_CALL_ROWS}) OccurredAt, Phase, Method, Path, Purpose, ActorKind, ActorName, HttpStatus, ErrorMessage
@@ -91,6 +124,7 @@ export async function loadDailyFacts(connection: Connection, since: Date, until:
   );
   return {
     calls: calls.map(toCall),
+    controls: controls.map(toControl),
     events: events.map(toEvent),
     files: files.map((row) => ({ id: String(row.CompanyFileId).toLowerCase(), name: text(row.Name) })),
     since,
@@ -104,4 +138,17 @@ export async function loadCfoRecipients(connection: Connection): Promise<DailyRe
     `SELECT UserID, DisplayName, Email FROM dbo.AppUsers WHERE IsActive = 1 AND LOWER(LTRIM(RTRIM(Role))) = N'cfo' ORDER BY UserID`,
   );
   return rows.map((row) => ({ email: text(row.Email), name: text(row.DisplayName) ?? text(row.Email) ?? `User ${row.UserID}`, userId: Number(row.UserID) }));
+}
+
+/** When the last successful run of the same kind (live or dry run) started: it covered everything up to that morning. */
+export async function lastCoveredRun(connection: Connection, dryRun: boolean): Promise<Date | null> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT TOP 1 StartedAt FROM dbo.TimerRuns
+      WHERE Name = N'myobDailyEmailTimer' AND Outcome = N'ok'
+        AND (CASE WHEN ISJSON(Counts) = 1 THEN JSON_VALUE(Counts, '$.dryRun') END) = @DryRun
+      ORDER BY StartedAt DESC`,
+    [{ name: "DryRun", type: TYPES.NVarChar, value: dryRun ? "true" : "false" }],
+  );
+  return rows[0] ? date(rows[0].StartedAt) : null;
 }

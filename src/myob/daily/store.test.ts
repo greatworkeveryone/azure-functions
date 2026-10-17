@@ -2,7 +2,7 @@
 
 jest.mock("../../db", () => ({ executeQuery: jest.fn() }));
 
-import { loadCfoRecipients, loadDailyFacts } from "./store";
+import { lastCoveredRun, loadCfoRecipients, loadDailyFacts } from "./store";
 
 const { executeQuery } = require("../../db") as { executeQuery: jest.Mock };
 const SINCE = new Date("2026-10-12T22:00:00Z");
@@ -12,6 +12,13 @@ const CF = "0F9E8D7C-6B5A-4F3E-9D2C-1B0A99887766";
 beforeEach(() => {
   jest.clearAllMocks();
   executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+    if (sql.includes("N'myob.control_change'")) {
+      return [{
+        Action: "myob.control_change", ActorName: "Johanne", After: '{"enabled":true}', Before: '{"enabled":false}', CompanyFileId: CF, OccurredAt: new Date("2026-10-13T00:01:00Z"),
+        Reason: "Lab day", RuleApplied: "set", SubjectId: `${CF.toLowerCase()}:orders.create`, SubjectType: "myob_control",
+      }];
+    }
+    if (sql.includes("FROM dbo.TimerRuns")) return [{ StartedAt: new Date("2026-10-12T22:01:00Z") }];
     if (sql.includes("FROM dbo.DecisionLedger")) {
       return [{
         Action: "myob.push", ActorName: "Johanne", After: '{"state":"verified"}', CompanyFileId: CF, CompanyFileName: "Demo Pty Ltd", JobId: 12, MyobNumber: "66Sm261014",
@@ -45,6 +52,26 @@ describe("loadDailyFacts", () => {
     const sql = String((executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("MyobApiLog")) as unknown[])[1]);
     expect(sql).toMatch(/Phase IN \(N'response', N'error'\)/);
     expect(facts.calls[0]).toMatchObject({ actorName: "Johanne", httpStatus: 201, phase: "response", purpose: "create-order" });
+  });
+});
+
+describe("controls and link events", () => {
+  it("are read only for registered company files, with the scope after the file in the subject", async () => {
+    const facts = await loadDailyFacts({} as never, SINCE, UNTIL);
+    const sql = String((executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("N'myob.control_change'")) as unknown[])[1]);
+    expect(sql).toMatch(/l\.Action IN \(N'myob\.control_change', N'myob\.link'\)/);
+    expect(sql).toMatch(/INNER JOIN dbo\.MyobCompanyFiles f\s+ON f\.CompanyFileId = CASE WHEN l\.SubjectType = N'myob_control'/);
+    expect(facts.controls).toEqual([expect.objectContaining({ after: { enabled: true }, companyFileId: CF.toLowerCase(), reason: "Lab day", scope: "orders.create" })]);
+  });
+});
+
+describe("lastCoveredRun", () => {
+  it("is the last ok run of the daily email that did a run of the same kind (live or dry run)", async () => {
+    expect(await lastCoveredRun({} as never, false)).toEqual(new Date("2026-10-12T22:01:00Z"));
+    const [, sql, params] = executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("TimerRuns")) as [unknown, string, { name: string; value: unknown }[]];
+    expect(sql).toMatch(/Name = N'myobDailyEmailTimer' AND Outcome = N'ok'/);
+    expect(sql).toMatch(/JSON_VALUE\(Counts, '\$\.dryRun'\)/);
+    expect(params).toContainEqual(expect.objectContaining({ name: "DryRun", value: "false" }));
   });
 });
 

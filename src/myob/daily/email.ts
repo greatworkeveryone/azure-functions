@@ -1,18 +1,28 @@
 // The daily "What Floorplan did in MYOB" email to the CFO (plan M4, decision
-// 13c). Plain text, like the morning digest. Four parts, each only when it has
-// lines: the records Floorplan created in MYOB; every proposal state change;
-// what changed in MYOB since (discrepancies seen or cleared); every MYOB call.
-// Each line names who acted. The read-back timer's successful reads are
-// counted on one line per kind; its refusals and failures are listed.
+// 13c). Plain text, like the morning digest. A summary line, then the company
+// files, then each part that has lines: the records Floorplan created in MYOB;
+// every proposal state change; what Floorplan may do in MYOB (controls, a
+// file's mode, the link); what changed in MYOB since (discrepancies seen or
+// cleared); every MYOB call. Each line names who acted. The read-back timer's
+// successful reads are counted on one line per kind; its refusals and
+// failures are listed. An approval says "approved": what MYOB then did is the
+// push or exception line, and a send Floorplan held back is a refused call.
 //
-// Only company files the CFO registered are reported: a proposal or a call for
-// any other file is dropped here, whatever the query returned. The subject
-// shows on a lock screen, so it carries the date and nothing else.
+// Only company files the CFO registered are reported: a proposal, control or
+// call for any other file is dropped here, whatever the query returned. A
+// call's file comes from the request classifier under the configured API base
+// (callScope.ts); a call it can't place is not listed. The subject shows on a
+// lock screen, so it carries the date and nothing else.
 
+import { myobApiBase } from "../../myob-endpoints";
 import { darwinDisplayDate, darwinStamp } from "../darwinClock";
+import { callScope } from "./callScope";
+import { controlLine } from "./controlLines";
 import type { DailyFacts, MyobCall, ProposalEvent } from "./types";
 
 export interface DailyEmailOptions {
+  /** MYOB_API_BASE, for placing each call in a company file; the configured one by default. */
+  apiBase?: string;
   /** APP_BASE_URL; null gives relative paths (a dry run without it set). */
   baseUrl: string | null;
   firstName: string;
@@ -24,23 +34,16 @@ export interface DailyEmailOptions {
 
 export interface DailyEmail {
   body: string;
-  counts: { calls: number; changes: number; created: number; discrepancies: number };
+  counts: { calls: number; changes: number; controls: number; created: number; discrepancies: number };
   subject: string;
 }
 
 export const MAX_CALL_LINES = 100;
-const FILE_IN_PATH = /^\/accountright\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/?]|$)/i;
-
-/** The company file a MYOB path is about, or null for an account-level call (sign-in, the file list). */
-export function companyFileOfPath(path: string): string | null {
-  return FILE_IN_PATH.exec(path)?.[1].toLowerCase() ?? null;
-}
-
 const link = (baseUrl: string | null, path: string) => (baseUrl === null ? path : `${baseUrl.replace(/\/+$/, "")}${path}`);
 const recordName = (event: ProposalEvent) => `${event.rendered.document ?? "Record"} ${event.myobNumber ?? event.rendered.number ?? `#${event.proposalId}`}`;
 
 const VERBS: Record<string, (event: ProposalEvent) => string> = {
-  "myob.approve": () => "approved and sent",
+  "myob.approve": () => "approved",
   "myob.exception": (event) => `exception${event.reason ? ` (${event.reason})` : ""}`,
   "myob.propose": (event) => (event.operation.endsWith(".update") ? "proposed an update" : "proposed"),
   "myob.push": () => "in MYOB, read back and matches",
@@ -89,28 +92,44 @@ function callLines(calls: MyobCall[], max: number, baseUrl: string | null): stri
 
 export function buildMyobDailyEmail(facts: DailyFacts, options: DailyEmailOptions): DailyEmail | null {
   const registered = new Set(facts.files.map((file) => file.id.toLowerCase()));
+  const names = new Map(facts.files.map((file) => [file.id.toLowerCase(), file.name ?? file.id]));
+  const apiBase = options.apiBase ?? myobApiBase();
   const events = facts.events.filter((event) => registered.has(event.companyFileId.toLowerCase()));
+  const controls = facts.controls.filter((event) => registered.has(event.companyFileId.toLowerCase()));
   const calls = facts.calls.filter((call) => {
-    const file = companyFileOfPath(call.path);
-    return file === null || registered.has(file);
+    const scope = callScope(call.method, call.path, apiBase);
+    return scope.kind === "account" || (scope.kind === "file" && registered.has(scope.file));
   });
-  if (events.length === 0 && calls.length === 0) return null;
+  if (events.length === 0 && controls.length === 0 && calls.length === 0) return null;
 
   const created = events.filter((event) => event.action === "myob.push" && event.operation.endsWith(".create"));
   const discrepancies = events.filter((event) => event.action === "myob.discrepancy");
   const changes = events.filter((event) => event.action !== "myob.discrepancy");
   const files = facts.files.map((file) => file.name ?? file.id).join(", ") || "none registered";
 
+  const counted = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const summary = [
+    counted(created.length, "record created", "records created"),
+    counted(changes.length, "proposal change", "proposal changes"),
+    counted(controls.length, "control change", "control changes"),
+    counted(discrepancies.length, "change in MYOB", "changes in MYOB"),
+    counted(calls.length, "MYOB call", "MYOB calls"),
+  ].join(", ");
   const lines = [
     `Good morning ${options.firstName},`,
     "",
-    `What Floorplan did in MYOB from ${darwinStamp(facts.since)} to ${darwinStamp(facts.until)} (Darwin time). Company files: ${files}.`,
+    `What Floorplan did in MYOB from ${darwinStamp(facts.since)} to ${darwinStamp(facts.until)} (Darwin time): ${summary}.`,
+    `Company files: ${files}.`,
   ];
   const section = (title: string, body: string[]) => body.length > 0 && lines.push("", title, ...body);
   section(`Records created in MYOB (${created.length})`, createdLines(created, options.baseUrl));
   section(
     `Proposals (${changes.length} ${changes.length === 1 ? "change" : "changes"})`,
     changes.map((event) => `- ${darwinStamp(event.occurredAt)} · ${event.actorName} · ${(VERBS[event.action] ?? (() => event.action))(event)} · ${recordName(event)}`),
+  );
+  section(
+    `What Floorplan may do in MYOB (${counted(controls.length, "change", "changes")})`,
+    controls.map((event) => controlLine(event, names.get(event.companyFileId.toLowerCase()) ?? event.companyFileId)),
   );
   section(`Changed in MYOB since (${discrepancies.length})`, discrepancies.map(discrepancyLine));
   section(`MYOB calls (${calls.length})`, callLines(calls, options.maxCallLines ?? MAX_CALL_LINES, options.baseUrl));
@@ -119,7 +138,7 @@ export function buildMyobDailyEmail(facts: DailyFacts, options: DailyEmailOption
 
   return {
     body: `${lines.join("\n")}\n`,
-    counts: { calls: calls.length, changes: changes.length, created: created.length, discrepancies: discrepancies.length },
+    counts: { calls: calls.length, changes: changes.length, controls: controls.length, created: created.length, discrepancies: discrepancies.length },
     subject: `What Floorplan did in MYOB, ${darwinDisplayDate(facts.until)}`,
   };
 }

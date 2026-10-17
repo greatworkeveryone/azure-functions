@@ -15,7 +15,7 @@ import { darwinDateKey, holidaysFromEnv, isBusinessDay } from "../../escalation/
 import { appBaseUrl, missingNotificationConfig } from "../../escalation/config";
 import { graphSendMail } from "../../graph";
 import { buildMyobDailyEmail } from "./email";
-import { loadCfoRecipients, loadDailyFacts, MAX_CALL_ROWS } from "./store";
+import { lastCoveredRun, loadCfoRecipients, loadDailyFacts, MAX_CALL_ROWS } from "./store";
 import type { DailyFacts, DailyRecipient } from "./types";
 
 export type MyobDailyMode = "dry-run" | "live" | "off";
@@ -27,10 +27,23 @@ export function myobDailyMode(env: NodeJS.ProcessEnv = process.env): MyobDailyMo
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** From the previous business morning at 07:30 Darwin to this one: Monday's email covers the weekend. */
-export function dailyWindow(now: Date, env: NodeJS.ProcessEnv = process.env): { since: Date; until: Date } {
+/** The furthest back one email reaches; older activity is in Admin → MYOB. */
+export const MAX_WINDOW_DAYS = 14;
+
+/**
+ * Up to 07:30 Darwin this morning, from where the last successful run of the
+ * same kind ended (07:30 on its morning), so a skipped or failed day is not
+ * lost; at most MAX_WINDOW_DAYS. With no such run, from the previous business
+ * morning: Monday's first email covers the weekend.
+ */
+export function dailyWindow(now: Date, env: NodeJS.ProcessEnv = process.env, lastCovered: Date | null = null): { since: Date; until: Date } {
   const holidays = holidaysFromEnv(env);
   const until = new Date(`${darwinDateKey(now)}T07:30:00+09:30`);
+  if (lastCovered) {
+    const covered = new Date(`${darwinDateKey(lastCovered)}T07:30:00+09:30`);
+    const earliest = new Date(until.getTime() - MAX_WINDOW_DAYS * DAY_MS);
+    return { since: covered >= until ? until : covered < earliest ? earliest : covered, until };
+  }
   for (let back = 1; back <= 14; back += 1) {
     const key = darwinDateKey(new Date(until.getTime() - back * DAY_MS));
     if (isBusinessDay(key, holidays)) return { since: new Date(`${key}T07:30:00+09:30`), until };
@@ -41,12 +54,14 @@ export function dailyWindow(now: Date, env: NodeJS.ProcessEnv = process.env): { 
 export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
 
 export interface MyobDailyDeps {
+  lastCovered(connection: Connection, dryRun: boolean): Promise<Date | null>;
   load(connection: Connection, since: Date, until: Date): Promise<DailyFacts>;
   recipients(connection: Connection): Promise<DailyRecipient[]>;
   send: SendMail;
 }
 
 export const defaultDailyDeps: MyobDailyDeps = {
+  lastCovered: lastCoveredRun,
   load: loadDailyFacts,
   recipients: loadCfoRecipients,
   send: (to, subject, body) => graphSendMail(to, subject, body),
@@ -56,6 +71,7 @@ export interface MyobDailyReport {
   calls: number;
   changes: number;
   configMissing: string[];
+  controls: number;
   created: number;
   discrepancies: number;
   dryRun: boolean;
@@ -77,7 +93,7 @@ export async function runMyobDaily(
 ): Promise<MyobDailyReport> {
   const env = options.env ?? process.env;
   const report: MyobDailyReport = {
-    calls: 0, changes: 0, configMissing: [], created: 0, discrepancies: 0, dryRun: options.dryRun, errors: [], noAddress: 0,
+    calls: 0, changes: 0, configMissing: [], controls: 0, created: 0, discrepancies: 0, dryRun: options.dryRun, errors: [], noAddress: 0,
     nothingToSend: false, recipients: 0, sent: 0, wouldSend: 0,
   };
   // A dry run sends nothing, so it can be read before the mail settings exist.
@@ -88,7 +104,7 @@ export async function runMyobDaily(
     return report;
   }
 
-  const { since, until } = dailyWindow(options.now ?? new Date(), env);
+  const { since, until } = dailyWindow(options.now ?? new Date(), env, await deps.lastCovered(connection, options.dryRun));
   const facts = await deps.load(connection, since, until);
   if (facts.calls.length >= MAX_CALL_ROWS) options.log(`myob daily: ${MAX_CALL_ROWS} MYOB calls or more in the window; the email shows the first ${MAX_CALL_ROWS}`);
   const baseUrl = appBaseUrl(env);
@@ -124,6 +140,10 @@ export async function runMyobDaily(
     } catch (error) {
       report.errors.push(`user #${recipient.userId}: ${errorText(error)}`);
     }
+  }
+  // Something was due and nobody got it (no address, or every send failed): the run fails, so TimerRuns says so.
+  if (report.sent + report.wouldSend === 0 && recipients.length > 0 && report.errors.length === 0) {
+    report.errors.push(`No CFO has an email address Floorplan can use, so nobody was sent the MYOB email (${report.noAddress} without one)`);
   }
   return report;
 }

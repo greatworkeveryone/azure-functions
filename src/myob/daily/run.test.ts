@@ -10,10 +10,11 @@ const CALL = {
   actorKind: "user", actorName: "Johanne", errorMessage: null, httpStatus: 201, method: "POST", occurredAt: new Date("2026-10-13T00:05:00Z"),
   path: `/accountright/${CF}/Purchase/Order/Service`, phase: "response" as const, purpose: "create-order",
 };
-const facts = (over: Partial<DailyFacts> = {}): DailyFacts => ({ calls: [CALL], events: [], files: [{ id: CF, name: "Demo Pty Ltd" }], since: new Date(0), until: NOW, ...over });
+const facts = (over: Partial<DailyFacts> = {}): DailyFacts => ({ calls: [CALL], controls: [], events: [], files: [{ id: CF, name: "Demo Pty Ltd" }], since: new Date(0), until: NOW, ...over });
 
 function deps(over: Partial<MyobDailyDeps> = {}): MyobDailyDeps & Record<string, jest.Mock> {
   return {
+    lastCovered: jest.fn().mockResolvedValue(null),
     load: jest.fn().mockResolvedValue(facts()),
     recipients: jest.fn().mockResolvedValue([{ email: "johanne@rp", name: "Johanne Smith", userId: 12 }]),
     send: jest.fn().mockResolvedValue(undefined),
@@ -46,7 +47,29 @@ describe("dailyWindow", () => {
   });
 });
 
+describe("dailyWindow from the last run that covered a day", () => {
+  it("starts where the last successful run of the same kind ended, so a skipped or failed day is not lost", () => {
+    const lastOk = new Date("2026-10-11T22:01:00Z"); // Monday 12/10 07:31 Darwin
+    expect(dailyWindow(NOW, {}, lastOk)).toEqual({ since: new Date("2026-10-11T22:00:00Z"), until: new Date("2026-10-13T22:00:00Z") });
+  });
+
+  it("goes back at most 14 days, and covers nothing twice on a second run the same morning", () => {
+    expect(dailyWindow(NOW, {}, new Date("2026-08-01T22:00:00Z")).since).toEqual(new Date("2026-09-29T22:00:00Z"));
+    const window = dailyWindow(NOW, {}, new Date("2026-10-13T22:01:00Z"));
+    expect(window.since).toEqual(window.until);
+  });
+});
+
 describe("runMyobDaily", () => {
+  it("asks for the last run of its own kind (live or dry run) and reads from where it ended", async () => {
+    const d = deps({ lastCovered: jest.fn().mockResolvedValue(new Date("2026-10-11T22:01:00Z")) });
+    await run(d);
+    expect(d.lastCovered).toHaveBeenCalledWith(expect.anything(), false);
+    expect(d.load).toHaveBeenCalledWith(expect.anything(), new Date("2026-10-11T22:00:00Z"), new Date("2026-10-13T22:00:00Z"));
+    await run(d, { dryRun: true, env: {} });
+    expect(d.lastCovered).toHaveBeenLastCalledWith(expect.anything(), true);
+  });
+
   it("emails each CFO through the digest's send path, with the window's facts", async () => {
     const d = deps();
     const report = await run(d);
@@ -88,7 +111,9 @@ describe("runMyobDaily", () => {
     expect(report).toMatchObject({ errors: ["user #12: Graph 503"], sent: 1 });
     delete process.env.DEV_EMAIL_OVERRIDE;
     const none = deps({ recipients: jest.fn().mockResolvedValue([{ email: null, name: "Johanne", userId: 12 }]) });
-    expect(await run(none)).toMatchObject({ noAddress: 1, sent: 0 });
+    const unsent = await run(none);
+    expect(unsent).toMatchObject({ noAddress: 1, sent: 0 });
+    expect(unsent.errors).toEqual([expect.stringContaining("nobody was sent")]);
   });
 
   it("reports an error when there is something to tell but no active CFO", async () => {

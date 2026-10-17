@@ -34,6 +34,21 @@ export interface MyobCall {
   purpose: string;
 }
 
+/** A DecisionLedger row about what Floorplan may do in MYOB: a control, a file's mode, the link. */
+export interface ControlEvent {
+  action: "myob.control_change" | "myob.link";
+  actorName: string;
+  after: Record<string, unknown> | null;
+  before: Record<string, unknown> | null;
+  /** The company file it is about (from its subject: "{file}:{operation}" or the linked file). */
+  companyFileId: string;
+  occurredAt: Date;
+  reason: string | null;
+  ruleApplied: string | null;
+  /** The part of the subject after the file: an operation, "*" (pause) or "entity" (mode). */
+  scope: string | null;
+}
+
 export interface RegisteredFile {
   id: string;
   name: string | null;
@@ -41,6 +56,8 @@ export interface RegisteredFile {
 
 export interface DailyFacts {
   calls: MyobCall[];
+  /** Changes to Floorplan's MYOB controls, file modes and the link. */
+  controls: ControlEvent[];
   events: ProposalEvent[];
   /** Company files the CFO registered (MyobCompanyFiles); nothing else is ever reported. */
   files: RegisteredFile[];

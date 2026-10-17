@@ -1,7 +1,8 @@
 /// <reference types="jest" />
 
-import { buildMyobDailyEmail, companyFileOfPath } from "./email";
-import type { DailyFacts, MyobCall, ProposalEvent } from "./types";
+import { callScope } from "./callScope";
+import { buildMyobDailyEmail } from "./email";
+import type { ControlEvent, DailyFacts, MyobCall, ProposalEvent } from "./types";
 
 const DEMO = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
 const RP = "11111111-2222-4333-8444-555555555555"; // RP's own file, never registered here
@@ -17,9 +18,10 @@ const call = (over: Partial<MyobCall> = {}): MyobCall => ({
   path: `/accountright/${DEMO}/Purchase/Order/Service`, phase: "response", purpose: "create-order", ...over,
 });
 const facts = (over: Partial<DailyFacts> = {}): DailyFacts => ({
-  calls: [], events: [], files: [{ id: DEMO, name: "Demo Pty Ltd" }], since: new Date("2026-10-13T07:30:00+09:30"), until: new Date("2026-10-14T07:30:00+09:30"), ...over,
+  calls: [], controls: [], events: [], files: [{ id: DEMO, name: "Demo Pty Ltd" }], since: new Date("2026-10-13T07:30:00+09:30"), until: new Date("2026-10-14T07:30:00+09:30"), ...over,
 });
-const OPTIONS = { baseUrl: "https://floorplan.example", firstName: "Johanne", overriddenFrom: null };
+const API_BASE = "https://api.myob.com/accountright";
+const OPTIONS = { apiBase: API_BASE, baseUrl: "https://floorplan.example", firstName: "Johanne", overriddenFrom: null };
 
 describe("buildMyobDailyEmail", () => {
   it("sends nothing when Floorplan did nothing in MYOB", () => {
@@ -49,7 +51,7 @@ describe("buildMyobDailyEmail", () => {
     expect(body).toContain("View in MYOB: https://app.myob.com/o/1");
     expect(body).toContain("Proposals (4 changes)");
     expect(body).toContain("- 14/10 09:12 · Ray · proposed · Order 66Sm261014");
-    expect(body).toContain("- 14/10 09:35 · Johanne · approved and sent · Order 66Sm261014");
+    expect(body).toContain("- 14/10 09:35 · Johanne · approved · Order 66Sm261014");
     expect(body).toContain("- 14/10 09:36 · Johanne · in MYOB, read back and matches · Order 66Sm261014");
     expect(body).toContain("- 14/10 09:12 · Ana · withdrew (Wrong supplier) · Order 66Sm261014");
     expect(body).toContain("MYOB calls (2)");
@@ -122,15 +124,53 @@ describe("buildMyobDailyEmail", () => {
     expect(email.body).toContain("and 3 more calls: https://floorplan.example/admin/myob");
   });
 
+  it("lists changes to the controls, a file's mode and the link, with who and their note, for registered files only", () => {
+    const control = (over: Partial<ControlEvent>): ControlEvent => ({
+      action: "myob.control_change", actorName: "Johanne", after: null, before: null, companyFileId: DEMO, occurredAt: AT("08:00"), reason: "Lab day",
+      ruleApplied: "set", scope: "orders.create", ...over,
+    });
+    const email = buildMyobDailyEmail(
+      facts({
+        controls: [
+          control({ after: { dailyCap: 5, dryRun: false, enabled: true, requireReview: true }, before: { dailyCap: 5, dryRun: true, enabled: false, requireReview: true } }),
+          control({ after: { isDemonstration: true, mode: "write" }, before: { isDemonstration: true, mode: "read" }, ruleApplied: "mode", scope: "entity" }),
+          control({ after: { pausedAll: true }, before: { pausedAll: false }, ruleApplied: "pause", scope: "*" }),
+          control({ action: "myob.link", actorName: "Will", after: { myobUsername: "floorplan@rp", scope: "sme-company-file sme-purchases" }, reason: null, ruleApplied: "relink", scope: null }),
+          control({ actorName: "Mallory", companyFileId: "11111111-2222-4333-8444-555555555555", ruleApplied: "set" }),
+        ],
+      }),
+      OPTIONS,
+    )!;
+    expect(email.body).toContain("What Floorplan may do in MYOB (4 changes)");
+    expect(email.body).toContain("- 14/10 08:00 · Johanne · orders.create: dry run on → off, enabled off → on (Lab day) · Demo Pty Ltd");
+    expect(email.body).toContain("- 14/10 08:00 · Johanne · mode read → write (Lab day) · Demo Pty Ltd");
+    expect(email.body).toContain("- 14/10 08:00 · Johanne · paused everything (Lab day) · Demo Pty Ltd");
+    expect(email.body).toContain("- 14/10 08:00 · Will · re-linked Floorplan to MYOB as floorplan@rp (sme-company-file sme-purchases) · Demo Pty Ltd");
+    expect(email.body).not.toContain("Mallory");
+  });
+
+  it("puts the summary line before the company-file names", () => {
+    const lines = buildMyobDailyEmail(facts({ calls: [call()] }), OPTIONS)!.body.split("\n");
+    const summary = lines.findIndex((line) => line.startsWith("What Floorplan did in MYOB from"));
+    const names = lines.findIndex((line) => line.includes("Demo Pty Ltd"));
+    expect(summary).toBeGreaterThan(-1);
+    expect(lines[summary]).toContain("1 MYOB call");
+    expect(lines[summary]).not.toContain("Demo Pty Ltd");
+    expect(names).toBeGreaterThan(summary);
+  });
+
   it("says when DEV_EMAIL_OVERRIDE redirected it", () => {
     expect(buildMyobDailyEmail(facts({ calls: [call()] }), { ...OPTIONS, overriddenFrom: "johanne@rp" })!.body).toContain("meant for johanne@rp");
   });
 });
 
-describe("companyFileOfPath", () => {
-  it("reads the company file from a MYOB path, and none from an account-level one", () => {
-    expect(companyFileOfPath(`/accountright/${DEMO.toUpperCase()}/Purchase/Order/Service?$filter=x`)).toBe(DEMO);
-    expect(companyFileOfPath("/accountright/")).toBeNull();
-    expect(companyFileOfPath("/oauth2/v1/authorize")).toBeNull();
+describe("callScope", () => {
+  it("finds the company file with the request classifier under the configured API base, and none for account-level calls", () => {
+    expect(callScope("GET", `/accountright/${DEMO.toUpperCase()}/Purchase/Order/Service?$filter=x`, API_BASE)).toEqual({ file: DEMO, kind: "file" });
+    expect(callScope("GET", "/accountright/", API_BASE)).toEqual({ kind: "account" });
+    expect(callScope("POST", "/oauth2/v1/authorize/", API_BASE)).toEqual({ kind: "account" });
+    expect(callScope("GET", `/accountright/${DEMO}/Contact/Supplier`, API_BASE)).toEqual({ file: DEMO, kind: "file" });
+    expect(callScope("GET", `/elsewhere/${DEMO}/Purchase/Order`, API_BASE)).toEqual({ kind: "unknown" });
+    expect(callScope("GET", "[unparseable url]", API_BASE)).toEqual({ kind: "unknown" });
   });
 });
