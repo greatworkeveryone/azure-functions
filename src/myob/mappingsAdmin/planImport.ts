@@ -1,8 +1,9 @@
 // What importing one CSV of MYOB mappings would do (plan M2), row by row, in
 // plain words, before anything is written: add, change (before → after),
 // already mapped, or skipped and why. Pure. The fingerprint covers every
-// outcome and what Floorplan held before, so an apply is refused if anything
-// moved since the CFO's preview.
+// outcome, what Floorplan held before and how a supplier was matched, so an
+// apply is refused if anything moved since the CFO's preview. A skipped row
+// keeps its company file when the file is registered, for that file's counts.
 
 import { canonicalJson, sha256Hex } from "../hash";
 import type { CsvRow } from "./csv";
@@ -44,12 +45,13 @@ export function planImport(kind: MappingKind, csv: { header: string[]; rows: Csv
   const seen = new Map<string, number>();
   const rows: PlannedRow[] = csv.rows.map(({ cells, line }) => {
     const read = definition.read(cells, refs);
-    const base = { after: null, before: null, changes: [], file: null, key: null, line, rowVersion: null };
+    const named = (cells.company_file_id ?? "").trim().toLowerCase();
+    const base = { after: null, before: null, changes: [], file: refs.files.has(named) ? named : null, key: null, line, rowVersion: null };
     if (!read.ok) return { ...base, message: `Skipped: ${read.reason}`, outcome: "skip" };
     const fileName = refs.files.get(read.file) ?? read.file;
     const where = kind === "buildings" ? "" : ` in ${fileName}`;
     const first = seen.get(read.key);
-    if (first !== undefined) return { ...base, message: `Skipped: ${read.subject}${where} is already on row ${first}`, outcome: "skip" };
+    if (first !== undefined) return { ...base, file: read.file, message: `Skipped: ${read.subject}${where} is already on row ${first}`, outcome: "skip" };
     seen.set(read.key, line);
 
     const subject = read.subject.charAt(0).toUpperCase() + read.subject.slice(1);
@@ -70,7 +72,7 @@ export function planImport(kind: MappingKind, csv: { header: string[]; rows: Csv
 
   const counts: Record<Outcome, number> = { add: 0, change: 0, skip: 0, unchanged: 0 };
   for (const row of rows) counts[row.outcome] += 1;
-  const fingerprint = rows.map((row) => [row.line, row.outcome, row.key, row.before, row.after, row.rowVersion]);
+  const fingerprint = rows.map((row) => [row.line, row.outcome, row.key, row.before, row.after, row.rowVersion, row.matchBasis ?? null]);
   return { counts, hash: sha256Hex(canonicalJson({ kind, rows: fingerprint })), kind, rows };
 }
 

@@ -2,9 +2,10 @@
 // (quoted cells, doubled quotes, line breaks inside quotes, CRLF or LF, an
 // optional BOM). Columns are matched by name, lower-cased with spaces as
 // underscores, so a re-saved spreadsheet still reads. Exported cells that a
-// spreadsheet would run as a formula are prefixed with an apostrophe.
+// spreadsheet would run as a formula are prefixed with an apostrophe, and that
+// apostrophe is taken off again on import, so an export re-imports unchanged.
 
-export const MAX_CSV_ROWS = 5000;
+export const MAX_CSV_ROWS = 2000;
 
 export class CsvError extends Error {}
 
@@ -68,13 +69,15 @@ export function parseCsv(text: string): { header: string[]; rows: CsvRow[] } {
   return {
     header,
     rows: rows.map((record) => ({
-      cells: Object.fromEntries(header.map((name, index) => [name, (record.fields[index] ?? "").trim()]).filter(([name]) => name)),
+      cells: Object.fromEntries(header.map((name, index) => [name, unguard((record.fields[index] ?? "").trim())]).filter(([name]) => name)),
       line: record.line,
     })),
   };
 }
 
 const FORMULA = /^[=+\-@\t\r]/;
+/** The apostrophe toCsv put before a formula character. */
+const unguard = (value: string) => (/^'[=+\-@\t\r]/.test(value) ? value.slice(1) : value);
 
 function cell(value: string): string {
   const safe = FORMULA.test(value) ? `'${value}` : value;

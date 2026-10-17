@@ -27,8 +27,9 @@ describe("parseCsv", () => {
     expect(() => parseCsv(text)).toThrow(CsvError);
   });
 
-  it("refuses more than the row limit", () => {
-    expect(() => parseCsv(`a\n${"x\n".repeat(5001)}`)).toThrow(/5,000 rows/);
+  it("refuses more than 2,000 rows", () => {
+    expect(() => parseCsv(`a\n${"x\n".repeat(2000)}`)).not.toThrow();
+    expect(() => parseCsv(`a\n${"x\n".repeat(2001)}`)).toThrow(/2,000 rows/);
   });
 });
 

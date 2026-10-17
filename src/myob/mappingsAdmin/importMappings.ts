@@ -48,7 +48,7 @@ export async function importMappings(tx: Connection, actor: LedgerActor, input: 
     await record(tx, {
       action: "myob.control_change",
       actor,
-      after: { added: count("add"), changed: count("change"), changes: changes.slice(0, LEDGER_CHANGES), kind: input.kind, skipped: result.counts.skip, unchanged: count("unchanged") },
+      after: { added: count("add"), changed: count("change"), changes: changes.slice(0, LEDGER_CHANGES), kind: input.kind, skipped: count("skip"), unchanged: count("unchanged") },
       reason: input.note ?? `Imported ${count("add")} new ${label} from a CSV`,
       ruleApplied: `import.${input.kind}`,
       subject: { id: `${file}:mappings`, type: "myob_control" },

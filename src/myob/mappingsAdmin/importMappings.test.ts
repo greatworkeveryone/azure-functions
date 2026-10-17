@@ -27,7 +27,38 @@ beforeEach(() => {
   store.loadRefs.mockResolvedValue(refs());
 });
 
+const OTHER = "22222222-2222-4333-8444-555555555555";
+const twoFiles = (existing = new Map()): MappingRefs => ({ ...refs(existing), files: new Map([[DEMO, "Demo Pty Ltd"], [OTHER, "Other Pty Ltd"]]) });
+
 describe("importMappings", () => {
+  it.each([
+    ["one supplier UID changed", `${HEAD}${DEMO},12,${SUP2},ACME Air Pty Ltd\n`],
+    ["the company file changed", `${HEAD}${OTHER},12,${SUP},ACME Air Pty Ltd\n`],
+  ])("refuses to apply a different file from the one previewed (%s): 409, nothing written", async (_label, otherCsv) => {
+    store.loadRefs.mockResolvedValue(twoFiles());
+    const preview = await importMappings({} as never, JOHANNE, input());
+    await expect(importMappings({} as never, JOHANNE, input({ csv: otherCsv, mode: "apply", previewHash: preview.plan.hash }))).rejects.toMatchObject({ status: 409 });
+    expect(store.writePlan).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it("ledgers one row per company file, each with its own counts and changes before → after", async () => {
+    const existing = new Map([[`${OTHER}|13`, { rowVersion: "v1", values: { abn: null, supplierName: "Bob", supplierUid: SUP, taxCode: null, taxCodeUid: null } }]]);
+    store.loadRefs.mockResolvedValue(twoFiles(existing));
+    const csv = `${HEAD}${DEMO},12,${SUP},ACME Air Pty Ltd\n${DEMO},99,${SUP},Nobody\n${OTHER},13,${SUP2},Bob Pty Ltd\n${OTHER},12,${SUP},ACME\n`;
+    const preview = await importMappings({} as never, JOHANNE, input({ csv }));
+    await importMappings({} as never, JOHANNE, input({ csv, mode: "apply", note: "Both files", previewHash: preview.plan.hash }));
+    expect(record).toHaveBeenCalledTimes(2);
+    const byFile = Object.fromEntries(record.mock.calls.map((call: unknown[]) => {
+      const entry = call[1] as { after: Record<string, unknown>; subject: { id: string } };
+      return [entry.subject.id, entry.after];
+    }));
+    expect(byFile[`${DEMO}:mappings`]).toMatchObject({ added: 1, changed: 0, changes: [], skipped: 1 });
+    expect(byFile[`${OTHER}:mappings`]).toMatchObject({
+      added: 1, changed: 1, changes: [{ after: expect.objectContaining({ supplierUid: SUP2 }), before: expect.objectContaining({ supplierUid: SUP }), key: `${OTHER}|13` }], skipped: 0,
+    });
+  });
+
   it("previews without locking, writing or ledgering", async () => {
     const result = await importMappings({} as never, JOHANNE, input());
     expect(result).toMatchObject({ applied: false, plan: { counts: { add: 1 } } });
