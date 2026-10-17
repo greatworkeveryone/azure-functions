@@ -9,6 +9,7 @@ const WP25_CODES = ["rent_review.basis_update", "rent_review.commence", "rent_re
 const WP26_CODES = [
   "rent_review.apply",
   "rent_review.approve",
+  "rent_review.basis_departure",
   "rent_review.calculate",
   "rent_review.cancel",
   "rent_review.index_available",
@@ -31,7 +32,7 @@ const entry = (action: LedgerEntryInput["action"], over: Partial<LedgerEntryInpu
 });
 
 describe("the rent review action codes", () => {
-  it("has exactly the four of WP25 and the eleven of WP26, all about a rent_review", () => {
+  it("has exactly the codes of WP25 and WP26, all about a rent_review", () => {
     const found = Object.keys(LEDGER_ACTIONS).filter((code) => code.startsWith("rent_review."));
     expect(found.sort()).toEqual([...WP25_CODES, ...WP26_CODES].sort());
     for (const code of [...WP25_CODES, ...WP26_CODES]) {
@@ -57,6 +58,11 @@ describe("the rent review action codes", () => {
     for (const code of ["rent_review.calculate", "rent_review.index_pending", "rent_review.index_available", "rent_review.submit", "rent_review.approve", "rent_review.apply"] as const) {
       expect(LEDGER_ACTIONS[code]).toMatchObject({ exception: false, reasonRequired: false });
     }
+  });
+
+  it("WP26: a basis departure is an exception without a reason of its own (the basis edits carried theirs)", () => {
+    expect(LEDGER_ACTIONS["rent_review.basis_departure"]).toMatchObject({ exception: true, reasonRequired: false });
+    expect(() => assertLedgerEntry(entry("rent_review.basis_departure"))).not.toThrow();
   });
 
   it("WP26: takes the CPI timer's system actor for index_available", () => {

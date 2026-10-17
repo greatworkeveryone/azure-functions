@@ -72,7 +72,7 @@ export interface ApprovalEscalationInput {
   actor: LedgerActor;
   appliedPercent: number;
   currentAnnual: number;
-  /** Separation of duties: the preparer and whoever keyed a manual rent. */
+  /** Separation of duties: the preparer, whoever keyed a manual rent, and whoever changed the basis. */
   excludeUserIds: readonly number[];
   log?: (message: string) => void;
   newAnnual: number;
@@ -209,13 +209,47 @@ export function planReviewEscalations(
 
 export const historyKey = (reviewId: string, policyKey: string): string => `${reviewId}\u0000${policyKey}`;
 
-/** The people a review's E3 must not go to: its preparer, and whoever keyed a manual rent. */
-export function separationOfDuties(review: { calc: ReturnType<typeof parseCalc>; preparedById: number | null }): number[] {
-  const ids = new Set<number>();
-  if (review.preparedById !== null) ids.add(review.preparedById);
+export interface SeparationFacts {
+  /** Whoever changed the review's basis since it was commenced (M3). */
+  basisEditorIds?: readonly number[];
+  calc: ReturnType<typeof parseCalc>;
+  preparedById: number | null;
+}
+
+/** Who had a hand in preparing a review (C6): its preparer, whoever keyed a manual
+ *  rent, and whoever changed its basis since it was commenced. */
+export function dutiesOf(review: SeparationFacts): { basisEditors: number[]; keyedBy: number | null; preparedBy: number | null } {
   const keyedBy = review.calc?.manual ? review.calc.computedBy?.userId : null;
-  if (typeof keyedBy === "number") ids.add(keyedBy);
-  return [...ids];
+  return {
+    basisEditors: [...new Set(review.basisEditorIds ?? [])],
+    keyedBy: typeof keyedBy === "number" ? keyedBy : null,
+    preparedBy: review.preparedById,
+  };
+}
+
+/** The people a review's E3 is not sent to and who may not approve it, directors
+ *  aside (sprint decision 17): everyone dutiesOf names. */
+export function separationOfDuties(review: SeparationFacts): number[] {
+  const duties = dutiesOf(review);
+  const ids = new Set<number>(duties.basisEditors);
+  if (duties.preparedBy !== null) ids.add(duties.preparedBy);
+  if (duties.keyedBy !== null) ids.add(duties.keyedBy);
+  return [...ids].sort((a, b) => a - b);
+}
+
+const BASIS_EDITORS_SQL = `SELECT DISTINCT l.ActorUserId
+  FROM dbo.DecisionLedger l
+  WHERE l.SubjectType = N'rent_review' AND l.SubjectId = @ReviewId
+    AND l.Action = N'rent_review.basis_update' AND l.ActorUserId IS NOT NULL
+    AND l.LedgerId > COALESCE((
+      SELECT MAX(c.LedgerId) FROM dbo.DecisionLedger c
+      WHERE c.SubjectType = N'rent_review' AND c.SubjectId = @ReviewId AND c.Action = N'rent_review.commence'), 0)`;
+
+/** Whoever changed the review's basis since it was last commenced, from the ledger
+ *  (rent_review.basis_update rows; IX_DecisionLedger_Subject serves it). */
+export async function basisEditorsSinceCommence(connection: Connection, reviewId: string): Promise<number[]> {
+  const rows = await executeQuery(connection, BASIS_EDITORS_SQL, [{ name: "ReviewId", type: TYPES.NVarChar, value: reviewId }]);
+  return rows.map((row) => Number(row.ActorUserId)).filter((id) => Number.isInteger(id));
 }
 
 function headlineFor(action: Extract<EscalationAction, { kind: "raise" }>, today: string): string {
@@ -310,7 +344,10 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
         const outcome = await raise(connection, {
           actor: run.actor,
           context: { rule: action.policyKey, scheduledFor: action.review.scheduledFor },
-          excludeUserIds: action.policyKey === REVIEW_POLICIES.approval ? separationOfDuties(action.review) : undefined,
+          excludeUserIds:
+            action.policyKey === REVIEW_POLICIES.approval
+              ? separationOfDuties({ ...action.review, basisEditorIds: await basisEditorsSinceCommence(connection, reviewId) })
+              : undefined,
           headline: headlineFor(action, run.today),
           now: run.now,
           policyKey: action.policyKey,

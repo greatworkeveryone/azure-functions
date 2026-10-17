@@ -106,6 +106,9 @@ export interface RentReviewCalc {
   /** The basis terms this review was worked on that differ from the lease's
    *  (leaseDepartures): any makes it a departure, written as an `other` row. */
   departures?: string[];
+  /** Set by submit when the basis departs from the lease: the result on the
+   *  lease's own terms, to set beside the rent submitted (M3). */
+  leaseTerms?: LeaseTermsResult;
   fixedPercent?: number;
   manual?: { explanation: string; newAnnual: number };
   method: CalcMethod;
@@ -118,6 +121,12 @@ export interface RentReviewCalc {
 }
 
 export type { CascadeRow };
+
+/** A review worked on the lease's own terms instead of its basis: the rent and
+ *  the charges that follow it, or why it can't be worked out. */
+export type LeaseTermsResult =
+  | { ancillaryAnnual: number; appliedPercent: number; newAnnual: number }
+  | { unavailable: string };
 
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 const r4 = (n: number): number => Math.round(n * 10000) / 10000 || 0;
@@ -511,6 +520,15 @@ export interface LeaseTermsForReview {
 
 const sameNumber = (a: number | null | undefined, b: number | null | undefined): boolean =>
   (a ?? null) === null ? (b ?? null) === null : (b ?? null) !== null && Math.abs((a as number) - (b as number)) < 1e-9;
+
+/** The lease's own terms as a basis for `method`: what leaseDepartures compares
+ *  a review's basis with, so a review worked on it departs from nothing. */
+export function leaseBasis(method: "cpi" | "fixed", lease: LeaseTermsForReview, reviewDate: string): Record<string, unknown> {
+  const common = { intervalMonths: lease.reviewIntervalMonths ?? 12, method, ratchet: lease.reviewRatchet, reviewDate };
+  if (method === "fixed") return { ...common, fixedPercent: lease.fixedPercent };
+  const region = lease.cpiRegion?.trim().toUpperCase() || null;
+  return { ...common, capPercent: lease.cpiCapPercent, floorPercent: lease.cpiFloorPercent, referenceQuarterRule: "quarter_before_review_date", region };
+}
 
 /**
  * The terms a review was worked on that differ from the lease's: an applied

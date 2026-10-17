@@ -10,6 +10,7 @@ import { clearRoleCache } from "../auth";
 import { approveRentReview } from "../functions/approveRentReview";
 import { calculateRentReview } from "../functions/calculateRentReview";
 import { submitRentReview } from "../functions/submitRentReview";
+import { updateRentReviewBasis } from "../functions/updateRentReviewBasis";
 import { carparkRunning, miscFeeRunning } from "../rentReview/cascade";
 import { computeScheduleRows, parseGroups, parseMiscFees, parseSteps } from "../scheduledRateStepLogic";
 import { postRequest } from "./fixtures/rentReviewFakes";
@@ -66,6 +67,8 @@ const submit = (body: Record<string, unknown> = {}) =>
   submitRentReview(postRequest({ reviewId: "rev-1", rowVersion: versionOf(world), ...body }, caller.role), ctx);
 const approve = (body: Record<string, unknown> = {}) =>
   approveRentReview(postRequest({ reviewId: "rev-1", rowVersion: versionOf(world), ...body }, caller.role), ctx);
+const editBasis = (patch: Record<string, unknown>, reason = "The lease's schedule says otherwise") =>
+  updateRentReviewBasis(postRequest({ basis: patch, reason, reviewId: "rev-1", rowVersion: versionOf(world) }, caller.role), ctx);
 const actions = () => world.ledgerRows().map((row) => row.Action);
 const reviewBody = (res: { jsonBody?: unknown }) => (res.jsonBody as { review: Record<string, any> }).review;
 
@@ -334,6 +337,29 @@ describe("submitRentReview: anything else waits for approval, and E3 goes to som
     const res = await submit();
     expect(res.jsonBody).toMatchObject({ applied: false });
     expect(world.ledgerRows()[0].RuleApplied).toBe("basis_departs_from_lease");
+    // M3: the lease's own 4% beside the 3% submitted, and what the departure gives up a year.
+    const departure = world.ledgerRows().find((row) => row.Action === "rent_review.basis_departure");
+    expect(departure).toMatchObject({ FinancialImpact: 1237.11, IsException: true, RuleApplied: "departs:fixedPercent" });
+    expect(departure?.computed).toEqual({ onLeaseTerms: { ancillaryAnnual: 0, appliedPercent: 4, newAnnual: 128659.79 } });
+    expect(departure?.after).toEqual({ ancillaryAnnual: 0, appliedPercent: 3, departures: ["fixedPercent"], newAnnual: 127422.68 });
+    expect(reviewBody(res).calc.leaseTerms).toEqual({ ancillaryAnnual: 0, appliedPercent: 4, newAnnual: 128659.79 });
+  });
+
+  it("records a CPI basis that departs from the lease against the lease's own result (M3)", async () => {
+    await calculated({ review: { Basis: JSON.stringify(basis({ capPercent: 3 })) } });
+    expect(reviewBody(await submit())).toMatchObject({ calc: { departures: ["capPercent"], newAnnual: 127422.68 }, state: "awaiting_approval" });
+    const departure = world.ledgerRows().find((row) => row.Action === "rent_review.basis_departure");
+    expect(departure?.computed).toEqual({ onLeaseTerms: { ancillaryAnnual: 0, appliedPercent: 3.2, newAnnual: 127670.1 } });
+    expect(departure?.FinancialImpact).toBe(247.42);
+  });
+
+  it("says why the lease's own result can't be worked out, with no impact, when its CPI quarters aren't published", async () => {
+    await calculated({ tenant: { CpiRegion: "AUS" } });
+    await submit();
+    const departure = world.ledgerRows().find((row) => row.Action === "rent_review.basis_departure");
+    expect(departure?.RuleApplied).toBe("departs:region");
+    expect(departure?.FinancialImpact).toBeNull();
+    expect((departure?.computed as { onLeaseTerms: { unavailable: string } }).onLeaseTerms.unavailable).toMatch(/aren't published yet/);
   });
 
   it("always sends an `other` review to approval", async () => {
@@ -471,6 +497,64 @@ describe("approveRentReview", () => {
     await submit();
     as(PEOPLE.cy);
     expect((await approve()).jsonBody).toMatchObject({ code: "sod_blocked" });
+    as(PEOPLE.bo);
+    expect((await approve()).status).toBe(200);
+  });
+
+  it("lets a director approve their own preparation (sprint decision 17), ledgered as director_own_preparation", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } });
+    as(PEOPLE.dee);
+    expect((await submit()).jsonBody).toMatchObject({ applied: false });
+    world.state.ledger = [];
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(reviewBody(res)).toMatchObject({ approval: { name: "Dee Director" }, prepared: { name: "Dee Director" }, state: "approved" });
+    const row = world.ledgerRows().find((r) => r.Action === "rent_review.approve");
+    expect(row).toMatchObject({ ActorUserId: 10, RuleApplied: "director_own_preparation" });
+    expect(row?.computed).toMatchObject({ ownPart: "prepared", separationOfDuties: { basisEditors: [], keyedBy: null, preparedBy: 10 }, stepUp: "money gate (S11)" });
+  });
+
+  it("blocks anyone but a director who changed the basis since commence (M3), and sends E3 away from them", async () => {
+    seed(world);
+    as(PEOPLE.bo);
+    expect((await editBasis({ capPercent: 4 })).status).toBe(200);
+    as(PEOPLE.ann);
+    expect((await calculate()).status).toBe(200);
+    expect((await submit()).jsonBody).toMatchObject({ applied: false });
+    expect(escalations.raiseApprovalEscalation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ excludeUserIds: [7, 8] }));
+    world.state.ledger = world.state.ledger.filter((r) => r.Action === "rent_review.basis_update");
+    as(PEOPLE.bo);
+    const res = await approve();
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toMatchObject({ code: "sod_blocked", error: "You changed this review's basis, so someone else has to approve it" });
+    expect(world.ledgerRows().find((r) => r.Action === "sod_blocked")).toMatchObject({ ActorUserId: 8, RuleApplied: "approver_edited_basis" });
+    as(PEOPLE.cy);
+    expect((await approve()).status).toBe(200);
+  });
+
+  it("lets a director who changed the basis approve it, ledgered as director_own_preparation", async () => {
+    seed(world);
+    as(PEOPLE.dee);
+    expect((await editBasis({ capPercent: 4 })).status).toBe(200);
+    as(PEOPLE.ann);
+    await calculate();
+    await submit();
+    as(PEOPLE.dee);
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(world.ledgerRows().find((r) => r.Action === "rent_review.approve")).toMatchObject({ RuleApplied: "director_own_preparation" });
+    expect(world.ledgerRows().find((r) => r.Action === "rent_review.approve")?.computed).toMatchObject({ ownPart: "basis" });
+  });
+
+  it("only counts basis changes since the review was last commenced", async () => {
+    seed(world);
+    world.state.ledger.push(
+      { Action: "rent_review.basis_update", ActorUserId: 8, LedgerId: 900, SubjectId: "rev-1", SubjectType: "rent_review" },
+      { Action: "rent_review.commence", ActorUserId: 7, LedgerId: 901, SubjectId: "rev-1", SubjectType: "rent_review" },
+    );
+    as(PEOPLE.ann);
+    await calculate();
+    await submit({ override: { newAnnual: 126000, reason: "Agreed" } });
     as(PEOPLE.bo);
     expect((await approve()).status).toBe(200);
   });

@@ -127,6 +127,10 @@ describe("separationOfDuties", () => {
     expect(separationOfDuties({ calc: { computedBy: { name: "Bo", userId: 9 } } as never, preparedById: 7 })).toEqual([7]);
     expect(separationOfDuties({ calc: null, preparedById: null })).toEqual([]);
   });
+
+  it("includes whoever changed the basis since commence (M3), once each", () => {
+    expect(separationOfDuties({ basisEditorIds: [12, 8, 12], calc: null, preparedById: 7 })).toEqual([7, 8, 12]);
+  });
 });
 
 describe("approvalHeadline", () => {
@@ -236,8 +240,9 @@ describe("runReviewEscalations (the generator's step)", () => {
     ...over,
   });
 
-  function serve(open: unknown[], history: unknown[] = [], stranded: unknown[] = []) {
+  function serve(open: unknown[], history: unknown[] = [], stranded: unknown[] = [], basisEditors: number[] = []) {
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("N'rent_review.basis_update'")) return basisEditors.map((id) => ({ ActorUserId: id }));
       if (sql.includes("FROM dbo.Escalations e\n  LEFT JOIN")) return stranded;
       if (sql.includes("FROM dbo.Escalations e")) return history;
       if (sql.includes("FROM dbo.RentReviews r")) return open;
@@ -268,15 +273,16 @@ describe("runReviewEscalations (the generator's step)", () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining("dry run, nothing written"));
   });
 
-  it("raises a missing E3 away from the preparer, and ends an E3 left behind by a decision", async () => {
+  it("raises a missing E3 away from the preparer and whoever changed the basis, and ends an E3 left behind by a decision", async () => {
     serve(
       [openRow({ PreparedById: 7, ScheduledFor: new Date(`${DAY(20)}T00:00:00Z`), State: "awaiting_approval", SubmittedAt: new Date() })],
       [],
       [{ ScheduledFor: new Date(`${DAY(-1)}T00:00:00Z`), State: "in_progress", SubjectId: "rev-2" }],
+      [8],
     );
     const result = await runStep();
     expect(result).toMatchObject({ errors: [], raised: 1 });
-    expect(engine.raise.mock.calls[0][1]).toMatchObject({ excludeUserIds: [7], policyKey: "rent_review.approval" });
+    expect(engine.raise.mock.calls[0][1]).toMatchObject({ excludeUserIds: [7, 8], policyKey: "rent_review.approval" });
     expect(engine.concludeForSubject.mock.calls[0][1]).toMatchObject({ code: "returned", policyKeys: ["rent_review.approval"], subjectId: "rev-2" });
   });
 

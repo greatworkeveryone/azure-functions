@@ -114,10 +114,14 @@ export const LEDGER_ACTIONS = {
   // calculation found the quarter unpublished; index_available by the CPI timer
   // (system). A submit that departs from the computed rent writes a second row,
   // rent_review.override, with computed vs chosen and the $ difference: that row
-  // is the exception and carries the reason (PLAN §3.12 names the code). Waive,
-  // cancel and revert are exceptions with a reason; return needs its note.
+  // is the exception and carries the reason (PLAN §3.12 names the code). A submit
+  // whose basis departs from the lease writes rent_review.basis_departure, the
+  // lease's own result beside the rent submitted (the basis edits behind it
+  // carried their reasons). Waive, cancel and revert are exceptions with a
+  // reason; return needs its note.
   "rent_review.apply": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.approve": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
+  "rent_review.basis_departure": { exception: true, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.calculate": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.cancel": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
   "rent_review.index_available": { exception: false, reasonRequired: false, subjects: ["rent_review"] },

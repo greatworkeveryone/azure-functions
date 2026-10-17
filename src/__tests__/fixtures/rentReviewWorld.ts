@@ -174,6 +174,14 @@ export class ReviewWorld {
         .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
       return found ? [{ After: found.After, Before: found.Before }] : [];
     }
+    if (/^SELECT DISTINCT l\.ActorUserId\s+FROM dbo\.DecisionLedger l/.test(sql.trim())) {
+      const rows = this.state.ledger.filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId);
+      const commenced = Math.max(0, ...rows.filter((r) => r.Action === "rent_review.commence").map((r) => Number(r.LedgerId)));
+      const ids = rows
+        .filter((r) => r.Action === "rent_review.basis_update" && Number(r.LedgerId) > commenced && r.ActorUserId !== null && r.ActorUserId !== undefined)
+        .map((r) => Number(r.ActorUserId));
+      return [...new Set(ids)].map((id) => ({ ActorUserId: id }));
+    }
     if (/INSERT INTO dbo\.RentScheduleChangeLog/.test(sql)) {
       this.state.changeLog.push({ ...p });
       return [];

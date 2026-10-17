@@ -35,8 +35,13 @@
 // required), computed vs chosen; financialImpact is the annual money forgone
 // against the computed result, the rent and every charge that follows it.
 //
-// Ledgered as rent_review.submit (+ rent_review.override, + rent_review.apply on
-// the one-step path), all in the same transaction.
+// A basis that departs from the lease is worked again on the lease's own terms
+// (rentReview/leaseTerms.ts), stored as calc.leaseTerms and ledgered as
+// rent_review.basis_departure (an exception): the lease's result beside the rent
+// submitted, financialImpact the annual money forgone against the lease (M3).
+//
+// Ledgered as rent_review.submit (+ rent_review.override, + rent_review.basis_departure,
+// + rent_review.apply on the one-step path), all in the same transaction.
 //
 // Gates: the roles that may apply a review (rentReview/http.ts REVIEW_APPLY_ROLES,
 // PLAN WP26's apply capability, mirrored in the frontend), then the money-action
@@ -68,7 +73,7 @@ import { applyReview } from "../rentReview/apply";
 import { parseBasis } from "../rentReview/basis";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
-import { raiseApprovalEscalation, separationOfDuties } from "../rentReview/escalations";
+import { basisEditorsSinceCommence, raiseApprovalEscalation, separationOfDuties } from "../rentReview/escalations";
 import {
   readJsonObject,
   readReason,
@@ -84,6 +89,7 @@ import { stepOnDate } from "../rentReview/method";
 import { isReviewRatchetOn, leaseTermsOf, refuseClosedTenancy, scheduleOf } from "../rentReview/reviewTenancy";
 import { inTransaction, loadReview, lockTenancyForReview, reviewForUpdate, totalOccupancySqm } from "../rentReview/store";
 import { markSubmitted } from "../rentReview/transitions";
+import { rentOnLeaseTerms } from "../rentReview/leaseTerms";
 import { ancillaryAnnual, writtenFromCalc } from "../rentReview/written";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 
@@ -163,7 +169,9 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
       }
 
       const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
-      const departures = calc.method === "other" ? [] : leaseDepartures(calc.method, basis, leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor)));
+      const lease = leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor));
+      const departures = calc.method === "other" ? [] : leaseDepartures(calc.method, basis, lease);
+      const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId));
 
       // H1: the receipt for the rent being submitted is read off the schedule as
       // APPLY will write it, so the approver sees what the schedule will say.
@@ -172,7 +180,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
         departs: override !== null || departures.length > 0,
         newStepId: randomUUID(),
         reviewId,
-        schedule: scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId)),
+        schedule,
         scheduledFor,
         stepId: typeof review.StepId === "string" ? review.StepId : null,
         target: chosen,
@@ -195,6 +203,21 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
       ];
       const buildingId = Number(tenancy.BuildingId);
       const scope = { buildingId, correlationId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
+      // M3: a basis that departs from the lease is set beside the lease's own result.
+      const leaseTerms =
+        departures.length > 0 && calc.method !== "other"
+          ? await rentOnLeaseTerms(db, {
+              lease,
+              method: calc.method,
+              newStepId: randomUUID(),
+              reviewId,
+              schedule,
+              scheduledFor,
+              scheduleVersion: calc.scheduleVersion,
+              stepId: typeof review.StepId === "string" ? review.StepId : null,
+              today,
+            })
+          : null;
       const differenceAnnual = override ? r2(override.newAnnual - calc.newAnnual) : 0;
       const ancillaryDifferenceAnnual = r2(ancillaryAnnual(receipt.cascade) - ancillaryAnnual(calc.cascade));
       const area = receipt.row.areaMissing ? 0 : receipt.row.sqm;
@@ -214,9 +237,10 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
               reason: override.reason,
             },
             sanity,
+            ...(leaseTerms ? { leaseTerms } : {}),
           }
         : // The computed rent's receipt again, its arrears to today.
-          { ...calc, arrears: receipt.arrears, cascade: receipt.cascade, departures, override: undefined, sanity };
+          { ...calc, arrears: receipt.arrears, cascade: receipt.cascade, departures, override: undefined, sanity, ...(leaseTerms ? { leaseTerms } : {}) };
       const chosenFigures = { appliedPercent: chosenPercent, currentAnnual: calc.currentAnnual, newAnnual: chosen };
 
       if (reasons.length === 0) {
@@ -243,7 +267,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
         });
         const after = await loadReview(db, reviewId);
         if (!after) throw new Error(`Review ${reviewId} vanished while being applied`);
-        return { after, applied: true, buildingId: applied.buildingId, calc: submitted, chosenFigures, reasons, scheduledFor, tenantId };
+        return { after, applied: true, basisEditors: [], buildingId: applied.buildingId, calc: submitted, chosenFigures, reasons, scheduledFor, tenantId };
       }
 
       if (!(await markSubmitted(db, reviewId, { name: caller.actor.name, userId: caller.actor.userId }, JSON.stringify(submitted)))) {
@@ -271,9 +295,23 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
           ruleApplied: departures.length > 0 ? "override+basis_departs_from_lease" : "override",
         });
       }
+      if (leaseTerms) {
+        const chosenTotal = chosen + ancillaryAnnual(receipt.cascade);
+        await ledger.record(db, {
+          ...scope,
+          action: "rent_review.basis_departure",
+          actor: caller.actor,
+          after: { ancillaryAnnual: ancillaryAnnual(receipt.cascade), appliedPercent: chosenPercent, departures, newAnnual: chosen },
+          computed: { onLeaseTerms: leaseTerms },
+          // Annual money forgone (positive) or gained (negative) against the lease's own terms.
+          financialImpact: "unavailable" in leaseTerms ? null : r2(leaseTerms.newAnnual + leaseTerms.ancillaryAnnual - chosenTotal),
+          ruleApplied: `departs:${departures.join("+")}`.slice(0, 100),
+        });
+      }
       const after = await loadReview(db, reviewId);
       if (!after) throw new Error(`Review ${reviewId} vanished while being submitted`);
-      return { after, applied: false, buildingId, calc: submitted, chosenFigures, reasons, scheduledFor, tenantId };
+      const basisEditors = await basisEditorsSinceCommence(db, reviewId);
+      return { after, applied: false, basisEditors, buildingId, calc: submitted, chosenFigures, reasons, scheduledFor, tenantId };
     });
 
     const review = toReviewDto(done.after, today);
@@ -299,7 +337,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
     await raiseApprovalEscalation(db, {
       actor: caller.actor,
       ...done.chosenFigures,
-      excludeUserIds: separationOfDuties({ calc: done.calc, preparedById: caller.actor.userId }),
+      excludeUserIds: separationOfDuties({ basisEditorIds: done.basisEditors, calc: done.calc, preparedById: caller.actor.userId }),
       log: (message) => context.warn(message),
       reasons: done.reasons,
       reviewId,

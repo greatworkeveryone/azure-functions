@@ -11,8 +11,12 @@
 //   state       awaiting_approval, else 409 invalid_state
 //   role        accounts_manager, cfo or director; admin is never an approver
 //               (D20), so it is refused here though requireRole lets it through
-//   C6          the approver isn't the preparer (nor whoever keyed a manual rent),
-//               else 403 sod_blocked, ledgered as sod_blocked
+//   C6          the approver isn't the preparer, whoever keyed a manual rent, nor
+//               anyone who changed the basis since commence, else 403 sod_blocked,
+//               ledgered as sod_blocked. Directors are never blocked (sprint
+//               decision 17): a director approving their own preparation passes
+//               the money gate's step-up like any approval and the approval is
+//               ledgered with rule director_own_preparation
 //   C7          the approver holds the level E3 has reached (accounts_manager,
 //               then cfo, then director; higher levels may approve lower), else
 //               403 approval_level, ledgered as denied
@@ -27,7 +31,7 @@
 
 import { randomUUID } from "node:crypto";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import * as ledger from "../ledger";
@@ -40,7 +44,7 @@ import { afterReviewDecision } from "../rentReview/afterDecision";
 import { applyReview } from "../rentReview/apply";
 import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
-import { requiredApprovalRole, separationOfDuties } from "../rentReview/escalations";
+import { basisEditorsSinceCommence, dutiesOf, requiredApprovalRole } from "../rentReview/escalations";
 import {
   APPROVER_RANK,
   approverRank,
@@ -57,6 +61,14 @@ import {
 import { inTransaction, loadReview, reviewForUpdate } from "../rentReview/store";
 
 const ROLE_WORDS: Record<string, string> = { accounts_manager: "an accounts manager", cfo: "the CFO", director: "a director" };
+
+type SodPart = "basis" | "keyed" | "prepared";
+
+const SOD_WORDS: Record<SodPart, { message: string; rule: string }> = {
+  basis: { message: "You changed this review's basis, so someone else has to approve it", rule: "approver_edited_basis" },
+  keyed: { message: "You keyed this review's rent by hand, so someone else has to approve it", rule: "approver_keyed_rent" },
+  prepared: { message: "You prepared this review, so someone else has to approve it", rule: "approver_is_preparer" },
+};
 
 export async function approveRentReview(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -110,14 +122,21 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
         const calc = parseCalc(review.Calc);
         if (!calc) throw new RentReviewError("not_calculated", "This review has no calculation to approve; return it to be calculated", { state });
 
-        // C6: separation of duties.
-        if (caller.actor.userId === null) {
+        // C6: separation of duties. Directors are never blocked (sprint decision 17):
+        // a director approving their own preparation goes through the money gate's
+        // step-up like any approval and is ledgered as director_own_preparation.
+        const userId = caller.actor.userId;
+        if (userId === null) {
           throw new RentReviewError("no_user", "Your Floorplan user couldn't be found, so your approval can't be checked against who prepared it");
         }
         const preparedById = review.PreparedById === null || review.PreparedById === undefined ? null : Number(review.PreparedById);
-        if (separationOfDuties({ calc, preparedById }).includes(caller.actor.userId)) {
-          const message = "You prepared this review, so someone else has to approve it";
-          throw new RentReviewError("sod_blocked", message, {}, refusal("sod_blocked", "approver_is_preparer", message));
+        const duties = dutiesOf({ basisEditorIds: await basisEditorsSinceCommence(db, reviewId), calc, preparedById });
+        const part: SodPart | null =
+          duties.preparedBy === userId ? "prepared" : duties.keyedBy === userId ? "keyed" : duties.basisEditors.includes(userId) ? "basis" : null;
+        const director = caller.roles.includes(AppRole.DIRECTOR);
+        if (part && !director) {
+          const { message, rule } = SOD_WORDS[part];
+          throw new RentReviewError("sod_blocked", message, {}, refusal("sod_blocked", rule, message));
         }
 
         // C7: the level E3 has reached.
@@ -134,8 +153,9 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
           after: { appliedPercent: chosenPercent, newAnnual: chosen, requiredRole: required, state: "approved" },
           before: { preparedById, state },
           buildingId,
+          ...(part ? { computed: { ownPart: part, separationOfDuties: duties, stepUp: "money gate (S11)" } } : {}),
           correlationId,
-          ruleApplied: `level_${required}`,
+          ruleApplied: part ? "director_own_preparation" : `level_${required}`,
           subject: { id: reviewId, type: "rent_review" },
           tenantId,
         });
