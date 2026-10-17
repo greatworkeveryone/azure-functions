@@ -19,6 +19,7 @@ const MIGRATIONS = [
   "129_email_intake_watermark.sql",
   "133_email_archive_columns.sql",
   "134_invoice_attachments.sql",
+  "136_building_category_owner.sql",
   "125_myob_reference_cache.sql",
   "126_myob_proposals.sql",
   "119_defects_periods.sql",
