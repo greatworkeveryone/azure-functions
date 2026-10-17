@@ -89,18 +89,20 @@ export interface PolicyHistory {
   /** When it was raised. */
   createdAt: Date;
   live: boolean;
+  /** E3: the highest rung any of the review's E3 reached since it was submitted. */
+  reachedRole?: string | null;
   /** ResolutionCode of an escalation that ended. */
   resolutionCode: string | null;
 }
 
 /**
  * Whether the generator should raise `policyKey` on the review now: its
- * condition holds, nothing under the policy is live, and the last one did not
- * end at a person's hand (resolved by someone or withdrawn), which is not
- * raised again. One that ended because the review moved on (a decision, or the
- * condition cleared) is raised again when the condition comes back, as it does
- * after a revert. For E3, only escalations since the review was last submitted
- * count.
+ * condition holds, nothing under the policy is live, and (E1, E2) the last one
+ * did not end at a person's hand (resolved by someone or withdrawn), which is
+ * not raised again. One that ended because the review moved on (a decision, or
+ * the condition cleared) is raised again when the condition comes back, as it
+ * does after a revert. E3 is raised whenever the review waits for approval with
+ * none live: only the review's decision ends it.
  */
 export function shouldRaise(
   policyKey: string,
@@ -111,6 +113,8 @@ export function shouldRaise(
   if (!reviewConditionActive(policyKey, facts, today)) return false;
   if (!last) return true;
   if (last.live) return false;
-  if (policyKey === REVIEW_POLICIES.approval && facts.submittedAt && last.createdAt.getTime() < facts.submittedAt.getTime()) return true;
+  // E3 ends only with the review's decision: one waiting for approval with no
+  // live E3 always gets it back, however the last one ended (L3).
+  if (policyKey === REVIEW_POLICIES.approval) return true;
   return !MANUAL_END_CODES.has(last.resolutionCode ?? "");
 }

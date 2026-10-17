@@ -7,9 +7,11 @@
 //                             "approved", "returned", "waived"; a cancelled review's
 //                             are withdrawn with the cancel's reason)
 //   runReviewEscalations      the generator's step, live runs only: raises E1 and
-//                             E2 where their condition holds, raises an E3 that
-//                             SUBMIT failed to raise, and ends any E3 left behind
-//                             by a decision whose after-commit step failed
+//                             E2 where their condition holds, raises an E3 a
+//                             review waiting for approval has lost (SUBMIT failed
+//                             to raise it, or it ended without a decision) at the
+//                             rung it had reached, and ends any E3 left behind by
+//                             a decision whose after-commit step failed
 //
 // None of this is part of a decision's transaction: the decision commits first
 // and its escalations follow (an escalation that fails to move never undoes a
@@ -26,7 +28,7 @@ import { sweepMaxActions } from "../escalation/config";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewState } from "../rentReviewMachine";
-import { approvalReasonsOf, chosenFigures, parseCalc } from "../rentReviewCalc";
+import { approvalReasonsOf, chosenFigures, isReduction, parseCalc } from "../rentReviewCalc";
 import { Sentry } from "../sentry";
 import {
   approvalOutcomeCode,
@@ -161,7 +163,8 @@ const OPEN_REVIEWS_SQL = `SELECT r.ReviewId, r.ScheduledFor, r.State, r.Prepared
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   WHERE r.State IN (${OPEN_STATE_LIST})`;
 
-const HISTORY_SQL = `SELECT e.EscalationId, e.SubjectId, e.PolicyKey, e.Status, e.ResolutionCode, e.CreatedAt
+const HISTORY_SQL = `SELECT e.EscalationId, e.SubjectId, e.PolicyKey, e.Status, e.ResolutionCode, e.CreatedAt,
+    e.TargetRole, e.NoIndependentTarget
   FROM dbo.Escalations e
   WHERE e.SubjectType = N'rent_review'
     AND e.PolicyKey IN (@NotCommenced, @Overdue, @Approval)
@@ -185,7 +188,7 @@ export interface OpenReviewFacts {
 }
 
 export type EscalationAction =
-  | { kind: "raise"; policyKey: string; review: OpenReviewFacts }
+  | { kind: "raise"; policyKey: string; review: OpenReviewFacts; startAtRole: string | null }
   | { code: string; kind: "end"; reviewId: string; scheduledFor: string; state: RentReviewState };
 
 /** What the generator's step should do. Pure. */
@@ -198,8 +201,9 @@ export function planReviewEscalations(
   const actions: EscalationAction[] = [];
   for (const review of reviews) {
     for (const policyKey of [...GENERATOR_POLICIES, REVIEW_POLICIES.approval]) {
-      if (shouldRaise(policyKey, review, history.get(historyKey(review.reviewId, policyKey)) ?? null, today)) {
-        actions.push({ kind: "raise", policyKey, review });
+      const last = history.get(historyKey(review.reviewId, policyKey)) ?? null;
+      if (shouldRaise(policyKey, review, last, today)) {
+        actions.push({ kind: "raise", policyKey, review, startAtRole: policyKey === REVIEW_POLICIES.approval ? approvalStart(review, last) : null });
       }
     }
   }
@@ -212,6 +216,15 @@ export function planReviewEscalations(
 }
 
 export const historyKey = (reviewId: string, policyKey: string): string => `${reviewId}\u0000${policyKey}`;
+
+/** Where a missing E3 starts again (L3): the directors for a lower rent (A3),
+ *  else the rung the review's E3 had reached since it was submitted; the bottom
+ *  when it never went past the first rung. */
+function approvalStart(review: OpenReviewFacts, last: PolicyHistory | null): string | null {
+  if (review.calc && isReduction(review.calc)) return "director";
+  const reached = last?.reachedRole ?? null;
+  return reached === null || reached === "accounts_manager" ? null : reached;
+}
 
 export interface SeparationFacts {
   /** Whoever changed the review's basis since it was commenced (M3). */
@@ -304,15 +317,26 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
     { name: "NotCommenced", type: TYPES.NVarChar, value: REVIEW_POLICIES.notCommenced },
     { name: "Overdue", type: TYPES.NVarChar, value: REVIEW_POLICIES.overdue },
   ];
+  const submittedAt = new Map(reviews.map((review) => [review.reviewId, review.submittedAt]));
   const history = new Map<string, PolicyHistory & { escalationId: number }>();
   for (const row of await executeQuery(connection, HISTORY_SQL, policyParams)) {
     const key = historyKey(String(row.SubjectId), String(row.PolicyKey));
     const escalationId = Number(row.EscalationId);
-    if ((history.get(key)?.escalationId ?? -1) > escalationId) continue;
+    const createdAt = dateOf(row.CreatedAt) ?? new Date(0);
+    const seen = history.get(key);
+    // E3: the highest rung reached since the review was last submitted, whatever became of it.
+    const since = submittedAt.get(String(row.SubjectId)) ?? null;
+    const counts = row.PolicyKey === REVIEW_POLICIES.approval && (since === null || createdAt.getTime() >= since.getTime());
+    const reachedRole = counts ? higherRung(seen?.reachedRole ?? null, rungOf(row)) : (seen?.reachedRole ?? null);
+    if (seen && seen.escalationId > escalationId) {
+      seen.reachedRole = reachedRole;
+      continue;
+    }
     history.set(key, {
-      createdAt: dateOf(row.CreatedAt) ?? new Date(0),
+      createdAt,
       escalationId,
       live: row.Status === "open" || row.Status === "acknowledged",
+      reachedRole,
       resolutionCode: typeof row.ResolutionCode === "string" ? row.ResolutionCode : null,
     });
   }
@@ -356,6 +380,7 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
           now: run.now,
           policyKey: action.policyKey,
           skipConditionCheck: true,
+          startAtRole: action.startAtRole,
           subjectId: reviewId,
           subjectType: REVIEW_SUBJECT,
         });
@@ -393,24 +418,35 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
 
 // ── C7: the level E3 has reached ─────────────────────────────────────────────
 
-const LIVE_APPROVAL_SQL = `SELECT TOP 1 e.TargetRole, e.NoIndependentTarget, e.[Level]
+const LEVEL_REACHED_SQL = `SELECT e.TargetRole, e.NoIndependentTarget, e.[Level], e.Status
   FROM dbo.Escalations e
+  INNER JOIN dbo.RentReviews r ON r.ReviewId = e.SubjectId
   WHERE e.SubjectType = N'rent_review' AND e.SubjectId = @ReviewId AND e.PolicyKey = @Approval
-    AND e.Status IN ('open', 'acknowledged')
-  ORDER BY e.EscalationId DESC`;
+    AND (r.SubmittedAt IS NULL OR e.CreatedAt >= r.SubmittedAt)`;
+
+const APPROVAL_RUNGS = ["accounts_manager", "cfo", "director"] as const;
+
+/** The rung one E3 row stands at: the directors when nobody independent was left;
+ *  an unknown role counts as the directors. */
+export function rungOf(row: { NoIndependentTarget?: unknown; TargetRole?: unknown }): string {
+  if (row.NoIndependentTarget === true || row.NoIndependentTarget === 1) return "director";
+  const role = typeof row.TargetRole === "string" ? row.TargetRole.trim().toLowerCase() : "";
+  return (APPROVAL_RUNGS as readonly string[]).includes(role) ? role : "director";
+}
+
+/** The higher of two rungs. */
+export const higherRung = (a: string | null, b: string): string =>
+  a !== null && APPROVAL_RUNGS.indexOf(a as (typeof APPROVAL_RUNGS)[number]) >= APPROVAL_RUNGS.indexOf(b as (typeof APPROVAL_RUNGS)[number]) ? a : b;
 
 /** The role an approver must hold (at least) to approve the review now (C7): the
- *  role E3 has reached on its ladder, the directors when nobody independent was
- *  left, and the ladder's first rung (an accounts manager) when there is no live
- *  E3 (it wasn't raised, or its policy is off). */
+ *  highest rung any E3 since the review was submitted has reached, live or not,
+ *  so withdrawing or losing the live one never lowers it (L3); the directors when
+ *  nobody independent was left; the ladder's first rung (an accounts manager)
+ *  when none was raised (or its policy is off). */
 export async function requiredApprovalRole(connection: Connection, reviewId: string): Promise<string> {
-  const rows = await executeQuery(connection, LIVE_APPROVAL_SQL, [
+  const rows = await executeQuery(connection, LEVEL_REACHED_SQL, [
     { name: "ReviewId", type: TYPES.NVarChar, value: reviewId },
     { name: "Approval", type: TYPES.NVarChar, value: REVIEW_POLICIES.approval },
   ]);
-  const live = rows[0];
-  if (!live) return "accounts_manager";
-  if (live.NoIndependentTarget === true || live.NoIndependentTarget === 1) return "director";
-  const role = typeof live.TargetRole === "string" ? live.TargetRole.trim().toLowerCase() : "";
-  return role === "accounts_manager" || role === "cfo" || role === "director" ? role : "director";
+  return rows.reduce<string | null>((reached, row) => higherRung(reached, rungOf(row)), null) ?? "accounts_manager";
 }

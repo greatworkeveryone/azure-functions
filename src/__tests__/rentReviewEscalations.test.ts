@@ -113,10 +113,11 @@ describe("shouldRaise: the generator never raises again what a person closed", (
     expect(shouldRaise(REVIEW_POLICIES.overdue, overdue, ended(code), TODAY)).toBe(true);
   });
 
-  it("raises E3 for a new submission even if one from before was withdrawn", () => {
+  it("raises E3 again whenever the review waits with none live, however the last one ended (L3)", () => {
     const waiting = { ...facts({ state: "awaiting_approval" }), submittedAt: new Date("2026-03-01T00:00:00Z") };
     expect(shouldRaise(REVIEW_POLICIES.approval, waiting, ended("withdrawn", new Date("2026-02-01T00:00:00Z")), TODAY)).toBe(true);
-    expect(shouldRaise(REVIEW_POLICIES.approval, waiting, ended("withdrawn", new Date("2026-03-02T00:00:00Z")), TODAY)).toBe(false);
+    expect(shouldRaise(REVIEW_POLICIES.approval, waiting, ended("withdrawn", new Date("2026-03-02T00:00:00Z")), TODAY)).toBe(true);
+    expect(shouldRaise(REVIEW_POLICIES.approval, waiting, { createdAt: new Date(), live: true, resolutionCode: null }, TODAY)).toBe(false);
   });
 });
 
@@ -300,6 +301,28 @@ describe("runReviewEscalations (the generator's step)", () => {
     serve([openRow({ Calc: JSON.stringify(calc), PreparedById: 7, ScheduledFor: new Date(`${DAY(20)}T00:00:00Z`), State: "awaiting_approval", SubmittedAt: new Date() })]);
     await runStep();
     expect(engine.raise.mock.calls[0][1].headline).toBe("Waiting for approval: $123,711.34 → $125,555.55 (+1.49%) — a different rent was chosen");
+  });
+
+  it("re-raises a lost E3 at the rung it had reached since the submission, not the bottom (L3)", async () => {
+    const submittedAt = new Date(Date.now() - 3_600_000);
+    const after = new Date(submittedAt.getTime() + 60_000);
+    serve(
+      [openRow({ PreparedById: 7, ScheduledFor: new Date(`${DAY(20)}T00:00:00Z`), State: "awaiting_approval", SubmittedAt: submittedAt })],
+      [
+        { CreatedAt: after, EscalationId: 4, NoIndependentTarget: false, PolicyKey: "rent_review.approval", ResolutionCode: "escalated", Status: "superseded", SubjectId: "rev-1", TargetRole: "accounts_manager" },
+        { CreatedAt: after, EscalationId: 5, NoIndependentTarget: false, PolicyKey: "rent_review.approval", ResolutionCode: "withdrawn", Status: "withdrawn", SubjectId: "rev-1", TargetRole: "cfo" },
+      ],
+    );
+    expect(await runStep()).toMatchObject({ errors: [], raised: 1 });
+    expect(engine.raise.mock.calls[0][1]).toMatchObject({ policyKey: "rent_review.approval", startAtRole: "cfo" });
+  });
+
+  it("re-raises a lost E3 for a lower rent at the directors (A3)", async () => {
+    const calc = { appliedPercent: -2, cascade: [], currentAnnual: 100000, method: "cpi", newAnnual: 98000, sanity: { inBand: true, maxPercent: 15, minPercent: -5 }, scheduleVersion: 1 };
+    serve([openRow({ Calc: JSON.stringify(calc), PreparedById: 7, ScheduledFor: new Date(`${DAY(20)}T00:00:00Z`), State: "awaiting_approval", SubmittedAt: new Date() })]);
+    await runStep();
+    expect(engine.raise.mock.calls[0][1]).toMatchObject({ startAtRole: "director" });
+    expect(engine.raise.mock.calls[0][1].headline).toMatch(/the rent goes down, so a director decides$/);
   });
 
   it("skips a policy that is switched off without counting it a failure, and collects real failures", async () => {

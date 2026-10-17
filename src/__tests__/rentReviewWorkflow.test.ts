@@ -880,3 +880,33 @@ describe("A3: a rent reduction is never applied in one step and needs a director
     expect((await approve()).status).toBe(200);
   });
 });
+
+// ── L3: C7 never regresses ────────────────────────────────────────────────────
+
+describe("L3: C7 reads the highest rung E3 reached since the review was submitted, live or not", () => {
+  it("still needs the CFO after the CFO-level E3 was withdrawn", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } });
+    as(PEOPLE.ann);
+    await submit();
+    const submittedAt = world.review("rev-1").SubmittedAt as Date;
+    const later = new Date(submittedAt.getTime() + 60_000);
+    world.state.escalations.push(
+      { CreatedAt: later, EscalationId: 1, Level: 1, NoIndependentTarget: false, PolicyKey: "rent_review.approval", Status: "superseded", SubjectId: "rev-1", TargetRole: "accounts_manager" },
+      { CreatedAt: later, EscalationId: 2, Level: 2, NoIndependentTarget: false, PolicyKey: "rent_review.approval", Status: "withdrawn", SubjectId: "rev-1", TargetRole: "cfo" },
+    );
+    as(PEOPLE.bo);
+    expect((await approve()).jsonBody).toMatchObject({ code: "approval_level", requiredRole: "cfo" });
+    as(PEOPLE.cy);
+    expect((await approve()).status).toBe(200);
+  });
+
+  it("doesn't count an E3 from before the review was last submitted", async () => {
+    await calculated({ cpi: [100, 120], review: { Basis: JSON.stringify(basis({ capPercent: null })) }, tenant: { CpiCapPercent: null } });
+    as(PEOPLE.ann);
+    await submit();
+    const earlier = new Date((world.review("rev-1").SubmittedAt as Date).getTime() - 60_000);
+    world.state.escalations.push({ CreatedAt: earlier, EscalationId: 1, Level: 3, NoIndependentTarget: true, PolicyKey: "rent_review.approval", Status: "resolved", SubjectId: "rev-1", TargetRole: "director" });
+    as(PEOPLE.bo);
+    expect((await approve()).status).toBe(200);
+  });
+});

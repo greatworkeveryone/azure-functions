@@ -10,7 +10,7 @@ import { executeQuery } from "../../db";
 import { formatDisplayDate } from "../../digest/format";
 import { sqlDateToIso } from "../../nextReviewDate";
 import { RENT_REVIEW_STATES, type RentReviewState } from "../../rentReviewMachine";
-import { reviewConditionActive } from "../../rentReview/escalationRules";
+import { REVIEW_POLICIES, reviewConditionActive } from "../../rentReview/escalationRules";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
 
@@ -88,4 +88,9 @@ export const rentReviewAdapter: EscalationAdapter = {
   },
 
   visibleTo: (viewer) => viewer.roles.some((role) => REVIEW_VIEW_ROLES.has(normaliseRole(role))),
+
+  // E3 ends with the review's own decision (approve, return, waive, cancel):
+  // withdrawing it by hand would leave the review waiting with nobody asked,
+  // and C7 reading a lower rung (L3). Neither its raiser (the preparer) nor admin may.
+  withdrawable: (escalation) => escalation.policyKey !== REVIEW_POLICIES.approval,
 };

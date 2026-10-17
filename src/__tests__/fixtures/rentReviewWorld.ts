@@ -196,11 +196,15 @@ export class ReviewWorld {
       const ids = Object.entries(p).filter(([k]) => k.startsWith("Change")).map(([, v]) => v);
       return this.state.changeLog.filter((r) => r.TenantId === p.TenantId && ids.includes(r.ChangeId));
     }
-    if (/FROM dbo\.Escalations e[\s\S]*TargetRole|SELECT TOP 1 e\.TargetRole/.test(sql)) {
-      return this.state.escalations
-        .filter((e) => e.SubjectId === p.ReviewId && e.PolicyKey === p.Approval && ["open", "acknowledged"].includes(String(e.Status)))
-        .sort((a, b) => Number(b.EscalationId) - Number(a.EscalationId))
-        .slice(0, 1);
+    if (/^SELECT e\.TargetRole, e\.NoIndependentTarget, e\.\[Level\], e\.Status\s+FROM dbo\.Escalations e/.test(sql.trim())) {
+      const review = this.state.reviews.find((r) => r.ReviewId === p.ReviewId);
+      const since = review?.SubmittedAt instanceof Date ? review.SubmittedAt.getTime() : null;
+      return this.state.escalations.filter(
+        (e) =>
+          e.SubjectId === p.ReviewId &&
+          e.PolicyKey === p.Approval &&
+          (since === null || !(e.CreatedAt instanceof Date) || e.CreatedAt.getTime() >= since),
+      );
     }
     if (/FROM dbo\.Escalations/.test(sql)) return [];
     if (/FROM dbo\.CpiIndex/.test(sql)) {

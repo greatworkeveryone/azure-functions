@@ -11,6 +11,7 @@
 // The inbox query (store.ts buildListWhere) expresses the same visibility in
 // SQL; keep the two in step.
 
+import { getAdapter } from "./adapters/registry";
 import { EscalationError } from "./errors";
 import { isAbove, normaliseRole, ROLES, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { EscalationRow, Viewer } from "./types";
@@ -67,9 +68,16 @@ export function canAct(viewer: Viewer, row: EscalationRow): boolean {
   return isTargetOf(viewer, row) || isOversight(viewer);
 }
 
-/** The raiser takes it back (while open); admin can too. */
+/** Whether anyone may withdraw it by hand: false where the subject's adapter
+ *  says only its own decision ends it (a rent review's approval, L3). */
+export function isWithdrawable(row: Pick<EscalationRow, "kind" | "policyKey" | "subjectType">): boolean {
+  return getAdapter(row.subjectType)?.withdrawable?.(row) !== false;
+}
+
+/** The raiser takes it back (while open); admin can too. Never one only its
+ *  subject's decision ends. */
 export function canWithdraw(viewer: Viewer, row: EscalationRow): boolean {
-  return isRaiser(viewer, row) || isAdmin(viewer);
+  return isWithdrawable(row) && (isRaiser(viewer, row) || isAdmin(viewer));
 }
 
 /** Push to the next level: whoever can act, or the raiser. */
