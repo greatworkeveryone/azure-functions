@@ -14,6 +14,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -65,7 +66,7 @@ async function getQuotes(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, ACTION_ROLES.viewQuotes.gate);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -140,7 +141,7 @@ export async function upsertQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.createQuote.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -547,9 +548,6 @@ function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): App
   };
 }
 
-/** Who may press Approve on a quote: every role the authority core lets approve one (J1). */
-const APPROVE_QUOTE_ROLES = SUBJECT_ELIGIBLE_ROLES.quote as readonly AppRole[];
-
 async function approveQuoteInTransaction(
   connection: Connection,
   input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; quoteId: number; userRoles: string[] },
@@ -721,7 +719,7 @@ async function approveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, APPROVE_QUOTE_ROLES);
+  const denied = await requireRole(request, ACTION_ROLES.approveQuote.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, APPROVE_QUOTE_TARGET);
     return denied;
@@ -841,7 +839,7 @@ export async function rejectQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.manageQuotes.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, REJECT_QUOTE_TARGET);
     return denied;
@@ -941,7 +939,7 @@ async function unapproveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.unapproveQuote.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNAPPROVE_QUOTE_TARGET);
     return denied;
@@ -1086,7 +1084,7 @@ async function completeQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.manageQuotes.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, COMPLETE_QUOTE_TARGET);
     return denied;
@@ -1193,7 +1191,7 @@ async function uncompleteQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.manageQuotes.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNCOMPLETE_QUOTE_TARGET);
     return denied;
@@ -1304,7 +1302,7 @@ async function deleteQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.manageQuotes.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, DELETE_QUOTE_TARGET);
     return denied;
@@ -1394,7 +1392,7 @@ async function validateQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.manageQuotes.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -1500,7 +1498,7 @@ export async function directorApproveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  const denied = await requireRole(request, ACTION_ROLES.approveQuoteAsDirector.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, DIRECTOR_APPROVE_QUOTE_TARGET);
     return denied;
@@ -1616,7 +1614,7 @@ async function resendDirectorQuoteEmail(
 
   // Same reasoning as resendDirectorInvoiceEmail — the workflow participants
   // who can see the banner need to be able to nudge the director themselves.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  const denied = await requireRole(request, ACTION_ROLES.resendDirectorEmail.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, RESEND_DIRECTOR_QUOTE_TARGET);
     return denied;
