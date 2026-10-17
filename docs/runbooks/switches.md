@@ -18,8 +18,11 @@ then the real switch.
 | `ESCALATION_HOLIDAYS` | unset: no holidays | Darwin public holidays, `YYYY-MM-DD`, comma-separated. The SLA clocks and the decision-request tiers skip them (weekends are always skipped). A bad entry is ignored and logged | Keep the list current for the year |
 | `DEV_EMAIL_OVERRIDE` | unset | Every outgoing escalation and decision-request email goes to this one address instead of the people asked | Dev and staging only; never in production |
 | `DIGEST_ENABLED` · `_DRY_RUN` | off | The morning digest email | After a dry run |
-| `RENT_REVIEW_GENERATOR_ENABLED` · `_DRY_RUN` | off | Creates and moves rent reviews (WP25). Pair with the Rent reviews flag below | After a dry run |
-| `CPI_SYNC_ENABLED` · `_DRY_RUN` | off | Daily ABS CPI sync into `CpiIndex` | After a dry run |
+| `RENT_REVIEW_GENERATOR_ENABLED` · `_DRY_RUN` | off | Creates and moves rent reviews (WP25). Each live run also raises E1/E2, re-raises a lost E3 at the rung it reached, and writes the RentPerAnnum cache of a review applied ahead of its date once the date comes (WP26); at most `ESCALATION_SWEEP_MAX_ACTIONS` escalations a run. Pair with the Rent reviews flag | After a dry run |
+| `REVIEW_WINDOW_DAYS` | 60 | Days before its date a scheduled rent review becomes due | Leave at 60 |
+| `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
+| `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row | The day WP25/WP26 go live (gate B) |
+| `CPI_SYNC_ENABLED` · `_DRY_RUN` | off | Daily ABS CPI sync into `CpiIndex`; then CPI reviews waiting for their index come back in progress, calculated, even when the ABS fetch fails (WP26) | After a dry run |
 | `PLANNER_SYNC_ENABLED` | off | Microsoft Planner sync, being retired | Leave off |
 | `PLANNER_UNSIGNED_HOLDBACK_ENABLED` | off | Only matters if Planner sync is on. The nightly timer never raises lease tasks (expiry, option, review) for a tenancy whose schedule is not signed off. This switch also lets it take down the ones already open; off, it leaves them and logs each tenancy with its open task count | Only if Planner sync is turned on, after reading the "not removed" line in the log |
 | `ACCESS_LOG_ENABLED` | **on** | Access-event log; `"false"` turns it off | Keep on |
@@ -41,13 +44,15 @@ Coming, not on `sprint/integration` yet: `REVIEW_SANITY_MIN_PERCENT` (−5) and
 
 ## Feature flags (Admin → Features)
 
-Hidden by default: Assets, Escalations, Rent reviews, Finance (CFO workspace),
+Hidden by default: Assets, Escalations, Rent reviews (`rentReviews`), Finance (CFO workspace),
 Procedures, Decision jobs. A flag only shows the module. The timers behind
 Escalations and Rent reviews still need their app settings above. Decision jobs
 (`decisionJobs`, Admin / Accounts jobs) need no setting and no migration: set it
 to preview for the director role first, then for everyone. The backend accepts
 the `admin` job kind whatever the flag says, and the sweep, Planner sync and
 digest skip those jobs.
+Rent reviews (`rentReviews`) shows the review screens; the generator and the CPI
+timer behind it need their settings above, and migration 101.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
@@ -76,3 +81,8 @@ NULL`, with a CHECK tying it to the tier) and seeds the `job.decision_pending` p
 set `Active = 0` on that row of `EscalationPolicies`: asking then answers 422
 `policy_inactive`. A build that is ahead of 137 still deletes files as before; once
 137 is applied, a file a decision request is about cannot be deleted (422).
+
+Migration 101 (`101_rent_review_workflow.sql`, WP25) is hand-applied like the rest.
+It is numbered below migrations already applied, so the runner applies it out of
+order with a warning only. Apply it before turning on the Rent reviews flag or the
+generator. WP26 adds no migration.
