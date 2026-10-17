@@ -31,6 +31,17 @@ export function plannerSyncEnabled(env: NodeJS.ProcessEnv = process.env): boolea
   return false;
 }
 
+/**
+ * True only when PLANNER_UNSIGNED_HOLDBACK_ENABLED is exactly "true". While it is off
+ * the nightly timer raises no lease tasks for a tenancy whose schedule nobody has
+ * signed off (PLAN D7), but leaves any already open alone: taking those down is a
+ * bulk change to live Planner data, so it is opt-in. Independent of
+ * PLANNER_SYNC_ENABLED: it only decides what the timer does once Planner is on.
+ */
+export function plannerUnsignedHoldbackEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PLANNER_UNSIGNED_HOLDBACK_ENABLED === "true";
+}
+
 /** Test-only: makes the next disabled call log again. */
 export function _resetPlannerSyncLogForTests(): void {
   disabledLogged = false;

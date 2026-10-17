@@ -21,6 +21,7 @@ then the real switch.
 | `RENT_REVIEW_GENERATOR_ENABLED` · `_DRY_RUN` | off | Creates and moves rent reviews (WP25). Pair with the Rent reviews flag below | After a dry run |
 | `CPI_SYNC_ENABLED` · `_DRY_RUN` | off | Daily ABS CPI sync into `CpiIndex` | After a dry run |
 | `PLANNER_SYNC_ENABLED` | off | Microsoft Planner sync, being retired | Leave off |
+| `PLANNER_UNSIGNED_HOLDBACK_ENABLED` | off | Only matters if Planner sync is on. The nightly timer never raises lease tasks (expiry, option, review) for a tenancy whose schedule is not signed off. This switch also lets it take down the ones already open; off, it leaves them and logs each tenancy with its open task count | Only if Planner sync is turned on, after reading the "not removed" line in the log |
 | `ACCESS_LOG_ENABLED` | **on** | Access-event log; `"false"` turns it off | Keep on |
 | `ACCESS_REPORT_ENABLED` | off | Access report email | Once Graph mail is confirmed |
 | `MONEY_ALLOWED_CIDRS` | unset: gate off, health warns | Networks allowed to take money actions | Office and remote-access egress; see `monitoring.md` §5 |

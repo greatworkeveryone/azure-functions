@@ -19,7 +19,9 @@ const sourceFiles = (dir: string): string[] =>
 // runControllerAction (src/myob-controller-handler.ts) is the CFO-only gate the
 // MYOB admin routes share, and withCaller (src/myob/proposalHttp.ts) resolves
 // the caller's roles for the MYOB proposal routes; the tests below keep both honest.
-const GATE = /\b(requireRole|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
+// requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
+// alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
+const GATE = /\b(requireRole|requireSignOffRole|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {

@@ -127,7 +127,7 @@ describe("getReviewsDue", () => {
     expect(res.status).toBe(200);
     const [tenant] = res.jsonBody.tenants;
     expect(Object.keys(tenant).sort()).toEqual(
-      ["buildingId", "daysToExpiry", "expiry", "legalName", "nextReviewDate", "optionNoticeMonths", "optionPeriods", "reviewState", "reviewType", "tenantId"],
+      ["buildingId", "daysToExpiry", "expiry", "legalName", "nextReviewDate", "optionNoticeMonths", "optionPeriods", "reviewState", "reviewType", "scheduleSignOff", "tenantId"],
     );
     expect(tenant).toMatchObject({ buildingId: 2, legalName: "Acme Pty Ltd", reviewState: "red", reviewType: "cpi", tenantId: 31 });
     expect(JSON.stringify(res.jsonBody)).not.toMatch(/12345678901|pat@acme|ap@acme|120000|late payer/);
