@@ -27,6 +27,8 @@ export interface ReadbackCounts {
   errors: number;
   matched: number;
   missing: number;
+  /** A first 404: noted, and called missing only if the next read misses too. */
+  notFoundOnce: number;
   read: number;
   refused: number;
   selected: number;
@@ -66,19 +68,21 @@ export async function readBackRows(
   deps: ReadbackDeps = READBACK_DEPS,
 ): Promise<ReadbackCounts> {
   const counts: ReadbackCounts = {
-    discrepanciesChanged: 0, dryRun: options.dryRun, errors: 0, matched: 0, missing: 0, read: 0, refused: 0, selected: rows.length,
+    discrepanciesChanged: 0, dryRun: options.dryRun, errors: 0, matched: 0, missing: 0, notFoundOnce: 0, read: 0, refused: 0, selected: rows.length,
     versionsAdvanced: 0, withDifferences: 0,
   };
   for (const row of rows) {
     try {
       const outcome = await deps.read(connection, row, options.actors.myob, options.now);
       counts.read += 1;
-      const { discrepancy } = outcome.verdict;
-      if (!discrepancy) counts.matched += 1;
+      const { discrepancy, notFoundOnce } = outcome.verdict;
+      if (notFoundOnce) counts.notFoundOnce += 1;
+      else if (!discrepancy) counts.matched += 1;
       else if (discrepancy.missing) counts.missing += 1;
       else counts.withDifferences += 1;
       if (options.dryRun) {
-        options.log(`myob read-back (dry run): proposal #${row.proposalId} ${discrepancy ? (discrepancy.missing ? "missing in MYOB" : `differs: ${discrepancy.fields.map((f) => f.label).join(", ")}`) : "matches"}`);
+        const found = notFoundOnce ? "not found (once)" : discrepancy ? (discrepancy.missing ? "missing in MYOB" : `differs: ${discrepancy.fields.map((f) => f.label).join(", ")}`) : "matches";
+        options.log(`myob read-back (dry run): proposal #${row.proposalId} ${found}`);
         continue;
       }
       const result = await inTx(connection, () => deps.record(connection, row.proposalId, outcome, options.actors.ledger, options.now));

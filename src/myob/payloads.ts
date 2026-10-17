@@ -66,6 +66,8 @@ export function buildServiceDocument(facts: DocumentFacts): Record<string, unkno
 export interface ComparableDocument {
   accountUids: string[];
   date: string;
+  /** Money: the same line totals mean 10% more or less once this flips. */
+  isTaxInclusive: boolean;
   number: string;
   supplierUid: string;
   taxCodeUids: string[];
@@ -80,6 +82,7 @@ export function comparable(document: Record<string, unknown>): ComparableDocumen
   return {
     accountUids: transactions.map((line) => uid(line.Account)),
     date: String(document.Date ?? "").slice(0, 10),
+    isTaxInclusive: document.IsTaxInclusive === true,
     number: String(document.Number ?? ""),
     supplierUid: uid(document.Supplier),
     taxCodeUids: transactions.map((line) => uid(line.TaxCode)),
@@ -105,6 +108,7 @@ export function diffDocuments(sent: Record<string, unknown>, myob: Record<string
 const DRIFT_LABELS: Record<Exclude<keyof ComparableDocument, "date"> | "description", string> = {
   accountUids: "account",
   description: "description",
+  isTaxInclusive: "tax inclusive",
   number: "number",
   supplierUid: "supplier",
   taxCodeUids: "tax code",

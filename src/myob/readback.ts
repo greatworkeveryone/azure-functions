@@ -1,7 +1,8 @@
 // The read-back sync (plan M10): MYOB has no webhooks, so Floorplan reads back
 // the records it created and says when MYOB and Floorplan disagree. Reads only,
-// Purchases only (decision 11): one GET per record, through myobRequest, so the
-// file's mode and the CFO's purchases.read switch apply.
+// Purchases only (decision 11): one GET per record through the GET-only reader
+// (readbackClient.ts) and myobRequest, so the file's mode and the CFO's
+// purchases.read switch apply, and the read-back can never write.
 //
 // It selects positively: the latest verified proposal for each MYOB record
 // Floorplan created, by proposal id, oldest check first. Records Floorplan
@@ -14,11 +15,11 @@ import { TYPES } from "tedious";
 import { executeQuery } from "../db";
 import { record as ledgerRecord, type LedgerActor } from "../ledger";
 import type { MyobActor } from "../myob-api-log";
-import { MyobPurchaseError } from "../myob-purchase-order";
 import { PROPOSAL_COLUMNS, toProposalRow, type ProposalRow } from "./proposalRow";
 import { getProposal, updateProposal } from "./proposalsStore";
-import { compareReadback, type Discrepancy, type ReadbackVerdict } from "./readbackCompare";
-import { KIND_OF, LIVE_PURCHASES, type MyobPurchases } from "./sendSteps";
+import { KIND_OF } from "./kinds";
+import { LIVE_READER, MyobPurchaseError, type MyobReader } from "./readbackClient";
+import { compareReadback, NOT_FOUND_ONCE, type Discrepancy, type ReadbackVerdict } from "./readbackCompare";
 
 export const READBACK_STALE_MINUTES = 25;
 
@@ -61,20 +62,23 @@ export async function readBackProposal(
   proposal: ProposalRow,
   actor: MyobActor,
   now: Date,
-  myob: MyobPurchases = LIVE_PURCHASES,
+  reader: MyobReader = LIVE_READER,
 ): Promise<{ record: Record<string, unknown> | null; verdict: ReadbackVerdict }> {
+  const kind = KIND_OF[proposal.operation];
   let current: Record<string, unknown> | null;
   try {
-    current = await myob.get(KIND_OF[proposal.operation], proposal.companyFileId, proposal.myobUid ?? "", actor, proposal.correlationId);
+    current = await reader.get(kind, proposal.companyFileId, proposal.myobUid ?? "", actor, proposal.correlationId);
   } catch (error) {
     if (!(error instanceof MyobPurchaseError && error.status === 404)) throw error;
     current = null;
   }
   const verdict = compareReadback({
     floorplanLastTouch: await floorplanLastTouch(connection, proposal),
+    kind,
     lastSeen: proposal.readBack,
     myob: current,
     now,
+    previousStatus: proposal.myobStatus,
     sent: proposal.payload,
     sentLabels: { supplier: proposal.rendered?.supplier ?? "the supplier Floorplan sent" },
   });
@@ -97,6 +101,12 @@ export async function recordReadback(
   const row = await getProposal(tx, proposalId, true);
   if (!row) return { discrepancyChanged: false, versionAdvanced: false };
   const { record, verdict } = outcome;
+  if (verdict.notFoundOnce) {
+    // One 404 isn't "missing" yet: note it, and say so only if the next read misses too.
+    const noted = await updateProposal(tx, row.proposalId, row.rowVersion, { LastReadBackAt: now, MyobStatus: NOT_FOUND_ONCE });
+    if (!noted) throw new Error(`MyobProposals ${proposalId} changed during its read-back`);
+    return { discrepancyChanged: false, versionAdvanced: false };
+  }
   const newVersion = verdict.advanceVersion && record?.RowVersion != null ? String(record.RowVersion) : null;
   const changed = fingerprint(row.discrepancy) !== fingerprint(verdict.discrepancy);
   const updated = await updateProposal(tx, row.proposalId, row.rowVersion, {
