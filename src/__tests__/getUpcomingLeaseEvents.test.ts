@@ -28,6 +28,7 @@ const tenancyRow = (id: number, over: Row = {}): Row => ({
   LegalName: `Tenant ${id} Pty Ltd`,
   OptionNoticeMonths: null,
   OptionPeriods: null,
+  ScheduleSignedOffAt: new Date("2026-10-01T00:00:00Z"),
   TenantId: id,
   TradingName: null,
   ...over,
@@ -40,6 +41,7 @@ const reviewRow = (id: number, date: string, over: Row = {}): Row => ({
   OwnerName: null,
   OwnerUserId: null,
   ReviewId: `rev-${id}`,
+  ScheduleSignedOffAt: new Date("2026-10-01T00:00:00Z"),
   ScheduledFor: asDate(date),
   State: "due",
   TenantId: id,
@@ -59,7 +61,7 @@ beforeEach(() => {
   db.createRequestConnection.mockResolvedValue({});
   tenancies = [];
   reviews = [];
-  routeSql(db.executeQuery, [
+  routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
     [/FROM dbo\.RentReviews r/, () => reviews],
     [/FROM dbo\.Tenants t\s+WHERE/, () => tenancies],
   ]);
@@ -188,10 +190,36 @@ describe("what it reads: names and dates only", () => {
 
     expect(res.status).toBe(200);
     expect(JSON.stringify(res.jsonBody)).not.toMatch(/12 345 678 901|accounts@acme|Pat Contact|123456|130000/);
-    const allowed = new Set(["buildingId", "date", "kind", "method", "overdue", "ownerName", "ownerUserId", "reviewId", "state", "tenantId", "tenantName"]);
+    const allowed = new Set(["buildingId", "date", "kind", "method", "overdue", "ownerName", "ownerUserId", "reviewId", "scheduleSignedOff", "state", "tenantId", "tenantName"]);
     for (const event of (res.jsonBody as Body).events) {
       for (const key of Object.keys(event)) expect(allowed.has(key)).toBe(true);
     }
+  });
+});
+
+describe("whether a schedule is signed off (PLAN D7)", () => {
+  it("reads only the sign-off time, never who signed it or their note", async () => {
+    await ask();
+    for (const pattern of [/FROM dbo\.RentReviews r/, /FROM dbo\.Tenants t/]) {
+      const { sql } = sqlOf(pattern);
+      expect(sql).toContain("t.ScheduleSignedOffAt");
+      expect(sql).not.toContain("ScheduleSignedOffByName");
+      expect(sql).not.toContain("ScheduleSignedOffById");
+      expect(sql).not.toContain("ScheduleSignOffNote");
+    }
+  });
+
+  it("marks each row signed off or not, from the tenancy behind it", async () => {
+    tenancies = [
+      tenancyRow(1, { Expiry: asDate(DAY(20)) }),
+      tenancyRow(2, { Expiry: asDate(DAY(21)), ScheduleSignedOffAt: null }),
+    ];
+    reviews = [reviewRow(3, DAY(10), { ScheduleSignedOffAt: null }), reviewRow(4, DAY(11))];
+
+    const { events } = (await ask()).jsonBody as Body;
+    const byKey = Object.fromEntries(events.map((event) => [`${event.kind}:${event.tenantId}`, event.scheduleSignedOff]));
+
+    expect(byKey).toEqual({ "expiry:1": true, "expiry:2": false, "review:3": false, "review:4": true });
   });
 });
 
@@ -223,6 +251,7 @@ describe("the events", () => {
       ownerName: "Ann Accounts",
       ownerUserId: 7,
       reviewId: "rev-1",
+      scheduleSignedOff: true,
       state: "in_progress",
       tenantId: 1,
       tenantName: "Tenant 1 Pty Ltd",
@@ -238,7 +267,7 @@ describe("the events", () => {
   });
 
   it("answers a failed query with a 500 and closes the connection", async () => {
-    routeSql(db.executeQuery, [[/FROM dbo\.Tenants/, () => Promise.reject(new Error("boom"))]]);
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.Tenants/, () => Promise.reject(new Error("boom"))]]);
     expect((await ask()).status).toBe(500);
     expect(db.closeConnection).toHaveBeenCalled();
   });

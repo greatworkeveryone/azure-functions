@@ -6,7 +6,9 @@
 //
 // Lane M adds its MYOB routes here when they exist (proposal approve / push /
 // update, controls set), with the same one-line call in each handler. Keep the
-// App Insights rule B list in docs/runbooks/monitoring.md in step.
+// App Insights rule B list in docs/runbooks/monitoring.md in step. WP26's rent
+// review decisions that change what a tenant is billed (submit, approve, waive,
+// revert) are money actions too.
 
 export interface MoneyGatedRoute {
   /** Source file of the handler, relative to the repo root. */
@@ -26,6 +28,13 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   { file: "src/functions/invoices.ts", label: "Undo an invoice's created-in-MYOB mark", route: "unmarkJobInvoiceMyobCreated" },
   { file: "src/functions/purchaseOrders.ts", label: "Mark a purchase order created in MYOB", route: "markPurchaseOrderMyobCreated" },
   { file: "src/functions/purchaseOrders.ts", label: "Undo a purchase order's created-in-MYOB mark", route: "unmarkPurchaseOrderMyobCreated" },
+  { file: "src/functions/submitRentReview.ts", label: "Submit (or apply) a rent review", route: "submitRentReview" },
+  { file: "src/functions/approveRentReview.ts", label: "Approve and apply a rent review", route: "approveRentReview" },
+  { file: "src/functions/waiveRentReview.ts", label: "Waive a rent review", route: "waiveRentReview" },
+  { file: "src/functions/revertRentReview.ts", label: "Revert an applied rent review", route: "revertRentReview" },
+  // WP26c: a director's decision on a pending schedule change (rent relief) changes what a tenant is billed.
+  { file: "src/functions/ratifyScheduleChange.ts", label: "Ratify a schedule change (rent relief)", route: "ratifyScheduleChange" },
+  { file: "src/functions/rejectScheduleChange.ts", label: "Reject a schedule change (rent relief)", route: "rejectScheduleChange" },
 ];
 
 export function isMoneyGatedRoute(route: string): boolean {

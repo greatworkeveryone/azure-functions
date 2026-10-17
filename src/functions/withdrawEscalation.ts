@@ -9,7 +9,8 @@
 //   acknowledged or closed meanwhile (the body carries `current`)
 //
 // Gate: ESCALATION_ROLES (frontend capability viewEscalations), then
-// permissions.canWithdraw on the row.
+// permissions.canWithdraw on the row. An escalation only its subject's decision
+// ends (a rent review's approval) can't be withdrawn by anyone (403).
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection } from "../db";
@@ -28,7 +29,7 @@ import {
   resolveCaller,
   type Caller,
 } from "../escalation/http";
-import { assertCan, canWithdraw } from "../escalation/permissions";
+import { assertCan, canWithdraw, isWithdrawable } from "../escalation/permissions";
 import { listActiveUsers } from "../escalation/store";
 import { NOTE_MAX_CHARS, type DirectoryUser } from "../escalation/types";
 
@@ -54,6 +55,7 @@ export async function withdrawEscalation(request: HttpRequest, context: Invocati
 
     const loaded = await loadVisibleRow(connection, caller, escalationId);
     directory = loaded.directory;
+    assertCan(isWithdrawable(loaded.row), "This ends with the decision it is waiting on, so it can't be withdrawn. Open it and decide there.");
     assertCan(canWithdraw(caller.viewer, loaded.row), "Only the person who raised this can withdraw it.");
 
     const escalation = await withdraw(connection, { actor: caller.actor, escalationId, expectedRowVersion: rowVersion, reason });

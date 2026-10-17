@@ -3,9 +3,10 @@
 // What happens to leases in the next `days` days (default 90, at most 365), for
 // the dashboard's lease alerts and the Next 90 days list (PLAN WP25, F18c):
 //
-//   200 { asOf, days, events: LeaseEvent[] }
+//   200 { asOf, days, events: LeaseEvent[], pendingChanges: { count, items } }
 //   LeaseEvent  { kind: "review" | "expiry" | "option_deadline",
 //                 tenantId, buildingId, tenantName, date, overdue,
+//                 scheduleSignedOff (whether the tenancy's schedule is signed off, D7),
 //                 review rows also: state, reviewId, method, ownerUserId, ownerName }
 //
 //   review           every open review dated inside the window or already past
@@ -15,7 +16,9 @@
 // Vacated and archived tenancies (D4) are left out of all three kinds.
 //
 // Overdue rows come first, then by date. Rows carry names and dates and nothing
-// else: no rent, ABN, contacts or notes. That is the fix for the leak
+// else: no rent, ABN, contacts or notes. pendingChanges (WP26c) are the changes
+// awaiting a director in the same scope, dates and names only, so the list and
+// its export can say "Includes {n} changes awaiting a director". That is the fix for the leak
 // LAUNCH-READINESS §4.4 notes in getReviewsDue, which sends whole tenancies to
 // anyone signed in. See rentReview/leaseEvents.ts for the rules.
 //
@@ -31,6 +34,7 @@ import { sqlDateToIso } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewMethod, type RentReviewState } from "../rentReviewMachine";
 import { tenantDisplayName } from "../rentReview/dto";
 import { RentReviewError, rentReviewErrorResponse, TENANCY_VIEW_ROLES } from "../rentReview/http";
+import { loadPendingChanges, pendingChangesOf } from "../scheduleChange/pending";
 import {
   buildLeaseEvents,
   DEFAULT_LEASE_EVENT_DAYS,
@@ -45,12 +49,12 @@ const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).joi
 
 // Names and dates only: this list is the whole of what the feed reads about a tenancy.
 const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Expiry,
-    t.OptionPeriods, t.OptionNoticeMonths
+    t.OptionPeriods, t.OptionNoticeMonths, t.ScheduleSignedOffAt
   FROM dbo.Tenants t
   WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.Expiry IS NOT NULL`;
 
 const REVIEWS_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method, r.OwnerUserId,
-    t.BuildingId, t.LegalName, t.TradingName, u.DisplayName AS OwnerName
+    t.BuildingId, t.LegalName, t.TradingName, t.ScheduleSignedOffAt, u.DisplayName AS OwnerName
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
@@ -112,6 +116,7 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       expiry: sqlDateToIso(row.Expiry),
       optionNoticeMonths: row.OptionNoticeMonths === null || row.OptionNoticeMonths === undefined ? null : Number(row.OptionNoticeMonths),
       optionPeriods: typeof row.OptionPeriods === "string" ? row.OptionPeriods : null,
+      scheduleSignedOff: Boolean(row.ScheduleSignedOffAt),
       tenantId: Number(row.TenantId),
       tenantName: tenantDisplayName(row),
     }));
@@ -121,13 +126,18 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       ownerName: typeof row.OwnerName === "string" ? row.OwnerName : null,
       ownerUserId: row.OwnerUserId === null || row.OwnerUserId === undefined ? null : Number(row.OwnerUserId),
       reviewId: String(row.ReviewId),
+      scheduleSignedOff: Boolean(row.ScheduleSignedOffAt),
       scheduledFor: sqlDateToIso(row.ScheduledFor) ?? "",
       state: row.State as RentReviewState,
       tenantId: Number(row.TenantId),
       tenantName: tenantDisplayName(row),
     }));
 
-    return { jsonBody: { asOf: today, days, events: buildLeaseEvents({ days, reviews, tenancies, today }) }, status: 200 };
+    const pending = await loadPendingChanges(connection, buildingId === null ? { all: true } : { buildingId }, "dates_only");
+    return {
+      jsonBody: { asOf: today, days, events: buildLeaseEvents({ days, reviews, tenancies, today }), pendingChanges: pendingChangesOf(pending) },
+      status: 200,
+    };
   } catch (error) {
     return rentReviewErrorResponse(error, context, "getUpcomingLeaseEvents");
   } finally {

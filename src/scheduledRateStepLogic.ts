@@ -12,6 +12,16 @@ export type RentScheduleMethodKind =
  *  review agreed at 0% included); "waived" = no change to the rent. */
 export type StepResolution = "applied" | "waived";
 
+/** A director's override of the lease's ratchet for one review row (C9, D23):
+ *  the engine applies that row's own factor even when it lowers the rent. Written
+ *  only by a rent review a director approved with the ratchet overridden. */
+export interface RatchetExemption {
+  /** When the director overrode it (ISO timestamp or date). */
+  at: string;
+  byName: string;
+  reason: string;
+}
+
 export interface ScheduledRateStep {
   id: string;
   /** Starting AHAC ph annual amount, set on commencement rows. Reviews at the same rate as rent. */
@@ -35,6 +45,8 @@ export interface ScheduledRateStep {
   reviewId?: string;
   /** Set when a review settled the step; review rows only. */
   resolution?: StepResolution;
+  /** The lease's ratchet doesn't hold this row (a director's override); review rows only. */
+  ratchetExempt?: RatchetExemption;
 }
 
 export interface StepValidationOk {
@@ -82,7 +94,12 @@ const ALLOWED_KEYS: ReadonlySet<string> = new Set([
   "flagComment",
   "reviewId",
   "resolution",
+  "ratchetExempt",
 ]);
+
+const EXEMPTION_NAME_MAX = 200;
+const EXEMPTION_AT_MAX = 40;
+const EXEMPTION_REASON_MAX = 2000;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -90,6 +107,22 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 export function isUuidShaped(v: unknown): v is string {
   return typeof v === "string" && UUID_RE.test(v);
+}
+
+/** A step's ratchetExempt: { byName, at, reason }, each a non-empty string. */
+export function validateRatchetExemption(raw: unknown): { ok: true; exemption: RatchetExemption } | StepValidationErr {
+  if (!isPlainObject(raw)) return { ok: false, error: "ratchetExempt must be { byName, at, reason }" };
+  const extra = Object.keys(raw).find((key) => key !== "byName" && key !== "at" && key !== "reason");
+  if (extra) return { ok: false, error: `Unknown key on ratchetExempt: ${extra}` };
+  const text = (value: unknown, max: number): string | null =>
+    typeof value === "string" && value.trim() !== "" && value.trim().length <= max ? value.trim() : null;
+  const byName = text(raw.byName, EXEMPTION_NAME_MAX);
+  const at = text(raw.at, EXEMPTION_AT_MAX);
+  const reason = text(raw.reason, EXEMPTION_REASON_MAX);
+  if (byName === null) return { ok: false, error: `ratchetExempt.byName must be a name of at most ${EXEMPTION_NAME_MAX} chars` };
+  if (at === null || Number.isNaN(Date.parse(at))) return { ok: false, error: "ratchetExempt.at must be an ISO date or timestamp" };
+  if (reason === null) return { ok: false, error: `ratchetExempt.reason must be a reason of at most ${EXEMPTION_REASON_MAX} chars` };
+  return { ok: true, exemption: { at, byName, reason } };
 }
 
 export function validateStep(raw: unknown): StepValidationResult {
@@ -103,7 +136,7 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
-  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, cpiValuePrev, ratePercent, note, flagComment, reviewId, resolution } = raw;
+  const { id, ahacBasePerAnnum, baseRentPerAnnum, sqm, effectiveFrom, effectiveTo, methodKind, cpiValue, cpiValuePrev, ratePercent, note, flagComment, reviewId, resolution, ratchetExempt } = raw;
 
   if (id !== undefined && id !== "") {
     if (!isUuidShaped(id)) {
@@ -202,6 +235,16 @@ export function validateStep(raw: unknown): StepValidationResult {
     }
   }
 
+  let exemption: RatchetExemption | undefined;
+  if (ratchetExempt !== undefined) {
+    if (methodKind === "commencement") {
+      return { ok: false, error: "ratchetExempt applies to review rows, not commencement rows" };
+    }
+    const checked = validateRatchetExemption(ratchetExempt);
+    if (!checked.ok) return checked;
+    exemption = checked.exemption;
+  }
+
   const normalised: ScheduledRateStep = {
     effectiveFrom,
     id: typeof id === "string" && id !== "" ? id : randomUUID(),
@@ -218,6 +261,7 @@ export function validateStep(raw: unknown): StepValidationResult {
   if (flagComment !== undefined) normalised.flagComment = flagComment as string;
   if (reviewId !== undefined) normalised.reviewId = reviewId as string;
   if (resolution !== undefined) normalised.resolution = resolution as StepResolution;
+  if (exemption !== undefined) normalised.ratchetExempt = exemption;
   return { ok: true, step: normalised };
 }
 
@@ -268,21 +312,29 @@ export function validateDeleteStepEnvelope(body: unknown):
 //  • A review's factor (PLAN §3.2): the CPI index ratio (or 1 + rate %),
 //    clamped to the lease's CPI floor and cap on CPI rows, then held at ≥ 1 on
 //    any review row when the lease has the ratchet ("no rent decreases on
-//    review"). A waived review has factor 1. Car parks and misc fees that follow
-//    the rent take the same factor.
+//    review"), except a row carrying ratchetExempt (a director's override of the
+//    lease's ratchet for that row alone, C9 / D23). A waived review has factor 1.
+//    Car parks and misc fees that follow the rent take the same factor.
 //  • A review row whose own value is unknown (CPI index missing, market/other
 //    rate not set) is pending, and so is every row after it until the next
 //    commencement row. A row a review settled (resolution) is never pending on
-//    its own account.
+//    its own account. Once the rent review workflow is live
+//    (terms.workflowLiveFrom, REVIEW_WORKFLOW_LIVE_FROM), an unsettled review
+//    row dated on or after that day is pending too ("awaiting_review"), even
+//    when its rate was keyed ahead: the rent moves only when a review applies
+//    the row, so its arrears are never counted twice (independent review M2).
 //  • effectiveTo is the exclusive end of a row (the first day it no longer
 //    applies).
 //  • The current row is the latest non-pending row with effectiveFrom ≤ today
 //    (the Darwin date).
+//  • Rent relief is not a row: it is an overlay on these figures
+//    (scheduleCharges.ts), so the rows always say what the lease says.
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
 export type SchedulePendingReason =
+  | "awaiting_review"
   | "cpi_index_missing"
   | "earlier_review_pending"
   | "rate_not_set";
@@ -295,6 +347,9 @@ export interface ScheduleTerms {
   cpiFloorPercent?: number | null;
   /** No rent decreases on review: every review's factor is at least 1. */
   reviewRatchet?: boolean | null;
+  /** REVIEW_WORKFLOW_LIVE_FROM (YYYY-MM-DD) once reviews run through the
+   *  workflow; null or absent while they are keyed by hand. */
+  workflowLiveFrom?: string | null;
 }
 
 export interface ScheduleRow {
@@ -350,9 +405,15 @@ function ownValueMissing(step: ScheduledRateStep): SchedulePendingReason | null 
 }
 
 /** Why a review row can't be computed on its own, or null when it can. A row
- *  a review settled (applied or waived) never waits. */
-export function stepPendingReason(step: ScheduledRateStep): SchedulePendingReason | null {
-  return step.resolution ? null : ownValueMissing(step);
+ *  a review settled (applied or waived) never waits. With the workflow live
+ *  (`workflowLiveFrom`), an unsettled review row dated on or after that day
+ *  waits for its review whatever was keyed on it. */
+export function stepPendingReason(step: ScheduledRateStep, workflowLiveFrom: string | null = null): SchedulePendingReason | null {
+  if (step.resolution) return null;
+  if (workflowLiveFrom !== null && step.methodKind !== "commencement" && step.effectiveFrom >= workflowLiveFrom) {
+    return "awaiting_review";
+  }
+  return ownValueMissing(step);
 }
 
 /** CPI uses the exact index ratio when both values are known; the stored
@@ -394,7 +455,7 @@ function reviewOutcome(
       settled.capApplied = true;
     }
   }
-  if (terms.reviewRatchet && factor < 1) {
+  if (terms.reviewRatchet && factor < 1 && !step.ratchetExempt) {
     factor = 1;
     settled.ratchetApplied = true;
   }
@@ -466,7 +527,7 @@ export function computeScheduleRows(
       continue;
     }
 
-    const ownReason = stepPendingReason(step);
+    const ownReason = stepPendingReason(step, terms.workflowLiveFrom ?? null);
     if (ownReason !== null) pendingCascade = true;
     if (pendingCascade) {
       emit(step, ownReason ?? "earlier_review_pending", explicitArea ?? area ?? fallbackArea, cpiBaseline, null);
@@ -652,7 +713,16 @@ const DIFF_FIELDS: ReadonlyArray<keyof ScheduledRateStep> = [
   "flagComment",
   "reviewId",
   "resolution",
+  "ratchetExempt",
 ];
+
+/** Field values compared by what they hold, key order aside: ratchetExempt is an object. */
+const sameValue = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+  const sorted = (value: object) => JSON.stringify(Object.entries(value).sort(([x], [y]) => x.localeCompare(y)));
+  return sorted(a) === sorted(b);
+};
 
 export function diffSteps(
   prev: ScheduledRateStep,
@@ -662,7 +732,7 @@ export function diffSteps(
   for (const field of DIFF_FIELDS) {
     const from = prev[field];
     const to = next[field];
-    if (from !== to) {
+    if (!sameValue(from, to)) {
       diff[field] = { from: from ?? null, to: to ?? null };
     }
   }

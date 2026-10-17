@@ -25,7 +25,7 @@ import { addClockHours, holidaysFromEnv } from "./businessTime";
 import { fallbackEmailsByRole } from "./config";
 import { isDecisionRow, isNextStepRow, ladderOf, type LadderRaiser } from "./decisionRows";
 import { EscalationError, isUniqueViolation } from "./errors";
-import { LadderError, resolveTarget, type AuthorityRouteStep, type ResolvedTarget } from "./ladder";
+import { LadderError, levelOfRole, resolveTarget, type AuthorityRouteStep, type ResolvedTarget } from "./ladder";
 import { notifyPreviousLevel, notifyRaiserResolved, notifyTargets, type NotifyEvent, type NotifyOptions } from "./notifier";
 import { getPolicy } from "./policies";
 import { normaliseRole, roleLabel } from "./roles";
@@ -34,6 +34,7 @@ import {
   getEscalationRow,
   insertEscalation,
   listActiveUsers,
+  listLiveForSubject,
   updateEscalation,
   type EscalationChanges,
   type NewEscalation,
@@ -211,6 +212,10 @@ export interface RaiseInput {
   reason?: string | null;
   /** For callers that just evaluated the condition (the sweep). */
   skipConditionCheck?: boolean;
+  /** Start at the first ladder level holding this role instead of the bottom:
+   *  a rent reduction goes to the directors at once, a re-raised approval goes
+   *  back to the level it had reached. Rules 1-3 still apply from there. */
+  startAtRole?: string | null;
   subjectId: string;
   subjectType: string;
   /** Replaces the subject's name and the headline altogether. */
@@ -296,6 +301,10 @@ async function planRaise(connection: Connection, input: RaiseInput): Promise<{ e
   const ladderRaiser = input.ladderRaiser
     ? { role: normaliseRole(input.ladderRaiser.role), userId: input.ladderRaiser.userId }
     : null;
+  const raiser = ladderRaiser ? ladderPerson(ladderRaiser, users) : raiserFor(input.actor, users);
+  const fromLevel = input.startAtRole
+    ? levelOfRole(policy.ladder, input.startAtRole, { authorityRoute: input.authorityRoute, raiserRole: raiser?.role, userTargets: input.userTargets })
+    : undefined;
   let target: ResolvedTarget | null;
   try {
     target = resolveTarget({
@@ -303,12 +312,13 @@ async function planRaise(connection: Connection, input: RaiseInput): Promise<{ e
       authorityRoute: input.authorityRoute,
       excludeUserIds: input.excludeUserIds,
       fallbackEmails: fallbackEmailsByRole(),
+      fromLevel,
       kind: policy.kind,
       ladder: policy.ladder,
       namedKeepRaiser: ladderRaiser !== null,
       onNoTarget: "directors",
       preferredUserId: input.preferredUserId,
-      raiser: ladderRaiser ? ladderPerson(ladderRaiser, users) : raiserFor(input.actor, users),
+      raiser,
       userTargets: input.userTargets,
     });
   } catch (error) {
@@ -752,6 +762,83 @@ export async function autoResolve(connection: Connection, input: AutoResolveInpu
     );
   });
   return reload(connection, input.escalationId);
+}
+
+// ── conclude (the subject's own decision) ────────────────────────────────────
+
+export interface ConcludeInput {
+  actor: LedgerActor;
+  /** What the subject's decision was, stored as ResolutionCode ("approved",
+   *  "returned", ...): lower-case words joined by underscores, at most 32 characters. */
+  code: string;
+  /** The decision's note or reason; required when an escalation is withdrawn. */
+  note?: string | null;
+  now?: Date;
+  notify?: NotifyOptions;
+  /** Only escalations under these policies; every live one on the subject when left out. */
+  policyKeys?: readonly string[];
+  subjectId: string;
+  subjectType: string;
+  /** The subject is gone (cancelled): an escalation nobody acknowledged is
+   *  withdrawn rather than resolved. */
+  withdrawOpen?: boolean;
+}
+
+const DECISION_CODE_RE = /^[a-z][a-z_]{0,31}$/;
+
+/**
+ * The subject's own decision has ended its escalations (PLAN §3.7: "authority
+ * escalations resolve only through the domain decision"). The domain calls this
+ * once its decision has committed: each live escalation on the subject (under
+ * `policyKeys`, if given) ends in a transaction of its own, resolved with the
+ * decision as its code, or withdrawn when the subject was cancelled and nobody
+ * had picked it up. Unlike resolve, it ends authority escalations too: the
+ * caller is the domain, and it has just decided. Ledgered like every other
+ * transition; the human raiser of one that was resolved is told. Returns the
+ * rows it ended; one someone else ended first is skipped.
+ */
+export async function concludeForSubject(connection: Connection, input: ConcludeInput): Promise<EscalationRow[]> {
+  const now = input.now ?? new Date();
+  if (!DECISION_CODE_RE.test(input.code)) throw new EscalationError("bad_request", `"${input.code}" isn't a resolution code`);
+  const note = trimNote(input.note);
+  const live = (await listLiveForSubject(connection, input.subjectType, input.subjectId)).filter(
+    (row) => !input.policyKeys || input.policyKeys.includes(row.policyKey),
+  );
+  const ended: EscalationRow[] = [];
+  for (const seen of live) {
+    const withdraw = input.withdrawOpen === true && seen.status === "open";
+    if (withdraw && !note) throw new EscalationError("reason_required", "Say why: a withdrawn escalation needs a reason");
+    const done = await inTransaction(connection, async () => {
+      const row = await lockRow(connection, seen.escalationId);
+      if (!LIVE_STATUSES.includes(row.status)) return null;
+      const adapter = requireAdapter(row.subjectType);
+      const status: EscalationStatus = withdraw && row.status === "open" ? "withdrawn" : "resolved";
+      await applyChanges(connection, row, {
+        ResolutionCode: input.code,
+        ResolutionNote: note,
+        ResolvedAt: now,
+        ResolvedByName: actorName(input.actor),
+        ResolvedByUserId: actorUserId(input.actor),
+        Status: status,
+      });
+      const updated = await reload(connection, row.escalationId);
+      await adapter.onChange?.(connection, updated);
+      await record(
+        connection,
+        ledgerEntry(status === "withdrawn" ? "escalation.withdraw" : "escalation.resolve", input.actor, updated, adapter, {
+          after: { ...snapshot(updated), resolutionCode: input.code },
+          before: snapshot(row),
+          reason: note,
+          ruleApplied: input.code,
+        }),
+      );
+      return updated;
+    });
+    if (!done) continue;
+    ended.push(done);
+    if (done.status === "resolved") await notifyRaiserResolved(connection, done, input.notify);
+  }
+  return ended;
 }
 
 // ── escalate further (supersede) ─────────────────────────────────────────────

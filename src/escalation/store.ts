@@ -127,6 +127,21 @@ export async function findLiveEscalation(
   return rows.length === 0 ? null : toEscalationRow(rows[0]);
 }
 
+/** Every open or acknowledged escalation about one subject, whatever its policy. */
+export async function listLiveForSubject(connection: Connection, subjectType: string, subjectId: string): Promise<EscalationRow[]> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT ${ESCALATION_COLUMNS} FROM dbo.Escalations
+     WHERE SubjectType = @SubjectType AND SubjectId = @SubjectId AND ${LIVE_SQL}
+     ORDER BY EscalationId`,
+    [
+      { name: "SubjectType", type: TYPES.NVarChar, value: subjectType },
+      { name: "SubjectId", type: TYPES.NVarChar, value: subjectId },
+    ],
+  );
+  return rows.map(toEscalationRow);
+}
+
 /** Every open or acknowledged escalation. A few dozen rows in practice. */
 export async function listLiveEscalations(connection: Connection): Promise<EscalationRow[]> {
   const rows = await executeQuery(

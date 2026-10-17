@@ -104,6 +104,14 @@ export function expandLadder(ladder: readonly LadderEntry[], input: ExpandInput 
   return levels.map((level, index) => ({ ...level, position: index + 1 }));
 }
 
+/** The position of the first level holding `role` once tokens are expanded; the
+ *  top level when none does (a caller that wants "the directors" gets the top). */
+export function levelOfRole(ladder: readonly LadderEntry[], role: string, input: ExpandInput = {}): number {
+  const levels = expandLadder(ladder, input);
+  const wanted = normaliseRole(role);
+  return levels.find((level) => level.role === wanted)?.position ?? Math.max(1, levels.length);
+}
+
 export interface ResolveInput {
   /** Everyone active in AppUsers. */
   activeUsers: readonly DirectoryUser[];

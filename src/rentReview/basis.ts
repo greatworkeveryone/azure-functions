@@ -22,12 +22,22 @@ import type { ScheduledRateStep } from "../scheduledRateStepLogic";
 
 export type RentReviewBasis = Record<string, unknown>;
 
-/** The reference quarter convention (PLAN Q5): the quarter ending immediately
- *  before the review date. Kept as a named rule so a tenancy can override it
- *  here later. */
-export const CPI_REFERENCE_RULES = ["quarter_before_review_date"] as const;
+/** The reference quarter conventions (PLAN Q5, independent review M4), one per
+ *  lease on Tenants.CpiReferenceQuarterRule (NULL = the default):
+ *    quarter_before_review_date      the quarter ending immediately before the
+ *                                    review date (the default)
+ *    latest_published_before_review  the latest quarter ABS published before the
+ *                                    review date (its end + 30 days falls before it)
+ *  The basis takes the lease's rule at commence; a basis on another rule departs
+ *  from the lease (rentReviewCalc.ts leaseDepartures). */
+export const CPI_REFERENCE_RULES = ["quarter_before_review_date", "latest_published_before_review"] as const;
 export type CpiReferenceRule = (typeof CPI_REFERENCE_RULES)[number];
 export const DEFAULT_CPI_REFERENCE_RULE: CpiReferenceRule = "quarter_before_review_date";
+
+/** A stored or sent rule, or the default for anything else (NULL included). */
+export function cpiReferenceRuleOf(value: unknown): CpiReferenceRule {
+  return typeof value === "string" && (CPI_REFERENCE_RULES as readonly string[]).includes(value) ? (value as CpiReferenceRule) : DEFAULT_CPI_REFERENCE_RULE;
+}
 
 export const CPI_REGIONS_IN_BASIS = ["AUS", "DARWIN"] as const;
 
@@ -46,6 +56,8 @@ const DEADLINE_LABEL_MAX_CHARS = 100;
 export interface BasisSource {
   cpiCapPercent: number | null;
   cpiFloorPercent: number | null;
+  /** Tenants.CpiReferenceQuarterRule (M4); null or absent = the default. */
+  cpiReferenceRule?: string | null;
   /** Tenants.CpiRegion. */
   cpiRegion: string | null;
   fixedReviewPercent: number | null;
@@ -88,7 +100,7 @@ export function buildBasisSnapshot(source: BasisSource): RentReviewBasis {
         ...common,
         capPercent: finiteOrNull(source.cpiCapPercent),
         floorPercent: finiteOrNull(source.cpiFloorPercent),
-        referenceQuarterRule: DEFAULT_CPI_REFERENCE_RULE,
+        referenceQuarterRule: cpiReferenceRuleOf(source.cpiReferenceRule ?? null),
         region: regionOrNull(source.cpiRegion),
       };
     case "fixed":

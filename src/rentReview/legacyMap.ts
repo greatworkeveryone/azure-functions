@@ -5,10 +5,10 @@
 // two columns and their CHECKs is a later, separately approved migration (111);
 // until then this file is the only place the mapping lives.
 //
-// Readers that predate the workflow (the next-review derivation's
-// RESOLVED_REVIEW_DATES_SQL) still read Status: approved and completed reviews
-// read as 'completed' and waived or cancelled ones as 'skipped', which is what
-// settles a review's date for them.
+// Readers that predate the workflow read Status: approved and completed reviews
+// read as 'completed' and waived or cancelled ones as 'skipped'. The next-review
+// derivation (RESOLVED_REVIEW_DATES_SQL) reads State first for workflow rows, so
+// a cancelled review does not settle its date there (WP26).
 
 import type { RentReviewMethod, RentReviewState } from "../rentReviewMachine";
 

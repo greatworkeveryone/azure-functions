@@ -10,6 +10,7 @@ import { registerAdapter, unregisterAdapter, type EscalationAdapter } from "./ad
 import {
   acknowledge,
   autoResolve,
+  concludeForSubject,
   escalateFurther,
   hasNextLevel,
   previewTarget,
@@ -147,6 +148,9 @@ jest.mock("./store", () => {
     }),
     listActiveUsers: jest.fn(async () => mockWorld.users.map((u) => ({ ...u }))),
     listLiveEscalations: jest.fn(async () => [...mockWorld.rows.values()].filter(live).map((r) => ({ ...r }))),
+    listLiveForSubject: jest.fn(async (_c: unknown, type: string, id: string) =>
+      [...mockWorld.rows.values()].filter((r) => r.subjectType === type && r.subjectId === id && live(r)).map((r) => ({ ...r })),
+    ),
     updateEscalation: jest.fn(async (_c: unknown, id: number, expected: string, changes: Record<string, unknown>) => {
       const row = mockWorld.rows.get(id);
       if (!row || row.rowVersion !== expected) return false;
@@ -218,11 +222,13 @@ const POLICIES: Record<string, EscalationPolicy> = {
   }),
 };
 
+const defaultSummary = async (_c: unknown, id: string) => (id === "404" ? null : { buildingId: 5, context: { title: "Leaking roof" }, summary: "Job #12 · Leaking roof" });
+
 const jobAdapter = {
   deepLink: jest.fn((id: string) => `/jobs?jobId=${id}`),
   isConditionActive: jest.fn(async () => true),
   ledgerScope: jest.fn((e: { subjectId: string }) => ({ jobId: Number(e.subjectId) })),
-  loadSummary: jest.fn(async (_c: unknown, id: string) => (id === "404" ? null : { buildingId: 5, context: { title: "Leaking roof" }, summary: "Job #12 · Leaking roof" })),
+  loadSummary: jest.fn(defaultSummary),
   onChange: jest.fn(async () => undefined),
   subjectType: "job",
   visibleTo: jest.fn(() => true),
@@ -242,6 +248,9 @@ beforeEach(() => {
   mockWorld.insertError = null;
   mockWorld.snapshot = null;
   jobAdapter.isConditionActive.mockResolvedValue(true);
+  // clearAllMocks keeps implementations; a describe that swaps this one (the sweep's, startAtRole's)
+  // must not leak it into the tests after it.
+  jobAdapter.loadSummary.mockImplementation(defaultSummary);
   jobAdapter.onChange.mockImplementation(async () => {
     events.push("onChange");
   });
@@ -758,6 +767,83 @@ describe("autoResolve (condition_cleared)", () => {
 
 // ── escalate further ─────────────────────────────────────────────────────────
 
+describe("concludeForSubject (the subject's own decision)", () => {
+  const raiseQuote = (over: Partial<Parameters<typeof raise>[1]> = {}) =>
+    raise(conn, { actor: actorOf(FAY), now: NOW, policyKey: "quote.over_limit", subjectId: "77", subjectType: "quote", ...over });
+
+  it("ends an authority escalation, which resolve refuses, with the decision as its code, and tells the raiser after commit", async () => {
+    const { escalation } = await raiseQuote();
+    events.length = 0;
+    ledger.mockClear();
+
+    const ended = await concludeForSubject(conn, { actor: actorOf(CAM), code: "approved", now: NOW, subjectId: "77", subjectType: "quote" });
+
+    expect(ended.map((r) => r.escalationId)).toEqual([escalation.escalationId]);
+    expect(rowOf(escalation.escalationId)).toMatchObject({ resolutionCode: "approved", resolvedByName: "Cam", resolvedByUserId: 3, status: "resolved" });
+    expect(events).toEqual(["begin", "ledger", "commit", "notifyRaiser"]);
+    expect(ledgerCalls()[0]).toMatchObject({
+      action: "escalation.resolve",
+      after: { resolutionCode: "approved", status: "resolved" },
+      before: { status: "open" },
+      ruleApplied: "approved",
+      subject: { id: escalation.escalationId, type: "escalation" },
+    });
+  });
+
+  it("withdraws one nobody picked up when the subject was cancelled, with the reason, and resolves one somebody had", async () => {
+    const quote = await raiseQuote();
+    const job = await raiseManual();
+    await acknowledge(conn, { actor: actorOf(ADAM), escalationId: job.escalation.escalationId, now: NOW });
+    ledger.mockClear();
+
+    await concludeForSubject(conn, { actor: actorOf(DEE), code: "cancelled", note: "Tenant vacated", subjectId: "77", subjectType: "quote", withdrawOpen: true });
+    await concludeForSubject(conn, { actor: actorOf(DEE), code: "cancelled", note: "Tenant vacated", subjectId: "12", subjectType: "job", withdrawOpen: true });
+
+    expect(rowOf(quote.escalation.escalationId)).toMatchObject({ resolutionCode: "cancelled", resolutionNote: "Tenant vacated", status: "withdrawn" });
+    expect(rowOf(job.escalation.escalationId)).toMatchObject({ resolutionCode: "cancelled", status: "resolved" });
+    expect(ledgerCalls().map((e) => [e.action, e.reason])).toEqual([
+      ["escalation.withdraw", "Tenant vacated"],
+      ["escalation.resolve", "Tenant vacated"],
+    ]);
+  });
+
+  it("needs a reason to withdraw, and changes nothing without one", async () => {
+    const { escalation } = await raiseQuote();
+    await expect(concludeForSubject(conn, { actor: actorOf(DEE), code: "cancelled", subjectId: "77", subjectType: "quote", withdrawOpen: true })).rejects.toMatchObject({
+      code: "reason_required",
+    });
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+  });
+
+  it("ends only the policies it is given", async () => {
+    const manual = await raiseManual();
+    await raiseManual({ policyKey: "job.stalled_unacknowledged" });
+    const ended = await concludeForSubject(conn, { actor: SWEEP_ACTOR, code: "approved", policyKeys: ["job.manual"], subjectId: "12", subjectType: "job" });
+    expect(ended.map((r) => r.escalationId)).toEqual([manual.escalation.escalationId]);
+    expect([...mockWorld.rows.values()].filter((r) => r.status === "open").map((r) => r.policyKey)).toEqual(["job.stalled_unacknowledged"]);
+  });
+
+  it("refuses a code that isn't one, before touching anything", async () => {
+    const { escalation } = await raiseQuote();
+    await expect(concludeForSubject(conn, { actor: actorOf(CAM), code: "Approved!", subjectId: "77", subjectType: "quote" })).rejects.toBeInstanceOf(EscalationError);
+    await expect(concludeForSubject(conn, { actor: actorOf(CAM), code: "a".repeat(33), subjectId: "77", subjectType: "quote" })).rejects.toBeInstanceOf(EscalationError);
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+  });
+
+  it("rolls the ending back when the ledger write fails", async () => {
+    const { escalation } = await raiseQuote();
+    ledger.mockRejectedValueOnce(new Error("ledger down"));
+    await expect(concludeForSubject(conn, { actor: actorOf(CAM), code: "approved", subjectId: "77", subjectType: "quote" })).rejects.toThrow("ledger down");
+    expect(rowOf(escalation.escalationId).status).toBe("open");
+    expect(notifyRaiserResolved).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when the subject has no live escalation", async () => {
+    await expect(concludeForSubject(conn, { actor: actorOf(CAM), code: "approved", subjectId: "nothing", subjectType: "quote" })).resolves.toEqual([]);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+  });
+});
+
 describe("escalateFurther", () => {
   it("supersedes with a new row at the next level, linked by ParentEscalationId, with both rows in the ledger under one correlation id", async () => {
     const esc = await openEscalation();
@@ -1127,6 +1213,36 @@ describe("the sweep drives the engine", () => {
   });
 });
 
+describe("raise: startAtRole", () => {
+  beforeEach(() => {
+    jobAdapter.loadSummary.mockImplementation(async () => ({ buildingId: 5, context: { title: "Over limit" }, summary: "Quote #7" }));
+  });
+
+  it("starts the ladder at the first level holding the role, skipping the eligible levels below it", async () => {
+    const { escalation } = await raise(conn, {
+      actor: SWEEP_ACTOR,
+      now: NOW,
+      policyKey: "quote.over_limit",
+      startAtRole: "director",
+      subjectId: "7",
+      subjectType: "quote",
+    });
+    expect(escalation).toMatchObject({ level: 2, noIndependentTarget: false, targetRole: "director" });
+  });
+
+  it("aims at the directors, flagged, when the only director is left out", async () => {
+    const { escalation } = await raise(conn, {
+      actor: SWEEP_ACTOR,
+      excludeUserIds: [DEE.userId],
+      now: NOW,
+      policyKey: "quote.over_limit",
+      startAtRole: "director",
+      subjectId: "7",
+      subjectType: "quote",
+    });
+    expect(escalation).toMatchObject({ noIndependentTarget: true, targetRole: "director" });
+  });
+});
 
 // ── a decision request's escalation (jobs plan A1) ───────────────────────────
 

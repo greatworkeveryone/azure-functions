@@ -18,7 +18,9 @@
 //   rowVersion must be the one the caller read, else 409 { code: "stale", current }
 //
 // Ledgered as rent_review.basis_update in the same transaction, with the old
-// and new values of the fields that changed. 200 { review }.
+// and new values of the fields that changed. A calculation worked on the old
+// basis is dropped with it (WP26), so the review is calculated again before it
+// is submitted. 200 { review }.
 //
 // Gate: the roles that may edit a tenancy (rentReview/http.ts); the owner or
 // manager check on top of it is made against the review.

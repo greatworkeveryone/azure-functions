@@ -10,6 +10,7 @@ import { APPROVAL_HEADER, FIRST_GUARDED_MIGRATION, findDestructiveStatements, sc
 // files, not a SQL parser.
 
 const MIGRATIONS = [
+  "099_schedule_change_requests.sql",
   "112_job_invoices_contractor_id.sql",
   "114_payments_invoice_link.sql",
   "115_myob_api_log.sql",
@@ -21,6 +22,7 @@ const MIGRATIONS = [
   "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
   "136_building_category_owner.sql",
+  "139_keys_rowversion.sql",
   "137_job_decision_requests.sql",
   "138_job_decisions.sql",
   "125_myob_reference_cache.sql",
@@ -70,10 +72,13 @@ describe.each(MIGRATIONS)("migration %s", (file) => {
     }
   });
 
-  it("adds columns only as NULLable or with a default", () => {
+  it("adds columns only as NULLable, with a default, or as a ROWVERSION", () => {
     const code = stripComments(raw);
     const adds = code.match(/ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+(?!CONSTRAINT\b)[^;]+;/gi) ?? [];
     for (const add of adds) {
+      // The server stamps a ROWVERSION on every row itself (096, 101, 139), so a statement that
+      // adds nothing but one needs neither NULL nor a default and cannot fail on existing rows.
+      if (/^ALTER\s+TABLE\s+[\w.[\]]+\s+ADD\s+\w+\s+ROWVERSION\s*;$/i.test(add)) continue;
       expect(add).toMatch(/(?<!NOT\s)NULL\b|\bDEFAULT\b/i);
     }
   });

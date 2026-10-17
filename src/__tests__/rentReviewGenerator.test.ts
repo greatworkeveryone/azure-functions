@@ -19,6 +19,7 @@ import {
   planGenerator,
   reviewWindowDays,
   runReviewGenerator,
+  scheduleNextReview,
   toTenancyFacts,
   type OpenReview,
 } from "../rentReview/generator";
@@ -31,6 +32,10 @@ jest.mock("../db", () => ({
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../tenant-register-cache", () => ({ invalidateTenantAndBuilding: jest.fn() }));
+// The escalation step has its own tests (rentReviewEscalations.test.ts); here only its wiring.
+jest.mock("../rentReview/escalations", () => ({
+  runReviewEscalations: jest.fn().mockResolvedValue({ ended: 0, errors: [], raised: 2, truncated: false }),
+}));
 
 const db = require("../db") as {
   beginTransaction: jest.Mock;
@@ -39,6 +44,7 @@ const db = require("../db") as {
   rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as { invalidateTenantAndBuilding: jest.Mock };
+const { runReviewEscalations } = require("../rentReview/escalations") as { runReviewEscalations: jest.Mock };
 
 // The generator is handed the date, so these tests never read the clock.
 const TODAY = "2026-10-14";
@@ -126,6 +132,12 @@ function fakeSql(_connection: unknown, sql: string, params: Param[] = []): Promi
       return Promise.reject(new Error("ledger unavailable"));
     }
     return Promise.resolve([]);
+  }
+  if (/FROM dbo\.Tenants t\s+WHERE t\.TenantId = @TenantId AND t\.Status <> 'vacated' AND t\.ArchivedAt IS NULL/.test(sql)) {
+    return Promise.resolve(tenants.filter((row) => row.TenantId === param("TenantId") && row.Status !== "vacated" && !row.ArchivedAt));
+  }
+  if (/FROM dbo\.RentReviews\s+WHERE TenantId = @TenantId AND State IN/.test(sql)) {
+    return Promise.resolve(stored.filter((r) => r.TenantId === param("TenantId") && OPEN.includes(r.State)).map((r) => ({ ...r })));
   }
   if (/FROM dbo\.Tenants t\s+WHERE t\.Status <> 'vacated'/.test(sql)) {
     // The fake honours the archive filter only if the SQL asks for it, so the
@@ -733,5 +745,60 @@ describe("runReviewGenerator, dry run", () => {
     expect(live.report.scheduled).toBe(dry.report.scheduled);
     expect(live.report.windowsOpened).toBe(dry.report.windowsOpened);
     expect(live.report.actions).toEqual(dry.report.actions);
+  });
+});
+
+describe("escalating (the timer asks for it)", () => {
+  beforeEach(() => {
+    tenants = [tenancy(1, DAY(5))];
+  });
+
+  it("runs the review escalation step after its own work, as the generator, live or dry", async () => {
+    const { report } = await run({ escalate: true });
+    expect(runReviewEscalations).toHaveBeenCalledWith(CONNECTION, expect.objectContaining({ actor: GENERATOR_ACTOR, dryRun: false, today: TODAY }));
+    expect(report.escalations).toEqual({ ended: 0, errors: [], raised: 2, truncated: false });
+
+    await run({ dryRun: true, escalate: true });
+    expect(runReviewEscalations.mock.calls[1][1]).toMatchObject({ dryRun: true });
+  });
+
+  it("doesn't escalate unless asked", async () => {
+    const { report } = await run();
+    expect(runReviewEscalations).not.toHaveBeenCalled();
+    expect(report.escalations).toBeNull();
+  });
+});
+
+describe("scheduleNextReview: SCHEDULE for one tenancy, after a decision", () => {
+  it("schedules the tenancy's next review by the generator's own plan and writes, and opens its window when it is due soon", async () => {
+    tenants = [tenancy(1, DAY(30)), tenancy(2, DAY(40))];
+    const result = await scheduleNextReview(CONNECTION, 1, { today: TODAY, windowDays: 60 });
+    expect(result).toEqual({ review: { reviewId: expect.any(String), scheduledFor: DAY(30), state: "due" }, skipped: null });
+    expect(stored.map((r) => r.TenantId)).toEqual([1]);
+    expect(ledgerRows().map((r) => [r.action, r.actorName])).toEqual([
+      ["rent_review.schedule", GENERATOR_ACTOR.name],
+      ["rent_review.open_window", GENERATOR_ACTOR.name],
+    ]);
+  });
+
+  it("returns the open review a tenancy already has, and writes nothing", async () => {
+    tenants = [tenancy(1, DAY(120))];
+    await scheduleNextReview(CONNECTION, 1, { today: TODAY, windowDays: 60 });
+    writes = [];
+    const again = await scheduleNextReview(CONNECTION, 1, { today: TODAY, windowDays: 60 });
+    expect(again.review).toMatchObject({ scheduledFor: DAY(120), state: "scheduled" });
+    expect(writes).toEqual([]);
+  });
+
+  it("gives a vacated or archived tenancy nothing", async () => {
+    tenants = [tenancy(1, DAY(30), { Status: "vacated" }), tenancy(2, DAY(30), { ArchivedAt: new Date() })];
+    await expect(scheduleNextReview(CONNECTION, 1, { today: TODAY })).resolves.toEqual({ review: null, skipped: "vacated" });
+    await expect(scheduleNextReview(CONNECTION, 2, { today: TODAY })).resolves.toEqual({ review: null, skipped: "vacated" });
+    expect(writes).toEqual([]);
+  });
+
+  it("gives a lease with no review clause nothing, and says why", async () => {
+    tenants = [tenancy(1, DAY(30), { ReviewType: "none" })];
+    await expect(scheduleNextReview(CONNECTION, 1, { today: TODAY })).resolves.toEqual({ review: null, skipped: "no_review_clause" });
   });
 });

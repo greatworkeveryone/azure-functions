@@ -64,10 +64,9 @@ describe("138_job_decisions.sql is additive and safe to run twice", () => {
     expect(batches.indexOf(precondition)).toBeLessThan(batches.findIndex((b) => /CREATE TABLE dbo\.JobDecisions/.test(b)));
   });
 
-  it("is the one 138, after 137, and the last for now", () => {
+  it("is the one 138, after 137", () => {
     expect(readdirSync(DIR).filter((f) => f.startsWith("138_"))).toEqual([FILE]);
     expect(readdirSync(DIR).filter((f) => f.startsWith("137_"))).toHaveLength(1);
-    expect(readdirSync(DIR).some((f) => f.startsWith("139_"))).toBe(false);
   });
 
   it("sets the session options a filtered index needs, in a batch of their own", () => {

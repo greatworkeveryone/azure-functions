@@ -1,5 +1,10 @@
 /// <reference types="jest" />
-import { _resetPlannerSyncLogForTests, PLANNER_SYNC_DISABLED_MESSAGE, plannerSyncEnabled } from "../plannerFlag";
+import {
+  _resetPlannerSyncLogForTests,
+  PLANNER_SYNC_DISABLED_MESSAGE,
+  plannerSyncEnabled,
+  plannerUnsignedHoldbackEnabled,
+} from "../plannerFlag";
 
 describe("plannerSyncEnabled", () => {
   let warn: jest.SpyInstance;
@@ -64,5 +69,33 @@ describe("plannerSyncEnabled", () => {
     plannerSyncEnabled({});
     plannerSyncEnabled({});
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("plannerUnsignedHoldbackEnabled", () => {
+  it("is on only when PLANNER_UNSIGNED_HOLDBACK_ENABLED is exactly the string true", () => {
+    expect(plannerUnsignedHoldbackEnabled({ PLANNER_UNSIGNED_HOLDBACK_ENABLED: "true" })).toBe(true);
+  });
+
+  it.each([undefined, "", "false", "TRUE", "True", "1", "yes", " true", "true "])("is off when it is %p", (value) => {
+    expect(plannerUnsignedHoldbackEnabled({ PLANNER_UNSIGNED_HOLDBACK_ENABLED: value })).toBe(false);
+  });
+
+  it("is not switched on by PLANNER_SYNC_ENABLED, and does not switch Planner sync on", () => {
+    expect(plannerUnsignedHoldbackEnabled({ PLANNER_SYNC_ENABLED: "true" })).toBe(false);
+    expect(plannerSyncEnabled({ PLANNER_UNSIGNED_HOLDBACK_ENABLED: "true" })).toBe(false);
+  });
+
+  it("reads process.env when no env is passed", () => {
+    const before = process.env.PLANNER_UNSIGNED_HOLDBACK_ENABLED;
+    try {
+      delete process.env.PLANNER_UNSIGNED_HOLDBACK_ENABLED;
+      expect(plannerUnsignedHoldbackEnabled()).toBe(false);
+      process.env.PLANNER_UNSIGNED_HOLDBACK_ENABLED = "true";
+      expect(plannerUnsignedHoldbackEnabled()).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.PLANNER_UNSIGNED_HOLDBACK_ENABLED;
+      else process.env.PLANNER_UNSIGNED_HOLDBACK_ENABLED = before;
+    }
   });
 });

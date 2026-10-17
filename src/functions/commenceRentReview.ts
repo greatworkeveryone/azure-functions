@@ -17,7 +17,9 @@
 //               review type read with mapMethodKind, else "other"
 //
 // Ledgered as rent_review.commence in the same transaction (no ledger row, no
-// commence). 200 { review }.
+// commence). 200 { review }. After the commit, the review's E1 (not commenced)
+// ends with the code "commenced" (WP26); a failure there is logged and the
+// escalation sweep ends it anyway once its condition has cleared.
 //
 // Gate: the roles that may edit a tenancy, as upsertRegisterTenant
 // (frontend capability editTenancy; PLAN WP26 gives commenceRentReview the same).
@@ -33,6 +35,8 @@ import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { buildBasisSnapshot } from "../rentReview/basis";
 import { toReviewDto } from "../rentReview/dto";
+import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
+import { settleReviewEscalations } from "../rentReview/escalations";
 import {
   readJsonObject,
   readReviewId,
@@ -114,6 +118,7 @@ export async function commenceRentReview(request: HttpRequest, context: Invocati
       const basis = buildBasisSnapshot({
         cpiCapPercent: decimal(tenancy.CpiCapPercent),
         cpiFloorPercent: decimal(tenancy.CpiFloorPercent),
+        cpiReferenceRule: typeof tenancy.CpiReferenceQuarterRule === "string" ? tenancy.CpiReferenceQuarterRule : null,
         cpiRegion: typeof tenancy.CpiRegion === "string" ? tenancy.CpiRegion : null,
         fixedReviewPercent: decimal(tenancy.FixedReviewPercent),
         intervalMonths: decimal(tenancy.ReviewIntervalMonths),
@@ -158,7 +163,17 @@ export async function commenceRentReview(request: HttpRequest, context: Invocati
     });
 
     invalidateTenantAndBuilding(done.tenantId, done.buildingId);
-    return { jsonBody: { review: toReviewDto(done.after, today) }, status: 200 };
+    const review = toReviewDto(done.after, today);
+    await settleReviewEscalations(db, {
+      actor: caller.actor,
+      code: REVIEW_DECISION_CODES.commenced,
+      log: (message) => context.warn(message),
+      reviewId,
+      scheduledFor: review.scheduledFor,
+      state: review.state,
+      today,
+    });
+    return { jsonBody: { review }, status: 200 };
   } catch (error) {
     return rentReviewErrorResponse(error, context, "commenceRentReview");
   } finally {

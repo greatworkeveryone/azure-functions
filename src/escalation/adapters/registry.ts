@@ -44,6 +44,10 @@ export interface EscalationAdapter {
   /** Narrows who may see escalations about this subject, on top of the target /
    *  raiser / roles-above rule, and who may raise one by hand. */
   visibleTo(viewer: Viewer, ref: ConditionRef): boolean;
+  /** False for an escalation only its subject's own decision may end: nobody
+   *  withdraws it by hand, its raiser and admin included. Left out: the usual
+   *  rule (the raiser, or admin). */
+  withdrawable?(escalation: Pick<EscalationRow, "kind" | "policyKey">): boolean;
 }
 
 const adapters = new Map<string, EscalationAdapter>();

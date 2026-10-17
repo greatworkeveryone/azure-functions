@@ -14,17 +14,28 @@
 // reads the table and logs each region's plan, writing nothing, whether or not
 // the sync is enabled; use it to preview a first run or a rebase.
 //
-// Fetch and validate first, open the database second: if ABS is down or sends
-// something unexpected, the database is never touched and the existing rows
-// stand. The failure goes to Sentry and the invocation fails visibly.
+// Fetch and validate first, write second: if ABS is down or sends something
+// unexpected, CpiIndex is never written and the existing rows stand. The
+// failure goes to Sentry and the invocation fails visibly, after the reviews
+// waiting for an index have been checked against the rows already stored (L7):
+// a quarter keyed by hand, or synced by an earlier run, still brings them back.
 //
 // Daily rather than monthly because the daily run is a no-op unless ABS has
 // published a new quarter or rebased, and a new quarter then lands within a day.
+//
+// After a sync has committed (or the fetch failed), every CPI rent review
+// waiting for its index whose quarters are now in CpiIndex goes back to in
+// progress and is calculated straight away (INDEX_AVAILABLE, WP26,
+// rentReview/indexResume.ts), ledgered as this timer. The dry run says which
+// would. A failure moving one fails the invocation under its own stage; the CPI
+// rows are already committed and the next run tries the reviews again.
 
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { AbsCpiError, CpiSeries, fetchAllCpiSeries } from "../cpiAbs";
 import { planCpiSync, syncCpiIndex } from "../cpiIndexSync";
+import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createServiceRequestConnection } from "../db";
+import { resumeAwaitingIndex } from "../rentReview/indexResume";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
 
@@ -67,11 +78,13 @@ export async function tenancyCpiSyncTimer(
 
   let connection;
   try {
-    let series: CpiSeries[];
+    let series: CpiSeries[] | null = null;
+    let fetchError: unknown = null;
     try {
       series = await fetchAllCpiSeries({ onRetry: (message) => context.warn(message) });
     } catch (error) {
-      return fail(context, "ABS fetch", error);
+      fetchError = error;
+      context.warn("tenancyCpiSyncTimer: the ABS fetch failed; CpiIndex is left as it is, and waiting rent reviews are checked against it");
     }
 
     try {
@@ -79,10 +92,32 @@ export async function tenancyCpiSyncTimer(
       // sync holds a transaction open across ~100 statements and auth.ts role
       // lookups share that singleton.
       connection = await createServiceRequestConnection();
-      if (dryRun) await planCpiSync(connection, series, context);
-      else await syncCpiIndex(connection, series, context);
+      if (series) {
+        if (dryRun) await planCpiSync(connection, series, context);
+        else await syncCpiIndex(connection, series, context);
+      }
     } catch (error) {
-      return fail(context, dryRun ? "database dry run" : "database sync", error);
+      return fail(context, fetchError ? "ABS fetch" : dryRun ? "database dry run" : "database sync", fetchError ?? error);
+    }
+
+    let resumed;
+    try {
+      resumed = await resumeAwaitingIndex(connection, {
+        dryRun,
+        log: (message) => context.log(message),
+        today: todayInDarwin(),
+        warn: (message) => context.warn(message),
+      });
+    } catch (error) {
+      return fail(context, fetchError ? "ABS fetch" : "index resume", fetchError ?? error);
+    }
+    if (fetchError) return fail(context, "ABS fetch", fetchError);
+    if (resumed.errors.length > 0) {
+      return fail(
+        context,
+        "index resume",
+        new Error(`${resumed.errors.length} rent review(s) couldn't go back to in progress; first: ${resumed.errors[0].message}`),
+      );
     }
   } finally {
     if (connection) closeConnection(connection);

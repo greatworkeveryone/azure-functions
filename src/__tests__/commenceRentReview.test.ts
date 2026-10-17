@@ -47,9 +47,15 @@ let tenancy: Row | null;
 let otherOpen: Row[];
 let updateMoves: boolean;
 
+// An escalation read of its own: the first FROM is dbo.Escalations. A review
+// read also reaches it, in an OUTER APPLY (C7's rung), and is not one.
+const ESCALATIONS_FIRST = /^\s*SELECT(?:(?!\bFROM\b)[\s\S])*\bFROM dbo\.Escalations\b/;
+
 function serve() {
   routeSql(db.executeQuery, [
     [/INSERT INTO dbo\.DecisionLedger/, () => []],
+    // After the commit: the review's live escalations, to end E1 (none here).
+    [ESCALATIONS_FIRST, () => []],
     [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
     [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],
     [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (tenancy ? [tenancy] : [])],
@@ -377,6 +383,14 @@ describe("what commencing does", () => {
     });
   });
 
+  it("snapshots the lease's own CPI reference-quarter rule (M4, WP26c)", async () => {
+    tenancy = tenancyRow({ CpiReferenceQuarterRule: "latest_published_before_review" });
+    await commence();
+    expect(JSON.parse(callsMatching(db.executeQuery, /UPDATE dbo\.RentReviews/)[0].params.Basis as string)).toMatchObject({
+      referenceQuarterRule: "latest_published_before_review",
+    });
+  });
+
   it("snapshots a fixed review's percentage, and a market review's empty clause and deadlines", async () => {
     tenancy = tenancyRow({ FixedReviewPercent: 3.5, ReviewType: "Fixed" });
     await commence();
@@ -505,6 +519,32 @@ describe("the ledger", () => {
     expect((res.jsonBody as { error: string }).error).toMatch(/role/);
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("after the commit, E1 ends (WP26)", () => {
+  it("looks up the review's live escalations to end E1 with the code commenced, once the commence has committed", async () => {
+    await commence();
+    const lookups = callsMatching(db.executeQuery, ESCALATIONS_FIRST);
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0].params).toMatchObject({ SubjectId: "rev-1", SubjectType: "rent_review" });
+    const lookupOrder = db.executeQuery.mock.invocationCallOrder[db.executeQuery.mock.calls.findIndex((c: unknown[]) => ESCALATIONS_FIRST.test(String(c[1])))];
+    expect(lookupOrder).toBeGreaterThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("still answers 200 when ending the escalation fails", async () => {
+    routeSql(db.executeQuery, [
+      [ESCALATIONS_FIRST, () => Promise.reject(new Error("escalations unavailable"))],
+      [/INSERT INTO dbo\.DecisionLedger/, () => []],
+      [/RentReviews r WITH \(UPDLOCK, ROWLOCK\)/, () => [stored]],
+      [/FROM dbo\.RentReviews r\s+INNER JOIN/, () => [stored]],
+      [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (tenancy ? [tenancy] : [])],
+      [/SELECT TOP 1 ReviewId FROM dbo\.RentReviews/, () => otherOpen],
+      [/UPDATE dbo\.RentReviews/, (params: Param[]) => [{ ReviewId: params.find((p) => p.name === "ReviewId")?.value }]],
+    ]);
+    const res = await commence();
+    expect(res.status).toBe(200);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 });
 

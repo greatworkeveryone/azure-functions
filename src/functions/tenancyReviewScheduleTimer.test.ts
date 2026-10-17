@@ -34,7 +34,9 @@ const report = (over: Record<string, unknown> = {}) => ({
   drift: [],
   dryRun: false,
   errors: [],
+  escalations: null,
   raced: 0,
+  rentCaches: null,
   scheduled: 0,
   tenancies: 0,
   unchanged: 0,
@@ -143,7 +145,11 @@ describe("running", () => {
     await expect(run({} as Timer, ctx)).resolves.toEqual({
       drift: 0,
       dryRun: false,
+      escalationsEnded: 0,
+      escalationsRaised: 0,
       raced: 0,
+      rentCachesSkipped: 0,
+      rentCachesWritten: 0,
       scheduled: 3,
       tenancies: 5,
       unchanged: 2,
@@ -151,6 +157,27 @@ describe("running", () => {
     });
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
     expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it("asks the generator to escalate (E1, E2, E3 catch-up), and counts what it raised and ended", async () => {
+    runReviewGenerator.mockResolvedValue(report({ escalations: { ended: 1, errors: [], raised: 4, truncated: false } }));
+    await expect(run({} as Timer, ctx)).resolves.toMatchObject({ escalationsEnded: 1, escalationsRaised: 4 });
+    expect(runReviewGenerator.mock.calls[0][0]).toMatchObject({ escalate: true });
+  });
+
+  it("asks the generator to write the rent caches due today (L10), counts them, and fails the run when one failed", async () => {
+    runReviewGenerator.mockResolvedValue(report({ rentCaches: { current: 0, errors: [], skipped: 1, written: 2 } }));
+    await expect(run({} as Timer, ctx)).resolves.toMatchObject({ rentCachesSkipped: 1, rentCachesWritten: 2 });
+    expect(runReviewGenerator.mock.calls[0][0]).toMatchObject({ rentCaches: true });
+    runReviewGenerator.mockResolvedValue(report({ rentCaches: { current: 0, errors: [{ message: "ledger down", reviewId: "rev-1" }], skipped: 0, written: 0 } }));
+    await expect(run({} as Timer, ctx)).rejects.toThrow(/1 rent cache\(s\) failed; first: ledger down/);
+  });
+
+  it("fails the run when a review's escalation failed", async () => {
+    runReviewGenerator.mockResolvedValue(
+      report({ escalations: { ended: 0, errors: [{ message: "no table", reviewId: "rev-1" }], raised: 0, truncated: false } }),
+    );
+    await expect(run({} as Timer, ctx)).rejects.toThrow("1 review escalation(s) failed; first: no table");
   });
 
   it("closes the connection, flushes Sentry and rethrows when the run itself fails", async () => {

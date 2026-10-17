@@ -38,7 +38,7 @@ const STEP_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const BASE = "Sep 2025 = 100.0";
 
 function serve(options: { cpi?: Array<{ Period: string; IndexValue: number; ReferenceBase: string | null }>; review?: Record<string, unknown>; sqm?: number; tenancy?: Record<string, unknown> | null } = {}) {
-  routeSql(db.executeQuery, [
+  routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
     [/FROM dbo\.RentReviews r/, () => [reviewRow(options.review ?? {})]],
     [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (options.tenancy === null ? [] : [tenancyRow(options.tenancy ?? {})])],
     [/FROM dbo\.TenantOccupancies/, () => [{ Sqm: options.sqm ?? 400 }]],
@@ -70,7 +70,7 @@ describe("who may ask, and what", () => {
   });
 
   it("is a 404 for a review that doesn't exist, and for one written before the workflow", async () => {
-    routeSql(db.executeQuery, [[/FROM dbo\.RentReviews r/, () => []]]);
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.RentReviews r/, () => []]]);
     expect((await ask("reviewId=nope")).status).toBe(404);
     const [{ sql }] = callsMatching(db.executeQuery, /FROM dbo\.RentReviews r/);
     expect(sql).toContain("r.State IS NOT NULL");
@@ -253,5 +253,47 @@ describe("the CPI suggestion", () => {
     serve({ tenancy: { CpiRegion: null } });
     expect(((await ask("reviewId=rev-1")).jsonBody as Body).cpiSuggestion).toBeNull();
     expect(callsMatching(db.executeQuery, /FROM dbo\.CpiIndex/)).toHaveLength(0);
+  });
+});
+
+describe("what the workspace needs before submit (WP26)", () => {
+  it("says a review came back: when, by whom and the approver's note", async () => {
+    serve({
+      review: {
+        ReturnNote: "Use the Darwin index",
+        ReturnedAt: new Date("2026-10-14T03:00:00Z"),
+        ReturnedByName: "Bo Manager",
+        State: "in_progress",
+      },
+    });
+    const { review } = (await ask("reviewId=rev-1")).jsonBody as Body;
+    expect(review.returned).toEqual({ at: "2026-10-14T03:00:00.000Z", byName: "Bo Manager", note: "Use the Darwin index" });
+  });
+
+  it("says nothing came back for a review that wasn't returned, or isn't in progress any more", async () => {
+    serve({ review: { State: "in_progress" } });
+    expect(((await ask("reviewId=rev-1")).jsonBody as Body).review.returned).toBeNull();
+    serve({ review: { ReturnNote: "x", ReturnedAt: new Date(), ReturnedByName: "Bo", State: "awaiting_approval" } });
+    expect(((await ask("reviewId=rev-1")).jsonBody as Body).review.returned).toBeNull();
+  });
+
+  it("reads the return from the ledger: the latest rent_review.return, in progress only, with no submit after it", async () => {
+    await ask("reviewId=rev-1");
+    const [{ sql }] = callsMatching(db.executeQuery, /FROM dbo\.RentReviews r/);
+    const flat = sql.replace(/\s+/g, " ");
+    expect(flat).toContain("OUTER APPLY ( SELECT TOP 1 l.OccurredAt AS ReturnedAt, l.ActorName AS ReturnedByName, l.Reason AS ReturnNote FROM dbo.DecisionLedger l");
+    expect(flat).toContain("WHERE r.State = 'in_progress'");
+    expect(flat).toContain("l.SubjectType = N'rent_review' AND l.SubjectId = r.ReviewId AND l.Action = N'rent_review.return'");
+    expect(flat).toContain("NOT EXISTS ( SELECT 1 FROM dbo.DecisionLedger s WHERE s.SubjectType = N'rent_review' AND s.SubjectId = r.ReviewId AND s.Action = N'rent_review.submit' AND s.LedgerId > l.LedgerId)");
+    expect(flat).toContain("ORDER BY l.LedgerId DESC ) lr");
+  });
+
+  it("shows the schedule's sign-off on the tenancy summary (C3), or null when it isn't signed off", async () => {
+    serve({ tenancy: { ScheduleSignedOffAt: new Date("2026-09-01T00:00:00Z"), ScheduleSignedOffByName: "Bo Manager" } });
+    expect(((await ask("reviewId=rev-1")).jsonBody as Body).tenancy.scheduleSignOff).toEqual({ at: "2026-09-01T00:00:00.000Z", byName: "Bo Manager" });
+    serve({ tenancy: { ScheduleSignedOffAt: null, ScheduleSignedOffByName: null } });
+    expect(((await ask("reviewId=rev-1")).jsonBody as Body).tenancy.scheduleSignOff).toBeNull();
+    const [{ sql }] = callsMatching(db.executeQuery, /FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/).slice(-1);
+    expect(sql).toContain("t.ScheduleSignedOffAt, t.ScheduleSignedOffByName");
   });
 });

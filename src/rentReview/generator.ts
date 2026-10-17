@@ -29,6 +29,23 @@
 // actor), so the history reads like the machine and a failure between the two
 // is finished by the next run. Re-running changes nothing.
 //
+// Escalations (WP26, PLAN §3.4): after its own work, a run that is asked to
+// (the timer always is) raises E1 (not commenced 14 days before the date) and E2
+// (overdue) where they hold, raises an E3 that SUBMIT failed to raise, and ends
+// an E3 a decision left behind (rentReview/escalations.ts). Only a live run
+// writes them; a dry run logs and counts what it would do. At most
+// ESCALATION_SWEEP_MAX_ACTIONS of them per run, so a first live run against a
+// backlog is paced over several days.
+//
+// Rent caches (WP26 L10): a run that is asked to (the timer always is) writes
+// the RentPerAnnum cache of every review APPLY applied ahead of its date, once
+// the date has come (rentReview/rentCache.ts), as the system; a dry run logs
+// what it would write.
+//
+// SCHEDULE for one tenancy (scheduleNextReview) is the same plan and the same
+// writes, for one tenancy: APPLY, WAIVE and a superseding CANCEL call it after
+// they commit, so the tenancy's next review exists at once.
+//
 // Opt-in because it writes in bulk (database-safety rule 2):
 //   RENT_REVIEW_GENERATOR_ENABLED=true   writes
 //   RENT_REVIEW_GENERATOR_DRY_RUN=true   logs what it would create or move, with
@@ -36,7 +53,7 @@
 //   neither                              does nothing and doesn't touch the database
 
 import { randomUUID } from "node:crypto";
-import type { Connection } from "tedious";
+import { type Connection, TYPES } from "tedious";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
 import { executeQuery, type SqlRow } from "../db";
 import { isUniqueViolation } from "../escalation/errors";
@@ -51,6 +68,8 @@ import {
 } from "../rentReviewMachine";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
+import { runReviewEscalations, type ReviewEscalationReport } from "./escalations";
+import { type RentCacheReport, writeDueRentCaches } from "./rentCache";
 import { hasNoReviewClause, type MethodSource, resolveReviewMethod, stepOnDate } from "./method";
 import { inTransaction, insertScheduledReview, markWindowOpen } from "./store";
 
@@ -227,18 +246,28 @@ export function planGenerator(
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
-const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
+const TENANCY_COLUMNS = `t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.LastReviewDate, t.ReviewIntervalMonths, t.NextReviewDate, t.ReviewType,
-    t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
+    t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}`;
+
+const TENANCIES_SQL = `SELECT ${TENANCY_COLUMNS}
   FROM dbo.Tenants t
   WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL
   ORDER BY t.TenantId`;
+
+const ONE_TENANCY_SQL = `SELECT ${TENANCY_COLUMNS}
+  FROM dbo.Tenants t
+  WHERE t.TenantId = @TenantId AND t.Status <> 'vacated' AND t.ArchivedAt IS NULL`;
 
 const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).join(", ");
 
 const OPEN_REVIEWS_SQL = `SELECT ReviewId, TenantId, ScheduledFor, State, Method
   FROM dbo.RentReviews
   WHERE State IN (${OPEN_STATE_LIST})`;
+
+const ONE_TENANCY_OPEN_REVIEW_SQL = `SELECT ReviewId, TenantId, ScheduledFor, State, Method
+  FROM dbo.RentReviews
+  WHERE TenantId = @TenantId AND State IN (${OPEN_STATE_LIST})`;
 
 export function toTenancyFacts(row: SqlRow): TenancyFacts {
   const trading = typeof row.TradingName === "string" ? row.TradingName.trim() : "";
@@ -257,9 +286,9 @@ export async function loadTenancies(connection: Connection): Promise<TenancyFact
   return (await executeQuery(connection, TENANCIES_SQL)).map(toTenancyFacts);
 }
 
-export async function loadOpenReviews(connection: Connection): Promise<Map<number, OpenReview>> {
+function toOpenReviews(rows: readonly SqlRow[]): Map<number, OpenReview> {
   const open = new Map<number, OpenReview>();
-  for (const row of await executeQuery(connection, OPEN_REVIEWS_SQL)) {
+  for (const row of rows) {
     open.set(Number(row.TenantId), {
       method: typeof row.Method === "string" ? row.Method : null,
       reviewId: String(row.ReviewId),
@@ -268,6 +297,10 @@ export async function loadOpenReviews(connection: Connection): Promise<Map<numbe
     });
   }
   return open;
+}
+
+export async function loadOpenReviews(connection: Connection): Promise<Map<number, OpenReview>> {
+  return toOpenReviews(await executeQuery(connection, OPEN_REVIEWS_SQL));
 }
 
 // ── Writing ─────────────────────────────────────────────────────────────────
@@ -387,6 +420,10 @@ export interface GeneratorReport {
   drift: DriftedReview[];
   dryRun: boolean;
   errors: Array<{ message: string; tenantId: number }>;
+  /** The escalation step (null when the run wasn't asked to escalate). */
+  escalations: ReviewEscalationReport | null;
+  /** The rent caches due today (null when the run wasn't asked to write them). */
+  rentCaches: RentCacheReport | null;
   /** Writes skipped because another run or a person got there first. */
   raced: number;
   scheduled: number;
@@ -401,6 +438,10 @@ export interface GeneratorReport {
 export interface GeneratorRun {
   connection: Connection;
   dryRun: boolean;
+  /** Raise E1 / E2 (and catch up E3) after the run's own work. The timer sets it. */
+  escalate?: boolean;
+  /** Write the RentPerAnnum caches APPLY deferred to a review's date (L10). The timer sets it. */
+  rentCaches?: boolean;
   log: (message: string) => void;
   onError?: (error: unknown, tenantId: number) => void;
   today?: string;
@@ -433,7 +474,9 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
     drift: plan.drift,
     dryRun: run.dryRun,
     errors: [],
+    escalations: null,
     raced: 0,
+    rentCaches: null,
     scheduled: 0,
     skipped: plan.skipped,
     tenancies: tenancies.length,
@@ -481,6 +524,26 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
     }
   }
 
+  if (run.rentCaches) {
+    report.rentCaches = await writeDueRentCaches(run.connection, {
+      actor: GENERATOR_ACTOR,
+      dryRun: run.dryRun,
+      log: run.log,
+      today,
+      warn: run.warn,
+    });
+  }
+
+  if (run.escalate) {
+    report.escalations = await runReviewEscalations(run.connection, {
+      actor: GENERATOR_ACTOR,
+      dryRun: run.dryRun,
+      log: run.log,
+      today,
+      warn: run.warn,
+    });
+  }
+
   run.log(
     `rentReviewGenerator: ${run.dryRun ? "dry run, nothing written. " : ""}${tenancies.length} tenancies checked on ${today} ` +
       `(window ${run.windowDays} days): ${report.scheduled} ${run.dryRun ? "to schedule" : "scheduled"}, ` +
@@ -489,4 +552,43 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
       `${report.raced} raced, ${report.errors.length} failed`,
   );
   return report;
+}
+
+// ── SCHEDULE for one tenancy ─────────────────────────────────────────────────
+
+export interface ScheduleNextResult {
+  /** The tenancy's open review after the call: the one scheduled now, or one it already had. */
+  review: { reviewId: string; scheduledFor: string; state: RentReviewState } | null;
+  /** Why nothing was scheduled: a vacated or archived tenancy, no review clause, no date. */
+  skipped: SkipReason | null;
+}
+
+/**
+ * SCHEDULE (and OPEN_WINDOW) for one tenancy, by the generator's own plan and
+ * writes (PLAN §3.1 APPLY: "SCHEDULE the next review"). Called after a review
+ * decision has committed, so the tenancy's next review exists at once rather
+ * than at the next generator run; whatever the generator's mode, since it is one
+ * targeted write that the decision implies, not a bulk run. A vacated or
+ * archived tenancy gets nothing.
+ */
+export async function scheduleNextReview(
+  connection: Connection,
+  tenantId: number,
+  options: { today?: string; windowDays?: number } = {},
+): Promise<ScheduleNextResult> {
+  const today = options.today ?? todayInDarwin();
+  const windowDays = options.windowDays ?? reviewWindowDays();
+  const params = [{ name: "TenantId", type: TYPES.Int, value: tenantId }];
+  const tenancies = (await executeQuery(connection, ONE_TENANCY_SQL, params)).map(toTenancyFacts);
+  if (tenancies.length === 0) return { review: null, skipped: "vacated" };
+  const open = toOpenReviews(await executeQuery(connection, ONE_TENANCY_OPEN_REVIEW_SQL, params));
+  const plan = planGenerator(tenancies, open, today, windowDays);
+  if (plan.skipped.length > 0) return { review: null, skipped: plan.skipped[0].reason };
+  const correlationId = ledger.newCorrelationId();
+  for (const action of plan.actions) {
+    const result = await applyAction(connection, action, windowDays, correlationId);
+    if (result.windowError !== undefined) throw result.windowError;
+  }
+  const after = toOpenReviews(await executeQuery(connection, ONE_TENANCY_OPEN_REVIEW_SQL, params)).get(tenantId);
+  return { review: after ? { reviewId: after.reviewId, scheduledFor: after.scheduledFor, state: after.state } : null, skipped: null };
 }

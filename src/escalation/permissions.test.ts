@@ -12,6 +12,7 @@ import {
   isOversight,
   isRaiser,
   isTargetOf,
+  isWithdrawable,
 } from "./permissions";
 import type { DirectoryUser, EscalationRow, Viewer } from "./types";
 
@@ -312,5 +313,23 @@ describe("the DTO", () => {
 
   it("has no deep link for a subject type nobody registered", () => {
     expect(toDto(row({ subjectType: "mystery" }), DEE, now, directory).deepLink).toBeNull();
+  });
+});
+
+describe("L3: a rent review's approval ends only with the review's decision", () => {
+  const approval = (over: Partial<EscalationRow> = {}) =>
+    row({ kind: "authority", policyKey: "rent_review.approval", raisedByUserId: 9, subjectId: "rev-1", subjectType: "rent_review", ...over });
+
+  it("can't be withdrawn by its raiser (the preparer) or by admin", () => {
+    expect(isWithdrawable(approval())).toBe(false);
+    expect(canWithdraw(GUS, approval())).toBe(false);
+    expect(canWithdraw(ADA, approval())).toBe(false);
+    expect(availableActions(GUS, approval()).withdraw).toBe(false);
+  });
+
+  it("leaves a review's attention escalations to the usual rule", () => {
+    const overdue = approval({ kind: "attention", policyKey: "rent_review.overdue", raisedByKind: "system", raisedByUserId: null });
+    expect(isWithdrawable(overdue)).toBe(true);
+    expect(canWithdraw(ADA, overdue)).toBe(true);
   });
 });

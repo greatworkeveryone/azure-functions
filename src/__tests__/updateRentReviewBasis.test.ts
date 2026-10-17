@@ -246,6 +246,11 @@ describe("when the basis can be changed", () => {
     await update();
     expect(saves()[0].sql).toContain("State IN ('in_progress', 'awaiting_index')");
   });
+
+  it("drops the review's calculation with the old basis (WP26): it was worked on terms that no longer stand", async () => {
+    await update();
+    expect(saves()[0].sql).toMatch(/SET Basis = @Basis, Calc = NULL,/);
+  });
 });
 
 describe("what it changes", () => {

@@ -14,7 +14,9 @@ import {
   type SqlParam,
   type SqlRow,
 } from "../db";
+import { RESOLVED_REVIEW_DATES_SQL } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewMethod, type RentReviewState } from "../rentReviewMachine";
+import { SIGN_OFF_COLUMNS } from "../scheduleSignOff";
 import { rollbackQuietly } from "../tenancyScheduleWrite";
 import type { CpiIndexRow } from "./cpi";
 import { legacyReviewType, legacyStatus } from "./legacyMap";
@@ -30,13 +32,84 @@ const REVIEW_COLUMNS = `
   r.NoticeIssuedAt, r.NoticeIssuedBy, r.NoticeMethod,
   r.BillingConfirmedAt, r.BillingConfirmedBy,
   r.WaiveReason, r.ExpectedIndexAt, r.CreatedAt, r.UpdatedAt, r.Version,
+  r.OldRentPerAnnum, r.NewRentPerAnnum, r.IncreasePercent,
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
-  t.ArchivedAt AS TenantArchivedAt,
-  u.DisplayName AS OwnerName`;
+  t.ArchivedAt AS TenantArchivedAt, t.RentReliefs AS TenantRentReliefs,
+  u.DisplayName AS OwnerName,
+  lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote,
+  ia.IndexArrivedAt, ia.IndexArrivedQuarter,
+  ar.ApprovalRung, cr.CancelReason`;
+
+// The last RETURN of a review that is back in progress and hasn't been
+// submitted since (WP26): the latest rent_review.return row in the decision
+// ledger with no rent_review.submit after it. RETURN clears SubmittedAt, so the
+// ledger is the only record that the review came back, and from whom, with
+// what note. Read for in-progress reviews only; IX_DecisionLedger_Subject
+// (SubjectType, SubjectId, ...) serves both lookups, a handful of rows each.
+const LAST_RETURN = `
+  OUTER APPLY (
+    SELECT TOP 1 l.OccurredAt AS ReturnedAt, l.ActorName AS ReturnedByName, l.Reason AS ReturnNote
+    FROM dbo.DecisionLedger l
+    WHERE r.State = 'in_progress'
+      AND l.SubjectType = N'rent_review' AND l.SubjectId = r.ReviewId AND l.Action = N'rent_review.return'
+      AND NOT EXISTS (
+        SELECT 1 FROM dbo.DecisionLedger s
+        WHERE s.SubjectType = N'rent_review' AND s.SubjectId = r.ReviewId
+          AND s.Action = N'rent_review.submit' AND s.LedgerId > l.LedgerId)
+    ORDER BY l.LedgerId DESC
+  ) lr`;
+
+// The CPI index a waiting review needed was published (L7): the latest
+// rent_review.index_available row while the review is in progress and hasn't
+// been submitted since, so its owner sees why it is back and what to do.
+const LAST_INDEX_ARRIVAL = `
+  OUTER APPLY (
+    SELECT TOP 1 a.OccurredAt AS IndexArrivedAt, JSON_VALUE(a.[After], '$.referenceQuarter') AS IndexArrivedQuarter
+    FROM dbo.DecisionLedger a
+    WHERE r.State = 'in_progress'
+      AND a.SubjectType = N'rent_review' AND a.SubjectId = r.ReviewId AND a.Action = N'rent_review.index_available'
+      AND NOT EXISTS (
+        SELECT 1 FROM dbo.DecisionLedger s
+        WHERE s.SubjectType = N'rent_review' AND s.SubjectId = r.ReviewId
+          AND s.Action = N'rent_review.submit' AND s.LedgerId > a.LedgerId)
+    ORDER BY a.LedgerId DESC
+  ) ia`;
+
+// C7's rung while the review waits for approval: the highest any E3 has reached
+// since the review was last submitted, live or not (1 accounts_manager, 2 cfo,
+// 3 director; nobody independent left, or a role it doesn't know, counts as
+// the directors). APPROVE reads it from the locked row and the review's DTO
+// shows it, so the two can't disagree (rentReview/approvalLevel.ts).
+const APPROVAL_RUNG = `
+  OUTER APPLY (
+    SELECT MAX(CASE
+        WHEN e.NoIndependentTarget = 1 THEN 3
+        WHEN e.TargetRole = N'accounts_manager' THEN 1
+        WHEN e.TargetRole = N'cfo' THEN 2
+        ELSE 3 END) AS ApprovalRung
+    FROM dbo.Escalations e
+    WHERE r.State = 'awaiting_approval'
+      AND e.SubjectType = N'rent_review' AND e.SubjectId = r.ReviewId AND e.PolicyKey = N'rent_review.approval'
+      AND (r.SubmittedAt IS NULL OR e.CreatedAt >= r.SubmittedAt)
+  ) ar`;
+
+// A cancelled review's reason: CANCEL records it in the ledger, not on the row.
+const LAST_CANCEL = `
+  OUTER APPLY (
+    SELECT TOP 1 c.Reason AS CancelReason
+    FROM dbo.DecisionLedger c
+    WHERE r.State = 'cancelled'
+      AND c.SubjectType = N'rent_review' AND c.SubjectId = r.ReviewId AND c.Action = N'rent_review.cancel'
+    ORDER BY c.LedgerId DESC
+  ) cr`;
 
 const REVIEW_JOINS = `
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
-  LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId`;
+  LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
+  ${LAST_RETURN}
+  ${LAST_INDEX_ARRIVAL}
+  ${APPROVAL_RUNG}
+  ${LAST_CANCEL}`;
 
 const REVIEW_BY_ID = `SELECT ${REVIEW_COLUMNS} FROM dbo.RentReviews r ${REVIEW_JOINS}
   WHERE r.ReviewId = @ReviewId AND r.State IS NOT NULL`;
@@ -96,8 +169,9 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
 
 const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
-    t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
-    t.ScheduledRateSteps, b.BuildingName
+    t.CpiRegion, t.CpiReferenceQuarterRule, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
+    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, b.BuildingName,
+    t.ScheduleSignedOffAt, t.ScheduleSignedOffByName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
   WHERE t.TenantId = @TenantId`;
@@ -105,6 +179,22 @@ const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.Trad
 /** The lease terms a review is decided on, one tenancy. */
 export async function loadTenancyForReview(connection: Connection, tenantId: number): Promise<SqlRow | null> {
   const rows = await executeQuery(connection, TENANCY_FOR_REVIEW, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
+  return rows[0] ?? null;
+}
+
+const TENANCY_LOCKED_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.Status, t.ArchivedAt, t.ScheduleVersion,
+    t.Commencement, t.LastReviewDate, t.LastReviewIncreasePercent, t.ReviewIntervalMonths, t.NextReviewDate,
+    t.ReviewType, t.FixedReviewPercent, t.CpiRegion, t.CpiReferenceQuarterRule, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
+    t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, t.UpdatedAt, t.UpdatedByName,
+    ${SIGN_OFF_COLUMNS},
+    ${RESOLVED_REVIEW_DATES_SQL}
+  FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK)
+  WHERE t.TenantId = @TenantId`;
+
+/** The review's tenancy, locked for the rest of the transaction: what APPLY,
+ *  WAIVE and REVERT read and write (PLAN §3.1: "lock the tenant row"). */
+export async function lockTenancyForReview(connection: Connection, tenantId: number): Promise<SqlRow | null> {
+  const rows = await executeQuery(connection, TENANCY_LOCKED_FOR_REVIEW, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
   return rows[0] ?? null;
 }
 
@@ -245,12 +335,13 @@ export async function markCommenced(connection: Connection, commence: Commenceme
   return moved.length > 0;
 }
 
-/** Replaces the basis of a review that is still being worked on. */
+/** Replaces the basis of a review that is still being worked on. A calculation
+ *  worked on the old basis no longer stands, so it goes with it (WP26). */
 export async function saveBasis(connection: Connection, reviewId: string, basisJson: string): Promise<boolean> {
   const saved = await executeQuery(
     connection,
     `UPDATE dbo.RentReviews
-       SET Basis = @Basis, UpdatedAt = SYSUTCDATETIME()
+       SET Basis = @Basis, Calc = NULL, UpdatedAt = SYSUTCDATETIME()
      OUTPUT INSERTED.ReviewId
      WHERE ReviewId = @ReviewId AND State IN ('in_progress', 'awaiting_index')`,
     [

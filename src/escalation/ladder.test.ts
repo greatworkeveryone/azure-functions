@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { describeTarget, expandLadder, LadderError, resolveTarget, type ResolveInput } from "./ladder";
+import { describeTarget, expandLadder, LadderError, levelOfRole, resolveTarget, type ResolveInput } from "./ladder";
 import { FINANCE_POLICY_PREFIX, isAbove, managerRoleFor, roleLabel, seenPolicyPrefixesOf, seenPolicyPrefixesOfAll, teamRolesOf, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, LadderEntry } from "./types";
 
@@ -446,5 +446,15 @@ describe("a level of named people keeps the raiser only when the ladder is about
     const target = resolve({ ladder: NEXT_STEP, raiser: person(GUS), userTargets: [CAM.userId, DEE.userId] });
     expect(target?.users).toEqual([CAM, DEE]);
     expect(target).toMatchObject({ role: null, targetUserId: null });
+  });
+});
+
+describe("levelOfRole", () => {
+  const ladder = [{ role: "accounts_manager" }, { role: "cfo" }, { role: "director" }];
+  it("is the position of the first level holding the role, or the top when none does", () => {
+    expect(levelOfRole(ladder, "accounts_manager")).toBe(1);
+    expect(levelOfRole(ladder, "cfo")).toBe(2);
+    expect(levelOfRole(ladder, "DIRECTOR")).toBe(3);
+    expect(levelOfRole(ladder, "facilities_manager")).toBe(3);
   });
 });

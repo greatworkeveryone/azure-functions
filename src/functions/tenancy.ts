@@ -52,6 +52,7 @@ import {
 import {
   CarparkScheduleGroup,
   closeOpenPredecessor,
+  computeScheduleRows,
   deleteGroup,
   deleteMiscFee,
   deleteStep,
@@ -98,7 +99,21 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { CPI_REFERENCE_RULES } from "../rentReview/basis";
+import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
+import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
+import { scheduleTermsOf } from "../scheduleTerms";
+import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
+import {
+  CLEAR_SIGN_OFF_SQL,
+  readSignOffClearReason,
+  recordSignOffCleared,
+  type ScheduleSignOff,
+  scheduleSignOffFromRow,
+  SIGN_OFF_COLUMNS,
+  signOffReasonRequiredResponse,
+} from "../scheduleSignOff";
 import {
   deleteInfoSheetRow,
   deleteInfoSheetSection,
@@ -240,11 +255,17 @@ interface RegisterTenantApi {
   costPerSqm: number;
   cpiCapPercent?: number;
   cpiFloorPercent?: number;
+  /** M4 (m099): the lease's CPI reference-quarter rule; absent = the default, quarter_before_review_date. */
+  cpiReferenceQuarterRule?: "latest_published_before_review" | "quarter_before_review_date";
   cpiRegion?: "AUS" | "DARWIN";
   createdAt: string;
   createdBy: UserRef;
   daysToExpiry?: number;
   dollarsToExpiry?: number;
+  /** WP26c: the ratified reliefs in force today (a chip on the register). */
+  activeReliefIds: string[];
+  /** WP26c: what is charged a year today: effectiveRentPerAnnum (the lease's) less a ratified relief on the rent in force today. */
+  chargedRentPerAnnum: number;
   effectiveRentPerAnnum: number;
   escalationPercent?: number;
   escalationSchedule?: string;
@@ -261,6 +282,11 @@ interface RegisterTenantApi {
   infoSheetSections: InfoSheetSectionApi[];
   /** m078 — lease document administration (execution dates, licences, etc.). */
   leaseAdministration: LeaseAdministration;
+  /** WP26c: changes awaiting a director (relief requests, reviews awaiting approval),
+   *  on every read; absent from a write's response, which reads the row alone. */
+  pendingChanges?: PendingChanges;
+  /** WP26c (m099): the ratified rent reliefs, an overlay on the schedule (scheduleCharges.ts). */
+  rentReliefs: RentRelief[];
   /** Per m040 — text date like "5/1/19". */
   informationSheetAsAt?: string;
   /** Per m040 — file path/reference for the info-sheet doc. */
@@ -289,14 +315,19 @@ interface RegisterTenantApi {
   reviewIntervalMonths?: number;
   /** "No rent decreases on review" — the schedule holds every review at ≥ 0%. */
   reviewRatchet: boolean;
+  /** REVIEW_WORKFLOW_LIVE_FROM, or null: the schedule engine's terms.workflowLiveFrom
+   *  (an unsettled review row dated on or after it waits for its review, WP26c M2). */
+  reviewWorkflowLiveFrom: string | null;
   reviewState: "amber" | "green" | "grey" | "red";
-  /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   /** Set when the tenancy is archived (D4): out of the register unless asked for. */
   archivedAt: string | null;
   archivedBy: string | null;
+  /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
   scheduleVersion: number;
+  /** Who signed this tenancy's schedule off as verified, and when; null = not signed off (m097). */
+  scheduleSignOff: ScheduleSignOff | null;
   // Free-form per m038: e.g. "CPI Darwin (June)", "Fixed 3%", "Market".
   reviewType: string;
   securityDepositHeld?: number;
@@ -456,6 +487,7 @@ function tenantRowToApi(
   row: SqlRow,
   occupancies: TenantOccupancyApi[],
   noteCountByAnchor: Record<string, number>,
+  pending?: PendingChanges,
 ): RegisterTenantApi {
   const totalSizeSqm = occupancies.reduce(
     (sum, o) => sum + (o.sizeSqm || 0),
@@ -468,13 +500,21 @@ function tenantRowToApi(
   // schedule row says (Darwin date), or the stored value with no schedule.
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
   const today = todayInDarwin();
-  const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
-  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, {
-    cpiCapPercent: asNum(row.CpiCapPercent) ?? null,
-    cpiFloorPercent: asNum(row.CpiFloorPercent) ?? null,
-    reviewRatchet,
-  });
+  const terms = scheduleTermsOf(row);
+  const reviewRatchet = terms.reviewRatchet === true;
+  const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, terms);
   const effectiveRentPerAnnum = resolved.annual;
+  // WP26c: a ratified relief in force today lowers what is charged, never the lease's figure.
+  const rentReliefs = parseReliefs(row.RentReliefs as string | null | undefined);
+  const inForce =
+    rentReliefs.length > 0
+      ? chargedOn(
+          computeCharges(computeScheduleRows(steps, rentPerAnnum ?? 0, totalSizeSqm, terms), { fallbackAnnual: rentPerAnnum ?? 0, reliefs: rentReliefs }),
+          today,
+        )
+      : null;
+  const rentRelievedToday = inForce !== null && inForce.charged.rent !== null && inForce.charged.rent !== inForce.lease.rent;
+  const chargedRentPerAnnum = rentRelievedToday && inForce?.charged.rent != null ? inForce.charged.rent : effectiveRentPerAnnum;
   const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
     totalSizeSqm > 0
@@ -500,13 +540,16 @@ function tenantRowToApi(
     accountsEmail: asStr(row.AccountsEmail),
     accountsPhone: asStr(row.AccountsPhone),
     acn: asStr(row.Acn),
+    activeReliefIds: inForce?.reliefIds ?? [],
     buildingId: row.BuildingId as number,
     businessTenanciesAct: asStr(row.BusinessTenanciesAct),
+    chargedRentPerAnnum,
     comments: asStr(row.Comments),
     commencement: toIsoDate(row.Commencement),
     costPerSqm,
     cpiCapPercent: asNum(row.CpiCapPercent),
     cpiFloorPercent: asNum(row.CpiFloorPercent),
+    cpiReferenceQuarterRule: asStr(row.CpiReferenceQuarterRule) as RegisterTenantApi["cpiReferenceQuarterRule"],
     cpiRegion: asStr(row.CpiRegion) as RegisterTenantApi["cpiRegion"],
     createdAt: toIso(row.CreatedAt),
     createdBy: {
@@ -542,6 +585,7 @@ function tenantRowToApi(
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
     optionPeriods: asStr(row.OptionPeriods),
+    ...(pending ? { pendingChanges: pending } : {}),
     postalAddress: asStr(row.PostalAddress),
     primaryContactEmail: asStr(row.PrimaryContactEmail),
     primaryContactName: asStr(row.PrimaryContactName),
@@ -549,15 +593,18 @@ function tenantRowToApi(
     holdoverTerms: asStr(row.HoldoverTerms),
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
     rentPerAnnum,
+    rentReliefs,
     rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
     reviewRatchet,
+    reviewWorkflowLiveFrom: terms.workflowLiveFrom,
     reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
     archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
     archivedBy: (row.ArchivedBy as string | null) ?? null,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
+    scheduleSignOff: scheduleSignOffFromRow(row),
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),
     securityDepositRequired: asStr(row.SecurityDepositRequired),
@@ -653,7 +700,7 @@ const TENANT_COLUMNS = `
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
   LastReviewIncreasePercent, FixedReviewPercent,
-  CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
+  CpiRegion, CpiReferenceQuarterRule, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
   SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld, SecurityDepositSteps,
   Status, Comments, EscalationPercent, EscalationSchedule,
   BusinessTenanciesAct,
@@ -661,10 +708,12 @@ const TENANT_COLUMNS = `
   ScheduledRateSteps,
   CarparkScheduleGroups,
   MiscFees,
+  RentReliefs,
   InfoSheetSections,
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
+  ${SIGN_OFF_COLUMNS},
   ArchivedAt, ArchivedBy,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
@@ -728,7 +777,7 @@ async function getRegisterTenants(
     );
 
     if (tenantRows.length === 0) {
-      return { status: 200, jsonBody: { tenants: [] } };
+      return { status: 200, jsonBody: { pendingChanges: pendingChangesOf([]), tenants: [] } };
     }
 
     const tenantIds = tenantRows.map((r) => r.TenantId as number);
@@ -774,16 +823,19 @@ async function getRegisterTenants(
       noteCountsByTenant.set(tid, map);
     }
 
+    // WP26c: the building's changes awaiting a director, on the list and on each tenancy.
+    const pending = await loadPendingChanges(connection, { buildingId }, "full");
     const tenants = tenantRows.map((row) => {
       const tid = row.TenantId as number;
       return tenantRowToApi(
         row,
         occupanciesByTenant.get(String(tid)) ?? [],
         noteCountsByTenant.get(tid) ?? {},
+        pendingFor(pending, tid),
       );
     });
 
-    const body = { tenants };
+    const body = { pendingChanges: pendingChangesOf(pending), tenants };
     if (!includeArchived) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
@@ -917,7 +969,9 @@ async function getRegisterTenant(
       noteCountByAnchor[key] = (noteCountByAnchor[key] ?? 0) + 1;
     }
 
-    const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor);
+    // WP26c: the tenancy's changes awaiting a director, with who asked and why.
+    const pending = await loadPendingChanges(connection, { tenantId }, "full");
+    const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor, pendingChangesOf(pending));
     const displayName = (tenant as any).tradingName ?? (tenant as any).legalName;
     const plannerTasks = plannerTaskRows.map((r) => {
       const triggerType = r.TriggerType as string;
@@ -1015,7 +1069,7 @@ async function upsertRegisterTenant(
             RentPerAnnum,
             ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
             LastReviewIncreasePercent, FixedReviewPercent,
-            CpiRegion, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
+            CpiRegion, CpiReferenceQuarterRule, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
@@ -1033,7 +1087,7 @@ async function upsertRegisterTenant(
             @RentPerAnnum,
             @ReviewType, @ReviewIntervalMonths, @NextReviewDate, @LastReviewDate,
             @LastReviewIncreasePercent, @FixedReviewPercent,
-            @CpiRegion, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
+            @CpiRegion, @CpiReferenceQuarterRule, @CpiCapPercent, @CpiFloorPercent, @ReviewRatchet,
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
@@ -1123,6 +1177,8 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
   HoldoverTerms: TYPES.NVarChar,
   CpiCapPercent: TYPES.Decimal,
   CpiFloorPercent: TYPES.Decimal,
+  // M4 (m099): null or "" puts it back to the default (normaliseValue).
+  CpiReferenceQuarterRule: TYPES.NVarChar,
   CpiRegion: TYPES.NVarChar,
   EscalationPercent: TYPES.Decimal,
   EscalationSchedule: TYPES.NVarChar,
@@ -1161,10 +1217,13 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
 // Tenant fields the schedule computes from (PLAN WP23a). A change is ledgered
 // as schedule.terms_edit and bumps ScheduleVersion, so a review calculated
 // before the change can't be applied after it. RentPerAnnum is the schedule's
-// starting rent when no commencement row carries one, so it counts too.
+// starting rent when no commencement row carries one, so it counts too. The CPI
+// reference-quarter rule (M4, WP26c) is set at sign-off with the lease's terms
+// and decides a review's rent, so it counts as well.
 const SCHEDULE_TERM_FIELDS: Record<string, string> = {
   CpiCapPercent: "cpiCapPercent",
   CpiFloorPercent: "cpiFloorPercent",
+  CpiReferenceQuarterRule: "cpiReferenceQuarterRule",
   FixedReviewPercent: "fixedReviewPercent",
   RentPerAnnum: "rentPerAnnum",
   ReviewIntervalMonths: "reviewIntervalMonths",
@@ -1179,9 +1238,10 @@ const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", 
 
 const LOCKED_TENANT_COLUMNS = `
   TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
-  CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
+  CpiCapPercent, CpiFloorPercent, CpiReferenceQuarterRule, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
+  ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
@@ -1196,6 +1256,11 @@ function comparableTerm(value: unknown): number | string | null {
 function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
   if (body.ReviewRatchet !== undefined && typeof body.ReviewRatchet !== "boolean") {
     return { status: 400, jsonBody: { error: "ReviewRatchet must be true or false" } };
+  }
+  // M4: the lease's CPI reference quarter; null or "" puts it back to the default.
+  const rule = body.CpiReferenceQuarterRule;
+  if (rule !== undefined && rule !== null && rule !== "" && !(CPI_REFERENCE_RULES as readonly unknown[]).includes(rule)) {
+    return { status: 400, jsonBody: { error: `CpiReferenceQuarterRule must be one of ${CPI_REFERENCE_RULES.join(", ")}, or null` } };
   }
   for (const col of ["CpiCapPercent", "CpiFloorPercent"]) {
     const value = body[col];
@@ -1337,7 +1402,16 @@ async function updateRegisterTenantRow(
       return null;
     }
     const termsChanged = Object.keys(termsAfter).length > 0;
+    // A change to what the schedule is computed from clears a sign-off, and the
+    // person says why (PLAN WP24). Asked before anything is written.
+    const priorSignOff = termsChanged ? scheduleSignOffFromRow(current) : null;
+    const clearReason = readSignOffClearReason(body);
+    if (priorSignOff && !clearReason) {
+      await rollbackQuietly(connection);
+      return signOffReasonRequiredResponse(priorSignOff);
+    }
     if (termsChanged) setParts.push("ScheduleVersion = ScheduleVersion + 1");
+    if (priorSignOff) setParts.push(CLEAR_SIGN_OFF_SQL);
     setParts.push("UpdatedAt = SYSUTCDATETIME()", "UpdatedById = @UpdatedById", "UpdatedByName = @UpdatedByName");
     updateParams.push(
       { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
@@ -1361,6 +1435,9 @@ async function updateRegisterTenantRow(
         ? withNextReviewDate([{ after: termsAfter, before: termsBefore }], nextReview.before, nextReview.after)
         : [{ after: termsAfter, before: termsBefore }];
       await ledger.record(connection, { ...scope, action: "schedule.terms_edit", ...terms });
+    }
+    if (priorSignOff && clearReason) {
+      await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
     }
     await commitTransaction(connection);
     return null;
@@ -1492,6 +1569,7 @@ function buildTenantParams(
       options: DECIMAL_OPTS.FixedReviewPercent,
     },
     { name: "CpiRegion", type: TYPES.NVarChar, value: v("CpiRegion") },
+    { name: "CpiReferenceQuarterRule", type: TYPES.NVarChar, value: v("CpiReferenceQuarterRule") },
     {
       name: "CpiCapPercent",
       type: TYPES.Decimal,
@@ -2043,6 +2121,9 @@ function reviewDueProjection(tenant: ReturnType<typeof tenantRowToApi>) {
     optionPeriods: tenant.optionPeriods,
     reviewState: tenant.reviewState,
     reviewType: tenant.reviewType,
+    // Whether the schedule is signed off, so the feed can hold back alerts on
+    // unverified figures (PLAN D7). The signer's note stays out.
+    scheduleSignOff: tenant.scheduleSignOff ? { ...tenant.scheduleSignOff, note: null } : null,
     tenantId: tenant.tenantId,
   };
 }
@@ -2144,6 +2225,9 @@ async function getPortfolioOccupancy(
               SUM(CASE WHEN t.Status IN ('current','holdover')
                        THEN 1 ELSE 0 END) AS ActiveTenantCount,
               SUM(CASE WHEN t.Status IN ('current','holdover')
+                            AND t.ScheduleSignedOffAt IS NULL
+                       THEN 1 ELSE 0 END) AS UnsignedTenantCount,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
                             AND t.Expiry IS NOT NULL
                        THEN occ.TenantSqm
                             * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
@@ -2162,6 +2246,9 @@ async function getPortfolioOccupancy(
       [],
     );
 
+    // WP26c: changes awaiting a director across the portfolio, dates and names
+    // only: facilities read these figures too.
+    const pending = await loadPendingChanges(connection, { all: true }, "dates_only");
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;
@@ -2177,13 +2264,17 @@ async function getPortfolioOccupancy(
         annualRent,
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
+        // The building's changes awaiting a director (WP26c): "Includes {n} changes awaiting a director".
+        pendingChangeCount: pending.filter((item) => item.buildingId === Number(r.BuildingId)).length,
         totalSqm,
+        // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
+        unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
         waleExpirySqm: waleDenominator,
         waleYears,
       };
     });
 
-    return { status: 200, jsonBody: { buildings } };
+    return { status: 200, jsonBody: { buildings, pendingChanges: pendingChangesOf(pending) } };
   } catch (error: any) {
     context.error("getPortfolioOccupancy failed:", error.message);
     return errorResponse("Failed to fetch portfolio occupancy", error.message);
@@ -2259,7 +2350,7 @@ async function upsertTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentive.id) ?? null;
@@ -2339,7 +2430,7 @@ async function deleteTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentiveId);
@@ -2382,54 +2473,7 @@ async function deleteTenantIncentive(
   }
 }
 
-// ── Rent schedule change log helpers ─────────────────────────────────────────
-
-interface ChangeLogOpts {
-  tenantId: number;
-  buildingId: number;
-  stepId: string;
-  changeKind: "added" | "updated" | "deleted";
-  changedById: string;
-  changedByName: string;
-  stepSnapshot: ScheduledRateStep;
-  diff: StepDiff | null;
-}
-
-async function insertRentScheduleChangeLog(
-  connection: Connection,
-  opts: ChangeLogOpts,
-): Promise<string> {
-  const changeId = randomUuid();
-  await executeQuery(
-    connection,
-    `INSERT INTO dbo.RentScheduleChangeLog
-       (ChangeId, TenantId, BuildingId, StepId, ChangeKind,
-        ChangedAt, ChangedById, ChangedByName, StepSnapshot, Diff)
-     VALUES
-       (@ChangeId, @TenantId, @BuildingId, @StepId, @ChangeKind,
-        SYSUTCDATETIME(), @ChangedById, @ChangedByName, @StepSnapshot, @Diff)`,
-    [
-      { name: "ChangeId", type: TYPES.NVarChar, value: changeId },
-      { name: "TenantId", type: TYPES.Int, value: opts.tenantId },
-      { name: "BuildingId", type: TYPES.Int, value: opts.buildingId },
-      { name: "StepId", type: TYPES.NVarChar, value: opts.stepId },
-      { name: "ChangeKind", type: TYPES.NVarChar, value: opts.changeKind },
-      { name: "ChangedById", type: TYPES.NVarChar, value: opts.changedById },
-      { name: "ChangedByName", type: TYPES.NVarChar, value: opts.changedByName },
-      {
-        name: "StepSnapshot",
-        type: TYPES.NVarChar,
-        value: JSON.stringify(opts.stepSnapshot),
-      },
-      {
-        name: "Diff",
-        type: TYPES.NVarChar,
-        value: opts.diff ? JSON.stringify(opts.diff) : null,
-      },
-    ],
-  );
-  return changeId;
-}
+// ── Rent schedule change log (writer: rentScheduleChangeLog.ts) ──────────────
 
 function changeLogRowToApi(row: SqlRow) {
   return {
@@ -2451,6 +2495,11 @@ function changeLogRowToApi(row: SqlRow) {
 // ── POST /api/upsertScheduledRateStep ────────────────────────────────────────
 
 const STEP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
+
+/** The row keeps the exemption it had, exactly (key order aside). */
+function ratchetExemptionKept(before: ScheduledRateStep["ratchetExempt"], after: ScheduledRateStep["ratchetExempt"]): boolean {
+  return !!before && !!after && before.at === after.at && before.byName === after.byName && before.reason === after.reason;
+}
 
 async function upsertScheduledRateStep(
   request: HttpRequest,
@@ -2486,10 +2535,21 @@ async function upsertScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
+        // A ratchet exemption is a director's override (C9, D23), written only by
+        // a rent review approved with the lease's ratchet overridden. An edit may
+        // keep one as it is or take it off (the ratchet then holds the row again),
+        // never add or change one.
+        if (step.ratchetExempt && !ratchetExemptionKept(oldStep?.ratchetExempt, step.ratchetExempt)) {
+          return {
+            error: "A ratchet exemption is a director's override: it is written when a director approves a rent review with the lease's ratchet overridden, not by editing the row",
+            kind: "reject",
+            status: 403,
+          };
+        }
         // Adding a row closes the open-ended row before it (effectiveTo is exclusive).
         const { closed, steps: withClosed } = closeOpenPredecessor(existing, step);
         const next = normaliseLegacyEnds(upsertStep(withClosed, step));
@@ -2586,7 +2646,7 @@ async function deleteScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const deletedStep = existing.find((s) => s.id === stepId);
@@ -3075,7 +3135,7 @@ async function upsertCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === group.id) ?? null;
@@ -3141,7 +3201,7 @@ async function deleteCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === groupId);
@@ -3575,7 +3635,7 @@ async function upsertMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === fee.id) ?? null;
@@ -3638,7 +3698,7 @@ async function deleteMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === feeId);
