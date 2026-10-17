@@ -20,7 +20,6 @@ import {
   commitTransaction,
   createRequestConnection,
   executeQuery,
-  rollbackTransaction,
   SqlParam,
   SqlRow,
 } from "../db";
@@ -77,11 +76,11 @@ import {
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
+import { hasLeaseEventWithin } from "../tenancyLeaseEvents";
 import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import {
   deriveNextReviewDate,
-  nextAnniversary,
   nextReviewInputFromRow,
   RESOLVED_REVIEW_DATES_SQL,
   sqlDateToIso,
@@ -99,6 +98,16 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
+import {
+  CLEAR_SIGN_OFF_SQL,
+  readSignOffClearReason,
+  recordSignOffCleared,
+  type ScheduleSignOff,
+  scheduleSignOffFromRow,
+  SIGN_OFF_COLUMNS,
+  signOffReasonRequiredResponse,
+} from "../scheduleSignOff";
 import {
   deleteInfoSheetRow,
   deleteInfoSheetSection,
@@ -291,9 +300,14 @@ interface RegisterTenantApi {
   reviewRatchet: boolean;
   reviewState: "amber" | "green" | "grey" | "red";
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
+  /** Set when the tenancy is archived (D4): out of the register unless asked for. */
+  archivedAt: string | null;
+  archivedBy: string | null;
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
   scheduleVersion: number;
+  /** Who signed this tenancy's schedule off as verified, and when; null = not signed off (m097). */
+  scheduleSignOff: ScheduleSignOff | null;
   // Free-form per m038: e.g. "CPI Darwin (June)", "Fixed 3%", "Market".
   reviewType: string;
   securityDepositHeld?: number;
@@ -551,8 +565,11 @@ function tenantRowToApi(
     reviewRatchet,
     reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
+    archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
+    archivedBy: (row.ArchivedBy as string | null) ?? null,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
+    scheduleSignOff: scheduleSignOffFromRow(row),
     securityDepositHeld: asNum(row.SecurityDepositHeld),
     securityDepositMethod: asStr(row.SecurityDepositMethod),
     securityDepositRequired: asStr(row.SecurityDepositRequired),
@@ -660,8 +677,16 @@ const TENANT_COLUMNS = `
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
+  ${SIGN_OFF_COLUMNS},
+  ArchivedAt, ArchivedBy,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
+
+// The building register: archived tenancies (D4) only when asked for.
+const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+ ORDER BY LegalName`;
+const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+ ORDER BY LegalName`;
 
 const OCCUPANCY_COLUMNS = `
   OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm,
@@ -700,7 +725,9 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
-  const cached = getCachedTenantList(buildingId);
+  // Archived tenancies (D4) are left out unless asked for; that view isn't cached.
+  const includeArchived = request.query.get("includeArchived") === "true";
+  const cached = includeArchived ? null : getCachedTenantList(buildingId);
   if (cached) return { status: 200, jsonBody: cached };
 
   let connection;
@@ -709,8 +736,7 @@ async function getRegisterTenants(
 
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
-       ORDER BY LegalName`,
+      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
 
@@ -771,7 +797,7 @@ async function getRegisterTenants(
     });
 
     const body = { tenants };
-    setCachedTenantList(buildingId, body);
+    if (!includeArchived) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
@@ -1169,6 +1195,7 @@ const LOCKED_TENANT_COLUMNS = `
   CpiCapPercent, CpiFloorPercent, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
+  ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
@@ -1324,7 +1351,16 @@ async function updateRegisterTenantRow(
       return null;
     }
     const termsChanged = Object.keys(termsAfter).length > 0;
+    // A change to what the schedule is computed from clears a sign-off, and the
+    // person says why (PLAN WP24). Asked before anything is written.
+    const priorSignOff = termsChanged ? scheduleSignOffFromRow(current) : null;
+    const clearReason = readSignOffClearReason(body);
+    if (priorSignOff && !clearReason) {
+      await rollbackQuietly(connection);
+      return signOffReasonRequiredResponse(priorSignOff);
+    }
     if (termsChanged) setParts.push("ScheduleVersion = ScheduleVersion + 1");
+    if (priorSignOff) setParts.push(CLEAR_SIGN_OFF_SQL);
     setParts.push("UpdatedAt = SYSUTCDATETIME()", "UpdatedById = @UpdatedById", "UpdatedByName = @UpdatedByName");
     updateParams.push(
       { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
@@ -1348,6 +1384,9 @@ async function updateRegisterTenantRow(
         ? withNextReviewDate([{ after: termsAfter, before: termsBefore }], nextReview.before, nextReview.after)
         : [{ after: termsAfter, before: termsBefore }];
       await ledger.record(connection, { ...scope, action: "schedule.terms_edit", ...terms });
+    }
+    if (priorSignOff && clearReason) {
+      await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
     }
     await commitTransaction(connection);
     return null;
@@ -1989,9 +2028,10 @@ async function deleteTenantNote(
 }
 
 // ── POST /api/deleteRegisterTenant ───────────────────────────────────────────
-// Hard-deletes a tenant. ON DELETE CASCADE handles occupancies, notes, history
-// and reviews. Refuses if Jobs.TenantID still references this tenant — the
-// caller has to reassign jobs first (mirrors the legacy /deleteTenant behaviour).
+// Body { TenantId }. Hard-deletes an empty draft only (D4, DL-04); anything a
+// tenancy holds or has had recorded against it answers 422 "… Archive it
+// instead." (jobs keep their 400 "Reassign first"). The rule, the lock and the
+// ledger row live in deleteTenancyDraft, shared with deleteTenant.
 
 async function deleteRegisterTenant(
   request: HttpRequest,
@@ -1999,257 +2039,42 @@ async function deleteRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  let body: Record<string, any> | null = null;
-  try {
-    body = (await request.json()) as Record<string, any>;
-    const tenantId = body?.TenantId;
-    if (typeof tenantId !== "number") {
-      return { status: 400, jsonBody: { error: "TenantId (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-
-    const refCount = await executeQuery(
-      connection,
-      "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    if ((refCount[0]?.N as number) > 0) {
-      return {
-        status: 400,
-        jsonBody: {
-          error:
-            "Cannot delete — tenant is assigned to at least one job. Reassign first.",
-        },
-      };
-    }
-
-    invalidateTenant(tenantId);
-    await executeQuery(
-      connection,
-      "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    return { status: 200, jsonBody: { deleted: true, tenantId } };
-  } catch (error: any) {
-    const formatted = formatSqlError(error);
-    context.error("deleteRegisterTenant failed", {
-      error: formatted,
-      payload: summariseBody(body),
-      stack: error?.stack,
-    });
-    return errorResponse("Delete register tenant failed", formatted);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantId?: unknown } | null;
+  const tenantId = body?.TenantId;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantId (number) required" } };
   }
-}
-
-// ── POST /api/applyRentReview ────────────────────────────────────────────────
-// Atomically: completes the RentReviews row, updates Tenants.RentPerAnnum,
-// LastReviewDate (the review's own date), LastReviewIncreasePercent and
-// NextReviewDate — derived from the schedule and the lease anniversary, so a
-// review processed late doesn't move the next one (WP23b). Legacy: WP25
-// replaces this with the review workflow.
-
-async function applyRentReview(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
-  if (roleCheck) return roleCheck;
-  const caller = callerFromToken(token);
-
-  let connection;
-  try {
-    const body = (await request.json()) as Record<string, any>;
-    const {
-      ReviewId,
-      NewRentPerAnnum,
-      IncreasePercent,
-      Source,
-      CpiBaseValue,
-      CpiCurrentValue,
-      CpiIndexUsed,
-    } = body;
-    if (typeof ReviewId !== "string" || !ReviewId) {
-      return { status: 400, jsonBody: { error: "ReviewId required" } };
-    }
-    if (
-      typeof NewRentPerAnnum !== "number" ||
-      !Number.isFinite(NewRentPerAnnum)
-    ) {
-      return { status: 400, jsonBody: { error: "NewRentPerAnnum required" } };
-    }
-
-    connection = await createRequestConnection(token);
-    const reviewRows = await executeQuery(
-      connection,
-      `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, t.RentPerAnnum, t.ReviewIntervalMonths,
-              t.Commencement, t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
-       FROM dbo.RentReviews r
-       INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
-       WHERE r.ReviewId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: ReviewId }],
-    );
-    if (reviewRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Review not found" } };
-    }
-    const r = reviewRows[0];
-    const tenantId = r.TenantId as number;
-    const oldRent = (r.RentPerAnnum as number | null) ?? 0;
-    const computedIncrease =
-      typeof IncreasePercent === "number"
-        ? IncreasePercent
-        : oldRent > 0
-          ? Math.round(((NewRentPerAnnum - oldRent) / oldRent) * 10000) / 100
-          : 0;
-    const intervalMonths = (r.ReviewIntervalMonths as number | null) ?? 12;
-    // The review settles its own date; the next one follows the schedule or
-    // the anniversary after it, however late this one is processed.
-    const reviewDate = sqlDateToIso(r.ScheduledFor) ?? todayInDarwin();
-    const steps = parseSteps(r.ScheduledRateSteps as string | null | undefined);
-    const settled = nextReviewInputFromRow({ ...r, LastReviewDate: reviewDate, NextReviewDate: null }, steps);
-    const nextReviewIso =
-      (steps.length > 0
-        ? deriveNextReviewDate({
-            ...settled,
-            resolvedReviewDates: new Set([...settled.resolvedReviewDates, reviewDate]),
-          })
-        : nextAnniversary(settled.commencement ?? reviewDate, intervalMonths > 0 ? intervalMonths : 12, reviewDate)) ??
-      reviewDate;
-
-    await beginTransaction(connection);
-    try {
-      await executeQuery(
-        connection,
-        `UPDATE dbo.RentReviews SET
-           Status = 'completed',
-           OldRentPerAnnum = @OldRent,
-           NewRentPerAnnum = @NewRent,
-           IncreasePercent = @IncreasePercent,
-           CpiIndexUsed = @CpiIndexUsed,
-           CpiBaseValue = @CpiBaseValue,
-           CpiCurrentValue = @CpiCurrentValue,
-           CompletedAt = SYSUTCDATETIME(),
-           CompletedById = @CompletedById,
-           CompletedByName = @CompletedByName,
-           Notes = @Notes
-         WHERE ReviewId = @Id`,
-        [
-          { name: "Id", type: TYPES.NVarChar, value: ReviewId },
-          {
-            name: "OldRent",
-            type: TYPES.Decimal,
-            value: oldRent,
-            options: DECIMAL_OPTS.OldRentPerAnnum,
-          },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          {
-            name: "CpiIndexUsed",
-            type: TYPES.NVarChar,
-            value: CpiIndexUsed ?? null,
-          },
-          {
-            name: "CpiBaseValue",
-            type: TYPES.Decimal,
-            value: CpiBaseValue ?? null,
-            options: DECIMAL_OPTS.CpiBaseValue,
-          },
-          {
-            name: "CpiCurrentValue",
-            type: TYPES.Decimal,
-            value: CpiCurrentValue ?? null,
-            options: DECIMAL_OPTS.CpiCurrentValue,
-          },
-          { name: "CompletedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
-          {
-            name: "Notes",
-            type: TYPES.NVarChar,
-            value: Source ? `Applied via ${Source}` : null,
-          },
-        ],
-      );
-
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Tenants SET
-           RentPerAnnum = @NewRent,
-           LastReviewDate = @LastReview,
-           LastReviewIncreasePercent = @IncreasePercent,
-           NextReviewDate = @NextReview,
-           UpdatedAt = SYSUTCDATETIME(),
-           UpdatedById = @UpdatedById,
-           UpdatedByName = @UpdatedByName
-         WHERE TenantId = @TenantId`,
-        [
-          { name: "TenantId", type: TYPES.Int, value: tenantId },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          { name: "LastReview", type: TYPES.Date, value: reviewDate },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          { name: "NextReview", type: TYPES.Date, value: nextReviewIso },
-          { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        ],
-      );
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection);
-      throw err;
-    }
-
-    invalidateTenant(tenantId);
-    resolveActivePlannerTasks("tenant", tenantId, ["rent_review"]).catch(
-      (err: unknown) => context.warn("plannerResolve (applyRentReview):", err instanceof Error ? err.message : String(err)),
-    );
-    return {
-      status: 200,
-      jsonBody: {
-        applied: true,
-        increasePercent: computedIncrease,
-        nextReviewDate: nextReviewIso,
-        reviewId: ReviewId,
-        tenantId,
-      },
-    };
-  } catch (error: any) {
-    context.error("applyRentReview failed:", error.message);
-    return errorResponse("Apply rent review failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteRegisterTenant");
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
-// Returns amber+red tenants for the dashboard widget. Same shape as
-// getRegisterTenants but filtered to ones needing attention.
+// Returns amber+red tenants for the dashboard widget and the activity feed,
+// plus any lease that expires or reaches its option deadline within 90 days.
+// Every role reads it, so each row carries only what those show — never ABN,
+// contacts, rent or deposits; the full record stays behind the register's
+// accounts-only gate (SEC-05). The option fields are lease terms the due list
+// needs to tell an option deadline from a plain expiry.
+
+function reviewDueProjection(tenant: ReturnType<typeof tenantRowToApi>) {
+  return {
+    buildingId: tenant.buildingId,
+    daysToExpiry: tenant.daysToExpiry,
+    expiry: tenant.expiry,
+    legalName: tenant.legalName,
+    nextReviewDate: tenant.nextReviewDate,
+    optionNoticeMonths: tenant.optionNoticeMonths,
+    optionPeriods: tenant.optionPeriods,
+    reviewState: tenant.reviewState,
+    reviewType: tenant.reviewType,
+    // Whether the schedule is signed off, so the feed can hold back alerts on
+    // unverified figures (PLAN D7). The signer's note stays out.
+    scheduleSignOff: tenant.scheduleSignOff ? { ...tenant.scheduleSignOff, note: null } : null,
+    tenantId: tenant.tenantId,
+  };
+}
 
 async function getReviewsDue(
   request: HttpRequest,
@@ -2276,21 +2101,40 @@ async function getReviewsDue(
         ]
       : [];
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
+    // Also expiries and option deadlines from yesterday to 91 days ahead: a
+    // wider net than the Darwin-day filter below, which is exact.
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} NextReviewDate IS NOT NULL
-        AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE))
+       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (
+         (NextReviewDate IS NOT NULL
+           AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
+         OR (Expiry IS NOT NULL
+           AND Expiry BETWEEN DATEADD(day, -1, CAST(SYSUTCDATETIME() AS DATE))
+                          AND DATEADD(day, 91, CAST(SYSUTCDATETIME() AS DATE)))
+         OR (Expiry IS NOT NULL AND OptionNoticeMonths IS NOT NULL
+           AND DATEADD(month, -OptionNoticeMonths, Expiry)
+               BETWEEN DATEADD(day, -1, CAST(SYSUTCDATETIME() AS DATE))
+                   AND DATEADD(day, 91, CAST(SYSUTCDATETIME() AS DATE)))
+       )
         AND Status <> 'vacated'
        ORDER BY NextReviewDate`,
       params,
     );
     /* eslint-enable local/no-sql-interpolation */
     // The SQL reads the stored date; a keyed review whose date has since passed
-    // has moved on, so keep only what is still due or overdue today.
+    // has moved on, so keep only what is still due or overdue today, plus any
+    // lease that expires or reaches its option deadline within 90 days.
+    const today = todayInDarwin();
     const tenants = rows
       .map((row) => tenantRowToApi(row, [], {}))
-      .filter((tenant) => tenant.reviewState === "amber" || tenant.reviewState === "red");
+      .filter(
+        (tenant) =>
+          tenant.reviewState === "amber" ||
+          tenant.reviewState === "red" ||
+          hasLeaseEventWithin(tenant, today),
+      )
+      .map(reviewDueProjection);
     return { status: 200, jsonBody: { tenants } };
   } catch (error: any) {
     context.error("getReviewsDue failed:", error.message);
@@ -2329,6 +2173,9 @@ async function getPortfolioOccupancy(
               SUM(CASE WHEN t.Status IN ('current','holdover')
                        THEN 1 ELSE 0 END) AS ActiveTenantCount,
               SUM(CASE WHEN t.Status IN ('current','holdover')
+                            AND t.ScheduleSignedOffAt IS NULL
+                       THEN 1 ELSE 0 END) AS UnsignedTenantCount,
+              SUM(CASE WHEN t.Status IN ('current','holdover')
                             AND t.Expiry IS NOT NULL
                        THEN occ.TenantSqm
                             * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
@@ -2342,6 +2189,7 @@ async function getPortfolioOccupancy(
          FROM dbo.TenantOccupancies
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
+       WHERE t.ArchivedAt IS NULL
        GROUP BY t.BuildingId`,
       [],
     );
@@ -2362,6 +2210,8 @@ async function getPortfolioOccupancy(
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
         totalSqm,
+        // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
+        unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
         waleExpirySqm: waleDenominator,
         waleYears,
       };
@@ -2443,7 +2293,7 @@ async function upsertTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentive.id) ?? null;
@@ -2523,7 +2373,7 @@ async function deleteTenantIncentive(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseIncentives(locked.Incentives as string | null | undefined);
         const before = existing.find((i) => i.id === incentiveId);
@@ -2670,7 +2520,7 @@ async function upsertScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
@@ -2770,7 +2620,7 @@ async function deleteScheduledRateStep(
     let changeId = "";
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const deletedStep = existing.find((s) => s.id === stepId);
@@ -3259,7 +3109,7 @@ async function upsertCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === group.id) ?? null;
@@ -3325,7 +3175,7 @@ async function deleteCarparkScheduleGroup(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseGroups(locked.CarparkScheduleGroups as string | null);
         const before = existing.find((g) => g.id === groupId);
@@ -3759,7 +3609,7 @@ async function upsertMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === fee.id) ?? null;
@@ -3822,7 +3672,7 @@ async function deleteMiscFeeHandler(
     if (!actor) return unauthorizedResponse();
     const outcome = await runScheduleWrite(
       connection,
-      { actor, buildingId: BuildingId, expectedVersion, tenantId: TenantId, updatedById: caller.id },
+      { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
       (locked) => {
         const existing = parseMiscFees(locked.MiscFees as string | null);
         const before = existing.find((f) => f.id === feeId);
@@ -3892,11 +3742,6 @@ app.http("deleteRegisterTenant", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deleteRegisterTenant,
-});
-app.http("applyRentReview", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: applyRentReview,
 });
 app.http("getReviewsDue", {
   methods: ["GET"],

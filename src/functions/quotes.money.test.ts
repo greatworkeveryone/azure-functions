@@ -114,9 +114,15 @@ describe("upsertQuote: creating", () => {
     expect((await create({ Amount: 500, ContractorName: "Acme" })).status).toBe(200);
   });
 
-  it.each([[undefined], [null], [0], [-10]])("refuses an amount of %p with 422, writing nothing", async (Amount) => {
+  it.each([[undefined], [null], [0]])("refuses an amount of %p with 422, writing nothing", async (Amount) => {
     mockSql([APP_USER, job(), CREATED]);
     expect(await create({ Amount })).toEqual({ jsonBody: { code: "amount_invalid", error: "Amount is required and must be more than $0." }, status: 422 });
+    expect(wrote(/INSERT INTO Quotes/)).toBe(false);
+  });
+
+  it("a negative amount is refused by the money parser (D1) before anything is read", async () => {
+    mockSql([APP_USER, job(), CREATED]);
+    expect((await create({ Amount: -10 })).status).toBe(400);
     expect(wrote(/INSERT INTO Quotes/)).toBe(false);
   });
 
@@ -134,7 +140,7 @@ describe("upsertQuote: creating", () => {
 });
 
 describe("upsertQuote: editing", () => {
-  const BEFORE = /SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorID, ContractorName, Status/;
+  const BEFORE = /SELECT JobID, QuoteNumber, ContractorID, ContractorName, Amount, Currency, Status,/;
   const quote = (over: Record<string, unknown> = {}): Route => ({
     match: BEFORE,
     rows: [{ Amount: 4000, ApprovedAt: new Date("2026-10-10T00:00:00Z"), ApprovedBy: "Abby", ContractorID: 3, ContractorName: "Acme", JobID: 9, QuoteID: 7, QuoteNumber: "QT-9-1", Status: "approved", ...over }],
@@ -209,6 +215,13 @@ describe("approveQuote", () => {
     expect(wrote(/UPDATE Quotes/)).toBe(false);
   });
 
+  it("decision 17: a director approves a quote they added", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    mockSql([APP_USER, JOB_BUILDING, job(), quoteRow({ CreatedBy: "Dana Director" }), { match: /SELECT QuoteID FROM Quotes/, rows: [{ QuoteID: 7 }] }]);
+    expect((await approve()).status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).not.toContainEqual(expect.objectContaining({ action: "sod_blocked" }));
+  });
+
   it("refuses a second approved quote on one job", async () => {
     mockSql([APP_USER, JOB_BUILDING, job({ HasApprovedQuote: 1 }), quoteRow(), QUOTE_SCOPE]);
     const res = await approve();
@@ -223,7 +236,7 @@ describe("approveQuote", () => {
 });
 
 describe("directorApproveQuote", () => {
-  const DIRECTOR_READ = /SELECT JobID, QuoteNumber, ContractorName, Status, CreatedBy, ApprovedBy FROM Quotes/;
+  const DIRECTOR_READ = /SELECT JobID, QuoteNumber, ContractorName, Status FROM Quotes/;
   const awaiting = (over: Record<string, unknown> = {}): Route => ({
     match: DIRECTOR_READ,
     rows: [{ ApprovedBy: "Abby Accounts", ContractorName: "Acme", CreatedBy: "Fran Facilities", JobID: 9, QuoteNumber: "QT-9-1", Status: "awaiting_director", ...over }],
@@ -237,17 +250,15 @@ describe("directorApproveQuote", () => {
     expect((await directorApprove()).status).toBe(200);
   });
 
-  it("refuses a director who added the quote", async () => {
-    mockSql([APP_USER, JOB_BUILDING, awaiting({ CreatedBy: "Dana Director" }), QUOTE_SCOPE]);
-    const res = await directorApprove();
-    expect(res).toMatchObject({ jsonBody: { code: "creator" }, status: 403 });
-    expect(wrote(/UPDATE Quotes/)).toBe(false);
-    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "sod_blocked", before: expect.objectContaining({ attempted: "quote.director_approve" }) })]);
-  });
-
-  it("refuses a director who gave the quote its first approval", async () => {
-    mockSql([APP_USER, JOB_BUILDING, awaiting({ ApprovedBy: "Dana Director" }), QUOTE_SCOPE]);
-    expect(await directorApprove()).toMatchObject({ jsonBody: { code: "same_approver" }, status: 403 });
-    expect(wrote(/UPDATE Quotes/)).toBe(false);
+  it("decision 17: a director who added the quote and gave its first approval still approves it", async () => {
+    mockSql([
+      APP_USER,
+      JOB_BUILDING,
+      awaiting({ ApprovedBy: "Dana Director", CreatedBy: "Dana Director" }),
+      { match: /OUTPUT inserted\.QuoteID/, rows: [{ QuoteID: 7 }] },
+      { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] },
+    ]);
+    expect((await directorApprove()).status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).not.toContainEqual(expect.objectContaining({ action: "sod_blocked" }));
   });
 });

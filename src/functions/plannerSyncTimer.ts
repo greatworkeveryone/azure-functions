@@ -2,6 +2,8 @@ import { app, type InvocationContext, type Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
+import { runsContractorFlow } from "../jobKinds";
 import {
   syncJobAwaitingAccounts,
   syncJobAwaitingFacilitiesApproval,
@@ -15,7 +17,9 @@ import {
   graphCreatePlannerTask,
   graphGetGroupMembers,
   graphGetPlannerTask,
+  resolveActivePlannerTasks,
 } from "../planner";
+import { plannerSyncEnabled, plannerUnsignedHoldbackEnabled } from "../plannerFlag";
 import {
   buildJobTaskDescription,
   buildTaskTitle,
@@ -23,6 +27,7 @@ import {
   computeEventDate,
   groupPlannerTasksByKey,
   isInWindow,
+  leaseTaskPlan,
   LEAD_TIMES,
   plannerTaskKey,
   toIsoDateString,
@@ -70,6 +75,10 @@ export async function plannerSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
+  // Planner is being retired: unless PLANNER_SYNC_ENABLED is "true" this run does
+  // nothing, whatever else (APP_BASE_URL, the PLANNER_* ids) is set.
+  if (!plannerSyncEnabled()) return;
+
   context.log("plannerSyncTimer: starting");
 
   const {
@@ -119,11 +128,14 @@ export async function plannerSyncTimer(
           ORDER BY Level, Area) AS FirstOccupancy,
          CONVERT(VARCHAR(10), t.Expiry, 120) AS Expiry,
          t.OptionNoticeMonths,
+         t.OptionPeriods,
          CONVERT(VARCHAR(10), t.NextReviewDate, 120) AS NextReviewDate,
-         t.ReviewType
+         t.ReviewType,
+         t.ScheduleSignedOffAt
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
+         AND t.ArchivedAt IS NULL
          AND (t.Expiry IS NOT NULL OR t.NextReviewDate IS NOT NULL)`,
     );
 
@@ -135,8 +147,10 @@ export async function plannerSyncTimer(
       firstOccupancy: (r.FirstOccupancy as string | null) ?? null,
       expiry: (r.Expiry as string | null) ?? null,
       optionNoticeMonths: (r.OptionNoticeMonths as number | null) ?? null,
+      optionPeriods: typeof r.OptionPeriods === "string" ? r.OptionPeriods : null,
       nextReviewDate: (r.NextReviewDate as string | null) ?? null,
       reviewType: (r.ReviewType as string | null) ?? null,
+      scheduleSignedOff: Boolean(r.ScheduleSignedOffAt),
     }));
 
     let created = 0;
@@ -164,7 +178,42 @@ export async function plannerSyncTimer(
         );
     const tenantTaskByKey = groupPlannerTasksByKey(tenantTaskRows as PlannerTaskRowShape[]);
 
-    for (const tenant of tenants) {
+    // A schedule nobody has signed off is unverified: raise no lease tasks for
+    // it (PLAN D7, D21). Taking down the ones already open changes live Planner
+    // data in bulk, so it only happens when PLANNER_UNSIGNED_HOLDBACK_ENABLED is
+    // "true"; otherwise they are left alone and the log says which.
+    const plan = leaseTaskPlan(tenants, tenantTaskRows as PlannerTaskRowShape[]);
+    const openTasks = new Map<number, number>();
+    for (const row of tenantTaskRows as PlannerTaskRowShape[]) {
+      if (row.Status === "active") openTasks.set(row.EntityId, (openTasks.get(row.EntityId) ?? 0) + 1);
+    }
+    if (plan.removeFor.length > 0) {
+      const describe = (tenantId: number) => `${tenantId} (${openTasks.get(tenantId) ?? 0} open lease tasks)`;
+      if (!plannerUnsignedHoldbackEnabled()) {
+        context.log(
+          `plannerSyncTimer: ${plan.removeFor.length} unsigned tenancies still have open lease tasks, not removed because PLANNER_UNSIGNED_HOLDBACK_ENABLED is not "true": ${plan.removeFor.map(describe).join(", ")}`,
+        );
+      } else {
+        let removedTasks = 0;
+        let removedTenancies = 0;
+        for (const tenantId of plan.removeFor) {
+          try {
+            await resolveActivePlannerTasks("tenant", tenantId, TENANT_TRIGGER_TYPES);
+            removedTasks += openTasks.get(tenantId) ?? 0;
+            removedTenancies++;
+            context.log(`plannerSyncTimer: removed ${openTasks.get(tenantId) ?? 0} open lease tasks for unsigned tenancy ${tenantId}`);
+          } catch (err: unknown) {
+            context.warn(
+              `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+        context.log(`plannerSyncTimer: removed ${removedTasks} open lease tasks across ${removedTenancies} unsigned tenancies`);
+      }
+    }
+
+    for (const tenant of plan.eligible) {
       for (const triggerType of TENANT_TRIGGER_TYPES) {
         const eventDate = computeEventDate(tenant, triggerType);
         if (!eventDate) continue;
@@ -335,7 +384,7 @@ export async function plannerSyncTimer(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
+      `SELECT j.JobID, j.Title, j.Kind,
               COALESCE(b.BuildingName, '') AS BuildingName,
               CONVERT(VARCHAR(23), j.ExpectedProgressUpdate, 126) AS ExpectedProgressUpdate
        FROM Jobs j
@@ -349,12 +398,15 @@ export async function plannerSyncTimer(
          AND j.ExpectedProgressUpdate < DATEADD(DAY, 1, CAST(SYSUTCDATETIME() AS DATE))`,
     );
 
-    const jobs: PlannerJobRow[] = jobRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-      expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
-    }));
+    // Admin / Accounts jobs (plan D2) have no contractor to chase, so no update task.
+    const jobs: PlannerJobRow[] = jobRows
+      .filter((r) => runsContractorFlow(r.Kind))
+      .map((r) => ({
+        jobId: r.JobID as number,
+        title: r.Title as string,
+        buildingName: (r.BuildingName as string | null) ?? null,
+        expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
+      }));
 
     let jobCreated = 0;
     let jobSkipped = 0;
@@ -783,5 +835,5 @@ export async function plannerSyncTimer(
 
 app.timer("plannerSyncTimer", {
   schedule: "0 30 2 * * *",
-  handler: plannerSyncTimer,
+  handler: runTimer("plannerSyncTimer", plannerSyncTimer),
 });

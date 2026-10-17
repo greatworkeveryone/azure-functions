@@ -1,65 +1,51 @@
-// MYOB AccountRight OAuth 2.0 helpers.
+// MYOB AccountRight OAuth 2.0.
 //
 // Flow:
-//   1. /myobAuthStart  → generate state, return MYOB authorize URL
-//   2. User signs in to MYOB, MYOB 302s back to /myobAuthCallback?code=...&state=...
-//   3. /myobAuthCallback → verify state, exchange code for tokens, store in DB
-//   4. Other code calls getValidMyobAccessToken() — refreshes if expired
+//   1. /myobAuthStart   → an admin gets a single-use state bound to their oid
+//                         (myob-auth-state.ts) and MYOB's authorize URL
+//   2. MYOB 302s the browser to /myobAuthCallback?code&state&businessId
+//   3. /myobAuthCallback → myob-link.ts: state consumed, businessId checked,
+//                         code exchanged, scopes checked, tokens stored encrypted
+//                         and the link ledgered
+//   4. getValidMyobAccessToken() refreshes under sp_getapplock when near expiry
 //
-// State CSRF protection: we sign a (timestamp, nonce) tuple with MYOB_CLIENT_SECRET
-// so the callback can verify the state was minted by us within the last 10
-// minutes without keeping any server-side session.
+// Scopes are fixed in code (myob-endpoints.ts): `sme-company-file sme-purchases`.
+// There is deliberately no environment override.
 //
 // Required env vars:
 //   MYOB_CLIENT_ID     — "Key" from the MYOB developer portal
 //   MYOB_CLIENT_SECRET — "Secret" from the MYOB developer portal
 //   MYOB_REDIRECT_URI  — must match the Redirect URI registered on the MYOB app
+//   MYOB_TOKEN_KEY     — see myob-token-crypto.ts
 
-import { createHmac, randomBytes, timingSafeEqual } from "crypto";
-import { Connection } from "tedious";
-import { TYPES } from "tedious";
+import type { Connection } from "tedious";
 import {
+  beginTransaction,
   closeConnection,
+  commitTransaction,
   createRequestConnection,
   createServiceRequestConnection,
-  executeQuery,
+  rollbackTransaction,
 } from "./db";
 import { myobRequest, type MyobActor } from "./myob-api-log";
+import {
+  lockMyobTokens,
+  openStoredTokens,
+  readMyobAuthRow,
+  saveRefreshedTokens,
+  type MyobTokenResponse,
+} from "./myob-auth-store";
+import { MYOB_SCOPE_STRING, MYOB_SCOPES, MYOB_TOKEN_URL } from "./myob-endpoints";
 
-// Token storage reads/writes connect as the app's service principal either
-// way. Both branches return a FRESH connection, never the singleton: every
-// caller here is an app.http handler, and myobAuthCallback in particular is
-// internet-reachable and runs with sqlToken: null because MYOB drives that
-// redirect. The branch survives only so the SQL_USER_CONNECTION rollback lever
-// still reaches the paths that do have a caller token.
-async function openDbConnection(sqlToken: string | null): Promise<Connection> {
-  return sqlToken
-    ? createRequestConnection(sqlToken)
-    : createServiceRequestConnection();
-}
+export { MyobRelinkRequiredError } from "./myob-auth-store";
+export type { MyobTokenResponse } from "./myob-auth-store";
+export { getMyobAuthStatus, type MyobAuthStatus } from "./myob-auth-status";
 
 const MYOB_AUTHORIZE_URL = "https://secure.myob.com/oauth2/account/authorize/";
-const MYOB_TOKEN_URL = "https://secure.myob.com/oauth2/v1/authorize/";
-const STATE_TTL_MS = 10 * 60 * 1000;
 const REFRESH_SKEW_MS = 60 * 1000; // refresh if access token expires in <60s
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-interface MyobTokenResponse {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  scope: string;
-  user?: { uid: string; username: string };
-}
-
-export interface MyobAuthStatus {
-  linked: boolean;
-  expiresAt: string | null;
-  authorizedBy: string | null;
-  authorizedAt: string | null;
-  isExpired: boolean;
-  scope: string | null;
+async function openDbConnection(sqlToken: string | null): Promise<Connection> {
+  return sqlToken ? createRequestConnection(sqlToken) : createServiceRequestConnection();
 }
 
 export class MyobNotLinkedError extends Error {
@@ -69,77 +55,59 @@ export class MyobNotLinkedError extends Error {
   }
 }
 
-// ── State (CSRF) ─────────────────────────────────────────────────────────────
-
-function stateSecret(): string {
-  const secret = process.env.MYOB_CLIENT_SECRET;
-  if (!secret) throw new Error("MYOB_CLIENT_SECRET is not configured");
-  return secret;
-}
-
-export function generateAuthState(): string {
-  const timestamp = Date.now().toString();
-  const nonce = randomBytes(16).toString("hex");
-  const hmac = createHmac("sha256", stateSecret())
-    .update(`${timestamp}.${nonce}`)
-    .digest("hex")
-    .slice(0, 32);
-  return Buffer.from(`${timestamp}.${nonce}.${hmac}`).toString("base64url");
-}
-
-export function verifyAuthState(state: string): boolean {
-  try {
-    const decoded = Buffer.from(state, "base64url").toString("utf8");
-    const [timestamp, nonce, hmac] = decoded.split(".");
-    if (!timestamp || !nonce || !hmac) return false;
-
-    const expected = createHmac("sha256", stateSecret())
-      .update(`${timestamp}.${nonce}`)
-      .digest("hex")
-      .slice(0, 32);
-    const a = Buffer.from(expected, "hex");
-    const b = Buffer.from(hmac, "hex");
-    if (a.length !== b.length) return false;
-    if (!timingSafeEqual(a, b)) return false;
-
-    const age = Date.now() - Number(timestamp);
-    return age >= 0 && age <= STATE_TTL_MS;
-  } catch {
-    return false;
+export class MyobScopeError extends Error {
+  constructor(extra: string[]) {
+    super(
+      extra.length
+        ? `MYOB granted access Floorplan did not ask for (${extra.join(", ")}); nothing was stored`
+        : "MYOB did not say which access it granted; nothing was stored",
+    );
+    this.name = "MyobScopeError";
   }
 }
 
-// ── Authorize URL ────────────────────────────────────────────────────────────
+// ── Authorize URL and scopes ─────────────────────────────────────────────────
 
 export function buildAuthorizeUrl(state: string): string {
   const clientId = process.env.MYOB_CLIENT_ID;
   const redirectUri = process.env.MYOB_REDIRECT_URI;
   if (!clientId) throw new Error("MYOB_CLIENT_ID is not configured");
   if (!redirectUri) throw new Error("MYOB_REDIRECT_URI is not configured");
-
-  // Empty string ("") means "omit the scope param" — some MYOB app
-  // registrations reject any scope string and default to whatever was granted.
-  const scope = process.env.MYOB_SCOPE ?? "sme-company-file sme-purchases sme-banking sme-contacts-supplier";
   const params = new URLSearchParams({
     client_id: clientId,
+    prompt: "consent",
     redirect_uri: redirectUri,
     response_type: "code",
+    scope: MYOB_SCOPE_STRING,
     state,
   });
-  if (scope) params.set("scope", scope);
   return `${MYOB_AUTHORIZE_URL}?${params.toString()}`;
 }
 
-// ── Token exchange + refresh ─────────────────────────────────────────────────
+/**
+ * Refuses a token that carries any scope beyond the two the agreement allows,
+ * or that doesn't say what it grants: unknown access is treated as too much.
+ */
+export function assertGrantedScope(scope: string | undefined): void {
+  const granted = (scope ?? "").split(/[\s,]+/).filter(Boolean);
+  if (granted.length === 0) throw new MyobScopeError([]);
+  const allowed = new Set<string>(MYOB_SCOPES);
+  const extra = granted.filter((s) => !allowed.has(s));
+  if (extra.length) throw new MyobScopeError(extra);
+}
+
+// ── Token endpoint ───────────────────────────────────────────────────────────
+
+function clientCredentials(): { clientId: string; clientSecret: string } {
+  const clientId = process.env.MYOB_CLIENT_ID;
+  const clientSecret = process.env.MYOB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("MYOB_CLIENT_ID / MYOB_CLIENT_SECRET not configured");
+  return { clientId, clientSecret };
+}
 
 // Through myobRequest like every other MYOB call, so token exchanges and
 // refreshes are in the audit log too (the log redacts the secrets in them).
-async function postTokenRequest(
-  body: URLSearchParams,
-  actor: MyobActor,
-  purpose: string,
-  correlationId?: string,
-): Promise<MyobTokenResponse> {
+async function postTokenRequest(body: URLSearchParams, actor: MyobActor, purpose: string, correlationId?: string) {
   const response = await myobRequest({
     actor,
     body,
@@ -149,177 +117,80 @@ async function postTokenRequest(
     purpose,
     url: MYOB_TOKEN_URL,
   });
-  if (!response.ok) {
-    throw new Error(`MYOB token endpoint ${response.status}: ${response.text}`);
-  }
+  if (!response.ok) throw new Error(`MYOB token endpoint ${response.status}: ${response.text}`);
   return response.json<MyobTokenResponse>();
 }
 
-export async function exchangeCodeForTokens(opts: {
-  actor: MyobActor;
-  authorizedBy: string | null;
-  code: string;
-  correlationId?: string;
-  sqlToken: string | null;
-}): Promise<MyobAuthStatus> {
-  const clientId = process.env.MYOB_CLIENT_ID;
-  const clientSecret = process.env.MYOB_CLIENT_SECRET;
+/** Exchanges an authorization code. Stores nothing: myob-link.ts decides whether to keep the tokens. */
+export async function exchangeCode(code: string, actor: MyobActor, correlationId?: string): Promise<MyobTokenResponse> {
+  const { clientId, clientSecret } = clientCredentials();
   const redirectUri = process.env.MYOB_REDIRECT_URI;
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error(
-      "MYOB OAuth env vars missing (MYOB_CLIENT_ID / MYOB_CLIENT_SECRET / MYOB_REDIRECT_URI)",
-    );
-  }
-
-  const scope = process.env.MYOB_SCOPE ?? "sme-company-file sme-purchases sme-banking sme-contacts-supplier";
-  const tokenBody = new URLSearchParams({
+  if (!redirectUri) throw new Error("MYOB_REDIRECT_URI is not configured");
+  const body = new URLSearchParams({
     client_id: clientId,
     client_secret: clientSecret,
-    code: opts.code,
-    redirect_uri: redirectUri,
+    code,
     grant_type: "authorization_code",
+    redirect_uri: redirectUri,
+    scope: MYOB_SCOPE_STRING,
   });
-  if (scope) tokenBody.set("scope", scope);
-  const tokens = await postTokenRequest(tokenBody, opts.actor, "oauth-token-exchange", opts.correlationId);
-
-  await persistTokens(tokens, opts.authorizedBy, opts.sqlToken);
-  return getMyobAuthStatus(opts.sqlToken);
+  const tokens = await postTokenRequest(body, actor, "oauth-token-exchange", correlationId);
+  assertGrantedScope(tokens.scope);
+  return tokens;
 }
 
-async function refreshTokens(
-  refreshToken: string,
-  actor: MyobActor,
-  correlationId?: string,
-): Promise<MyobTokenResponse> {
-  const clientId = process.env.MYOB_CLIENT_ID;
-  const clientSecret = process.env.MYOB_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error("MYOB_CLIENT_ID / MYOB_CLIENT_SECRET not configured");
-  }
-  return postTokenRequest(
-    new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }),
-    actor,
-    "oauth-token-refresh",
-    correlationId,
-  );
+async function refreshTokens(refreshToken: string, actor: MyobActor, correlationId?: string): Promise<MyobTokenResponse> {
+  const { clientId, clientSecret } = clientCredentials();
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  });
+  const tokens = await postTokenRequest(body, actor, "oauth-token-refresh", correlationId);
+  assertGrantedScope(tokens.scope);
+  return tokens;
 }
 
-// ── DB persistence ───────────────────────────────────────────────────────────
-
-async function persistTokens(
-  tokens: MyobTokenResponse,
-  authorizedBy: string | null,
-  sqlToken: string | null,
-): Promise<void> {
-  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
-  const connection = await openDbConnection(sqlToken);
-  try {
-    await executeQuery(
-      connection,
-      `MERGE dbo.MyobAuth AS target
-       USING (SELECT 1 AS Id) AS src ON target.Id = src.Id
-       WHEN MATCHED THEN UPDATE SET
-         AccessToken  = @AccessToken,
-         RefreshToken = @RefreshToken,
-         ExpiresAt    = @ExpiresAt,
-         Scope        = @Scope,
-         AuthorizedBy = COALESCE(@AuthorizedBy, AuthorizedBy),
-         AuthorizedAt = CASE WHEN @AuthorizedBy IS NOT NULL THEN SYSUTCDATETIME() ELSE AuthorizedAt END,
-         UpdatedAt    = SYSUTCDATETIME()
-       WHEN NOT MATCHED THEN INSERT
-         (Id, AccessToken, RefreshToken, ExpiresAt, Scope, AuthorizedBy, AuthorizedAt, UpdatedAt)
-         VALUES (1, @AccessToken, @RefreshToken, @ExpiresAt, @Scope, @AuthorizedBy, SYSUTCDATETIME(), SYSUTCDATETIME());`,
-      [
-        { name: "AccessToken", type: TYPES.NVarChar, value: tokens.access_token },
-        { name: "RefreshToken", type: TYPES.NVarChar, value: tokens.refresh_token },
-        { name: "ExpiresAt", type: TYPES.DateTime2, value: expiresAt },
-        { name: "Scope", type: TYPES.NVarChar, value: tokens.scope ?? null },
-        { name: "AuthorizedBy", type: TYPES.NVarChar, value: authorizedBy },
-      ],
-    );
-  } finally {
-    closeConnection(connection);
-  }
-}
-
-interface MyobAuthRow {
-  AccessToken: string;
-  RefreshToken: string;
-  ExpiresAt: Date;
-  Scope: string | null;
-  AuthorizedBy: string | null;
-  AuthorizedAt: Date;
-}
-
-async function loadRow(sqlToken: string | null): Promise<MyobAuthRow | null> {
-  const connection = await openDbConnection(sqlToken);
-  try {
-    const rows = await executeQuery(
-      connection,
-      `SELECT AccessToken, RefreshToken, ExpiresAt, Scope, AuthorizedBy, AuthorizedAt
-       FROM dbo.MyobAuth WHERE Id = 1`,
-    );
-    if (rows.length === 0) return null;
-    return rows[0] as unknown as MyobAuthRow;
-  } finally {
-    closeConnection(connection);
-  }
-}
-
-// ── Public API ───────────────────────────────────────────────────────────────
-
-export async function getMyobAuthStatus(
-  sqlToken: string | null,
-): Promise<MyobAuthStatus> {
-  const row = await loadRow(sqlToken);
-  if (!row) {
-    return {
-      linked: false,
-      expiresAt: null,
-      authorizedBy: null,
-      authorizedAt: null,
-      isExpired: false,
-      scope: null,
-    };
-  }
-  const isExpired = row.ExpiresAt.getTime() <= Date.now();
-  return {
-    linked: true,
-    expiresAt: row.ExpiresAt.toISOString(),
-    authorizedBy: row.AuthorizedBy,
-    authorizedAt: row.AuthorizedAt.toISOString(),
-    isExpired,
-    scope: row.Scope,
-  };
-}
+// ── Access ──────────────────────────────────────────────────────────────────
 
 /**
- * Returns a valid access token, refreshing if the stored token is within
- * REFRESH_SKEW_MS of expiry. Throws MyobNotLinkedError if no row exists.
- *
- * Pass the caller's SQL token so the DB read/write hits the user connection;
- * pass null only from background paths (timers) where no user is present and
- * the service principal has SQL access. `actor` is who the (possible) refresh
- * call is on behalf of, for the MYOB audit log.
+ * Returns a valid access token, refreshing it when it expires within
+ * REFRESH_SKEW_MS. The refresh runs in a transaction holding
+ * sp_getapplock('myob_refresh') and re-reads the row under the lock, so
+ * concurrent callers refresh once and the rest use the new token.
  */
 export async function getValidMyobAccessToken(
   sqlToken: string | null,
   actor: MyobActor,
   correlationId?: string,
 ): Promise<string> {
-  const row = await loadRow(sqlToken);
-  if (!row) throw new MyobNotLinkedError();
+  const connection = await openDbConnection(sqlToken);
+  try {
+    const row = await readMyobAuthRow(connection);
+    if (!row) throw new MyobNotLinkedError();
+    const tokens = openStoredTokens(row);
+    if (row.ExpiresAt.getTime() > Date.now() + REFRESH_SKEW_MS) return tokens.accessToken;
 
-  if (row.ExpiresAt.getTime() > Date.now() + REFRESH_SKEW_MS) {
-    return row.AccessToken;
+    await beginTransaction(connection);
+    try {
+      await lockMyobTokens(connection);
+      const locked = await readMyobAuthRow(connection);
+      if (!locked) throw new MyobNotLinkedError();
+      const current = openStoredTokens(locked);
+      if (locked.ExpiresAt.getTime() > Date.now() + REFRESH_SKEW_MS) {
+        await commitTransaction(connection);
+        return current.accessToken;
+      }
+      const refreshed = await refreshTokens(current.refreshToken, actor, correlationId);
+      await saveRefreshedTokens(connection, refreshed);
+      await commitTransaction(connection);
+      return refreshed.access_token;
+    } catch (error) {
+      await rollbackTransaction(connection).catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    closeConnection(connection);
   }
-
-  const refreshed = await refreshTokens(row.RefreshToken, actor, correlationId);
-  await persistTokens(refreshed, null, sqlToken);
-  return refreshed.access_token;
 }

@@ -31,16 +31,30 @@ import { isTestJob } from "../testRecords";
 import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
 import { loadJobForMoney } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
+import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
 import { QUOTE_COLUMNS, approveDirectorQuote, rejectQuote as rejectQuoteWrite } from "../quote-decisions";
-import { record } from "../ledger";
+import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { approvalRule, jobScope, quoteFacts, quoteSnapshot } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvalRule,
+  approvalSnapshot,
+  approvedAmount,
+  contractorFacts,
+  deletionAfter,
+  jobScope,
+  quoteFacts,
+  quoteSnapshot,
+} from "../ledger/moneyDecisions";
+import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
+import { parseMoneyField } from "../money";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -119,7 +133,7 @@ async function getQuotes(
 
 // ── POST /api/upsertQuote ────────────────────────────────────────────────────
 
-async function upsertQuote(
+export async function upsertQuote(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -147,6 +161,8 @@ async function upsertQuote(
       SourceEmailID,
       ReceivedAt,
     } = body ?? {};
+    const amount = parseMoneyField(Amount, "Amount");
+    if (!amount.ok) return { status: 400, jsonBody: { error: amount.error } };
 
     connection = await createRequestConnection(token);
 
@@ -155,8 +171,11 @@ async function upsertQuote(
       if (typeof JobID !== "number") {
         return { status: 400, jsonBody: { error: "JobID (number) required to create a quote" } };
       }
-      const badAmount = amountRefusal(Amount, "Amount", true);
+      const badAmount = amountRefusal(amount.value, "Amount", true);
       if (badAmount) return refusalResponse(badAmount);
+      if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, JobID, QuotePDFBlobName))) {
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+      }
 
       await beginTransaction(connection);
       try {
@@ -213,7 +232,7 @@ async function upsertQuote(
             { name: "Seq", type: TYPES.Int, value: nextSeq },
             { name: "ContractorID", type: TYPES.Int, value: ContractorID ?? null },
             { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
-            { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
+            { name: "Amount", type: TYPES.Decimal, value: amount.value ?? null },
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "QuotePDFBlobName", type: TYPES.NVarChar, value: QuotePDFBlobName ?? null },
@@ -228,8 +247,8 @@ async function upsertQuote(
         // quote + its creation event land atomically; if the event insert
         // fails we don't ship a ghost quote with no history trail.
         const amountLabel =
-          typeof Amount === "number"
-            ? ` · $${Number(Amount).toLocaleString()}`
+          typeof amount.value === "number"
+            ? ` · $${amount.value.toLocaleString()}`
             : "";
         const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
         await executeQuery(
@@ -289,26 +308,32 @@ async function upsertQuote(
         Notes: TYPES.NVarChar,
         QuotePDFBlobName: TYPES.NVarChar,
       },
-      { Amount, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
+      { Amount: amount.value, ContractorID, ContractorName, Currency, Notes, QuotePDFBlobName },
     );
     if (!update) {
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
-    const badAmount = amountRefusal(Amount, "Amount", false);
+    const badAmount = amountRefusal(amount.value, "Amount", false);
     if (badAmount) return refusalResponse(badAmount);
 
-    // J3: one transaction. The quote and its job are read under locks, so the
-    // diff and the rules decide on the rows the write replaces.
-    const actor = await resolveLedgerActor(request, connection);
-    if (!actor) return unauthorizedResponse();
+    // An edit that carries an amount or a payee can tear down an existing
+    // approval, which is a decision (PLAN §3.12): the reset and its ledger row
+    // commit together or not at all. Only those edits look up who is editing.
+    let actor: LedgerActor | null = null;
+    if (Amount !== undefined || ContractorID !== undefined || ContractorName !== undefined) {
+      actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+    }
+
     await beginTransaction(connection);
     try {
+      // Read the existing quote before mutating so we can diff for the audit
+      // trail and detect whether the edit invalidates a prior approval. Locked
+      // until commit, so the approval recorded as reset is the one reset.
       const beforeRows = await executeQuery(
         connection,
-        `SELECT QuoteID, JobID, QuoteNumber, Amount, ContractorID, ContractorName, Status, ApprovedAt,
-                ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, Currency, QuotePDFBlobName
-           FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id`,
+        `SELECT ${QUOTE_LEDGER_COLUMNS} FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: QuoteID }],
       );
       if (beforeRows.length === 0) {
@@ -317,8 +342,13 @@ async function upsertQuote(
       }
       const before = beforeRows[0];
       const jobId = before.JobID as number;
+      if (QuotePDFBlobName != null && !(await isJobAttachmentBlob(connection, jobId, QuotePDFBlobName))) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: PDF_NOT_A_JOB_ATTACHMENT } };
+      }
       const quoteNumber = (before.QuoteNumber as string | null) ?? `#${QuoteID}`;
 
+      // J3: the job still takes money changes (not internal, done or archived).
       const moneyJob = await loadJobForMoney(connection, jobId);
       const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
       if (jobRefusal) {
@@ -334,7 +364,7 @@ async function upsertQuote(
           contractorName: (before.ContractorName as string | null) ?? null,
           status: (before.Status as string | null) ?? null,
         },
-        { amount: Amount, contractorId: ContractorID, contractorName: ContractorName },
+        { amount: amount.value, contractorId: ContractorID, contractorName: ContractorName },
       );
 
       await executeQuery(
@@ -403,13 +433,29 @@ async function upsertQuote(
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );
+
+        // Only an edit that carries an amount or a payee can get here, and
+        // those looked up who is editing above.
+        if (!actor) throw new Error("An approval was reset without a ledger actor");
+        const scope = await jobScope(connection, jobId);
+        const edited = {
+          ...before,
+          Amount: amount.value !== undefined ? amount.value : before.Amount,
+          ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
+          ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
+          Currency: Currency !== undefined ? Currency : before.Currency,
+        };
         await record(connection, {
           action: "quote.approval_reset",
           actor,
-          after: { status: "pending", ...quoteFacts({ ...before, Amount: Amount ?? before.Amount, ContractorID: ContractorID ?? before.ContractorID, ContractorName: ContractorName ?? before.ContractorName }) },
-          before: quoteSnapshot(before),
-          buildingId: moneyJob?.buildingId ?? null,
-          jobId,
+          after: {
+            ...quoteFacts(edited),
+            ...amountChange({ approved: before.Amount, next: edited.Amount, previous: before.Amount }),
+            status: "pending",
+          },
+          before: approvalSnapshot(before),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
           ruleApplied: why,
           subject: { id: QuoteID, type: "quote" },
         });
@@ -461,6 +507,8 @@ interface QuoteApproval {
   amount: number;
   currency: string;
   directorNeeded: boolean;
+  /** The quote's ledger facts, for the director request that may follow. */
+  facts: Record<string, unknown>;
   jobId: number;
   newStatus: string;
 }
@@ -481,7 +529,7 @@ interface ApprovalRefusal {
 
 function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): ApprovalRefusal {
   return {
-    action: refusal.code === "creator" || refusal.code === "same_approver" ? "sod_blocked" : "denied",
+    action: refusal.code === "creator" ? "sod_blocked" : "denied",
     code: refusal.code,
     httpStatus: refusal.status,
     message: refusal.message,
@@ -494,9 +542,9 @@ const APPROVE_QUOTE_ROLES = SUBJECT_ELIGIBLE_ROLES.quote as readonly AppRole[];
 
 async function approveQuoteInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; email: string; quoteId: number; userRoles: string[] },
+  input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; quoteId: number; userRoles: string[] },
 ): Promise<QuoteApprovalOutcome> {
-  const { actor, approvedBy, email, quoteId, userRoles } = input;
+  const { actor, approvedBy, correlationId, email, quoteId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Locked until commit, so the status we record as replaced is the one we replace.
@@ -520,13 +568,14 @@ async function approveQuoteInTransaction(
     const quoteStatus = (quote.Status as string | null) ?? null;
 
     // J3, in order: the job takes money changes; the quote is still waiting
-    // for a decision; whoever added it doesn't approve it; and the job has no
-    // other approved quote (a second one would overwrite Jobs.ApprovedQuoteID).
+    // for a decision; whoever added it doesn't approve it (unless a director,
+    // decision 17); and the job has no other approved quote (a second one
+    // would overwrite Jobs.ApprovedQuoteID).
     const moneyJob = await loadJobForMoney(connection, jobId);
     const stateRefusal =
       (moneyJob ? jobMoneyRefusal(moneyJob) : null) ??
       approvableRefusal(quoteStatus, "quote") ??
-      creatorRefusal(quote.CreatedBy, approvedBy, "quote") ??
+      creatorRefusal(quote.CreatedBy, { name: approvedBy, roles: userRoles }, "quote") ??
       (moneyJob?.hasApprovedQuote
         ? { code: "quote_already_approved", message: "This job already has an approved quote. Deselect it before approving another.", status: 409 as const }
         : null);
@@ -639,15 +688,16 @@ async function approveQuoteInTransaction(
       action: "quote.approve",
       actor,
       after: { status: newStatus, ...quoteFacts(quote) },
-      before: { status: (quote.Status as string | null) ?? null },
+      before: { status: (quote.Status as string | null) ?? null, ...contractorFacts(quote) },
       buildingId: scope.buildingId,
+      correlationId,
       jobId: scope.jobId,
       ruleApplied: approvalRule({ directorNeeded, userCanApprove }),
       subject: { id: quoteId, type: "quote" },
     });
 
     await commitTransaction(connection);
-    return { ok: true, approval: { amount, currency, directorNeeded, jobId, newStatus } };
+    return { ok: true, approval: { amount, currency, directorNeeded, facts: quoteFacts(quote), jobId, newStatus } };
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
     throw err;
@@ -683,9 +733,12 @@ async function approveQuote(
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return unauthorizedResponse();
 
+    // The approval and the director request it triggers are one operation.
+    const correlationId = newCorrelationId();
     const outcome = await approveQuoteInTransaction(connection, {
       actor,
       approvedBy,
+      correlationId,
       email: identity.email,
       quoteId: QuoteID,
       userRoles: await rolesForRequest(request),
@@ -703,41 +756,32 @@ async function approveQuote(
       );
       return { status: httpStatus, jsonBody: { code, error: message } };
     }
-    const { amount, currency, directorNeeded, jobId, newStatus } = outcome.approval;
+    const { amount, currency, directorNeeded, facts, jobId, newStatus } = outcome.approval;
 
     // Fire-and-forget director email: packet build + Graph sendMail can take
     // 5–20s with attachments, and we don't want the user's click to block on
     // it. Uses a fresh connection so the request connection can close in
     // `finally`. The Resend button on the banner recovers from background
-    // failures.
+    // failures. The stamp and the ledger row for the send are written once the
+    // mail has gone (see ../email/director-requests).
     if (directorNeeded) {
       void (async () => {
         let bgConnection;
         try {
           bgConnection = await createRequestConnection(token);
-          const { sendDirectorApprovalEmail } = await import("../email/director-emails");
-          const result = await sendDirectorApprovalEmail({
-            connection: bgConnection,
-            jobId,
-            stage: "quote",
+          await sendDirectorRequest({
+            actor,
             amount,
+            connection: bgConnection,
+            correlationId,
             currency,
+            facts,
+            jobId,
+            resend: false,
+            stage: "quote",
+            subjectId: QuoteID,
             triggeredBy: approvedBy,
           });
-          await executeQuery(
-            bgConnection,
-            `UPDATE Quotes
-               SET DirectorEmailSentAt = @SentAt,
-                   DirectorEmailSentTo = @SentTo,
-                   DirectorEmailSentBy = @SentBy
-             WHERE QuoteID = @Id`,
-            [
-              { name: "Id", type: TYPES.Int, value: QuoteID },
-              { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
-              { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-              { name: "SentBy", type: TYPES.NVarChar, value: approvedBy },
-            ],
-          );
         } catch (emailErr: any) {
           context.warn(`Director email failed for quote ${QuoteID}: ${emailErr?.message}`);
         } finally {
@@ -833,7 +877,7 @@ export async function rejectQuote(
             : "quote.reject",
         actor,
         after: { status: "rejected", ...quoteFacts(outcome.quote) },
-        before: { status: outcome.previousStatus ?? null },
+        before: { status: outcome.previousStatus ?? null, ...contractorFacts(outcome.quote) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: QuoteID, type: "quote" },
@@ -991,7 +1035,7 @@ async function unapproveQuote(
       await record(connection, {
         action: "quote.unapprove",
         actor,
-        after: { status: "pending", ...quoteFacts(quote) },
+        after: { status: "pending", ...quoteFacts(quote), ...amountUnchanged(quote.Amount, approvedAmount(quote)) },
         before: quoteSnapshot(quote),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1100,7 +1144,7 @@ async function completeQuote(
         action: "quote.complete",
         actor,
         after: { status: "completed", ...quoteFacts(quote) },
-        before: { status: "approved" },
+        before: { status: "approved", ...contractorFacts(quote) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: QuoteID, type: "quote" },
@@ -1206,8 +1250,8 @@ async function uncompleteQuote(
       await record(connection, {
         action: "quote.uncomplete",
         actor,
-        after: { status: "approved", ...quoteFacts(quote) },
-        before: { status: "completed" },
+        after: { status: "approved", ...quoteFacts(quote), ...amountUnchanged(quote.Amount, approvedAmount(quote)) },
+        before: { status: "completed", ...contractorFacts(quote) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: QuoteID, type: "quote" },
@@ -1306,6 +1350,7 @@ async function deleteQuote(
       await record(connection, {
         action: "quote.delete",
         actor,
+        after: deletionAfter(quoteFacts(quote), approvedAmount(quote)),
         before: quoteSnapshot(quote),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1489,17 +1534,6 @@ export async function directorApproveQuote(
       });
       if (!outcome.ok) {
         await rollbackTransaction(connection).catch(() => {});
-        if ("code" in outcome) {
-          // Separation of duties (J3), ledgered in a transaction of its own.
-          await recordRefusal(
-            connection,
-            actor,
-            { id: QuoteID, type: "quote" },
-            { action: "sod_blocked", attempted: "quote.director_approve", code: outcome.code, message: outcome.error },
-            outcome.jobId,
-          );
-          return { status: outcome.status, jsonBody: { code: outcome.code, error: outcome.error } };
-        }
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
       const scope = await jobScope(connection, outcome.jobId);
@@ -1507,7 +1541,7 @@ export async function directorApproveQuote(
         action: "quote.director_approve",
         actor,
         after: { status: "approved", ...quoteFacts(outcome.quote) },
-        before: { status: "awaiting_director" },
+        before: { status: "awaiting_director", ...contractorFacts(outcome.quote) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: QuoteID, type: "quote" },
@@ -1537,13 +1571,20 @@ app.http("directorApproveQuote", { methods: ["POST"], authLevel: "anonymous", ha
 // ── POST /api/resendDirectorQuoteEmail ───────────────────────────────────────
 // Body: { QuoteID } — the sender is the verified caller, never the body.
 // Re-fires the director packet email for a quote currently awaiting director
-// approval — used when the initial best-effort send failed or got missed.
+// approval — used when the initial best-effort send failed or got missed. A
+// send is ledgered once the mail has gone (see ../email/director-requests).
 
 interface ResendDirectorQuoteEmailBody {
   QuoteID: number;
   /** @deprecated ignored — identity comes from the token */
   TriggeredBy?: string;
 }
+
+const RESEND_DIRECTOR_QUOTE_TARGET: RefusalTarget = {
+  attempted: "quote.director_request_sent",
+  idField: "QuoteID",
+  subjectType: "quote",
+};
 
 async function resendDirectorQuoteEmail(
   request: HttpRequest,
@@ -1555,7 +1596,10 @@ async function resendDirectorQuoteEmail(
   // Same reasoning as resendDirectorInvoiceEmail — the workflow participants
   // who can see the banner need to be able to nudge the director themselves.
   const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
-  if (denied) return denied;
+  if (denied) {
+    await recordRoleRefusal(request, token, denied, RESEND_DIRECTOR_QUOTE_TARGET);
+    return denied;
+  }
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1569,10 +1613,13 @@ async function resendDirectorQuoteEmail(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
 
     const rows = await executeQuery(
       connection,
-      `SELECT JobID, Amount, ISNULL(Currency, 'AUD') AS Currency, Status FROM Quotes WHERE QuoteID = @Id`,
+      `SELECT JobID, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, QuoteNumber, ContractorID, ContractorName
+         FROM Quotes WHERE QuoteID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: QuoteID }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Quote not found" } };
@@ -1586,29 +1633,18 @@ async function resendDirectorQuoteEmail(
       return { status: 400, jsonBody: { error: "Quote is not in awaiting_director state" } };
     }
 
-    const { sendDirectorApprovalEmail } = await import("../email/director-emails");
-    const result = await sendDirectorApprovalEmail({
-      connection,
-      jobId,
-      stage: "quote",
+    await sendDirectorRequest({
+      actor,
       amount,
+      connection,
       currency,
+      facts: quoteFacts(rows[0]),
+      jobId,
+      resend: true,
+      stage: "quote",
+      subjectId: QuoteID,
       triggeredBy: identity.name,
     });
-    await executeQuery(
-      connection,
-      `UPDATE Quotes
-         SET DirectorEmailSentAt = @SentAt,
-             DirectorEmailSentTo = @SentTo,
-             DirectorEmailSentBy = @SentBy
-       WHERE QuoteID = @Id`,
-      [
-        { name: "Id", type: TYPES.Int, value: QuoteID },
-        { name: "SentAt", type: TYPES.DateTime2, value: result.sentAt },
-        { name: "SentTo", type: TYPES.NVarChar, value: JSON.stringify(result.sentTo) },
-        { name: "SentBy", type: TYPES.NVarChar, value: identity.name },
-      ],
-    );
 
     const stored = await executeQuery(
       connection,

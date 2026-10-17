@@ -42,6 +42,9 @@ const mailSync = require("../email/mail-sync") as { syncMailbox: jest.Mock };
 const { hydrateAttachmentRefs, positiveIntFromEnv } = require("./parseEmails") as typeof import("./parseEmails");
 const blob = require("../blob-storage") as { generateReadSasUrl: jest.Mock };
 const SAS = "https://acct.blob.core.windows.net/x?sig=1";
+// Attachment names as the mail sync mints them (blob-names.ts EMAIL_ATTACHMENT_SHAPE).
+const UUID = "3f2c9a10-5b7e-4d21-9c8a-0e1f2a3b4c5d";
+const minted = (folder: string, ext = "pdf") => `email-attachments/${folder}/${UUID}.${ext}`;
 
 type ParseEmailsModule = typeof import("./parseEmails");
 type RunParseBatch = ParseEmailsModule["runParseBatch"];
@@ -269,7 +272,7 @@ describe("runParseBatch → toddler request caps", () => {
     stubClaims([
       {
         ...claimedEmail,
-        AttachmentBlobs: JSON.stringify([{ blobName: "email-attachments/x/b.pdf", fileName: "a".repeat(5000) }]),
+        AttachmentBlobs: JSON.stringify([{ blobName: minted("x"), fileName: "a".repeat(5000) }]),
         FromAddress: "f".repeat(3000),
         Subject: "s".repeat(5000),
       },
@@ -287,33 +290,44 @@ describe("runParseBatch → toddler request caps", () => {
 
 describe("hydrateAttachmentRefs", () => {
   it("accepts bare blob-name strings (ingestEmail shape)", () => {
-    expect(hydrateAttachmentRefs(JSON.stringify(["emails/abc/quote.pdf"]))).toEqual([
-      { fileName: "quote.pdf", sasUrl: SAS },
+    expect(hydrateAttachmentRefs(JSON.stringify([minted("abc")]))).toEqual([
+      { fileName: `${UUID}.pdf`, sasUrl: SAS },
     ]);
-    expect(blob.generateReadSasUrl).toHaveBeenCalledWith("emails/abc/quote.pdf", 3_600_000);
+    expect(blob.generateReadSasUrl).toHaveBeenCalledWith(minted("abc"), 3_600_000);
   });
 
   it("accepts { blobName, fileName } objects (Graph sync shape)", () => {
-    const raw = JSON.stringify([{ blobName: "email-attachments/AAMk/9f2c-quote.pdf", fileName: "Quote 1042.pdf" }]);
+    const raw = JSON.stringify([{ blobName: minted("AAMk"), fileName: "Quote 1042.pdf" }]);
 
     expect(hydrateAttachmentRefs(raw)).toEqual([{ fileName: "Quote 1042.pdf", sasUrl: SAS }]);
-    expect(blob.generateReadSasUrl).toHaveBeenCalledWith("email-attachments/AAMk/9f2c-quote.pdf", 3_600_000);
+    expect(blob.generateReadSasUrl).toHaveBeenCalledWith(minted("AAMk"), 3_600_000);
   });
 
   it("handles a mixed array in order", () => {
-    const raw = JSON.stringify(["emails/abc/a.pdf", { blobName: "email-attachments/x/b.pdf", fileName: "b.pdf" }]);
+    const raw = JSON.stringify([minted("abc"), { blobName: minted("x"), fileName: "b.pdf" }]);
 
-    expect(hydrateAttachmentRefs(raw).map((a) => a.fileName)).toEqual(["a.pdf", "b.pdf"]);
+    expect(hydrateAttachmentRefs(raw).map((a) => a.fileName)).toEqual([`${UUID}.pdf`, "b.pdf"]);
   });
 
   it("drops junk entries and falls back to the blob basename when fileName is missing", () => {
-    const raw = JSON.stringify([null, 42, "", {}, { blobName: 7 }, { blobName: "" }, { blobName: "email-attachments/x/c.pdf" }]);
+    const raw = JSON.stringify([null, 42, "", {}, { blobName: 7 }, { blobName: "" }, { blobName: minted("x") }]);
 
-    expect(hydrateAttachmentRefs(raw)).toEqual([{ fileName: "c.pdf", sasUrl: SAS }]);
+    expect(hydrateAttachmentRefs(raw)).toEqual([{ fileName: `${UUID}.pdf`, sasUrl: SAS }]);
+  });
+
+  it("skips a stored name the mail sync never minted instead of failing the parse (SEC-01)", () => {
+    const raw = JSON.stringify([
+      "emails/abc/quote.pdf",
+      { blobName: "email-attachments/x/../../key-photos/keys/a.jpg", fileName: "a.jpg" },
+      { blobName: minted("x"), fileName: "ok.pdf" },
+    ]);
+
+    expect(hydrateAttachmentRefs(raw)).toEqual([{ fileName: "ok.pdf", sasUrl: SAS }]);
+    expect(blob.generateReadSasUrl).toHaveBeenCalledTimes(1);
   });
 
   it("caps a 5,000-char fileName at 255", () => {
-    const raw = JSON.stringify([{ blobName: "email-attachments/x/c.pdf", fileName: "n".repeat(5000) }]);
+    const raw = JSON.stringify([{ blobName: minted("x"), fileName: "n".repeat(5000) }]);
 
     expect(hydrateAttachmentRefs(raw)[0].fileName).toHaveLength(255);
   });
@@ -321,7 +335,7 @@ describe("hydrateAttachmentRefs", () => {
   it("returns [] for null, invalid JSON and non-array JSON", () => {
     expect(hydrateAttachmentRefs(null)).toEqual([]);
     expect(hydrateAttachmentRefs("not json")).toEqual([]);
-    expect(hydrateAttachmentRefs(JSON.stringify({ blobName: "email-attachments/x/c.pdf" }))).toEqual([]);
+    expect(hydrateAttachmentRefs(JSON.stringify({ blobName: minted("x") }))).toEqual([]);
   });
 });
 
@@ -331,7 +345,7 @@ describe("runParseBatch → attachments", () => {
     stubClaims([
       {
         ...claimedEmail,
-        AttachmentBlobs: JSON.stringify([{ blobName: "email-attachments/x/b.pdf", fileName: "Invoice.pdf" }]),
+        AttachmentBlobs: JSON.stringify([{ blobName: minted("x"), fileName: "Invoice.pdf" }]),
       },
     ]);
     const run = loadRunParseBatch(ENV);

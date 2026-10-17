@@ -78,7 +78,7 @@ beforeEach(() => {
   db.createRequestConnection.mockResolvedValue({});
   db.executeQuery.mockResolvedValue([]);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
 });
 
 describe("authentication and validation", () => {

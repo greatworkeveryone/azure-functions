@@ -3,6 +3,7 @@ import { closeConnection, createServiceRequestConnection } from "../db";
 import { sweepMode } from "../escalation/config";
 import { runSweep } from "../escalation/sweep";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Timer trigger: every 30 minutes ───────────────────────────────────────────
 // The escalation sweep (PLAN §3.7, src/escalation/sweep.ts): ends escalations
@@ -59,5 +60,5 @@ export async function escalationSweepTimer(_timer: Timer, context: InvocationCon
 
 app.timer("escalationSweepTimer", {
   schedule: "0 */30 * * * *",
-  handler: escalationSweepTimer,
+  handler: runTimer("escalationSweepTimer", escalationSweepTimer),
 });

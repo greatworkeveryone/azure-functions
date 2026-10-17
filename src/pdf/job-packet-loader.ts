@@ -11,6 +11,7 @@ import { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "../db";
 import { downloadBlob } from "../blob-storage";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import type {
   PacketInput,
   PacketJob,
@@ -182,7 +183,8 @@ async function loadJobAttachments(
 ): Promise<PacketAttachment[]> {
   // Attachments are stored in the polymorphic `Attachments` table (not
   // JobAttachments). OriginalName is the display name; ContentType is stored
-  // directly. Rows without MyBuildingsConfirmedAt still have live blobs.
+  // directly. Rows with MyBuildingsConfirmedAt set are legacy rows whose blob was
+  // deleted by the removed cleanup timer; every other row has a live blob.
   //
   // Director packet rule: include every attachment on the job, EXCEPT those
   // whose only link is to a rejected quote. An attachment with no quote links
@@ -277,8 +279,14 @@ function inferContentType(fileName: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
-async function maybeLoadBlob(blobName: string | null): Promise<Buffer | null> {
+// Stored names (quote/invoice PDFs, claimed attachments) are downloaded with
+// the account key, so only a minted wr-attachments name is ever fetched.
+export async function maybeLoadBlob(blobName: string | null): Promise<Buffer | null> {
   if (!blobName) return null;
+  if (!isBlobName(blobName, WR_ATTACHMENTS_SHAPES)) {
+    console.warn("job packet: skipped a stored blob name that is not a minted attachment name");
+    return null;
+  }
   try {
     return await downloadBlob(blobName);
   } catch {

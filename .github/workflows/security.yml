@@ -1,10 +1,11 @@
 name: Security
 
+# The repo has no `main`; these are the branches that exist and ship.
 on:
   push:
-    branches: [main]
+    branches: [dev/launch-readiness, develop-c, master]
   pull_request:
-    branches: [main]
+    branches: [dev/launch-readiness, develop-c, master]
   schedule:
     - cron: "0 6 * * 1"
 
@@ -16,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
       - name: Install with scripts ignored
         run: npm ci --ignore-scripts

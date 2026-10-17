@@ -21,6 +21,7 @@ import { invalidateApprovalLimitsCache } from "../approval-limits-db";
 import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForRequest } from "../auth";
 import { LedgerValidationError, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { requireMoneyContext } from "../moneyGate";
 
 interface SetApprovalLimitBody {
   RoleName: string;
@@ -39,6 +40,9 @@ export async function setApprovalLimit(
   if (!userRoles.includes(AppRole.ADMIN)) {
     return { status: 403, jsonBody: { error: "Admin role required" } };
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {

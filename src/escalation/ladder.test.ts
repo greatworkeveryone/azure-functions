@@ -1,6 +1,6 @@
 /// <reference types="jest" />
 import { describeTarget, expandLadder, LadderError, resolveTarget, type ResolveInput } from "./ladder";
-import { isAbove, managerRoleFor, roleLabel, teamRolesOf, teamRolesOfAll } from "./roles";
+import { FINANCE_POLICY_PREFIX, isAbove, managerRoleFor, roleLabel, seenPolicyPrefixesOf, seenPolicyPrefixesOfAll, teamRolesOf, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, LadderEntry } from "./types";
 
 const user = (userId: number, name: string, role: string, email: string | null = `${name.toLowerCase()}@example.com`): DirectoryUser => ({
@@ -347,6 +347,17 @@ describe("roles", () => {
     expect(teamRolesOf("facilities")).toEqual([]);
     expect(teamRolesOfAll(["facilities", "accounts_manager"])).toEqual(["accounts_manager", "accounts"]);
     expect(teamRolesOfAll(["facilities", "director"])).toBeNull();
+  });
+
+  it("lets only the CFO oversee a policy domain: finance.", () => {
+    expect(seenPolicyPrefixesOf("cfo")).toEqual(["finance."]);
+    expect(seenPolicyPrefixesOf(" CFO ")).toEqual(["finance."]);
+    for (const role of ["director", "admin", "accounts_manager", "facilities_manager", "accounts", "facilities", "user", "constructor", "", null]) {
+      expect(seenPolicyPrefixesOf(role)).toEqual([]);
+    }
+    expect(seenPolicyPrefixesOfAll(["facilities", "cfo", "cfo"])).toEqual(["finance."]);
+    expect(seenPolicyPrefixesOfAll(["facilities", "accounts_manager"])).toEqual([]);
+    expect(FINANCE_POLICY_PREFIX).toBe("finance.");
   });
 
   it("knows which roles are above a target (§3.7 visibility)", () => {

@@ -13,6 +13,8 @@ export type TriggerType =
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
 
+import { optionNoticeWindow } from "./leaseOptions";
+
 export interface PlannerTenantRow {
   tenantId: number;
   legalName: string;
@@ -21,8 +23,12 @@ export interface PlannerTenantRow {
   firstOccupancy: string | null;
   expiry: string | null;
   optionNoticeMonths: number | null;
+  /** The free-text option field: "Nil" or text we can't read means there is no option deadline. */
+  optionPeriods: string | null;
   nextReviewDate: string | null;
   reviewType: string | null;
+  /** Whether someone has signed this tenancy's schedule off as verified (m097). */
+  scheduleSignedOff: boolean;
 }
 
 export interface PlannerJobRow {
@@ -62,10 +68,23 @@ export function formatDDMMYYYY(isoDate: string): string {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function subMonthsUTC(date: Date, months: number): Date {
-  return new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - months, date.getUTCDate()),
+/**
+ * The last day to give option notice: the expiry less the notice period,
+ * month-end safe (31 Aug less 6 months is 28/29 Feb, never early March), so a
+ * reminder never lands after the deadline. Null when there is nothing to give
+ * notice of: no option text we can read ("Nil" included), no notice period, or no
+ * expiry. The same rule the lease-events feed and the tenancy screens use
+ * (optionNoticeWindow).
+ */
+function optionDeadlineDate(tenant: PlannerTenantRow): Date | null {
+  if (!tenant.expiry) return null;
+  const expiry = tenant.expiry.slice(0, 10);
+  // The deadline doesn't depend on the day it is asked on; any real date will do.
+  const { deadline } = optionNoticeWindow(
+    { expiry, optionNoticeMonths: tenant.optionNoticeMonths, optionPeriods: tenant.optionPeriods },
+    expiry,
   );
+  return deadline ? new Date(`${deadline}T00:00:00Z`) : null;
 }
 
 export function addDaysUTC(date: Date, days: number): Date {
@@ -79,10 +98,8 @@ export function computeEventDate(
   switch (triggerType) {
     case "lease_expiry":
       return tenant.expiry ? new Date(tenant.expiry) : null;
-    case "option_notice": {
-      if (!tenant.expiry || tenant.optionNoticeMonths == null) return null;
-      return subMonthsUTC(new Date(tenant.expiry), tenant.optionNoticeMonths);
-    }
+    case "option_notice":
+      return optionDeadlineDate(tenant);
     case "rent_review":
       return tenant.nextReviewDate ? new Date(tenant.nextReviewDate) : null;
     default:
@@ -153,15 +170,8 @@ export function buildTenantTaskDescription(
     case "lease_expiry":
       return `${prefix}Expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     case "option_notice": {
-      const deadline =
-        tenant.expiry && tenant.optionNoticeMonths != null
-          ? formatDDMMYYYY(
-              subMonthsUTC(
-                new Date(tenant.expiry),
-                tenant.optionNoticeMonths,
-              ).toISOString(),
-            )
-          : "—";
+      const due = optionDeadlineDate(tenant);
+      const deadline = due ? formatDDMMYYYY(due.toISOString()) : "—";
       return `${prefix}Option deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     }
     case "rent_review":
@@ -373,4 +383,26 @@ export function groupPlannerTasksByKey(
     m.set(k, r); // last row wins; DB has a unique constraint so this is rare
   }
   return m;
+}
+
+/**
+ * Which tenancies get lease tasks this run (PLAN D7, D21). A schedule nobody has
+ * signed off is unverified, so its 90/60/30-day expiry, option and review tasks
+ * are not raised. `removeFor` is the unsigned tenancies that still have an active
+ * task; the timer takes those down only when PLANNER_UNSIGNED_HOLDBACK_ENABLED
+ * is "true" (plannerFlag.ts) and otherwise just logs them.
+ */
+export function leaseTaskPlan(
+  tenants: readonly PlannerTenantRow[],
+  taskRows: readonly PlannerTaskRowShape[],
+): { eligible: PlannerTenantRow[]; removeFor: number[] } {
+  const withActiveTask = new Set(
+    taskRows.filter((row) => row.Status === "active").map((row) => row.EntityId),
+  );
+  return {
+    eligible: tenants.filter((tenant) => tenant.scheduleSignedOff),
+    removeFor: tenants
+      .filter((tenant) => !tenant.scheduleSignedOff && withActiveTask.has(tenant.tenantId))
+      .map((tenant) => tenant.tenantId),
+  };
 }

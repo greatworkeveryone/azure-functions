@@ -1,17 +1,16 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { exchangeCodeForTokens, verifyAuthState } from "../myob-auth";
+import { completeMyobLink } from "../myob-link";
+import { MyobTokenCryptoError } from "../myob-token-crypto";
 
-// MYOB redirects the user here after they sign in and approve the app.
-// We exchange the authorization code for tokens, persist them, and serve a
-// small HTML page that closes the popup tab.
+// MYOB redirects the user here after they sign in and approve the app, with
+// ?code&state&businessId. src/myob-link.ts does the work: the state must be
+// unused, unexpired and minted for an admin; businessId must be the expected
+// company file; the token must carry only the agreed scopes. Only then are the
+// tokens stored (encrypted) and the link ledgered.
 //
-// This route is intentionally anonymous — MYOB itself drives the redirect
-// and won't carry our Entra bearer token. Security is provided by:
-//   1. The state parameter, signed with MYOB_CLIENT_SECRET (10-min TTL)
-//   2. The code being single-use and tied to our MYOB_CLIENT_ID
-//
-// In the MYOB developer portal, register the Redirect Uri as the full URL of
-// this endpoint, e.g. https://<func>.azurewebsites.net/api/myobAuthCallback
+// Anonymous because MYOB drives this redirect and carries no Entra token.
+// Register the full URL of this endpoint as the MYOB app's Redirect Uri, e.g.
+// https://<func>.azurewebsites.net/api/myobAuthCallback
 
 function htmlPage(body: string, statusCode = 200): HttpResponseInit {
   return {
@@ -25,59 +24,6 @@ function htmlPage(body: string, statusCode = 200): HttpResponseInit {
   };
 }
 
-async function myobAuthCallback(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const code = request.query.get("code");
-  const state = request.query.get("state");
-  const error = request.query.get("error");
-  const errorDescription = request.query.get("error_description");
-
-  if (error) {
-    context.warn(`MYOB OAuth returned error: ${error} — ${errorDescription}`);
-    return htmlPage(
-      `<h1>MYOB authorization failed</h1><p>${escapeHtml(error)}: ${escapeHtml(errorDescription ?? "")}</p>`,
-      400,
-    );
-  }
-
-  if (!code || !state) {
-    return htmlPage(
-      `<h1>Missing parameters</h1><p>The callback was hit without a <code>code</code> or <code>state</code> — try authorizing again from the admin page.</p>`,
-      400,
-    );
-  }
-
-  if (!verifyAuthState(state)) {
-    return htmlPage(
-      `<h1>State check failed</h1><p>The state parameter didn't match or has expired (10-min TTL). Restart the flow from the admin page.</p>`,
-      400,
-    );
-  }
-
-  try {
-    // The callback runs without a user JWT — MYOB drives this redirect —
-    // so token storage falls back to the service-principal SQL connection.
-    await exchangeCodeForTokens({
-      actor: { kind: "system", name: "myobAuthCallback" },
-      authorizedBy: null,
-      code,
-      sqlToken: null,
-    });
-    return htmlPage(
-      `<h1>MYOB connected.</h1><p>You can close this tab. Reload the admin page to see the linked status.</p>`,
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    context.error("MYOB token exchange failed:", message);
-    return htmlPage(
-      `<h1>Token exchange failed</h1><p>${escapeHtml(message)}</p>`,
-      500,
-    );
-  }
-}
-
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -87,8 +33,48 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+async function myobAuthCallback(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const code = request.query.get("code");
+  const state = request.query.get("state");
+  const error = request.query.get("error");
+
+  if (error) {
+    context.warn(`MYOB OAuth returned error: ${error} — ${request.query.get("error_description")}`);
+    return htmlPage(
+      `<h1>MYOB authorization failed</h1><p>${escapeHtml(error)}: ${escapeHtml(request.query.get("error_description") ?? "")}</p>`,
+      400,
+    );
+  }
+  if (!code || !state) {
+    return htmlPage(
+      `<h1>Missing parameters</h1><p>The callback was hit without a <code>code</code> or <code>state</code> — try authorizing again from the admin page.</p>`,
+      400,
+    );
+  }
+
+  try {
+    const outcome = await completeMyobLink({ businessId: request.query.get("businessId"), code, state });
+    if (!outcome.ok) {
+      context.warn(`MYOB link refused (${outcome.status}): ${outcome.title} — ${outcome.detail}`);
+      return htmlPage(`<h1>${escapeHtml(outcome.title)}</h1><p>${escapeHtml(outcome.detail)}</p>`, outcome.status);
+    }
+    const who = outcome.myobUsername ? ` as <code>${escapeHtml(outcome.myobUsername)}</code>` : "";
+    return htmlPage(
+      `<h1>MYOB ${outcome.relinked ? "re-linked" : "connected"}.</h1><p>Company file <code>${escapeHtml(outcome.businessId)}</code>${who}. You can close this tab and reload the admin page.</p>`,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    context.error("MYOB link failed:", message);
+    // Settings problems are the admin's to fix; anything else stays in the log.
+    const shown = err instanceof MyobTokenCryptoError ? message : "Nothing was linked. The details are in the function log.";
+    return htmlPage(`<h1>MYOB link failed</h1><p>${escapeHtml(shown)}</p>`, 500);
+  }
+}
+
+export { myobAuthCallback };
+
 app.http("myobAuthCallback", {
-  methods: ["GET"],
   authLevel: "anonymous",
   handler: myobAuthCallback,
+  methods: ["GET"],
 });

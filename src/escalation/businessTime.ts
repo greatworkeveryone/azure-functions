@@ -171,6 +171,85 @@ export function darwinDateKey(instant: Date): string {
   return dateKeyOf(darwinDayIndex(instant));
 }
 
+// ── Calendar days and the business day's edges ───────────────────────────────
+// Date-only helpers for schedules that are set by the day (the decision-request
+// tiers): they work on YYYY-MM-DD Darwin dates and never on the process time zone.
+
+function dayIndexOfKey(dateKey: string): number {
+  if (!isRealDate(dateKey)) throw new RangeError(`Not a date: ${dateKey}`);
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return Date.UTC(year, month - 1, day) / DAY_MS;
+}
+
+/** Whether a string is a real YYYY-MM-DD calendar date. */
+export function isDateKey(value: unknown): value is string {
+  return typeof value === "string" && isRealDate(value);
+}
+
+/** The date `days` calendar days after `dateKey` (negative: before). */
+export function addCalendarDays(dateKey: string, days: number): string {
+  if (!Number.isInteger(days)) throw new RangeError("days must be a whole number");
+  return dateKeyOf(dayIndexOfKey(dateKey) + days);
+}
+
+/** The first business day on or after `dateKey`. */
+export function nextBusinessDay(dateKey: string, holidays: Holidays = holidaysFromEnv()): string {
+  return dateKeyOf(nextBusinessDayIndex(dayIndexOfKey(dateKey), holidays));
+}
+
+/** The last business day on or before `dateKey`. */
+export function previousBusinessDay(dateKey: string, holidays: Holidays = holidaysFromEnv()): string {
+  let index = dayIndexOfKey(dateKey);
+  for (let skipped = 0; skipped <= MAX_SKIPPED_DAYS; skipped += 1) {
+    if (isBusinessDayIndex(index, holidays)) return dateKeyOf(index);
+    index -= 1;
+  }
+  throw new RangeError(`No business day within ${MAX_SKIPPED_DAYS} days before ${dateKey}; check ESCALATION_HOLIDAYS`);
+}
+
+/** The business day `days` business days after `dateKey` (which need not be one
+ *  itself): 1 is the next business day strictly after it. Zero returns `dateKey`. */
+export function addBusinessDays(dateKey: string, days: number, holidays: Holidays = holidaysFromEnv()): string {
+  if (!Number.isInteger(days) || days < 0) throw new RangeError("days must be a whole number of zero or more");
+  let index = dayIndexOfKey(dateKey);
+  for (let counted = 0; counted < days; counted += 1) {
+    index = nextBusinessDayIndex(index + 1, holidays);
+  }
+  return dateKeyOf(index);
+}
+
+/** 08:30 Darwin on a date: when the business day opens. */
+export function businessDayStart(dateKey: string): Date {
+  return new Date(dayIndexOfKey(dateKey) * DAY_MS + BUSINESS_DAY_START_MINUTES * MINUTE_MS - DARWIN_OFFSET_MS);
+}
+
+/** 17:00 Darwin on a date: close of business. */
+export function businessDayEnd(dateKey: string): Date {
+  return new Date(dayIndexOfKey(dateKey) * DAY_MS + BUSINESS_DAY_END_MINUTES * MINUTE_MS - DARWIN_OFFSET_MS);
+}
+
+/**
+ * The first moment at or after `instant` that falls inside business hours (08:30
+ * up to, not including, 17:00 on a business day). An instant already inside is
+ * returned as it is; one before opening waits for 08:30 that day, and one after
+ * closing, at the weekend or on a holiday waits for 08:30 on the next business
+ * day. For times people should be emailed, not left to arrive overnight.
+ */
+export function nextBusinessHoursInstant(instant: Date, holidays: Holidays = holidaysFromEnv()): Date {
+  const startMs = BUSINESS_DAY_START_MINUTES * MINUTE_MS;
+  const endMs = BUSINESS_DAY_END_MINUTES * MINUTE_MS;
+  const local = instant.getTime() + DARWIN_OFFSET_MS;
+  const dayIndex = Math.floor(local / DAY_MS);
+  const cursor = local - dayIndex * DAY_MS;
+
+  if (isBusinessDayIndex(dayIndex, holidays)) {
+    if (cursor >= startMs && cursor < endMs) return new Date(instant.getTime());
+    if (cursor < startMs) return new Date(dayIndex * DAY_MS + startMs - DARWIN_OFFSET_MS);
+  }
+  const next = nextBusinessDayIndex(dayIndex + 1, holidays);
+  return new Date(next * DAY_MS + startMs - DARWIN_OFFSET_MS);
+}
+
 /** Minutes after midnight, Darwin, of an instant. */
 export function darwinMinuteOfDay(instant: Date): number {
   const local = instant.getTime() + DARWIN_OFFSET_MS;

@@ -139,6 +139,44 @@ describe("upsertJobInvoice: creating", () => {
     expect(await call("upsertJobInvoice", { Amount: 500, JobID: 9 })).toMatchObject({ jsonBody: { code }, status });
     expect(wrote(/INSERT INTO JobInvoices/)).toBe(false);
   });
+
+  it("decision 18: an outgoing (on-charge) invoice raised after the job is done is allowed, and ledgered", async () => {
+    mockSql([APP_USER, job({ Status: "Done" }), CREATED, STORED]);
+
+    const res = await call("upsertJobInvoice", { Amount: 500, ContractorName: "Tenant Co", Direction: "outgoing", JobID: 9 });
+
+    expect(res.status).toBe(200);
+    expect(wrote(/INSERT INTO JobInvoices/)).toBe(true);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "invoice.raised_after_close",
+        after: expect.objectContaining({ amount: 500, direction: "outgoing", jobStatus: "Done" }),
+        isException: true,
+        jobId: 9,
+        ruleApplied: "outgoing_after_close",
+        subjectId: "5",
+      }),
+    ]);
+  });
+
+  it("decision 18: an outgoing invoice on a live job is not an after-close row", async () => {
+    mockSql([APP_USER, job({ Status: "Work" }), CREATED, STORED]);
+    expect((await call("upsertJobInvoice", { Amount: 500, Direction: "outgoing", JobID: 9 })).status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+  });
+
+  it("decision 18: an outgoing invoice on an internal job is still refused", async () => {
+    mockSql([APP_USER, job({ IsInternal: true, Status: "Done" }), CREATED]);
+    expect(await call("upsertJobInvoice", { Amount: 500, Direction: "outgoing", JobID: 9 })).toMatchObject({ jsonBody: { code: "internal_job" }, status: 422 });
+  });
+
+  it("decision 18: editing an outgoing invoice on a done job is allowed; turning an incoming one outgoing is not", async () => {
+    mockSql([APP_USER, job({ Status: "Done" }), invoice({ Direction: "outgoing" }), PAYMENTS(0), STORED]);
+    expect((await call("upsertJobInvoice", { JobInvoiceID: 5, Notes: "Sent to tenant" })).status).toBe(200);
+
+    mockSql([APP_USER, job({ Status: "Done" }), invoice({ Direction: "incoming" }), PAYMENTS(0), STORED]);
+    expect(await call("upsertJobInvoice", { Direction: "outgoing", JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
+  });
 });
 
 describe("upsertJobInvoice: editing", () => {
@@ -202,16 +240,11 @@ describe("directorApproveJobInvoice", () => {
     expect((await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
   });
 
-  it("refuses the director who gave it its stage-1 approval", async () => {
-    mockSql([APP_USER, JOB_BUILDING, stageOne({ ApprovedBy: "Dana Director" }), INVOICE_SCOPE]);
-    expect(await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "same_approver" }, status: 403 });
-    expect(wrote(/SET Status = 'director_approved'/)).toBe(false);
-    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "sod_blocked" })]);
-  });
-
-  it("refuses the director who added the invoice", async () => {
-    mockSql([APP_USER, JOB_BUILDING, stageOne({ CreatedBy: "Dana Director" }), INVOICE_SCOPE]);
-    expect(await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "creator" }, status: 403 });
+  it("decision 17: a director who added the invoice and gave its stage-1 approval still gives the director approval", async () => {
+    mockSql([APP_USER, JOB_BUILDING, stageOne({ ApprovedBy: "Dana Director", CreatedBy: "Dana Director" }), STORED]);
+    expect((await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
+    expect(wrote(/SET Status = 'director_approved'/)).toBe(true);
+    expect(ledgerInserts(db.executeQuery)).not.toContainEqual(expect.objectContaining({ action: "sod_blocked" }));
   });
 });
 

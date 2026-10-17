@@ -24,13 +24,18 @@ function refuse(code: string, message: string, status: MoneyRefusal["status"]): 
 /**
  * The job a money record belongs to must accept money changes: internal jobs
  * have no quotes, POs or invoices; a done job is reopened first (J2's
- * reopenJob); an archived job is restored first.
+ * reopenJob); an archived job is restored first. Decision 18: an outgoing
+ * (on-charge) invoice may still be raised and worked on after the job is done;
+ * contractor-side quotes, POs and incoming invoices need the reopen.
  */
-export function jobMoneyRefusal(job: { isArchived?: unknown; isInternal?: unknown; status?: unknown }): MoneyRefusal | null {
+export function jobMoneyRefusal(
+  job: { isArchived?: unknown; isInternal?: unknown; status?: unknown },
+  options: { outgoingInvoice?: boolean } = {},
+): MoneyRefusal | null {
   if (job.isInternal === true || job.isInternal === 1) {
     return refuse("internal_job", "Internal jobs have no quotes, purchase orders or invoices.", 422);
   }
-  if (job.status === "Done") {
+  if (job.status === "Done" && !options.outgoingInvoice) {
     return refuse("job_done", "This job is done. A manager can reopen it before its quotes, purchase orders or invoices change.", 409);
   }
   if (job.isArchived === true || job.isArchived === 1) {
@@ -81,17 +86,19 @@ export function samePerson(left: unknown, right: unknown): boolean {
   return key !== "" && key === nameKey(right);
 }
 
-/** Whoever added a quote or invoice doesn't approve it; nor does a director approve a quote they added. */
-export function creatorRefusal(createdBy: unknown, approver: string, subject: MoneySubject): MoneyRefusal | null {
-  return samePerson(createdBy, approver)
+/**
+ * Whoever added a quote or invoice doesn't approve it. Decision 17: a director
+ * is never blocked by separation of duties, so a director may approve what
+ * they added (and give the director approval after their own first approval).
+ */
+export function creatorRefusal(
+  createdBy: unknown,
+  approver: { name: string; roles: readonly string[] },
+  subject: MoneySubject,
+): MoneyRefusal | null {
+  if (approver.roles.some((role) => role.trim().toLowerCase() === "director")) return null;
+  return samePerson(createdBy, approver.name)
     ? refuse("creator", `You added this ${WORDS[subject]}, so someone else has to approve it.`, 403)
-    : null;
-}
-
-/** The director's approval comes from a different person than the first approval. */
-export function stageOneRefusal(stageOneBy: unknown, director: string, subject: MoneySubject): MoneyRefusal | null {
-  return samePerson(stageOneBy, director)
-    ? refuse("same_approver", `You gave this ${WORDS[subject]} its first approval, so another director has to give the director approval.`, 403)
     : null;
 }
 

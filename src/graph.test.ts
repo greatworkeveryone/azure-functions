@@ -121,3 +121,38 @@ describe("graphFetchEmails → sender authentication", () => {
     ]);
   });
 });
+
+describe("graphFetchEmails → attachment retry", () => {
+  function failFirst(match: (url: string) => boolean, status: number): jest.Mock {
+    const fetchMock = routeGraph([MESSAGES[1]]);
+    const route = fetchMock.getMockImplementation() as (input: string) => Promise<unknown>;
+    let failed = false;
+    fetchMock.mockImplementation(async (input: string) => {
+      if (!failed && match(String(input))) {
+        failed = true;
+        return { json: async () => ({}), ok: false, status, text: async () => "busy" };
+      }
+      return route(input);
+    });
+    return fetchMock;
+  }
+
+  it("retries the attachment list once when Graph answers 503", async () => {
+    failFirst((url) => url.includes("/attachments?"), 503);
+    const [email] = await graphFetchEmails("inbox@example.test");
+    expect(email.attachmentBlobNames).toHaveLength(1);
+  });
+
+  it("retries an attachment download once when Graph answers 429", async () => {
+    failFirst((url) => url.endsWith("/$value"), 429);
+    const [email] = await graphFetchEmails("inbox@example.test");
+    expect(email.attachmentBlobNames).toHaveLength(1);
+  });
+
+  it("does not retry a 404", async () => {
+    const fetchMock = failFirst((url) => url.includes("/attachments?"), 404);
+    const [email] = await graphFetchEmails("inbox@example.test");
+    expect(email.attachmentBlobNames).toEqual([]);
+    expect(fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/attachments?"))).toHaveLength(1);
+  });
+});

@@ -6,12 +6,15 @@
 // deleteKey commits to keep MS Planner in sync. The standalone wrapper opens
 // its own service connection + loads facilities group members and swallows
 // errors so the caller's HTTP response never fails because Planner is down.
+//
+// Both entry points are no-ops unless PLANNER_SYNC_ENABLED is "true" (plannerFlag.ts).
 
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { reconcileTask } from "./jobPlannerSync";
 import { graphGetGroupMembers } from "./planner";
+import { plannerSyncEnabled } from "./plannerFlag";
 import { Sentry } from "./sentry";
 import {
   addDaysUTC,
@@ -46,6 +49,7 @@ export async function syncKeyLostReported(
   keyId: number,
   deps: KeysSyncDeps,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
 
   // Mirror the column/join pattern from src/functions/keys.ts KEY_COLUMNS:
@@ -109,6 +113,8 @@ export async function syncKeyLostReportedStandalone(
   keyId: number,
   log?: LogFn,
 ): Promise<void> {
+  if (!plannerSyncEnabled()) return;
+
   const { PLANNER_FACILITIES_GROUP_ID, APP_BASE_URL } = process.env;
 
   if (!PLANNER_FACILITIES_GROUP_ID || !APP_BASE_URL) {

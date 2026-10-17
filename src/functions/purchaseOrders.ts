@@ -15,6 +15,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { renderPurchaseOrderPDF } from "../pdf/purchase-order-pdf";
@@ -36,7 +37,17 @@ import { JobEvent } from "../jobStatusMachine";
 import { decidePurchaseOrderEdit } from "../edit-effects";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { jobScope, purchaseOrderFacts, purchaseOrderSnapshot } from "../ledger/moneyDecisions";
+import {
+  amountChange,
+  amountUnchanged,
+  approvedQuoteAmount,
+  contractorFacts,
+  deletionAfter,
+  jobScope,
+  purchaseOrderFacts,
+  purchaseOrderMarkers,
+  purchaseOrderSnapshot,
+} from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import {
   adminRefusal,
@@ -48,6 +59,8 @@ import {
 } from "../moneyRules";
 import { loadJobForMoney } from "../moneyJob-db";
 import { isTestJob } from "../testRecords";
+import { parseMoneyField } from "../money";
+import type { LedgerActor } from "../ledger/types";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -117,8 +130,9 @@ interface UpsertPurchaseOrderBody {
   ContractorID?: number;
   ContractorName?: string;
   Scope?: string;
-  EstimatedCost?: number;
-  CostNotToExceed?: number;
+  /** Numbers or typed strings such as "1,500.00"; parsed by parseMoneyField. */
+  EstimatedCost?: number | string | null;
+  CostNotToExceed?: number | string | null;
   CostJustification?: string;
   EmailSubject?: string;
   EmailBody?: string;
@@ -162,13 +176,19 @@ export async function upsertPurchaseOrder(
       ContractorID,
       ContractorName,
       Scope,
-      EstimatedCost,
-      CostNotToExceed,
+      EstimatedCost: rawEstimatedCost,
+      CostNotToExceed: rawCostNotToExceed,
       CostJustification,
       EmailSubject,
       EmailBody,
       ChargeCode,
     } = body ?? {};
+    const estimated = parseMoneyField(rawEstimatedCost, "EstimatedCost");
+    if (!estimated.ok) return { status: 400, jsonBody: { error: estimated.error } };
+    const cap = parseMoneyField(rawCostNotToExceed, "CostNotToExceed");
+    if (!cap.ok) return { status: 400, jsonBody: { error: cap.error } };
+    const EstimatedCost = estimated.value;
+    const CostNotToExceed = cap.value;
 
     connection = await createRequestConnection(token);
 
@@ -359,15 +379,27 @@ export async function upsertPurchaseOrder(
     const badCost = purchaseOrderCostRefusal(EstimatedCost, CostNotToExceed, false);
     if (badCost) return refusalResponse(badCost);
 
-    // J3: one transaction. The PO and its job are read under locks, so the
-    // diff and the rules decide on what the write replaces.
-    const actor = await resolveLedgerActor(request, connection);
-    if (!actor) return unauthorizedResponse();
+    // A cost or payee edit can void the sent and MYOB markers, which is a
+    // decision (PLAN §3.12): the reset and its ledger row commit together or
+    // not at all. Only an edit that carries a cost or a payee looks up who is
+    // editing.
+    let actor: LedgerActor | null = null;
+    if (EstimatedCost !== undefined || CostNotToExceed !== undefined || ContractorID !== undefined || ContractorName !== undefined) {
+      actor = await resolveLedgerActor(request, connection);
+      if (!actor) return unauthorizedResponse();
+    }
+
     await beginTransaction(connection);
     try {
+      // Read the existing PO before mutating so we can diff for the audit
+      // trail and decide whether to clear the Sent / MYOB markers. Locked until
+      // commit, so the markers recorded as reset are the ones reset.
       const beforeRows = await executeQuery(
         connection,
-        `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id`,
+        `SELECT PurchaseOrderID, JobID, PONumber, ContractorName,
+                EstimatedCost, CostNotToExceed, SentAt, MyobCreatedAt, CompletedAt,
+                SentBy, MyobCreatedBy, ContractorID
+           FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
       );
       if (beforeRows.length === 0) {
@@ -376,8 +408,10 @@ export async function upsertPurchaseOrder(
       }
       const before = beforeRows[0];
       const jobId = before.JobID as number;
-      const poNumber = (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
+      const poNumber =
+        (before.PONumber as string | null) ?? `#${PurchaseOrderID}`;
 
+      // J3: the job still takes money changes (not internal, done or archived).
       const moneyJob = await loadJobForMoney(connection, jobId);
       const jobRefusal = moneyJob ? jobMoneyRefusal(moneyJob) : null;
       if (jobRefusal) {
@@ -390,8 +424,10 @@ export async function upsertPurchaseOrder(
           completedAt: (before.CompletedAt as Date | null) ?? null,
           contractorId: (before.ContractorID as number | null) ?? null,
           contractorName: (before.ContractorName as string | null) ?? null,
-          costNotToExceed: before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
-          estimatedCost: before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
+          costNotToExceed:
+            before.CostNotToExceed != null ? Number(before.CostNotToExceed) : null,
+          estimatedCost:
+            before.EstimatedCost != null ? Number(before.EstimatedCost) : null,
           myobCreatedAt: (before.MyobCreatedAt as Date | null) ?? null,
           sentAt: (before.SentAt as Date | null) ?? null,
         },
@@ -465,23 +501,33 @@ export async function upsertPurchaseOrder(
             { name: "POID", type: TYPES.Int, value: PurchaseOrderID },
           ],
         );
+
+        // Only an edit that carries a cost or a payee can get here, and those
+        // looked up who is editing above.
+        if (!actor) throw new Error("PO markers were reset without a ledger actor");
+        const cleared = { myob: effects.clearMyobMarker, sent: effects.clearSentMarker };
+        const scope = await jobScope(connection, jobId);
+        const edited = {
+          ...before,
+          ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
+          ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
+          CostNotToExceed: CostNotToExceed !== undefined ? CostNotToExceed : before.CostNotToExceed,
+          EstimatedCost: EstimatedCost !== undefined ? EstimatedCost : before.EstimatedCost,
+        };
+        // An order is measured against the quote approved for its job.
+        const approvedQuote = await approvedQuoteAmount(connection, jobId);
         await record(connection, {
           action: "po.markers_reset",
           actor,
           after: {
-            ...purchaseOrderFacts({
-              ...before,
-              ContractorID: ContractorID ?? before.ContractorID,
-              ContractorName: ContractorName ?? before.ContractorName,
-              CostNotToExceed: CostNotToExceed ?? before.CostNotToExceed,
-              EstimatedCost: EstimatedCost ?? before.EstimatedCost,
-            }),
-            myobCreated: effects.clearMyobMarker ? false : before.MyobCreatedAt != null,
-            sent: effects.clearSentMarker ? false : before.SentAt != null,
+            ...purchaseOrderFacts(edited),
+            ...amountChange({ approved: approvedQuote, next: edited.EstimatedCost, previous: before.EstimatedCost }),
+            myobMarkerCleared: cleared.myob,
+            sentMarkerCleared: cleared.sent,
           },
-          before: purchaseOrderSnapshot(before),
-          buildingId: moneyJob?.buildingId ?? null,
-          jobId,
+          before: purchaseOrderMarkers(before, cleared),
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
           ruleApplied: effects.contractorChanged ? "payee_changed" : "cost_changed",
           subject: { id: PurchaseOrderID, type: "purchase_order" },
         });
@@ -813,7 +859,7 @@ async function sendPurchaseOrder(
         actor,
         after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
         // A re-send shows the earlier send here.
-        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null },
+        before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null, ...contractorFacts(contractorRows[0]) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: PurchaseOrderID, type: "purchase_order" },
@@ -928,9 +974,11 @@ async function deletePurchaseOrder(
       );
 
       const scope = await jobScope(connection, po.JobID as number);
+      const approvedQuote = await approvedQuoteAmount(connection, po.JobID as number);
       await record(connection, {
         action: "po.delete",
         actor,
+        after: deletionAfter(purchaseOrderFacts(po), approvedQuote),
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -991,6 +1039,9 @@ async function markPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, MARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -1077,7 +1128,7 @@ async function markPurchaseOrderMyobCreated(
         actor,
         after: { myobCreated: true, ...purchaseOrderFacts(po) },
         // Marking again just re-stamps; the earlier marking shows here.
-        before: { myobCreated: po.MyobCreatedAt != null },
+        before: { myobCreated: po.MyobCreatedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1127,6 +1178,9 @@ async function unmarkPurchaseOrderMyobCreated(
     await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {
@@ -1202,10 +1256,11 @@ async function unmarkPurchaseOrderMyobCreated(
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.unmark_myob_created",
         actor,
-        after: { myobCreated: false, ...purchaseOrderFacts(po) },
+        after: { myobCreated: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,
@@ -1355,7 +1410,7 @@ async function markPurchaseOrderComplete(
         actor,
         after: { completed: true, ...purchaseOrderFacts(po) },
         // Completing again just re-stamps; the earlier completion shows here.
-        before: { completed: po.CompletedAt != null },
+        before: { completed: po.CompletedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id, type: "purchase_order" },
@@ -1470,10 +1525,11 @@ async function unmarkPurchaseOrderComplete(
       );
 
       const scope = await jobScope(connection, jobId);
+      const approvedQuote = await approvedQuoteAmount(connection, jobId);
       await record(connection, {
         action: "po.uncomplete",
         actor,
-        after: { completed: false, ...purchaseOrderFacts(po) },
+        after: { completed: false, ...purchaseOrderFacts(po), ...amountUnchanged(po.EstimatedCost, approvedQuote) },
         before: purchaseOrderSnapshot(po),
         buildingId: scope.buildingId,
         jobId: scope.jobId,

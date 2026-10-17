@@ -8,7 +8,6 @@ import {
   purchaseOrderCostRefusal,
   purchaseOrderQuoteRefusal,
   samePerson,
-  stageOneRefusal,
 } from "../moneyRules";
 
 // J3: the rules the money handlers share, on their own.
@@ -22,6 +21,12 @@ describe("jobMoneyRefusal", () => {
     expect(jobMoneyRefusal({ isInternal: true, status: "Done" })?.code).toBe("internal_job");
     expect(jobMoneyRefusal({ isInternal: false, status: "Done" })).toMatchObject({ code: "job_done", status: 409 });
     expect(jobMoneyRefusal({ isArchived: 1, status: "Work" })?.code).toBe("job_archived");
+  });
+
+  it("decision 18: an outgoing (on-charge) invoice is still allowed on a done job, but not on an internal or archived one", () => {
+    expect(jobMoneyRefusal({ isInternal: false, status: "Done" }, { outgoingInvoice: true })).toBeNull();
+    expect(jobMoneyRefusal({ isInternal: true, status: "Done" }, { outgoingInvoice: true })?.code).toBe("internal_job");
+    expect(jobMoneyRefusal({ isArchived: true, status: "Work" }, { outgoingInvoice: true })?.code).toBe("job_archived");
   });
 });
 
@@ -47,15 +52,18 @@ describe("separation of duties", () => {
     expect(samePerson(null, "Dana")).toBe(false);
   });
 
-  it("refuses the creator as approver, and the first approver as director", () => {
-    expect(creatorRefusal("Dana Director", "Dana Director", "quote")).toEqual({
+  it("refuses the creator as approver", () => {
+    expect(creatorRefusal("Abby Accounts", { name: "Abby Accounts", roles: ["accounts_manager"] }, "quote")).toEqual({
       code: "creator",
       message: "You added this quote, so someone else has to approve it.",
       status: 403,
     });
-    expect(creatorRefusal("Abby Accounts", "Dana Director", "invoice")).toBeNull();
-    expect(stageOneRefusal("Dana Director", "Dana Director", "invoice")?.code).toBe("same_approver");
-    expect(stageOneRefusal("Abby Accounts", "Dana Director", "invoice")).toBeNull();
+    expect(creatorRefusal("Abby Accounts", { name: "Casey Controller", roles: ["accounts_manager"] }, "invoice")).toBeNull();
+  });
+
+  it("decision 17: never blocks a director", () => {
+    expect(creatorRefusal("Dana Director", { name: "Dana Director", roles: ["director"] }, "quote")).toBeNull();
+    expect(creatorRefusal("Dana Director", { name: "Dana Director", roles: [" Director "] }, "invoice")).toBeNull();
   });
 });
 

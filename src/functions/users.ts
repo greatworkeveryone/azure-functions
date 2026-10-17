@@ -18,9 +18,10 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { noteSignIn } from "../access/accessEvents";
 import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
-import { checkRateLimit } from "../rateLimit";
+import { checkRateLimit, checkSignInRateLimit, clientIpFromHeaders } from "../rateLimit";
 import { Sentry } from "../sentry";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
@@ -351,21 +352,6 @@ export async function registerSelf(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  // Pre-verification IP-based fallback so an attacker without a valid token
-  // can't burn through user creates from a single host.
-  const callerIp =
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    request.headers.get("x-azure-clientip") ??
-    "unknown";
-  const ipRl = checkRateLimit(`registerSelf:ip:${callerIp}`, { limit: 5, windowMs: 60_000 });
-  if (!ipRl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(ipRl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
-  }
-
   // Verify the token signature before trusting any identity claim. This path
   // writes the EntraOid→role mapping via a service connection, so Azure SQL
   // never validates the caller's token for us — an unverified decode would let
@@ -374,13 +360,13 @@ export async function registerSelf(
   if (!identity) return unauthorizedResponse();
   const { oid, name, email: rawEmail } = identity;
 
-  // Per-OID limit prevents a single authenticated user from grinding the
-  // endpoint past the IP gate (e.g. behind a shared egress).
-  const oidRl = checkRateLimit(`registerSelf:oid:${oid}`, { limit: 5, windowMs: 60_000 });
-  if (!oidRl.allowed) {
+  // Limits count only verified callers (SEC-10): an anonymous flood naming the
+  // office's IP can no longer sign the whole office out.
+  const rl = checkSignInRateLimit(oid, clientIpFromHeaders((h) => request.headers.get(h)));
+  if (!rl.allowed) {
     return {
       status: 429,
-      headers: { "Retry-After": String(Math.ceil(oidRl.retryAfterMs / 1000)) },
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
       jsonBody: { error: "Rate limit exceeded" },
     };
   }
@@ -389,6 +375,9 @@ export async function registerSelf(
   if (!EMAIL_REGEX.test(email)) {
     return { status: 400, jsonBody: { error: "invalid email" } };
   }
+
+  // Every sign-in goes to the access log (S10); deferred, never awaited.
+  noteSignIn(request, oid);
 
   let connection;
   try {
@@ -410,7 +399,7 @@ export async function registerSelf(
           { name: "UserID", type: TYPES.Int,      value: UserID },
         ],
       );
-      return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
+      return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
     // Step 2: pre-invited user matched by email (first login after admin invite).
@@ -463,7 +452,7 @@ export async function registerSelf(
           ],
         );
       }
-      return { status: 200, jsonBody: { userId: UserID, role: Role ?? null } };
+      return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
     // Step 3: completely new user — create pending record (no role yet).
@@ -480,7 +469,7 @@ export async function registerSelf(
     );
     return {
       status: 200,
-      jsonBody: { userId: inserted[0].UserID as number, role: null },
+      jsonBody: { accessHints: true, userId: inserted[0].UserID as number, role: null },
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

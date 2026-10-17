@@ -2,6 +2,7 @@ import { app, InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Timer trigger: 03:30 ACST (Darwin) daily ─────────────────────────────────
 // Verifies the database ledger (which makes dbo.MyobApiLog tamper-evident)
@@ -79,5 +80,5 @@ async function ledgerVerifyTimer(
 
 app.timer("ledgerVerifyTimer", {
   schedule: "0 0 18 * * *",
-  handler: ledgerVerifyTimer,
+  handler: runTimer("ledgerVerifyTimer", ledgerVerifyTimer),
 });

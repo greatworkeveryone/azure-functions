@@ -4,6 +4,7 @@
 // the real ledger runs, so what is asserted is the INSERT record() really sends.
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
+import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 
 jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
@@ -113,6 +114,9 @@ const APP_USER: Route = { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ U
 const JOB_BUILDING: Route = { match: /SELECT BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5 }] };
 const LEDGER_FAILS: Route = { match: /INSERT INTO dbo\.DecisionLedger/, reject: new Error("ledger unavailable") };
 
+// Every money row any test here writes has the shape trend reports read (see the fixture).
+afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
+
 describe("upsertPurchaseOrder: creating a PO", () => {
   // The job, locked for the J3 rules: live, with an approved quote.
   const jobState = (over: Record<string, unknown> = {}): Route => ({
@@ -156,7 +160,14 @@ describe("upsertPurchaseOrder: creating a PO", () => {
       actorName: "Fred Facilities",
       actorRole: "facilities_manager",
       actorUserId: 21,
-      after: { contractorId: 3, contractorName: "Acme", costNotToExceed: 900, estimatedCost: 800, poNumber: "66Se261013" },
+      after: {
+        amount: 800,
+        contractorId: 3,
+        contractorName: "Acme",
+        costNotToExceed: 900,
+        estimatedCost: 800,
+        poNumber: "66Se261013",
+      },
       before: null,
       buildingId: 5,
       isException: false,
@@ -168,10 +179,12 @@ describe("upsertPurchaseOrder: creating a PO", () => {
   });
 
   it("writes a PO with no contractor with nulls rather than failing", async () => {
+    moneyShape.recordHasNo("amount", "contractor");
     const res = await upsertPurchaseOrder(makeRequest({ CostNotToExceed: 500, JobID: 42 }), ctx);
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)[0].after).toEqual({
+      amount: null,
       contractorId: null,
       contractorName: null,
       costNotToExceed: 500,
@@ -224,7 +237,7 @@ describe("upsertPurchaseOrder: creating a PO", () => {
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
   });
 
-  it("editing an unsent PO's cost is not a ledgered decision (only a marker reset is, J3)", async () => {
+  it("editing a PO that touches no cost is not a ledgered decision, and doesn't even look up who is editing", async () => {
     mockSql([
       APP_USER,
       jobState(),
@@ -232,7 +245,7 @@ describe("upsertPurchaseOrder: creating a PO", () => {
       { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] },
     ]);
 
-    const res = await upsertPurchaseOrder(makeRequest({ EstimatedCost: 100, PurchaseOrderID: 99 }), ctx);
+    const res = await upsertPurchaseOrder(makeRequest({ PurchaseOrderID: 99, Scope: "Replace the pump" }), ctx);
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
@@ -324,6 +337,245 @@ describe("upsertPurchaseOrder: creating a PO", () => {
   });
 });
 
+describe("upsertPurchaseOrder: a cost edit that voids what was sent", () => {
+  const SENT_AT = new Date("2026-10-01T02:03:04Z");
+  const MYOB_AT = new Date("2026-10-02T05:06:07Z");
+  const poRow = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT PurchaseOrderID, JobID, PONumber, ContractorName/,
+    rows: [
+      {
+        CompletedAt: null,
+        ContractorID: 3,
+        ContractorName: "Acme",
+        CostNotToExceed: 900,
+        EstimatedCost: 800,
+        JobID: 42,
+        MyobCreatedAt: MYOB_AT,
+        MyobCreatedBy: "Ann Accounts",
+        PONumber: "66Se261013",
+        PurchaseOrderID: 99,
+        SentAt: SENT_AT,
+        SentBy: "Fred Facilities",
+        ...over,
+      },
+    ],
+  });
+  const stored: Route = { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] };
+  const edit = (body: Record<string, unknown> = {}) =>
+    upsertPurchaseOrder(makeRequest({ EstimatedCost: 1200, PurchaseOrderID: 99, ...body }), ctx);
+  const resets = () => ledgerInserts(db.executeQuery).filter((r) => r.action === "po.markers_reset");
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetRateLimitForTests();
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    auth.requireRole.mockResolvedValue(null);
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    db.beginTransaction.mockResolvedValue(undefined);
+    db.commitTransaction.mockResolvedValue(undefined);
+    db.rollbackTransaction.mockResolvedValue(undefined);
+    db.createRequestConnection.mockResolvedValue({ id: "connection" });
+    mockSql([APP_USER, JOB_BUILDING, poRow(), stored]);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it("writes one po.markers_reset exception: the old cost and both cleared stamps before, the new cost after", async () => {
+    const res = await edit();
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(1);
+    const [row] = resets();
+    expect(row).toMatchObject({
+      action: "po.markers_reset",
+      actorKind: "user",
+      actorName: "Fred Facilities",
+      actorRole: "facilities_manager",
+      actorUserId: 21,
+      buildingId: 5,
+      isException: true,
+      jobId: 42,
+      subjectId: "99",
+      subjectType: "purchase_order",
+    });
+    expect(row.before).toEqual({
+      amount: 800,
+      contractorId: 3,
+      contractorName: "Acme",
+      costNotToExceed: 900,
+      estimatedCost: 800,
+      myobCreatedAt: "2026-10-02T05:06:07.000Z",
+      myobCreatedBy: "Ann Accounts",
+      poNumber: "66Se261013",
+      sentAt: "2026-10-01T02:03:04.000Z",
+      sentBy: "Fred Facilities",
+    });
+    expect(row.after).toEqual({
+      amount: 1200,
+      contractorId: 3,
+      contractorName: "Acme",
+      costNotToExceed: 900,
+      delta: 400,
+      deltaPercent: 50,
+      estimatedCost: 1200,
+      myobMarkerCleared: true,
+      newAmount: 1200,
+      originalApprovedAmount: null,
+      poNumber: "66Se261013",
+      previousAmount: 800,
+      sentMarkerCleared: true,
+    });
+  });
+
+  it("measures the new cost against the quote approved for the job, when there is one", async () => {
+    mockSql([APP_USER, JOB_BUILDING, poRow(), stored, { match: /SELECT q\.Amount FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 750 }] }]);
+
+    await edit({ EstimatedCost: 900 });
+
+    expect(resets()[0].after).toMatchObject({
+      amount: 900,
+      delta: 100,
+      deltaPercent: 12.5,
+      newAmount: 900,
+      originalApprovedAmount: 750,
+      previousAmount: 800,
+    });
+  });
+
+  it("says how far a cut in the cost moved the amount, below zero", async () => {
+    await edit({ EstimatedCost: 600 });
+
+    expect(resets()[0].after).toMatchObject({ amount: 600, delta: -200, deltaPercent: -25, newAmount: 600, previousAmount: 800 });
+  });
+
+  it("names only the marker that was set: a PO that was sent but never recorded in MYOB", async () => {
+    mockSql([APP_USER, JOB_BUILDING, poRow({ MyobCreatedAt: null, MyobCreatedBy: null }), stored]);
+
+    await edit();
+
+    const [row] = resets();
+    expect(row.before).toEqual({
+      amount: 800,
+      contractorId: 3,
+      contractorName: "Acme",
+      costNotToExceed: 900,
+      estimatedCost: 800,
+      poNumber: "66Se261013",
+      sentAt: "2026-10-01T02:03:04.000Z",
+      sentBy: "Fred Facilities",
+    });
+    expect(row.after).toMatchObject({ myobMarkerCleared: false, sentMarkerCleared: true });
+  });
+
+  it("names only the marker that was set: a PO recorded in MYOB but not sent", async () => {
+    mockSql([APP_USER, JOB_BUILDING, poRow({ SentAt: null, SentBy: null }), stored]);
+
+    await edit();
+
+    const [row] = resets();
+    expect(row.before).toEqual({
+      amount: 800,
+      contractorId: 3,
+      contractorName: "Acme",
+      costNotToExceed: 900,
+      estimatedCost: 800,
+      myobCreatedAt: "2026-10-02T05:06:07.000Z",
+      myobCreatedBy: "Ann Accounts",
+      poNumber: "66Se261013",
+    });
+    expect(row.after).toMatchObject({ myobMarkerCleared: true, sentMarkerCleared: false });
+  });
+
+  it("a change to the cost cap alone resets the markers too, and the new cap is what `after` shows", async () => {
+    await edit({ CostNotToExceed: 1000, EstimatedCost: undefined });
+
+    const [row] = resets();
+    expect(row.before).toMatchObject({ costNotToExceed: 900, estimatedCost: 800 });
+    expect(row.after).toMatchObject({ costNotToExceed: 1000, delta: 0, deltaPercent: 0, estimatedCost: 800, newAmount: 800, previousAmount: 800 });
+  });
+
+  it.each([
+    ["a PO that was never sent or recorded in MYOB", { MyobCreatedAt: null, MyobCreatedBy: null, SentAt: null, SentBy: null }],
+    ["a PO already marked complete, whose dollars are history", { CompletedAt: new Date("2026-10-05T00:00:00Z") }],
+  ])("writes no row for %s", async (_name, over) => {
+    mockSql([APP_USER, JOB_BUILDING, poRow(over), stored]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ran(/SET SentAt = NULL|SET MyobCreatedAt = NULL/)).toBe(false);
+  });
+
+  it("writes no row when the cost is sent back unchanged", async () => {
+    const res = await edit({ EstimatedCost: 800 });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(ran(/SET SentAt = NULL|SET MyobCreatedAt = NULL/)).toBe(false);
+  });
+
+  it("clears the markers and writes the row inside one transaction that commits", async () => {
+    await edit();
+
+    const begun = db.beginTransaction.mock.invocationCallOrder[0];
+    const committed = db.commitTransaction.mock.invocationCallOrder[0];
+    expect(orderOf(/SELECT PurchaseOrderID, JobID, PONumber, ContractorName/)).toBeGreaterThan(begun);
+    expect(orderOf(/SET SentAt = NULL/)).toBeGreaterThan(orderOf(/SELECT PurchaseOrderID, JobID, PONumber, ContractorName/));
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(orderOf(/SET SentAt = NULL/));
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(committed);
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it("reads the PO under lock, so the markers recorded as reset are the ones reset", async () => {
+    await edit();
+
+    const read = db.executeQuery.mock.calls.find((c: unknown[]) => /SELECT PurchaseOrderID, JobID, PONumber, ContractorName/.test(String(c[1])));
+    expect(String(read?.[1])).toMatch(/FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\)/);
+  });
+
+  it("finds who is editing before anything is written", async () => {
+    await edit();
+
+    expect(orderOf(/FROM dbo\.AppUsers WHERE EntraOid/)).toBeLessThan(db.beginTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("rolls the reset back when the ledger write fails: markers stay set, the cost stays as it was", async () => {
+    mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, poRow(), stored]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(orderOf(/SET SentAt = NULL/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    expect(db.closeConnection).toHaveBeenCalled();
+  });
+
+  it("answers 401 before starting when the ledger can't name who is editing", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValueOnce(CALLER).mockResolvedValueOnce(null);
+
+    const res = await edit();
+
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(ran(/UPDATE PurchaseOrders/)).toBe(false);
+  });
+
+  it("404s an unknown PO inside the transaction, writing nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING]);
+
+    const res = await edit();
+
+    expect(res.status).toBe(404);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+  });
+});
+
 describe("sendPurchaseOrder", () => {
   const po = (over: Record<string, unknown> = {}): Route => ({
     match: /SELECT c\.EmailAddress, po\.PDFBlobName/,
@@ -398,7 +650,7 @@ describe("sendPurchaseOrder", () => {
 
     await send();
 
-    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ sentAt: "2026-10-01T02:03:04.000Z" });
+    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ contractorId: 3, contractorName: "Acme", sentAt: "2026-10-01T02:03:04.000Z" });
   });
 
   it("flips SentAt and writes the ledger row inside one transaction that commits", async () => {
@@ -533,7 +785,9 @@ describe("purchase order transitions", () => {
       },
     ],
   });
-  const FACTS = { contractorId: 3, contractorName: "Acme", costNotToExceed: 900, estimatedCost: 800, poNumber: "66Se261013" };
+  const FACTS = { amount: 800, contractorId: 3, contractorName: "Acme", costNotToExceed: 900, estimatedCost: 800, poNumber: "66Se261013" };
+  // The quote approved for the job, which an order is measured against.
+  const approvedQuote: Route = { match: /SELECT q\.Amount FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 750 }] };
   const SNAPSHOT = {
     ...FACTS,
     completedAt: null,
@@ -585,7 +839,17 @@ describe("purchase order transitions", () => {
         actorName: "Fred Facilities",
         actorRole: "facilities_manager",
         actorUserId: 21,
-        after: null,
+        after: {
+          amount: 0,
+          contractorId: 3,
+          contractorName: "Acme",
+          deleted: true,
+          delta: -800,
+          deltaPercent: -100,
+          newAmount: 0,
+          originalApprovedAmount: null,
+          previousAmount: 800,
+        },
         before: SNAPSHOT,
         buildingId: 5,
         isException: true,
@@ -593,6 +857,14 @@ describe("purchase order transitions", () => {
         subjectId: "99",
         subjectType: "purchase_order",
       });
+    });
+
+    it("measures what went against the quote approved for the job", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po(), approvedQuote]);
+
+      await remove();
+
+      expect(rows()[0].after).toMatchObject({ amount: 0, delta: -800, deltaPercent: -100, originalApprovedAmount: 750, previousAmount: 800 });
     });
 
     it("deletes the PO and writes the ledger row inside one transaction that commits", async () => {
@@ -796,6 +1068,21 @@ describe("purchase order transitions", () => {
       });
     });
 
+    it("says the amount did not move, measured against the quote approved for the job", async () => {
+      mockSql([APP_USER, JOB_BUILDING, marked, stored, approvedQuote]);
+
+      await unmark();
+
+      expect(rows()[0].after).toMatchObject({
+        amount: 800,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 800,
+        originalApprovedAmount: 750,
+        previousAmount: 800,
+      });
+    });
+
     it("clears the marking and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, marked, stored]);
 
@@ -949,6 +1236,21 @@ describe("purchase order transitions", () => {
       });
     });
 
+    it("says the amount did not move, measured against the quote approved for the job", async () => {
+      mockSql([APP_USER, JOB_BUILDING, completed, stored, approvedQuote]);
+
+      await uncomplete();
+
+      expect(rows()[0].after).toMatchObject({
+        amount: 800,
+        delta: 0,
+        deltaPercent: 0,
+        newAmount: 800,
+        originalApprovedAmount: 750,
+        previousAmount: 800,
+      });
+    });
+
     it("clears the completion and writes the ledger row inside one transaction that commits", async () => {
       mockSql([APP_USER, JOB_BUILDING, completed, stored]);
 
@@ -1004,4 +1306,8 @@ describe("purchase order transitions", () => {
       expect(rows()).toEqual([expect.objectContaining({ before: { attempted: "po.uncomplete" }, ruleApplied: "role_not_permitted" })]);
     });
   });
+});
+
+it("wrote every purchase order money code in this file, each checked against the shape trend reports read", () => {
+  moneyShape.expectEveryCodeWritten("po.");
 });

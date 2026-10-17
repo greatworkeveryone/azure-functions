@@ -11,9 +11,12 @@ jest.mock("@azure/functions", () => {
   return { ...actual, app: { http: jest.fn(), storageQueue: jest.fn(), timer: jest.fn() } };
 });
 jest.mock("../db", () => ({
+  beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),
+  commitTransaction: jest.fn().mockResolvedValue(undefined),
   createRequestConnection: jest.fn(),
   executeQuery: jest.fn(),
+  rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../auth", () => {
   const actual = jest.requireActual("../auth");
@@ -23,6 +26,7 @@ jest.mock("../auth", () => {
     extractToken: jest.fn(),
     oidFromToken: jest.fn().mockReturnValue("caller-oid"),
     requireRole: jest.fn(),
+    rolesForRequest: jest.fn().mockResolvedValue(["facilities_manager"]),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     verifiedIdentityFromRequest: jest.fn(),
   };
@@ -96,11 +100,18 @@ function sameJob(statement: string, parentId: number, attachmentId: number): boo
 async function fakeDb(_connection: unknown, sql: string, params: { name: string; value: unknown }[] = []): Promise<Record<string, unknown>[]> {
   const value = (name: string) => params.find((p) => p.name === name)?.value as number;
   const parentId = value("ParentID");
+  // D5's transactional detach: the record's state with the link locked, the
+  // ledger actor, and the job's building. The invoice here is open.
+  if (/FROM dbo\.\w+ r WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) {
+    return [{ FileName: "a.pdf", JobID: 9, Linked: 1, LockedBecause: null, Number: "INV-5" }];
+  }
+  if (/FROM dbo\.AppUsers WHERE EntraOid/.test(sql)) return [{ UserID: 3 }];
+  if (/SELECT BuildingID FROM Jobs/.test(sql)) return [{ BuildingID: 5 }];
   const list = /FROM (\w+Attachments) j\s+JOIN Attachments a/.exec(sql);
   if (list) {
     return (LINKS[list[1]] ?? [])
       .filter((id) => sameJob(sql, parentId, id))
-      .map((id) => ({ BlobName: `files/${id}.pdf`, Id: id, JobID: FILE_JOB[id], MyBuildingsConfirmedAt: null }));
+      .map((id) => ({ BlobName: blobOf(id), Id: id, JobID: FILE_JOB[id], MyBuildingsConfirmedAt: null }));
   }
   let answer: Record<string, unknown>[] = [];
   for (const statement of sql.split(";")) {
@@ -130,6 +141,10 @@ beforeEach(() => {
   db.executeQuery.mockImplementation(fakeDb);
   written = [];
 });
+
+// Minted attachment names (S1): the list route only signs names of this shape.
+const blobOf = (id: number, job: number = FILE_JOB[id] ?? 0) =>
+  `attachments/jobs/${job}/00000000-0000-4000-8000-${String(id).padStart(12, "0")}.pdf`;
 
 describe("invoice attachment routes", () => {
   it("are registered with the same methods as the purchase-order trio", () => {
@@ -200,9 +215,11 @@ describe("detachFromInvoice", () => {
     const res = await detach({ AttachmentID: 11, InvoiceID: 5 });
 
     expect(res).toEqual({ jsonBody: { ok: true }, status: 200 });
-    const [call] = sqlCalls();
-    expect(call.sql).toMatch(/DELETE FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
-    expect(call.params).toEqual({ AttachmentID: 11, ParentID: 5 });
+    const call = sqlCalls().find((c) => /DELETE FROM JobInvoiceAttachments/.test(c.sql));
+    expect(call?.sql).toMatch(/DELETE FROM JobInvoiceAttachments\s+WHERE JobInvoiceID = @ParentID AND AttachmentID = @AttachmentID/);
+    expect(call?.params).toEqual({ AttachmentID: 11, ParentID: 5 });
+    expect(sqlCalls().some((c) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql))).toBe(true); // D5: the detach is ledgered
+    expect(sqlCalls().some((c) => /DELETE FROM Attachments/.test(c.sql))).toBe(false); // the file itself stays
   });
 
   it("400s without InvoiceID, 401s without a token, answers the gate's 403", async () => {
@@ -220,15 +237,15 @@ describe("getInvoiceAttachments", () => {
 
   it("lists the invoice's files with a fresh read link, archived ones without", async () => {
     db.executeQuery.mockResolvedValue([
-      { BlobName: "jobs/9/a.pdf", Id: 11, MyBuildingsConfirmedAt: null, OriginalName: "a.pdf" },
-      { BlobName: "jobs/9/b.pdf", Id: 12, MyBuildingsConfirmedAt: new Date("2026-10-01T00:00:00Z"), OriginalName: "b.pdf" },
+      { BlobName: blobOf(11, 9), Id: 11, MyBuildingsConfirmedAt: null, OriginalName: "a.pdf" },
+      { BlobName: blobOf(12, 9), Id: 12, MyBuildingsConfirmedAt: new Date("2026-10-01T00:00:00Z"), OriginalName: "b.pdf" },
     ]);
 
     const res = await list({ invoiceId: "5" });
 
     expect(res.status).toBe(200);
     expect(res.jsonBody).toMatchObject({
-      attachments: [{ Id: 11, sasUrl: "https://blob/jobs/9/a.pdf?sas" }, { Id: 12, sasUrl: null }],
+      attachments: [{ Id: 11, sasUrl: `https://blob/${blobOf(11, 9)}?sas` }, { Id: 12, sasUrl: null }],
       count: 2,
     });
     const [call] = sqlCalls();
@@ -300,6 +317,6 @@ describe.each([
   it("leaves out links made across jobs before this check, so no read link is minted for them", async () => {
     const res = await handler(listRoute)(get(query), ctx);
     expect(res.status).toBe(200);
-    expect(res.jsonBody).toMatchObject({ attachments: [{ Id: 11, sasUrl: "https://blob/files/11.pdf?sas" }], count: 1 });
+    expect(res.jsonBody).toMatchObject({ attachments: [{ Id: 11, sasUrl: `https://blob/${blobOf(11)}?sas` }], count: 1 });
   });
 });

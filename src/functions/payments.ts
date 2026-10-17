@@ -8,12 +8,14 @@ import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, c
 import { decideAuthority, type AuthorityFacts } from "../approvalAuthority";
 import { loadApprovalFacts } from "../approvalAuthority-db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { adminRefusal, holdsAdmin } from "../moneyRules";
 import { isTestJob } from "../testRecords";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
-import { jobScope, paymentFacts } from "../ledger/moneyDecisions";
+import { contractorFacts, jobScope, paymentEdit, paymentFacts, withContractorId } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import type { LedgerActor } from "../ledger/types";
 
 const PAYMENT_COLUMNS = `
   PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Variance,
@@ -165,15 +167,16 @@ const RECORDED_PAYMENT_REFUSALS: ReadonlySet<string> = new Set([
   "invoice_not_approved",
 ]);
 
-// Who the money goes to is on the invoice being paid, not on the payment.
+// Who the money goes to is on the invoice being paid, not on the payment, and
+// so is the amount its approval covered.
 async function loadPaidInvoice(connection: Connection, jobInvoiceId: number | null | undefined) {
   if (jobInvoiceId === null || jobInvoiceId === undefined) return undefined;
   const rows = await executeQuery(
     connection,
-    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber FROM JobInvoices WHERE JobInvoiceID = @Id",
+    "SELECT InvoiceNumber, ContractorName, SupplierInvoiceNumber, Amount, ContractorID FROM JobInvoices WHERE JobInvoiceID = @Id",
     [{ name: "Id", type: TYPES.Int, value: jobInvoiceId }],
   );
-  return rows[0];
+  return rows[0] ? withContractorId(connection, rows[0]) : undefined;
 }
 
 // Locks the invoice row for the surrounding transaction so two concurrent
@@ -236,13 +239,40 @@ function parseCreateInput(
   return { ok: true, value: { amount: Amount, jobId: JobID, jobInvoiceId: JobInvoiceID } };
 }
 
-// Editing a payment isn't a ledgered decision; only an attempt to create one is
-// recorded, against the invoice it would have paid.
-const CREATE_PAYMENT_TARGET: RefusalTarget = {
-  attempted: (body) => (body.PaymentID === undefined ? "payment.create" : null),
-  idField: "JobInvoiceID",
-  subjectType: "invoice",
-};
+// What a refused request was trying to do. Creating a payment is recorded
+// against the invoice it would have paid; changing the amount of one against
+// the payment. Any other edit (notes, say) isn't a ledgered decision.
+const PAYMENT_TARGETS: RefusalTarget[] = [
+  {
+    attempted: (body) => (body.PaymentID === undefined ? "payment.create" : null),
+    idField: "JobInvoiceID",
+    subjectType: "invoice",
+  },
+  {
+    attempted: (body) => (body.PaymentID !== undefined && typeof body.Amount === "number" ? "payment.amount_change" : null),
+    idField: "PaymentID",
+    subjectType: "payment",
+  },
+];
+
+// A refused attempt to change a payment's amount, ledgered in a transaction of
+// its own once the edit's has rolled back. `state` is how the payment stood.
+async function refuseAmountChange(
+  connection: Connection,
+  editor: LedgerActor | null,
+  payment: { id: number; jobId: number },
+  refusal: { code: string; message: string; state: Record<string, unknown> },
+): Promise<void> {
+  await rollbackTransaction(connection).catch(() => {});
+  if (!editor) return;
+  await recordRefusal(
+    connection,
+    editor,
+    { id: payment.id, type: "payment" },
+    { attempted: "payment.amount_change", code: refusal.code, message: refusal.message, state: refusal.state },
+    payment.jobId,
+  );
+}
 
 async function upsertPayment(
   request: HttpRequest,
@@ -253,14 +283,17 @@ async function upsertPayment(
 
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
   if (denied) {
-    await recordRoleRefusal(request, token, denied, CREATE_PAYMENT_TARGET);
+    await recordRoleRefusal(request, token, denied, PAYMENT_TARGETS);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
 
-  let connection;
+  let connection: Connection | undefined;
   try {
     const body = ((await request.json()) ?? {}) as UpsertPaymentBody;
     const { PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Notes } = body;
@@ -428,63 +461,117 @@ async function upsertPayment(
       return { status: 400, jsonBody: { error: "No fields to update" } };
     }
 
-    const existingRows = await executeQuery(
-      connection,
-      "SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments WHERE PaymentID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: PaymentID }],
-    );
-    if (existingRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Payment not found" } };
-    }
-    const existing = existingRows[0];
-    const existingInvoiceId = (existing.JobInvoiceID as number | null) ?? null;
-    const amountChanges =
-      typeof Amount === "number" && toCents(Amount) !== toCents(Number(existing.Amount));
-    const jobChanges = JobID !== undefined && JobID !== existing.JobID;
-    const invoiceChanges = JobInvoiceID !== undefined && (JobInvoiceID ?? null) !== existingInvoiceId;
-
-    // Once MYOB has the bill, or the payment has left 'pending', what it pays
-    // and how much are facts someone else has acted on.
-    const isLocked = existing.MyobID != null || existing.Status !== "pending";
-    if (isLocked && (amountChanges || jobChanges || invoiceChanges)) {
-      return {
-        status: 422,
-        jsonBody: { error: "This payment has already been sent to MYOB or paid, so its job, invoice and amount can't be changed." },
-      };
+    // An edit that carries an amount can change what is paid, which is a
+    // decision (PLAN §3.12): the payment is read under lock, and the change and
+    // its ledger row commit together or not at all. Only those edits look up who
+    // is editing.
+    let editor: LedgerActor | null = null;
+    if (typeof Amount === "number") {
+      editor = await resolveLedgerActor(request, connection);
+      if (!editor) return unauthorizedResponse();
     }
 
-    const updateParams = update.params.map((p) =>
-      p.type === TYPES.Decimal ? { ...p, options: MONEY_OPTIONS } : p,
-    );
-    const updateSql = `UPDATE Payments SET ${update.setClause} WHERE PaymentID = @Id`;
-    const updateArgs = [{ name: "Id", type: TYPES.Int, value: PaymentID }, ...updateParams];
+    await beginTransaction(connection);
+    try {
+      const existingRows = await executeQuery(
+        connection,
+        "SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments WITH (UPDLOCK, HOLDLOCK) WHERE PaymentID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: PaymentID }],
+      );
+      if (existingRows.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Payment not found" } };
+      }
+      const existing = existingRows[0];
+      const existingInvoiceId = (existing.JobInvoiceID as number | null) ?? null;
+      const amountChanges =
+        typeof Amount === "number" && toCents(Amount) !== toCents(Number(existing.Amount));
+      const jobChanges = JobID !== undefined && JobID !== existing.JobID;
+      const invoiceChanges = JobInvoiceID !== undefined && (JobInvoiceID ?? null) !== existingInvoiceId;
 
-    if (amountChanges && existingInvoiceId != null) {
-      // Raising the amount of a pending payment must not slip past the cap
-      // checked on create.
-      await beginTransaction(connection);
-      try {
+      const payment = { id: PaymentID, jobId: existing.JobID as number };
+      // What a refused attempt shows: the payment as it stood (its MYOB bill,
+      // if it has one, included) and the amount that was asked for.
+      const refusedState = amountChanges
+        ? {
+            amount: Number(existing.Amount),
+            jobInvoiceId: existingInvoiceId,
+            myobBillUid: typeof existing.MyobID === "string" ? existing.MyobID : null,
+            requestedAmount: Amount,
+            status: String(existing.Status),
+          }
+        : {};
+
+      // Once MYOB has the bill, or the payment has left 'pending', what it pays
+      // and how much are facts someone else has acted on.
+      const isLocked = existing.MyobID != null || existing.Status !== "pending";
+      if (isLocked && (amountChanges || jobChanges || invoiceChanges)) {
+        const error = "This payment has already been sent to MYOB or paid, so its job, invoice and amount can't be changed.";
+        if (amountChanges) {
+          await refuseAmountChange(connection, editor, payment, {
+            code: "payment_locked",
+            message: error,
+            state: refusedState,
+          });
+        } else {
+          await rollbackTransaction(connection).catch(() => {});
+        }
+        return { status: 422, jsonBody: { error } };
+      }
+
+      const updateParams = update.params.map((p) =>
+        p.type === TYPES.Decimal ? { ...p, options: MONEY_OPTIONS } : p,
+      );
+      const updateSql = `UPDATE Payments SET ${update.setClause} WHERE PaymentID = @Id`;
+      const updateArgs = [{ name: "Id", type: TYPES.Int, value: PaymentID }, ...updateParams];
+
+      if (amountChanges && existingInvoiceId != null) {
+        // Raising the amount of a pending payment must not slip past the cap
+        // checked on create.
         const invoice = await loadInvoiceForPayment(connection, existingInvoiceId, PaymentID);
-        const refusal = invoice
-          ? paymentInvoiceError({
+        const refusal: PaymentRefusal | null = invoice
+          ? paymentInvoiceRefusal({
               amount: Amount as number,
               invoice,
               jobId: existing.JobID as number,
               facts: await loadApprovalFacts(connection, null),
             })
-          : "The invoice this payment was recorded against no longer exists.";
+          : { code: "invoice_missing", message: "The invoice this payment was recorded against no longer exists." };
         if (refusal) {
-          await rollbackTransaction(connection).catch(() => {});
-          return { status: 422, jsonBody: { error: refusal } };
+          if (RECORDED_PAYMENT_REFUSALS.has(refusal.code)) {
+            await refuseAmountChange(connection, editor, payment, {
+              code: refusal.code,
+              message: refusal.message,
+              state: { ...refusedState, invoiceStatus: invoice?.status ?? null },
+            });
+          } else {
+            await rollbackTransaction(connection).catch(() => {});
+          }
+          return { status: 422, jsonBody: { error: refusal.message } };
         }
-        await executeQuery(connection, updateSql, updateArgs);
-        await commitTransaction(connection);
-      } catch (err) {
-        await rollbackTransaction(connection).catch(() => {});
-        throw err;
       }
-    } else {
       await executeQuery(connection, updateSql, updateArgs);
+
+      if (amountChanges) {
+        // Only an edit that carries an amount can get here, and those looked up
+        // who is editing above.
+        if (!editor) throw new Error("A payment amount was changed without a ledger actor");
+        const scope = await jobScope(connection, existing.JobID as number);
+        const edit = paymentEdit(existing, Amount as number, await loadPaidInvoice(connection, existingInvoiceId));
+        await record(connection, {
+          action: "payment.amount_change",
+          actor: editor,
+          after: edit.after,
+          before: edit.before,
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: PaymentID, type: "payment" },
+        });
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
 
     const stored = await executeQuery(
@@ -539,6 +626,9 @@ async function markPaymentPaid(
     await recordRoleRefusal(request, token, denied, MARK_PAID_TARGET);
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
@@ -604,11 +694,12 @@ async function markPaymentPaid(
       );
 
       const scope = await jobScope(connection, payment.JobID as number | null | undefined);
+      const invoice = await loadPaidInvoice(connection, payment.JobInvoiceID);
       await record(connection, {
         action: "payment.mark_paid",
         actor: ledgerActor,
-        after: { status: "paid", ...paymentFacts(payment, await loadPaidInvoice(connection, payment.JobInvoiceID)) },
-        before: { status: (payment.Status as string | null) ?? null },
+        after: { status: "paid", ...paymentFacts(payment, invoice) },
+        before: { status: (payment.Status as string | null) ?? null, ...contractorFacts(invoice ?? {}) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
         subject: { id: PaymentID, type: "payment" },

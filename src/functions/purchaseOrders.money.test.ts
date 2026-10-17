@@ -144,9 +144,11 @@ describe("upsertPurchaseOrder: creating", () => {
 
   it("refuses a PO with no cost, or a cost of $0 or less", async () => {
     mockSql([APP_USER, JOB_BUILDING, job(), CREATED]);
-    for (const body of [{}, { CostNotToExceed: 0 }, { EstimatedCost: -5 }, { CostNotToExceed: 4500, EstimatedCost: 0 }]) {
+    for (const body of [{}, { CostNotToExceed: 0 }, { CostNotToExceed: 4500, EstimatedCost: 0 }]) {
       expect(await create(body)).toMatchObject({ jsonBody: { code: "amount_invalid" }, status: 422 });
     }
+    // A negative cost is the money parser's 400 (D1), before anything is read.
+    expect((await create({ EstimatedCost: -5 })).status).toBe(400);
     expect(wrote(/INSERT INTO PurchaseOrders/)).toBe(false);
   });
 

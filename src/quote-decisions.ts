@@ -7,7 +7,6 @@
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { executeQuery, type SqlRow } from "./db";
-import { creatorRefusal, stageOneRefusal } from "./moneyRules";
 
 export const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -42,9 +41,7 @@ export interface QuoteRejectionInput {
 
 export type QuoteDecisionOutcome =
   | { ok: true; jobId: number; quote: SqlRow; previousStatus?: string }
-  | { ok: false; status: 404 | 409; error: string }
-  /** Separation of duties (J3): the code is ledgered as `sod_blocked`. */
-  | { code: string; jobId: number; ok: false; status: 403; error: string };
+  | { ok: false; status: 404 | 409; error: string };
 
 // A decision taken from an email reply is weaker evidence than one clicked in
 // the app, so the audit trail says so and names who replied.
@@ -75,7 +72,7 @@ export async function approveDirectorQuote(
   const { quoteId, approvedBy, sourceEmailId, sourceEmailAddress, note } = input;
   const rows = await executeQuery(
     connection,
-    `SELECT JobID, QuoteNumber, ContractorName, Status, CreatedBy, ApprovedBy FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id`,
+    `SELECT JobID, QuoteNumber, ContractorName, Status FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id`,
     [{ name: "Id", type: TYPES.Int, value: quoteId }],
   );
   if (rows.length === 0) return { ok: false, status: 404, error: "Quote not found" };
@@ -91,10 +88,6 @@ export async function approveDirectorQuote(
   if (status !== "awaiting_director") {
     return { ok: false, status: 409, error: "Quote must be in awaiting_director state" };
   }
-  // J3: a director doesn't approve a quote they added, nor one they gave its
-  // first approval (selected and sent up); another director does.
-  const sod = creatorRefusal(rows[0].CreatedBy, approvedBy, "quote") ?? stageOneRefusal(rows[0].ApprovedBy, approvedBy, "quote");
-  if (sod) return { code: sod.code, error: sod.message, jobId, ok: false, status: 403 };
 
   const updated = await executeQuery(
     connection,
