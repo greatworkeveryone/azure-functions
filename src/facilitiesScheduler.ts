@@ -39,12 +39,7 @@ import type { LedgerActor } from "./ledger";
 import { advanceNextDue, createScheduledJob, insertRun } from "./serviceScheduleRuns";
 import { SELECT_SCHEDULE, scheduleCoverageJob, scheduleRowToApi, seriesOf, type ScheduleApi } from "./serviceSchedules";
 
-export type SchedulerMode = "off" | "dry-run" | "live";
-
-export function schedulerMode(env: NodeJS.ProcessEnv = process.env): SchedulerMode {
-  if (env.SCHEDULER_DRY_RUN === "true") return "dry-run";
-  return env.SCHEDULER_ENABLED === "true" ? "live" : "off";
-}
+export { schedulerMode, type SchedulerMode } from "./schedulerMode";
 
 export const SCHEDULER_ACTOR: LedgerActor = { kind: "system", name: "schedulerTimer" };
 /** CreatedBy on the jobs and runs the scheduler writes. */

@@ -2,7 +2,8 @@
 //
 // One service schedule and its history: every due date the scheduler has
 // handled, the job it created (and that job's status) or why it skipped.
-// Response: { schedule, runs }.
+// Response: { schedule, runs, schedulerMode }: the mode lets the drawer say
+// whether the daily scheduler is making jobs yet.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
@@ -11,6 +12,7 @@ import { authorize, badRequest, errorMessage, notFound } from "../assetRegisterS
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
+import { schedulerMode } from "../schedulerMode";
 import { listRuns } from "../serviceScheduleRuns";
 import { fetchSchedule, scheduleRowToApi } from "../serviceSchedules";
 
@@ -27,7 +29,7 @@ export async function getServiceSchedule(request: HttpRequest, context: Invocati
     const row = await fetchSchedule(connection, id);
     if (!row) return notFound("Service schedule not found");
     const runs = await listRuns(connection, id);
-    return { jsonBody: { runs, schedule: scheduleRowToApi(row, todayInDarwin()) }, status: 200 };
+    return { jsonBody: { runs, schedule: scheduleRowToApi(row, todayInDarwin()), schedulerMode: schedulerMode() }, status: 200 };
   } catch (error) {
     context.error("getServiceSchedule failed:", errorMessage(error));
     return errorResponse("Failed to load the service schedule", error);

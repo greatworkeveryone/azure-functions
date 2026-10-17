@@ -1,11 +1,14 @@
 // POST /api/recordServiceOutcome
-//   Body: { serviceScheduleId, outcome: "serviced" | "skipped", servicedOn?, reason? }
+//   Body: { serviceScheduleId, dueDate, outcome: "serviced" | "skipped", servicedOn?, reason? }
 //
 // Closes out a schedule's current due date without a Floorplan job (UX review
 // E4): "serviced" (it was done, e.g. under the contractor's own visit; on
 // servicedOn, default today) or "skipped" (this one won't happen; reason
 // required). Either way the run is recorded, the schedule moves to the next
 // date of its series, and the decision is ledgered (a skip as an exception).
+// dueDate is the date the person was shown. If the schedule has moved on since
+// (someone else closed it, or edited it) the answer is 409 with code moved_on
+// and nothing is recorded, so a second person can't close the next real service by mistake.
 // Refused while a job for that due date is still open: finish or archive it.
 // Managers only. Response: { schedule }.
 
@@ -26,6 +29,7 @@ import {
 } from "../assetRegisterSupport";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { displayDate } from "../defectsPeriods";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { nextDueAfter } from "../facilitiesRules";
 import { record } from "../ledger";
@@ -33,17 +37,19 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { advanceNextDue, insertRun } from "../serviceScheduleRuns";
 import { fetchSchedule, isRealDate, scheduleRowToApi, scheduleSnapshot, seriesOf, type ScheduleApi } from "../serviceSchedules";
 
-type Input = { outcome: "serviced" | "skipped"; reason: string | null; scheduleId: number; servicedOn: string };
+type Input = { dueDate: string; outcome: "serviced" | "skipped"; reason: string | null; scheduleId: number; servicedOn: string };
 
 function parse(body: Record<string, unknown>, today: string): { error: string } | Input {
   if (!Number.isInteger(body.serviceScheduleId) || (body.serviceScheduleId as number) <= 0) return { error: "serviceScheduleId is required" };
+  if (body.dueDate === undefined || body.dueDate === null) return { error: "dueDate is required: the due date being closed (YYYY-MM-DD)" };
+  if (!isRealDate(body.dueDate)) return { error: "dueDate must be a date (YYYY-MM-DD)" };
   if (body.outcome !== "serviced" && body.outcome !== "skipped") return { error: 'outcome must be "serviced" or "skipped"' };
   const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim().slice(0, 500) : null;
   if (body.outcome === "skipped" && !reason) return { error: "Give a reason for skipping this due date" };
   const servicedOn = body.servicedOn === undefined || body.servicedOn === null ? today : body.servicedOn;
   if (!isRealDate(servicedOn)) return { error: "servicedOn must be a date (YYYY-MM-DD)" };
   if (servicedOn > today) return { error: "The service date can't be after today" };
-  return { outcome: body.outcome, reason, scheduleId: body.serviceScheduleId as number, servicedOn };
+  return { dueDate: body.dueDate, outcome: body.outcome, reason, scheduleId: body.serviceScheduleId as number, servicedOn };
 }
 
 export async function recordServiceOutcome(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -65,6 +71,11 @@ export async function recordServiceOutcome(request: HttpRequest, context: Invoca
       const before = scheduleRowToApi(row, today);
       if (before.archived) return txFail(conflict("This schedule is archived."));
       const due = before.nextDue;
+      if (due !== input.dueDate) {
+        const by = before.updatedBy ? ` (last changed by ${before.updatedBy})` : "";
+        const error = `This schedule has moved on since you opened it: it is now due ${displayDate(due)}${by}. Nothing was recorded. Reload to see it.`;
+        return txFail({ jsonBody: { code: "moved_on", error }, status: 409 });
+      }
       const runs = await executeQuery(
         conn,
         `SELECT r.ServiceScheduleRunId, r.JobId, j.Status AS JobStatus, j.IsArchived AS JobArchived

@@ -19,6 +19,7 @@ import { listPeriods, periodRowToApi } from "../defectsPeriods";
 import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
 import { addDays } from "../facilitiesRules";
 import { assembleOverview, type OverviewLinkedJob, type OverviewRun } from "../maintenanceOverview";
+import { schedulerMode } from "../schedulerMode";
 import { SELECT_SCHEDULE, scheduleRowToApi } from "../serviceSchedules";
 
 const DEFAULT_DAYS = 90;
@@ -100,6 +101,7 @@ export async function getMaintenanceOverview(request: HttpRequest, context: Invo
       linkedJobs: linked.map(toLinkedJob),
       periods: periods.map((row) => periodRowToApi(row, today)).filter((period) => period.active),
       runs: runs.map(toRun),
+      schedulerMode: schedulerMode(),
       schedules: schedules.map((row) => scheduleRowToApi(row, today)),
       today,
     });
