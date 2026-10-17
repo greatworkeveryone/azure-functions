@@ -70,7 +70,11 @@ beforeEach(() => {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/MAX\(Seq\)/.test(sql)) return [{ NextSeq: 1 }];
     if (/INSERT INTO JobInvoices/.test(sql)) return [{ JobInvoiceID: 5 }];
-    if (/SELECT JobInvoiceID, JobID, InvoiceNumber, Amount/.test(sql)) {
+    // The job and the invoice, read under locks since J3.
+    if (/SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/.test(sql)) {
+      return [{ IsArchived: false, IsContract: false, IsInternal: false, JobID: 42, Status: "Work" }];
+    }
+    if (/FROM JobInvoices WITH \(UPDLOCK, HOLDLOCK\) WHERE JobInvoiceID/.test(sql)) {
       return [{ JobInvoiceID: 5, JobID: 42, InvoiceNumber: "261012-IV-42-ACM-1", Amount: 100, ContractorName: "Acme", Status: "pending", ApprovedAt: null }];
     }
     if (/FROM JobInvoices WHERE JobInvoiceID/.test(sql)) return [STORED];
@@ -94,8 +98,8 @@ describe("upsertJobInvoice — SupplierInvoiceNumber", () => {
   });
 
   it("stores NULL when it is absent or blank", async () => {
-    await upsertJobInvoice(makeRequest({ JobID: 42 }), ctx);
-    await upsertJobInvoice(makeRequest({ JobID: 42, SupplierInvoiceNumber: "   " }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, JobID: 42, SupplierInvoiceNumber: "   " }), ctx);
     const inserts = calls().filter((c: { sql: string }) => /INSERT INTO JobInvoices/.test(c.sql));
     expect(inserts).toHaveLength(2);
     for (const insert of inserts) expect(insert.params.SupplierInvoiceNumber).toBeNull();
@@ -103,7 +107,7 @@ describe("upsertJobInvoice — SupplierInvoiceNumber", () => {
 
   it("does not truncate a long number to 16 characters", async () => {
     const number = "TAX/2026/10/0000123456";
-    await upsertJobInvoice(makeRequest({ JobID: 42, SupplierInvoiceNumber: number }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, JobID: 42, SupplierInvoiceNumber: number }), ctx);
     expect(calls().find((c: { sql: string }) => /INSERT INTO JobInvoices/.test(c.sql))!.params.SupplierInvoiceNumber).toBe(number);
   });
 
@@ -121,7 +125,7 @@ describe("upsertJobInvoice — SupplierInvoiceNumber", () => {
   });
 
   it("returns the field in the stored invoice payload", async () => {
-    await upsertJobInvoice(makeRequest({ JobID: 42, SupplierInvoiceNumber: "INV-0041" }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, JobID: 42, SupplierInvoiceNumber: "INV-0041" }), ctx);
     const select = calls().find((c: { sql: string }) => /SELECT[\s\S]*FROM JobInvoices WHERE JobInvoiceID/.test(c.sql) && /SupplierInvoiceNumber/.test(c.sql));
     expect(select).toBeDefined();
   });

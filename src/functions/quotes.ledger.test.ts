@@ -219,12 +219,24 @@ describe("approveQuote", () => {
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
   });
 
-  it("records what the quote was before, when it was approved again", async () => {
-    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "rejected" }), stored]);
+  it("records what the quote was before it was approved", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "awaiting_approval" }), stored]);
 
     await approve();
 
-    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ contractorId: 3, contractorName: "Acme", status: "rejected" });
+    expect(ledgerInserts(db.executeQuery)[0].before).toEqual({ contractorId: 3, contractorName: "Acme", status: "awaiting_approval" });
+  });
+
+  it("a rejected quote is not approved again (J3): 409, a `denied` row, nothing written", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow({ Status: "rejected" }), stored, { match: /FROM Quotes s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
+
+    const res = await approve();
+
+    expect(res.status).toBe(409);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: { attempted: "quote.approve", status: "rejected" }, ruleApplied: "not_approvable" }),
+    ]);
+    expect(sqlCalls().some((c) => /UPDATE Quotes/.test(c.sql))).toBe(false);
   });
 
   it("does the approval's writes and the ledger row inside one transaction, then commits", async () => {
@@ -1169,8 +1181,22 @@ describe("upsertQuote: an amount edit that tears down an approval", () => {
     expect(orderOf(CLEAR)).toBe(-1);
   });
 
-  it("a contractor-only edit leaves the approval alone, writes no row and doesn't look up who is editing", async () => {
+  it("a contractor-only edit is a payee change (J3): it clears the approval and is ledgered as payee_changed", async () => {
     const res = await edit({ Amount: undefined, ContractorName: "Beta Pty" });
+
+    expect(res.status).toBe(200);
+    expect(orderOf(CLEAR)).toBeGreaterThan(-1);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "quote.approval_reset",
+        after: expect.objectContaining({ contractorName: "Beta Pty", delta: 0, status: "pending" }),
+        ruleApplied: "payee_changed",
+      }),
+    ]);
+  });
+
+  it("a notes-only edit leaves the approval alone, writes no row and doesn't look up who is editing", async () => {
+    const res = await edit({ Amount: undefined, Notes: "Called them" });
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);

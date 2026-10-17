@@ -279,6 +279,29 @@ describe("a director's emailed approval", () => {
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
   });
 
+  it("a job that is done or already has an approved quote refuses the emailed approval: one `denied` row, nothing written", async () => {
+    const cases: [Record<string, unknown>, string][] = [[{ Status: "Done" }, "job_done"], [{ HasApprovedQuote: 1 }, "quote_already_approved"]];
+    for (const [over, code] of cases) {
+      db.executeQuery.mockClear();
+      mockSql([
+        {
+          match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/,
+          rows: [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Awaiting Approval", ...over }],
+        },
+        { match: /FROM Quotes s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] },
+        ...HAPPY,
+      ]);
+
+      const res = await decide();
+
+      expect(res).toMatchObject({ jsonBody: { code }, status: 409 });
+      expect(db.executeQuery.mock.calls.some((c: unknown[]) => /UPDATE (Quotes|Jobs|Emails)/.test(String(c[1])))).toBe(false);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.director_approve" }), ruleApplied: code }),
+      ]);
+    }
+  });
+
   it("writes no ledger row when the helper refuses", async () => {
     mockSql([withRow(HELPER_QUOTE, { Status: "approved" }), ...HAPPY]);
 

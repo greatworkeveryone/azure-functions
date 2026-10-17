@@ -9,8 +9,9 @@ import { decideAuthority, type AuthorityFacts } from "../approvalAuthority";
 import { loadApprovalFacts } from "../approvalAuthority-db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { requireMoneyContext } from "../moneyGate";
-import { MyobWritesDisabledError, userActor } from "../myob-api-log";
-import { applyMyobPayment, createMyobBill } from "../myob-client";
+import { adminRefusal, holdsAdmin } from "../moneyRules";
+import { isTestJob } from "../testRecords";
+import { refuseMoneyChange } from "../moneyJob-db";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { contractorFacts, jobScope, paymentEdit, paymentFacts, withContractorId } from "../ledger/moneyDecisions";
@@ -85,11 +86,6 @@ interface UpsertPaymentBody {
 // unless told otherwise, which rounds cents away before the value reaches SQL.
 const MONEY_OPTIONS = { precision: 18, scale: 2 };
 
-// Non-fatal: the payment is committed locally either way.
-const MYOB_WRITES_OFF_ON_CREATE =
-  "MYOB sync is switched off, so this payment was saved in Floorplan only — no bill was created in MYOB.";
-const MYOB_WRITES_OFF_ON_PAID =
-  "MYOB sync is switched off, so this payment was marked paid in Floorplan only — nothing was sent to MYOB.";
 
 const toCents = (amount: number): number => Math.round(amount * 100);
 const formatMoney = (cents: number): string =>
@@ -297,7 +293,6 @@ async function upsertPayment(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
-  const actor = userActor(identity, await rolesForRequest(request).catch(() => []));
 
   let connection: Connection | undefined;
   try {
@@ -329,10 +324,10 @@ async function upsertPayment(
 
     if (create) {
       // ── Create ──────────────────────────────────────────────────────────────
-      // Recording a payment is a decision (PLAN §3.12): the payment and its
-      // ledger row commit together or not at all, and only then is MYOB asked
-      // for the bill (as it always was). One correlation id goes to the ledger
-      // row and to that MYOB call, so MyobApiLog leads back to the decision.
+      // Recording a payment is a decision (PLAN §3.12): the payment, its event
+      // and its ledger row commit together or not at all. It is recorded in
+      // Floorplan only (J3): a MYOB bill is its own explicit action through
+      // the MYOB proposals (lane M), never bundled with this one (decision 12).
       const ledgerActor = await resolveLedgerActor(request, connection);
       if (!ledgerActor) return unauthorizedResponse();
       const correlationId = newCorrelationId();
@@ -344,6 +339,20 @@ async function upsertPayment(
         if (!invoice) {
           await rollbackTransaction(connection).catch(() => {});
           return { status: 404, jsonBody: { error: "Invoice not found." } };
+        }
+        // Decision 4 (J3): admin pays on test records only.
+        const roles = await rolesForRequest(request);
+        const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, invoice.jobId)));
+        if (adminBar) {
+          await rollbackTransaction(connection).catch(() => {});
+          await recordRefusal(
+            connection,
+            ledgerActor,
+            { id: create.jobInvoiceId, type: "invoice" },
+            { attempted: "payment.create", code: adminBar.code, message: adminBar.message, state: { status: invoice.status } },
+            invoice.jobId,
+          );
+          return { status: adminBar.status, jsonBody: { code: adminBar.code, error: adminBar.message } };
         }
         const refusal = paymentInvoiceRefusal({
           amount: create.amount,
@@ -390,6 +399,17 @@ async function upsertPayment(
         );
         newId = inserted[0].PaymentID as number;
 
+        await executeQuery(
+          connection,
+          `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+           VALUES (@JobID, @CreatedBy, @Text, 'payment_made');`,
+          [
+            { name: "JobID", type: TYPES.Int, value: create.jobId },
+            { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+            { name: "Text", type: TYPES.NVarChar, value: `Recorded a payment of ${formatMoney(toCents(create.amount))}` },
+          ],
+        );
+
         const scope = await jobScope(connection, create.jobId);
         await record(connection, {
           action: "payment.create",
@@ -418,63 +438,12 @@ async function upsertPayment(
         throw err;
       }
 
-      // ── Fetch job title for the MYOB bill description ────────────────────
-      const jobRows = await executeQuery(
-        connection,
-        "SELECT Title FROM Jobs WHERE JobID = @Id",
-        [{ name: "Id", type: TYPES.Int, value: create.jobId }],
-      );
-      const jobTitle = (jobRows[0]?.Title as string | null) ?? `Job #${create.jobId}`;
-
-      // ── Contractor name from the linked quote (optional) ─────────────────
-      let contractorName: string | null = null;
-      if (QuoteID) {
-        const quoteRows = await executeQuery(
-          connection,
-          "SELECT ContractorName FROM Quotes WHERE QuoteID = @Id",
-          [{ name: "Id", type: TYPES.Int, value: QuoteID }],
-        );
-        contractorName = (quoteRows[0]?.ContractorName as string | null) ?? null;
-      }
-
-      // ── Create MYOB Purchase Bill (fire-and-forget on error) ────────────
-      let myobWarning: string | undefined;
-      try {
-        const myob = await createMyobBill({
-          actor,
-          amount: create.amount,
-          contractorName: contractorName ?? undefined,
-          correlationId,
-          jobId: create.jobId,
-          jobTitle,
-          notes: Notes ?? undefined,
-          referenceNumber: `PAY-${create.jobId}-${newId}`,
-          sqlToken: token,
-        });
-        await executeQuery(
-          connection,
-          `UPDATE Payments
-           SET MyobID = @MyobID, MyobURL = @MyobURL, MyobSyncedAt = SYSUTCDATETIME()
-           WHERE PaymentID = @Id`,
-          [
-            { name: "MyobID",  type: TYPES.NVarChar, value: myob.uid },
-            { name: "MyobURL", type: TYPES.NVarChar, value: myob.url },
-            { name: "Id",      type: TYPES.Int,      value: newId },
-          ],
-        );
-        context.log(`MYOB bill created: ${myob.uid} for payment ${newId}`);
-      } catch (myobErr: any) {
-        // MYOB failure must not block the payment — log and continue.
-        context.warn(`MYOB bill creation failed for payment ${newId}: ${myobErr.message}`);
-        if (myobErr instanceof MyobWritesDisabledError) myobWarning = MYOB_WRITES_OFF_ON_CREATE;
-      }
-
       const stored = await executeQuery(
         connection,
         `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: newId }],
       );
-      return { status: 200, jsonBody: { payment: stored[0], ...(myobWarning ? { myobWarning } : {}) } };
+      return { status: 200, jsonBody: { payment: stored[0] } };
     }
 
     // ── Update ───────────────────────────────────────────────────────────────
@@ -515,6 +484,18 @@ async function upsertPayment(
         return { status: 404, jsonBody: { error: "Payment not found" } };
       }
       const existing = existingRows[0];
+      // Decision 4 (J3 review): admin changes a payment on test records only.
+      const roles = await rolesForRequest(request);
+      const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, existing.JobID as number)));
+      if (adminBar) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: typeof Amount === "number" ? "payment.amount_change" : "payment.edit",
+          jobId: existing.JobID as number,
+          refusal: adminBar,
+          state: { status: (existing.Status as string | null) ?? null },
+          subject: { id: PaymentID, type: "payment" },
+        });
+      }
       const existingInvoiceId = (existing.JobInvoiceID as number | null) ?? null;
       const amountChanges =
         typeof Amount === "number" && toCents(Amount) !== toCents(Number(existing.Amount));
@@ -625,17 +606,14 @@ async function upsertPayment(
 
 // ── POST /api/markPaymentPaid ─────────────────────────────────────────────────
 // Body: { PaymentID } — PaidBy is the verified caller, never the body.
-// Sets Status='paid' in our DB and applies the payment against the MYOB bill.
-// If MYOB has no bill for this payment (MyobID is null), logs a warning
-// but still marks the local record as paid.
+// Sets Status='paid' in Floorplan. Nothing is sent to MYOB (J3): a MYOB write
+// is its own explicit action through lane M's proposals (decision 12), so a
+// payment is never marked paid on the strength of, or despite, a MYOB call.
 //
-// Marking a payment paid is a decision (PLAN §3.12): the status and its ledger
-// row commit together or not at all. Only then is MYOB told, so a failed ledger
-// write can't leave MYOB holding a payment that Floorplan still shows as
-// pending (and that a retry would apply a second time). One correlation id
-// goes to both the ledger row and the MYOB call, so MyobApiLog leads back to
-// the decision. What MYOB is sent, and the MYOB_WRITES_ENABLED switch, are
-// unchanged; MYOB failing is still not fatal.
+// Marking a payment paid is a decision (PLAN §3.12): it re-checks the invoice
+// it pays (still approved, director-approved where the gate needs it, the
+// unpaid balance covers it), and the status and its ledger row commit
+// together or not at all.
 
 interface MarkPaymentPaidBody {
   PaymentID?: number;
@@ -644,7 +622,7 @@ interface MarkPaymentPaidBody {
 }
 
 const MARK_PAID_TARGET: RefusalTarget = {
-  attempted: "payment.myob_applied",
+  attempted: "payment.mark_paid",
   idField: "PaymentID",
   subjectType: "payment",
 };
@@ -667,7 +645,6 @@ async function markPaymentPaid(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
-  const actor = userActor(identity, await rolesForRequest(request).catch(() => []));
 
   let connection;
   try {
@@ -681,13 +658,11 @@ async function markPaymentPaid(
     const ledgerActor = await resolveLedgerActor(request, connection);
     if (!ledgerActor) return unauthorizedResponse();
 
-    const correlationId = newCorrelationId();
-
     await beginTransaction(connection);
     let payment;
     try {
       // Locked until commit, so two clicks on "Mark as paid" can't both get
-      // past the paid check and apply the payment in MYOB twice.
+      // past the paid check.
       const rows = await executeQuery(
         connection,
         `SELECT ${PAYMENT_COLUMNS} FROM Payments WITH (UPDLOCK, HOLDLOCK) WHERE PaymentID = @Id`,
@@ -704,10 +679,25 @@ async function markPaymentPaid(
         return { status: 200, jsonBody: { payment } };
       }
 
+      const refusal = await markPaidRefusal(connection, request, payment, PaymentID);
+      if (refusal) {
+        // A refused attempt, ledgered in a transaction of its own now that this
+        // one has rolled back.
+        await rollbackTransaction(connection).catch(() => {});
+        await recordRefusal(
+          connection,
+          ledgerActor,
+          { id: PaymentID, type: "payment" },
+          { attempted: "payment.mark_paid", code: refusal.code, message: refusal.message, state: { status: payment.Status } },
+          (payment.JobID as number | null | undefined) ?? null,
+        );
+        return { status: refusal.status, jsonBody: { code: refusal.code, error: refusal.message } };
+      }
+
       await executeQuery(
         connection,
         `UPDATE Payments
-         SET Status = 'paid', MyobSyncedAt = SYSUTCDATETIME(),
+         SET Status = 'paid', PaidAt = SYSUTCDATETIME(),
              PaidBy = @MarkedPaidBy
          WHERE PaymentID = @Id`,
         [
@@ -719,12 +709,11 @@ async function markPaymentPaid(
       const scope = await jobScope(connection, payment.JobID as number | null | undefined);
       const invoice = await loadPaidInvoice(connection, payment.JobInvoiceID);
       await record(connection, {
-        action: "payment.myob_applied",
+        action: "payment.mark_paid",
         actor: ledgerActor,
         after: { status: "paid", ...paymentFacts(payment, invoice) },
         before: { status: (payment.Status as string | null) ?? null, ...contractorFacts(invoice ?? {}) },
         buildingId: scope.buildingId,
-        correlationId,
         jobId: scope.jobId,
         subject: { id: PaymentID, type: "payment" },
       });
@@ -734,40 +723,49 @@ async function markPaymentPaid(
       throw err;
     }
 
-    // ── Apply payment in MYOB if we have a bill UID ─────────────────────────
-    const myobId = payment.MyobID as string | null;
-    let myobWarning: string | undefined;
-    if (myobId) {
-      try {
-        await applyMyobPayment({
-          actor,
-          amount: payment.Amount as number,
-          billUid: myobId,
-          correlationId,
-          sqlToken: token,
-        });
-        context.log(`MYOB payment applied: bill ${myobId}, payment ${PaymentID}`);
-      } catch (myobErr: any) {
-        context.warn(`MYOB payment apply failed for payment ${PaymentID}: ${myobErr.message}`);
-        if (myobErr instanceof MyobWritesDisabledError) myobWarning = MYOB_WRITES_OFF_ON_PAID;
-        // Continue — the payment is marked paid locally regardless.
-      }
-    } else {
-      context.warn(`Payment ${PaymentID} has no MyobID — marking paid locally only`);
-    }
-
     const updated = await executeQuery(
       connection,
       `SELECT ${PAYMENT_COLUMNS} FROM Payments WHERE PaymentID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PaymentID }],
     );
-    return { status: 200, jsonBody: { payment: updated[0], ...(myobWarning ? { myobWarning } : {}) } };
+    return { status: 200, jsonBody: { payment: updated[0] } };
   } catch (error: any) {
     context.error("markPaymentPaid failed:", error.message);
     return errorResponse("Mark payment paid failed", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
+}
+
+/**
+ * Why this payment can't be marked paid now, or null (J3): admin only on test
+ * records (decision 4); it must pay an invoice; and that invoice, as it stands
+ * now, must still allow this payment (approved, director-approved where the
+ * gate needs it, the unpaid balance net of the other payments covers it).
+ */
+async function markPaidRefusal(
+  connection: Connection,
+  request: HttpRequest,
+  payment: Record<string, unknown>,
+  paymentId: number,
+): Promise<{ code: string; message: string; status: number } | null> {
+  const jobId = payment.JobID as number;
+  const roles = await rolesForRequest(request);
+  const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, jobId)));
+  if (adminBar) return adminBar;
+  const invoiceId = (payment.JobInvoiceID as number | null | undefined) ?? null;
+  if (invoiceId === null) {
+    return { code: "no_invoice", message: "This payment isn't recorded against an invoice, so it can't be checked and marked paid.", status: 422 };
+  }
+  const invoice = await loadInvoiceForPayment(connection, invoiceId, paymentId);
+  if (!invoice) return { code: "no_invoice", message: "The invoice this payment was recorded against no longer exists.", status: 422 };
+  const refusal = paymentInvoiceRefusal({
+    amount: Number(payment.Amount),
+    facts: await loadApprovalFacts(connection, null),
+    invoice,
+    jobId,
+  });
+  return refusal ? { ...refusal, status: 422 } : null;
 }
 
 // MYOB's Business API has no webhooks, so nothing pushes "paid" to us. Paid

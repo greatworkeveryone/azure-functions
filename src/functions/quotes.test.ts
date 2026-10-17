@@ -265,7 +265,7 @@ const flush = async () => {
 describe("approveQuote", () => {
   const quoteRow = (amount: number): SqlRoute => [
     /SELECT JobID, QuoteNumber, ContractorName, Amount/,
-    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1" }],
+    [{ Amount: amount, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
   ];
   const stored: SqlRoute = [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7, Status: "approved" }]];
 
@@ -355,8 +355,9 @@ describe("quote handlers that used to read the actor from the body", () => {
       /OUTPUT INSERTED|^\s*SELECT/i.test(sql) ? [row] : [],
     );
 
-    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy.
-    const ids = name === "upsertQuote" ? { JobID: 9 } : { JobID: 9, QuoteID: 7 };
+    // upsertQuote without a QuoteID takes the create path, which stamps CreatedBy
+    // (and, since J3, needs an amount above $0).
+    const ids = name === "upsertQuote" ? { Amount: 100, JobID: 9 } : { JobID: 9, QuoteID: 7 };
     await bodyActorHandler[name](makeRequest({ ...ids, [field]: "Someone Else" }), ctx);
 
     const values = sqlCalls().flatMap((c) => Object.values(c.params));

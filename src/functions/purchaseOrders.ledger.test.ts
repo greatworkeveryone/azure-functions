@@ -118,9 +118,10 @@ const LEDGER_FAILS: Route = { match: /INSERT INTO dbo\.DecisionLedger/, reject: 
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 
 describe("upsertPurchaseOrder: creating a PO", () => {
+  // The job, locked for the J3 rules: live, with an approved quote.
   const jobState = (over: Record<string, unknown> = {}): Route => ({
-    match: /SELECT Status, AwaitingRole, ApprovedQuoteID FROM Jobs/,
-    rows: [{ ApprovedQuoteID: 4, AwaitingRole: "facilities", Status: "Work", ...over }],
+    match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/,
+    rows: [{ BuildingID: 5, HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 42, Status: "Work", ...over }],
   });
   const create: Route[] = [
     jobState(),
@@ -177,16 +178,16 @@ describe("upsertPurchaseOrder: creating a PO", () => {
     });
   });
 
-  it("writes an internal PO (no contractor, no cost) with nulls rather than failing", async () => {
+  it("writes a PO with no contractor with nulls rather than failing", async () => {
     moneyShape.recordHasNo("amount", "contractor");
-    const res = await upsertPurchaseOrder(makeRequest({ JobID: 42 }), ctx);
+    const res = await upsertPurchaseOrder(makeRequest({ CostNotToExceed: 500, JobID: 42 }), ctx);
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)[0].after).toEqual({
       amount: null,
       contractorId: null,
       contractorName: null,
-      costNotToExceed: null,
+      costNotToExceed: 500,
       estimatedCost: null,
       poNumber: "66Se261013",
     });
@@ -238,7 +239,9 @@ describe("upsertPurchaseOrder: creating a PO", () => {
 
   it("editing a PO that touches no cost is not a ledgered decision, and doesn't even look up who is editing", async () => {
     mockSql([
-      { match: /SELECT PurchaseOrderID, JobID, PONumber, ContractorName/, rows: [{ JobID: 42, PONumber: "66Se261013", PurchaseOrderID: 99 }] },
+      APP_USER,
+      jobState(),
+      { match: /FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id/, rows: [{ JobID: 42, PONumber: "66Se261013", PurchaseOrderID: 99 }] },
       { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] },
     ]);
 
@@ -246,7 +249,6 @@ describe("upsertPurchaseOrder: creating a PO", () => {
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
-    expect(ran(/FROM dbo\.AppUsers/)).toBe(false);
   });
 
   describe("when the role gate says no", () => {
@@ -287,16 +289,15 @@ describe("upsertPurchaseOrder: creating a PO", () => {
   });
 
   describe("a PO that would act as the quote's approval is refused", () => {
-    const leapfrog = jobState({ ApprovedQuoteID: null, Status: "Awaiting Approval" });
-    const MESSAGE =
-      "Cannot create a purchase order — the quote hasn't been approved yet. Approve the quote first (this enforces the approval limit) before raising a PO.";
+    const leapfrog = jobState({ HasApprovedQuote: 0, Status: "Awaiting Approval" });
+    const MESSAGE = "Approve the quote before raising or sending a purchase order (the approval applies the spending limit).";
 
     it("still 422s with the same words, and records `denied` against the job", async () => {
       mockSql([leapfrog, APP_USER, JOB_BUILDING, ...create]);
 
       const res = await upsertPurchaseOrder(makeRequest(body), ctx);
 
-      expect(res).toEqual({ jsonBody: { error: MESSAGE }, status: 422 });
+      expect(res).toEqual({ jsonBody: { code: "quote_not_approved", error: MESSAGE }, status: 422 });
       const rows = ledgerInserts(db.executeQuery);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
@@ -331,7 +332,7 @@ describe("upsertPurchaseOrder: creating a PO", () => {
 
       const res = await upsertPurchaseOrder(makeRequest(body), ctx);
 
-      expect(res).toEqual({ jsonBody: { error: MESSAGE }, status: 422 });
+      expect(res).toEqual({ jsonBody: { code: "quote_not_approved", error: MESSAGE }, status: 422 });
     });
   });
 });

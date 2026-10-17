@@ -83,6 +83,10 @@ beforeEach(() => {
   };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/MAX\(Seq\)/.test(sql)) return [{ NextSeq: 1 }];
+    // J3: the job takes money records (live, not internal or archived).
+    if (/SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/.test(sql)) {
+      return [{ BuildingID: 1, HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 42, Status: "Work" }];
+    }
     if (/INSERT INTO JobInvoices/.test(sql)) return [{ JobInvoiceID: 5 }];
     if (/FROM dbo\.Contractors WHERE ContractorID/.test(sql)) return [{ ContractorName: "Acme Pty Ltd" }];
     if (/SELECT JobInvoiceID, JobID, InvoiceNumber, Amount/.test(sql)) return [existing];
@@ -93,7 +97,7 @@ beforeEach(() => {
 
 describe("creating an invoice records its contractor", () => {
   it("stores the id the request gives, with the name that came with it", async () => {
-    const res = await upsertJobInvoice(makeRequest({ ContractorID: 7, ContractorName: "Acme Corp", JobID: 42 }), ctx);
+    const res = await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: 7, ContractorName: "Acme Corp", JobID: 42 }), ctx);
 
     expect(res.status).toBe(200);
     const insert = callMatching(/INSERT INTO JobInvoices/)!;
@@ -103,7 +107,7 @@ describe("creating an invoice records its contractor", () => {
   });
 
   it("checks the id against the contractors we have, binding it", async () => {
-    await upsertJobInvoice(makeRequest({ ContractorID: 7, JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: 7, JobID: 42 }), ctx);
 
     expect(contractorLookups()).toHaveLength(1);
     expect(contractorLookups()[0].sql).toBe("SELECT ContractorName FROM dbo.Contractors WHERE ContractorID = @ContractorID");
@@ -111,7 +115,7 @@ describe("creating an invoice records its contractor", () => {
   });
 
   it("takes the contractor's own name when only the id comes: for the invoice, its number and its event", async () => {
-    await upsertJobInvoice(makeRequest({ ContractorID: 7, JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: 7, JobID: 42 }), ctx);
 
     const insert = callMatching(/INSERT INTO JobInvoices/)!;
     expect(insert.params).toMatchObject({ ContractorID: 7, ContractorName: "Acme Pty Ltd" });
@@ -120,21 +124,21 @@ describe("creating an invoice records its contractor", () => {
   });
 
   it("leaves the id null when only a name comes, and never looks the name up", async () => {
-    await upsertJobInvoice(makeRequest({ ContractorName: "Acme Plumbing", JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, ContractorName: "Acme Plumbing", JobID: 42 }), ctx);
 
     expect(callMatching(/INSERT INTO JobInvoices/)!.params).toMatchObject({ ContractorID: null, ContractorName: "Acme Plumbing" });
     expect(contractorLookups()).toHaveLength(0);
   });
 
   it("stores neither when the request names no contractor", async () => {
-    await upsertJobInvoice(makeRequest({ JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, JobID: 42 }), ctx);
 
     expect(callMatching(/INSERT INTO JobInvoices/)!.params).toMatchObject({ ContractorID: null, ContractorName: null });
     expect(contractorLookups()).toHaveLength(0);
   });
 
   it("an id of null says there is none", async () => {
-    await upsertJobInvoice(makeRequest({ ContractorID: null, ContractorName: "Acme Plumbing", JobID: 42 }), ctx);
+    await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: null, ContractorName: "Acme Plumbing", JobID: 42 }), ctx);
 
     expect(callMatching(/INSERT INTO JobInvoices/)!.params).toMatchObject({ ContractorID: null, ContractorName: "Acme Plumbing" });
     expect(contractorLookups()).toHaveLength(0);
@@ -143,7 +147,7 @@ describe("creating an invoice records its contractor", () => {
   it("refuses an id that isn't a contractor before starting, so nothing is written", async () => {
     db.executeQuery.mockImplementation(async () => []);
 
-    const res = await upsertJobInvoice(makeRequest({ ContractorID: 999, JobID: 42 }), ctx);
+    const res = await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: 999, JobID: 42 }), ctx);
 
     expect(res).toEqual({ jsonBody: { error: "ContractorID does not match a contractor" }, status: 400 });
     expect(db.beginTransaction).not.toHaveBeenCalled();
@@ -151,14 +155,14 @@ describe("creating an invoice records its contractor", () => {
   });
 
   it.each([0, -3, 1.5, "7", 2147483648, true])("refuses %p as an id without looking anything up", async (bad) => {
-    const res = await upsertJobInvoice(makeRequest({ ContractorID: bad, JobID: 42 }), ctx);
+    const res = await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: bad, JobID: 42 }), ctx);
 
     expect(res).toEqual({ jsonBody: { error: "ContractorID must be a whole number" }, status: 400 });
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
   it("gives the invoice back with its contractor id", async () => {
-    const res = await upsertJobInvoice(makeRequest({ ContractorID: 7, JobID: 42 }), ctx);
+    const res = await upsertJobInvoice(makeRequest({ Amount: 100, ContractorID: 7, JobID: 42 }), ctx);
 
     const reload = callMatching(/FROM JobInvoices WHERE JobInvoiceID/)!;
     expect(reload.sql).toMatch(/ContractorName, ContractorID,/);

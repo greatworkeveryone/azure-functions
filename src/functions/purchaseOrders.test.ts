@@ -108,13 +108,13 @@ beforeEach(() => {
 describe("upsertPurchaseOrder", () => {
   it("create: records the token's name as CreatedBy and job actor, ignoring CreatedBy in the body", async () => {
     routeSql([
-      [/SELECT Status, AwaitingRole, ApprovedQuoteID FROM Jobs/, [{ ApprovedQuoteID: 4, AwaitingRole: "facilities", Status: "Quote" }]],
+      [/SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/, [{ HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Awaiting Approval" }]],
       [/MAX\(Seq\)/, [{ NextSeq: 1 }]],
       [/INSERT INTO PurchaseOrders/, [{ PurchaseOrderID: 3 }]],
       storedPo,
     ]);
 
-    const res = await upsertPurchaseOrder(makeRequest({ CreatedBy: "Someone Else", JobID: 9 }), ctx);
+    const res = await upsertPurchaseOrder(makeRequest({ CostNotToExceed: 500, CreatedBy: "Someone Else", JobID: 9 }), ctx);
 
     expect(res.status).toBe(200);
     expect(callMatching(/INSERT INTO PurchaseOrders/)?.params.CreatedBy).toBe("Johanne CFO");
@@ -129,10 +129,8 @@ describe("upsertPurchaseOrder", () => {
 
   it("edit: the po_edited event carries the token's name, ignoring CreatedBy in the body", async () => {
     routeSql([
-      [
-        /SELECT PurchaseOrderID, JobID, PONumber, ContractorName,\s+EstimatedCost/,
-        [{ JobID: 9, PONumber: "PO-9-1", PurchaseOrderID: 3 }],
-      ],
+      [/FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id/, [{ JobID: 9, PONumber: "PO-9-1", PurchaseOrderID: 3 }]],
+      [/SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/, [{ HasApprovedQuote: 1, IsInternal: false, JobID: 9, Status: "Work" }]],
       storedPo,
     ]);
 

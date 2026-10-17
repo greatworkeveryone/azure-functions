@@ -97,6 +97,8 @@ const ACCEPTS: Route[] = [
   { match: EVENT_INSERT, rows: [{ JobEventID: 77 }] },
   { match: GUARDED_UPDATE, rows: [{ JobID: 9 }] },
 ];
+// J3: the invoice an entry names is on the entry's job.
+const ON_JOB: Route = { match: /AS QuoteOnJob/, rows: [{ InvoiceOnJob: 1, PurchaseOrderOnJob: 1, QuoteOnJob: 1 }] };
 const event = (body: Record<string, unknown>) => addJobEvent(makeRequest({ JobID: 9, ...body }), ctx);
 
 beforeEach(() => {
@@ -193,7 +195,7 @@ describe("addJobEvent: the transition guard", () => {
     });
 
     it("every invoice approved (director included) and in MYOB: Done", async () => {
-      mockSql([atAccounts, invoices(invoice(), invoice({ Amount: 30000, Status: "director_approved" }), invoice({ Status: "rejected", MyobCreatedAt: null })), ...ACCEPTS]);
+      mockSql([atAccounts, invoices(invoice(), invoice({ Amount: 30000, Status: "director_approved" }), invoice({ Status: "rejected", MyobCreatedAt: null })), ON_JOB, ...ACCEPTS]);
       const res = await event({ NewStatus: "Done", InvoiceID: 3 });
       expect(res.status).toBe(200);
       expect(find(GUARDED_UPDATE)?.params).toMatchObject({ ExpectedStatus: "Awaiting Approval", Status: "Done" });

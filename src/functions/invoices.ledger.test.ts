@@ -1179,8 +1179,18 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
     expect(ran(CLEAR)).toBe(false);
   });
 
-  it("a contractor-only edit leaves the approval alone, writes no row and doesn't look up who is editing", async () => {
+  it("a contractor-only edit is a payee change (J3): it clears the approval and is ledgered as payee_changed", async () => {
     const res = await edit({ Amount: undefined, ContractorName: "Beta Pty" });
+
+    expect(res.status).toBe(200);
+    expect(ran(CLEAR)).toBe(true);
+    expect(resets()).toEqual([
+      expect.objectContaining({ after: expect.objectContaining({ contractorName: "Beta Pty", delta: 0 }), ruleApplied: "payee_changed" }),
+    ]);
+  });
+
+  it("a notes-only edit leaves the approval alone, writes no row and doesn't look up who is editing", async () => {
+    const res = await edit({ Amount: undefined, Notes: "Chased the supplier" });
 
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
@@ -1240,6 +1250,56 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+  });
+});
+
+describe("an outgoing invoice raised after the job is done (decision 18)", () => {
+  const DONE_JOB: Route = {
+    match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/,
+    rows: [{ BuildingID: 5, HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Done" }],
+  };
+  const raise = () =>
+    upsertJobInvoice(makeRequest({ Amount: 750, ContractorName: "Acme", Direction: "outgoing", JobID: 9, SupplierInvoiceNumber: "INV-0042" }), ctx);
+
+  it("is allowed without a reopen, and writes one invoice.raised_after_close exception in the invoice's transaction", async () => {
+    mockSql([APP_USER, DONE_JOB, CONTRACTOR, { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] }, STORED]);
+
+    const res = await raise();
+
+    expect(res.status).toBe(200);
+    const rows = ledgerInserts(db.executeQuery);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: "invoice.raised_after_close",
+      actorName: "Casey Controller",
+      after: { amount: 750, contractorId: 3, contractorName: "Acme", direction: "outgoing", jobStatus: "Done" },
+      buildingId: 5,
+      isException: true,
+      jobId: 9,
+      ruleApplied: "outgoing_after_close",
+      subjectId: "5",
+      subjectType: "invoice",
+    });
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("an incoming invoice on a done job still needs the reopen: 409, nothing written, the refused attempt ledgered", async () => {
+    mockSql([APP_USER, JOB_BUILDING, DONE_JOB, { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] }, STORED]);
+
+    const res = await upsertJobInvoice(makeRequest({ Amount: 750, ContractorName: "Acme", JobID: 9 }), ctx);
+
+    expect(res).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
+    expect(ran(/INSERT INTO JobInvoices/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "denied",
+        before: { attempted: "invoice.create", direction: "incoming", jobStatus: "Done" },
+        buildingId: 5,
+        jobId: 9,
+        ruleApplied: "job_done",
+        subjectType: "job",
+      }),
+    ]);
   });
 });
 

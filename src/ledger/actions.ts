@@ -58,6 +58,14 @@ export const LEDGER_ACTIONS = {
   "quote.unapprove": { exception: true, reasonRequired: false, subjects: ["quote"] },
   "quote.uncomplete": { exception: true, reasonRequired: false, subjects: ["quote"] },
 
+  // Marking a payment paid (beta sprint J3) is recorded in Floorplan only: a
+  // MYOB write is its own explicit action (decision 12). The approval and
+  // marker resets above also cover a payee change since J3.
+  "payment.mark_paid": { exception: false, reasonRequired: false, subjects: ["payment"] },
+  // Decision 18: an outgoing (on-charge) invoice raised on a job already Done
+  // is allowed without a reopen, and recorded so the audit can find it.
+  "invoice.raised_after_close": { exception: true, reasonRequired: false, subjects: ["invoice"] },
+
   // Job lifecycle decisions (beta sprint J2). Done is final: reopening one is
   // a manager's exception with a reason. The MYOB read-back closing a job
   // whose invoices are all paid is a system decision.

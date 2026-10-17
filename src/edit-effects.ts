@@ -26,6 +26,8 @@ function isMaterialChange(
 
 export interface ApprovalAmountBefore {
   amount: number | null;
+  /** Quotes carry the contractor's id as well as its name. */
+  contractorId?: number | null;
   contractorName: string | null;
   status: string | null;
   approvedAt: Date | null;
@@ -33,20 +35,32 @@ export interface ApprovalAmountBefore {
 
 export interface ApprovalAmountChange {
   amount?: number | null;
+  contractorId?: number | null;
   contractorName?: string | null;
+}
+
+/** The payee changed: a different contractor id, or a different name. Undefined fields are no change. */
+function payeeChanged(
+  before: { contractorId?: number | null; contractorName: string | null },
+  change: { contractorId?: number | null; contractorName?: string | null },
+): boolean {
+  const idChanged = change.contractorId !== undefined && (change.contractorId ?? null) !== (before.contractorId ?? null);
+  const nameChanged = change.contractorName !== undefined && change.contractorName !== before.contractorName;
+  return idChanged || nameChanged;
 }
 
 export interface ApprovalAmountEffects {
   amountChanged: boolean;
   contractorChanged: boolean;
   /**
-   * True when the edit invalidates a previous approval — the caller should
-   * clear approval fields and revert the relevant job status.
+   * True when the edit invalidates a previous approval — the caller clears the
+   * approval fields (and, for an invoice, any MYOB mark). It never moves the
+   * job (J2).
    *
-   * Fires when the amount changed AND the row was in any state past
-   * "pending" (approved, awaiting director, completed, or has an ApprovedAt
-   * stamp). Contractor-only edits don't invalidate approval — the approver
-   * approved the amount, not the company name.
+   * Fires when the amount or the payee changed AND the row was in any state
+   * past "pending" (approved, awaiting director, completed, or has an
+   * ApprovedAt stamp). The approver approved paying this amount to this
+   * contractor; a different payee is a different decision (J3).
    */
   clearApproval: boolean;
   /** Human-readable diff line for the activity feed. */
@@ -65,9 +79,7 @@ export function decideApprovalAmountEdit(
   change: ApprovalAmountChange,
 ): ApprovalAmountEffects {
   const amountChanged = isMaterialChange(before.amount, change.amount);
-  const contractorChanged =
-    change.contractorName !== undefined &&
-    change.contractorName !== before.contractorName;
+  const contractorChanged = payeeChanged(before, change);
 
   const wasApproved =
     (before.status != null && APPROVED_STATUSES.has(before.status)) ||
@@ -91,7 +103,7 @@ export function decideApprovalAmountEdit(
   return {
     amountChanged,
     contractorChanged,
-    clearApproval: amountChanged && wasApproved,
+    clearApproval: (amountChanged || contractorChanged) && wasApproved,
     summary,
   };
 }
@@ -99,6 +111,7 @@ export function decideApprovalAmountEdit(
 // ── Purchase orders: no approval status, but Sent / MYOB markers ─────────────
 
 export interface PurchaseOrderEditBefore {
+  contractorId?: number | null;
   contractorName: string | null;
   costNotToExceed: number | null;
   estimatedCost: number | null;
@@ -108,6 +121,7 @@ export interface PurchaseOrderEditBefore {
 }
 
 export interface PurchaseOrderEditChange {
+  contractorId?: number | null;
   contractorName?: string | null;
   costNotToExceed?: number | null;
   estimatedCost?: number | null;
@@ -136,15 +150,13 @@ export function decidePurchaseOrderEdit(
     before.costNotToExceed,
     change.costNotToExceed,
   );
-  const contractorChanged =
-    change.contractorName !== undefined &&
-    change.contractorName !== before.contractorName;
+  const contractorChanged = payeeChanged(before, change);
 
-  // Cost moves are the ones that invalidate the contractor's copy / MYOB
-  // entry. Re-naming or scope tweaks don't change the dollars — leave
-  // markers in place. Once the work is marked Completed, the dollars are
+  // Cost and payee moves invalidate the contractor's copy and the MYOB entry
+  // (a PO to a different contractor is a different PO, J3). Scope tweaks
+  // leave markers in place. Once the work is marked Completed, the record is
   // historical; we still log the edit but don't tear down markers.
-  const moneyChanged = estimatedCostChanged || costNotToExceedChanged;
+  const moneyChanged = estimatedCostChanged || costNotToExceedChanged || contractorChanged;
   const inFlight = before.completedAt == null;
 
   const parts: string[] = [];

@@ -53,9 +53,10 @@ export const PLAIN_MONEY_CODES: readonly string[] = [
   "invoice.director_request_failed",
   "invoice.director_request_sent",
   "invoice.myob_created",
+  "invoice.raised_after_close",
   "invoice.reject",
   "payment.create",
-  "payment.myob_applied",
+  "payment.mark_paid",
   "po.complete",
   "po.create",
   "po.myob_created",
@@ -72,7 +73,12 @@ export const PLAIN_MONEY_CODES: readonly string[] = [
 /** Money codes the registry has, that no handler writes yet (WP20 raises them).
  *  Whoever adds a writer moves the code to the list it belongs in, and every
  *  handler suite then has to write it; moneyRowShape.test.ts fails until they do. */
-export const UNWRITTEN_MONEY_CODES: readonly string[] = ["quote.approve_attributed", "quote.attribution_disputed"];
+export const UNWRITTEN_MONEY_CODES: readonly string[] = [
+  // Retired by J3: payments no longer call MYOB, so nothing writes it; old rows keep it.
+  "payment.myob_applied",
+  "quote.approve_attributed",
+  "quote.attribution_disputed",
+];
 
 /** The keys an adjustment adds to `after`. */
 export const CHANGE_KEYS = ["delta", "deltaPercent", "newAmount", "originalApprovedAmount", "previousAmount"] as const;
