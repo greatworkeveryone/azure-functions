@@ -49,6 +49,7 @@ const REVIEWED_TIMERS: Record<string, string> = {
   accessReportTimer: "accessReportTimer.ts — reads AccessEvents and AppUsers, sends mail, writes nothing; off unless ACCESS_REPORT_ENABLED is \"true\"",
   schedulerTimer: "schedulerTimer.ts — reads ServiceSchedules and DefectsPeriods; creates jobs, asset links and run rows selected positively by schedule id, idempotent on (ScheduleId, DueDate); off unless SCHEDULER_ENABLED is \"true\", SCHEDULER_DRY_RUN writes nothing (sprint F2)",
   digestTimer: "digestTimer.ts — reads only, sends mail; off unless DIGEST_ENABLED or DIGEST_DRY_RUN is \"true\"",
+  myobReadbackTimer: "myobReadbackTimer.ts — selects positively by proposal id (the latest verified MyobProposals row per MYOB uid); GETs through a GET-only client; writes only that row's read-back columns (LastReadBackAt, MyobRowVersion, MyobStatus, MyobSnapshot, Discrepancy), checked against its RowVersion so a concurrent send makes the read-back fail rather than overwrite, plus a ledger row; deletes nothing; off unless MYOB_READBACK_ENABLED or MYOB_READBACK_DRY_RUN is \"true\" (plan M10)",
 };
 
 // Every call that deletes a blob, by file. A blob can be referenced by more

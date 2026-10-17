@@ -39,7 +39,7 @@ describe("migration 125_myob_reference_cache.sql", () => {
 
 describe("migration 126_myob_proposals.sql", () => {
   it("has every column myob/proposalsStore.ts reads and writes", () => {
-    const code = read("src/myob/proposalsStore.ts");
+    const code = read("src/myob/proposalRow.ts");
     const select = /PROPOSAL_COLUMNS = `([\s\S]*?)`/.exec(code)?.[1] ?? "";
     const columns = select.split(",").map((c) => c.trim()).filter(Boolean);
     expect(columns.length).toBeGreaterThan(20);

@@ -19,15 +19,10 @@ import {
 } from "../myob-purchase-order";
 import { canonicalJson } from "./hash";
 import { diffDocuments, type FieldDiff } from "./payloads";
+import { KIND_OF } from "./kinds";
 import type { ProposalRow } from "./proposalsStore";
 
-export const KIND_OF: Record<ProposalRow["operation"], PurchaseKind> = {
-  "bills.create": "Bill",
-  "orders.create": "Order",
-  "orders.update": "Order",
-  "quotes.create": "Quote",
-  "quotes.update": "Quote",
-};
+export { KIND_OF };
 
 export interface MyobPurchases {
   create: typeof createPurchase;

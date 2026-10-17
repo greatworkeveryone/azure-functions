@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { canPropose, forbidden, withCaller } from "../myob/proposalHttp";
 import { openProposals, proposalsForSubject } from "../myob/proposalsStore";
+import { proposalView } from "../myob/proposalView";
 
 // GET /api/getMyobProposals?subjectType=purchase_order&subjectId=9  (a record's history)
 // GET /api/getMyobProposals?queue=open                              (the CFO's review queue)
@@ -19,7 +20,7 @@ export async function getMyobProposals(request: HttpRequest, context: Invocation
     else if ((subjectType === "purchase_order" || subjectType === "quote") && Number.isInteger(subjectId) && subjectId > 0) {
       proposals = await proposalsForSubject(connection, subjectType, subjectId);
     } else return { jsonBody: { error: "Ask for a record (subjectType and subjectId) or queue=open" }, status: 400 };
-    return { jsonBody: { canPropose: canPropose(roles), canSend: isController, proposals }, status: 200 };
+    return { jsonBody: { canPropose: canPropose(roles), canSend: isController, proposals: proposals.map(proposalView) }, status: 200 };
   });
 }
 

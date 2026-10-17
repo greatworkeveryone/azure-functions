@@ -228,6 +228,9 @@ export const LEDGER_ACTIONS = {
   "myob.propose": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
   "myob.push": { exception: false, reasonRequired: false, subjects: ["myob_proposal"] },
   "myob.withdraw": { exception: true, reasonRequired: true, subjects: ["myob_proposal"] },
+  // The read-back sync (plan M10): MYOB now differs from what Floorplan sent,
+  // the record is missing there, or the difference cleared. RuleApplied says which.
+  "myob.discrepancy": { exception: true, reasonRequired: false, subjects: ["myob_proposal"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
