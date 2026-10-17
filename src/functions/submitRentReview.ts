@@ -7,6 +7,8 @@
 // Sends a calculated review on. In one transaction, under update locks on the
 // review and its tenancy:
 //   rowVersion  the one the caller read, else 409 { code: "stale", current }
+//   who         the review's owner, or an accounts manager and up (directors
+//               always), else 403 forbidden, ledgered as denied (L5)
 //   state       in_progress, else 409 invalid_state; a calc, else 409 not_calculated
 //   tenancy     archived 422 tenancy_archived, vacated 422 tenancy_vacated
 //   C4          the schedule hasn't changed since the calc (ScheduleVersion), else
@@ -86,6 +88,7 @@ import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
 import { basisEditorsSinceCommence, raiseApprovalEscalation, separationOfDuties } from "../rentReview/escalations";
 import { readDirectorOverride, recordDirectorOverride, signOffFacts } from "../rentReview/directorOverride";
 import {
+  ownsOrManages,
   readJsonObject,
   readReason,
   readReviewId,
@@ -166,6 +169,10 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
         if (directorOverride && !director) {
           const message = "Only a director can override a rent review's checks";
           throw new RentReviewError("forbidden", message, {}, refusal("director_override_not_director", message));
+        }
+        if (!ownsOrManages(review, caller)) {
+          const message = "Only the review's owner, or an accounts manager or above, can submit it";
+          throw new RentReviewError("forbidden", message, {}, refusal("not_owner_or_manager", message));
         }
         const calc = parseCalc(review.Calc);
         if (!calc) throw new RentReviewError("not_calculated", "Calculate the review before submitting it", { state });

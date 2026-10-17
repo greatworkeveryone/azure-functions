@@ -14,10 +14,14 @@
 //   state       approved, else 409 invalid_state (a completed review stays)
 //   reason      required (400 reason_required)
 //   role        accounts_manager, cfo or director; admin is never an approver
+//               (403 forbidden, ledgered as denied)
 //   tenancy     archived 422 tenancy_archived, vacated 422 tenancy_vacated
 //   409 changed_since_apply   the schedule row or review fields were edited since
 //   409 next_review_in_progress   the next review has been started
 //   409 not_revertible        APPLY's record can't be found
+//   409 try_again             another review was opened on the tenancy at the same
+//                             moment (the one-open-review index), or SQL Server chose
+//                             this revert as a deadlock's victim; nothing was written
 // Ledgered as rent_review.revert (an exception, with the reason) and, for the
 // next review, rent_review.cancel. After the commit: caches, and the cancelled
 // next review's escalations are withdrawn. The reverted review is open again, so
@@ -32,6 +36,7 @@ import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import * as ledger from "../ledger";
 import { requireMoneyContext } from "../moneyGate";
+import { isUniqueViolation } from "../escalation/errors";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision } from "../rentReview/afterDecision";
@@ -39,11 +44,13 @@ import { toReviewDto } from "../rentReview/dto";
 import { REVIEW_DECISION_CODES } from "../rentReview/escalationRules";
 import { settleReviewEscalations } from "../rentReview/escalations";
 import {
+  deniedAttempt,
   holdsApproverRole,
   readJsonObject,
   readReason,
   readReviewId,
   readRowVersion,
+  recordReviewRefusal,
   REVIEW_APPROVE_ROLES,
   RentReviewError,
   rentReviewErrorResponse,
@@ -71,39 +78,55 @@ export async function revertRentReview(request: HttpRequest, context: Invocation
     connection = await createRequestConnection(token);
     const caller = await resolveCaller(request, connection);
     if (!caller) return unauthorizedResponse();
-    if (!holdsApproverRole(caller.roles)) {
-      throw new RentReviewError("forbidden", "Only an accounts manager, the CFO or a director can revert a rent review");
-    }
     const db = connection;
     const today = todayInDarwin();
     const correlationId = ledger.newCorrelationId();
 
-    const done = await inTransaction(db, async () => {
-      const review = await reviewForUpdate(db, reviewId);
-      if (!review) throw new RentReviewError("not_found", "That review doesn't exist");
-      if (rowVersionHex(review.Version) !== rowVersion) throw staleReview(review, today);
-      const state = review.State as RentReviewState;
-      if (!canTransition(state, "REVERT")) {
+    let done;
+    try {
+      done = await inTransaction(db, async () => {
+        const review = await reviewForUpdate(db, reviewId);
+        if (!review) throw new RentReviewError("not_found", "That review doesn't exist");
+        // Admin passes requireRole but is never an approver (D20); the attempt is ledgered (L4).
+        if (!holdsApproverRole(caller.roles)) {
+          const message = "Only an accounts manager, the CFO or a director can revert a rent review";
+          throw new RentReviewError("forbidden", message, {}, deniedAttempt(caller, review, "rent_review.revert", "role_not_permitted", message));
+        }
+        if (rowVersionHex(review.Version) !== rowVersion) throw staleReview(review, today);
+        const state = review.State as RentReviewState;
+        if (!canTransition(state, "REVERT")) {
+          throw new RentReviewError(
+            "invalid_state",
+            state === "completed"
+              ? "This review has been completed, so it can't be reverted"
+              : `This review is ${state.replace(/_/g, " ")}; only an applied review can be reverted`,
+            { state },
+          );
+        }
+        const reverted = await revertReview(db, {
+          actor: caller.actor,
+          actorOid: oidFromToken(token) ?? "unknown",
+          correlationId,
+          reason,
+          review,
+          today,
+        });
+        const after = await loadReview(db, reviewId);
+        if (!after) throw new Error(`Review ${reviewId} vanished while being reverted`);
+        return { after, ...reverted };
+      });
+    } catch (error) {
+      await recordReviewRefusal(db, error);
+      // L1: a review opened on the tenancy between the next-review check and this
+      // one going back to in progress (the one-open-review index): nothing was written.
+      if (isUniqueViolation(error)) {
         throw new RentReviewError(
-          "invalid_state",
-          state === "completed"
-            ? "This review has been completed, so it can't be reverted"
-            : `This review is ${state.replace(/_/g, " ")}; only an applied review can be reverted`,
-          { state },
+          "try_again",
+          "Another review was opened on this tenancy at the same moment, so this one wasn't reverted. Try again.",
         );
       }
-      const reverted = await revertReview(db, {
-        actor: caller.actor,
-        actorOid: oidFromToken(token) ?? "unknown",
-        correlationId,
-        reason,
-        review,
-        today,
-      });
-      const after = await loadReview(db, reviewId);
-      if (!after) throw new Error(`Review ${reviewId} vanished while being reverted`);
-      return { after, ...reverted };
-    });
+      throw error;
+    }
 
     const review = toReviewDto(done.after, today);
     await afterReviewDecision(db, {

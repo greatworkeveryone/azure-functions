@@ -29,6 +29,8 @@
 //               directorOverride: { checks: ["not_signed_off"], reason }, ledgered as
 //               rent_review.director_override with the sign-off facts; a C3
 //               override made at submit already rides in the calc
+// 409 try_again when SQL Server chose this approval as a deadlock's victim (an
+// approve and a revert on one tenancy at once); nothing was written.
 // Ledgered as rent_review.approve and rent_review.apply in the same transaction.
 // After the commit: caches, E2/E3 end as approved (the preparer is told), the next
 // review is scheduled, and the rent_review Planner tasks complete while Planner is on.

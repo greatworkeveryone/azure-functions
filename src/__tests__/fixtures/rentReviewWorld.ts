@@ -30,6 +30,8 @@ export class ReviewWorld {
   private ledgerId = 1;
   /** Throw on the ledger INSERT whose row this returns true for (an injected failure). */
   failLedger: ((row: Row) => boolean) | null = null;
+  /** Throw this error on the statement it returns one for (a deadlock, a unique-index race). */
+  failSql: ((sql: string) => Error | null) | null = null;
   /** Every statement, in order, for assertions about what ran. */
   log: string[] = [];
   committed = 0;
@@ -160,6 +162,8 @@ export class ReviewWorld {
 
   async execute(sql: string, list: Param[] = []): Promise<Row[]> {
     this.log.push(sql);
+    const injected = this.failSql?.(sql) ?? null;
+    if (injected) throw injected;
     const p = Object.fromEntries(list.map((x) => [x.name, x.value]));
 
     if (/INSERT INTO dbo\.DecisionLedger/.test(sql)) {

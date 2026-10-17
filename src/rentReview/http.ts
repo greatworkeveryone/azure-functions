@@ -97,6 +97,26 @@ export function isManagerOrAbove(roles: readonly string[]): boolean {
   return roles.some((role) => MANAGER_AND_UP.has(role));
 }
 
+/** The review's owner, or an accounts manager and up (directors always). */
+export function ownsOrManages(review: SqlRow, caller: Caller): boolean {
+  const owner = review.OwnerUserId === null || review.OwnerUserId === undefined ? null : Number(review.OwnerUserId);
+  return (owner !== null && owner === caller.actor.userId) || isManagerOrAbove(caller.roles);
+}
+
+/** A refused attempt on a review, as the ledger records it (denied) once the transaction has rolled back. */
+export function deniedAttempt(caller: Caller, review: SqlRow, attempted: string, rule: string, message: string): LedgerEntryInput {
+  return {
+    action: "denied",
+    actor: caller.actor,
+    before: { attempted, state: review.State ?? null },
+    buildingId: Number(review.TenantBuildingId),
+    reason: message,
+    ruleApplied: rule,
+    subject: { id: String(review.ReviewId), type: "rent_review" },
+    tenantId: Number(review.TenantId),
+  };
+}
+
 export const REASON_MAX_CHARS = 2000;
 const REVIEW_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
@@ -129,7 +149,8 @@ export type RentReviewErrorCode =
   | "stale_schedule"
   | "step_settled"
   | "tenancy_archived"
-  | "tenancy_vacated";
+  | "tenancy_vacated"
+  | "try_again";
 
 const STATUS: Record<RentReviewErrorCode, number> = {
   approval_level: 403,
@@ -160,6 +181,7 @@ const STATUS: Record<RentReviewErrorCode, number> = {
   step_settled: 409,
   tenancy_archived: 422,
   tenancy_vacated: 422,
+  try_again: 409,
 };
 
 export class RentReviewError extends Error {
@@ -203,7 +225,17 @@ export async function recordReviewRefusal(connection: Connection | undefined, er
   await recordApart(connection, error.refusal, `refused ${error.code}`, "rent-review-refusal");
 }
 
-/** A refusal as a response; a ledger refusal is a 400, anything else a 500 that goes to Sentry. */
+/** SQL Server chose this request as a deadlock's victim (1205) and rolled it back. */
+export function isDeadlockVictim(error: unknown): boolean {
+  return (error as { number?: unknown } | null)?.number === 1205;
+}
+
+const TRY_AGAIN_DEADLOCK =
+  "Someone else was changing this tenancy at the same moment, so nothing was changed. Try again.";
+
+/** A refusal as a response; a ledger refusal is a 400; a deadlock victim (two
+ *  decisions on one tenancy at once: SQL Server rolled this one back whole) is a
+ *  409 try_again; anything else a 500 that goes to Sentry. */
 export function rentReviewErrorResponse(
   error: unknown,
   context: InvocationContext,
@@ -211,6 +243,10 @@ export function rentReviewErrorResponse(
 ): HttpResponseInit {
   if (error instanceof RentReviewError) {
     return { jsonBody: { code: error.code, error: error.message, ...error.details }, status: error.status };
+  }
+  if (isDeadlockVictim(error)) {
+    context.warn(`${name}: deadlock victim, rolled back; the caller is asked to try again`);
+    return { jsonBody: { code: "try_again", error: TRY_AGAIN_DEADLOCK }, status: 409 };
   }
   const refusal = ledgerRefusal(error);
   if (refusal) return refusal;

@@ -18,6 +18,8 @@
 // calc: a 200, not an error. The CPI timer brings it back (INDEX_AVAILABLE).
 //
 //   rowVersion  the one the caller read, else 409 { code: "stale", current }
+//   who         the review's owner, or an accounts manager and up (directors
+//               always), else 403 forbidden, ledgered as denied (L5)
 //   state       in_progress, else 409 invalid_state
 //   tenancy     archived 422 tenancy_archived, vacated 422 tenancy_vacated
 //   refusals    422 basis_incomplete, cpi_base_mismatch, earlier_review_pending,
@@ -43,9 +45,12 @@ import { parseBasis } from "../rentReview/basis";
 import { previousQuarter, referenceQuarter } from "../rentReview/cpi";
 import { toReviewDto } from "../rentReview/dto";
 import {
+  deniedAttempt,
+  ownsOrManages,
   readJsonObject,
   readReviewId,
   readRowVersion,
+  recordReviewRefusal,
   RentReviewError,
   rentReviewErrorResponse,
   resolveCaller,
@@ -88,108 +93,118 @@ export async function calculateRentReview(request: HttpRequest, context: Invocat
     const db = connection;
     const today = todayInDarwin();
 
-    const done = await inTransaction(db, async () => {
-      const review = await reviewForUpdate(db, reviewId);
-      if (!review) throw new RentReviewError("not_found", "That review doesn't exist");
-      if (rowVersionHex(review.Version) !== rowVersion) throw staleReview(review, today);
-      const state = review.State as RentReviewState;
-      if (state !== "in_progress") {
-        throw new RentReviewError(
-          "invalid_state",
-          state === "awaiting_index"
-            ? "This review is waiting for the CPI index; it comes back to be calculated once the index is published"
-            : `This review is ${state.replace(/_/g, " ")}; only a review in progress can be calculated`,
-          { state },
-        );
-      }
-      const method = String(review.Method);
-      if (method === "market") {
-        throw new RentReviewError("method_not_supported", "Market reviews are recorded by directors; that workflow arrives later");
-      }
-      if (!CALC_METHODS.includes(method)) throw new RentReviewError("invalid_state", "This review has no method to calculate by", { state });
-      if (manual && method !== "other") throw new RentReviewError("bad_request", "A new rent is keyed by hand only on an `other` review");
-
-      const tenantId = Number(review.TenantId);
-      const tenancy = await loadTenancyForReview(db, tenantId);
-      if (!tenancy) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
-      refuseClosedTenancy(tenancy);
-
-      const basis = parseBasis(review.Basis) ?? {};
-      const scheduledFor = toReviewDto(review, today).scheduledFor;
-      const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
-      const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
-      const reference = referenceQuarter(scheduledFor);
-      const cpiRows =
-        method === "cpi" && (region === "AUS" || region === "DARWIN")
-          ? await loadCpiRows(db, region, [reference, previousQuarter(reference, interval)])
-          : [];
-      const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
-      const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId));
-      const result = calculateReview({
-        basis,
-        carparkGroups: schedule.carparkGroups,
-        computedAt: new Date().toISOString(),
-        computedBy: { name: caller.actor.name, userId: caller.actor.userId },
-        cpiRows,
-        fallbackAnnual: schedule.context.fallbackAnnual,
-        fallbackSqm: schedule.context.fallbackSqm,
-        lease: {
-          cpiCapPercent: schedule.context.lease.cpiCapPercent ?? null,
-          cpiFloorPercent: schedule.context.lease.cpiFloorPercent ?? null,
-          reviewRatchet: schedule.context.lease.reviewRatchet === true,
-        },
-        manual,
-        method: method as CalcMethod,
-        miscFees: schedule.miscFees,
-        newStepId: randomUUID(),
-        reviewId,
-        sanity: sanityBandFromEnv(),
-        scheduledFor,
-        scheduleVersion: Number(tenancy.ScheduleVersion ?? 0),
-        stepId: typeof review.StepId === "string" ? review.StepId : null,
-        steps,
-        today,
-      });
-      if (result.kind === "refused") throw new RentReviewError(result.code, result.message);
-
-      const buildingId = Number(tenancy.BuildingId);
-      const scope = { buildingId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
-      if (result.kind === "index_pending") {
-        if (!canTransition(state, "INDEX_PENDING", { method: "cpi" }) || !(await markAwaitingIndex(db, reviewId, result.expectedIndexAt))) {
-          throw new RentReviewError("invalid_state", "This review just moved on, so it wasn't calculated", { state });
+    let done;
+    try {
+      done = await inTransaction(db, async () => {
+        const review = await reviewForUpdate(db, reviewId);
+        if (!review) throw new RentReviewError("not_found", "That review doesn't exist");
+        if (rowVersionHex(review.Version) !== rowVersion) throw staleReview(review, today);
+        if (!ownsOrManages(review, caller)) {
+          const message = "Only the review's owner, or an accounts manager or above, can calculate it";
+          throw new RentReviewError("forbidden", message, {}, deniedAttempt(caller, review, "rent_review.calculate", "not_owner_or_manager", message));
         }
-        await ledger.record(db, {
-          ...scope,
-          action: "rent_review.index_pending",
-          actor: caller.actor,
-          after: {
-            expectedIndexAt: result.expectedIndexAt,
-            missing: result.missing,
-            previousQuarter: result.previousQuarter,
-            referenceQuarter: result.referenceQuarter,
-            region: result.region,
-            state: "awaiting_index",
+        const state = review.State as RentReviewState;
+        if (state !== "in_progress") {
+          throw new RentReviewError(
+            "invalid_state",
+            state === "awaiting_index"
+              ? "This review is waiting for the CPI index; it comes back to be calculated once the index is published"
+              : `This review is ${state.replace(/_/g, " ")}; only a review in progress can be calculated`,
+            { state },
+          );
+        }
+        const method = String(review.Method);
+        if (method === "market") {
+          throw new RentReviewError("method_not_supported", "Market reviews are recorded by directors; that workflow arrives later");
+        }
+        if (!CALC_METHODS.includes(method)) throw new RentReviewError("invalid_state", "This review has no method to calculate by", { state });
+        if (manual && method !== "other") throw new RentReviewError("bad_request", "A new rent is keyed by hand only on an `other` review");
+
+        const tenantId = Number(review.TenantId);
+        const tenancy = await loadTenancyForReview(db, tenantId);
+        if (!tenancy) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
+        refuseClosedTenancy(tenancy);
+
+        const basis = parseBasis(review.Basis) ?? {};
+        const scheduledFor = toReviewDto(review, today).scheduledFor;
+        const region = typeof basis.region === "string" ? basis.region.toUpperCase() : "";
+        const interval = typeof basis.intervalMonths === "number" ? basis.intervalMonths : null;
+        const reference = referenceQuarter(scheduledFor);
+        const cpiRows =
+          method === "cpi" && (region === "AUS" || region === "DARWIN")
+            ? await loadCpiRows(db, region, [reference, previousQuarter(reference, interval)])
+            : [];
+        const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
+        const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId));
+        const result = calculateReview({
+          basis,
+          carparkGroups: schedule.carparkGroups,
+          computedAt: new Date().toISOString(),
+          computedBy: { name: caller.actor.name, userId: caller.actor.userId },
+          cpiRows,
+          fallbackAnnual: schedule.context.fallbackAnnual,
+          fallbackSqm: schedule.context.fallbackSqm,
+          lease: {
+            cpiCapPercent: schedule.context.lease.cpiCapPercent ?? null,
+            cpiFloorPercent: schedule.context.lease.cpiFloorPercent ?? null,
+            reviewRatchet: schedule.context.lease.reviewRatchet === true,
           },
-          before: { state },
-          ruleApplied: "reference_quarter_unpublished",
+          manual,
+          method: method as CalcMethod,
+          miscFees: schedule.miscFees,
+          newStepId: randomUUID(),
+          reviewId,
+          sanity: sanityBandFromEnv(),
+          scheduledFor,
+          scheduleVersion: Number(tenancy.ScheduleVersion ?? 0),
+          stepId: typeof review.StepId === "string" ? review.StepId : null,
+          steps,
+          today,
         });
-      } else {
-        if (!(await saveCalc(db, reviewId, JSON.stringify(result.calc)))) {
-          throw new RentReviewError("invalid_state", "This review just moved on, so it wasn't calculated", { state });
-        }
-        await ledger.record(db, {
-          ...scope,
-          action: "rent_review.calculate",
-          actor: caller.actor,
-          after: result.calc,
-          ruleApplied: method === "cpi" ? "cpi_quarter_before_review_date" : method === "fixed" ? "fixed_lease_percent" : "manual",
-        });
-      }
+        if (result.kind === "refused") throw new RentReviewError(result.code, result.message);
 
-      const after = await loadReview(db, reviewId);
-      if (!after) throw new Error(`Review ${reviewId} vanished while being calculated`);
-      return { after, buildingId, tenantId };
-    });
+        const buildingId = Number(tenancy.BuildingId);
+        const scope = { buildingId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
+        if (result.kind === "index_pending") {
+          if (!canTransition(state, "INDEX_PENDING", { method: "cpi" }) || !(await markAwaitingIndex(db, reviewId, result.expectedIndexAt))) {
+            throw new RentReviewError("invalid_state", "This review just moved on, so it wasn't calculated", { state });
+          }
+          await ledger.record(db, {
+            ...scope,
+            action: "rent_review.index_pending",
+            actor: caller.actor,
+            after: {
+              expectedIndexAt: result.expectedIndexAt,
+              missing: result.missing,
+              previousQuarter: result.previousQuarter,
+              referenceQuarter: result.referenceQuarter,
+              region: result.region,
+              state: "awaiting_index",
+            },
+            before: { state },
+            ruleApplied: "reference_quarter_unpublished",
+          });
+        } else {
+          if (!(await saveCalc(db, reviewId, JSON.stringify(result.calc)))) {
+            throw new RentReviewError("invalid_state", "This review just moved on, so it wasn't calculated", { state });
+          }
+          await ledger.record(db, {
+            ...scope,
+            action: "rent_review.calculate",
+            actor: caller.actor,
+            after: result.calc,
+            ruleApplied: method === "cpi" ? "cpi_quarter_before_review_date" : method === "fixed" ? "fixed_lease_percent" : "manual",
+          });
+        }
+
+        const after = await loadReview(db, reviewId);
+        if (!after) throw new Error(`Review ${reviewId} vanished while being calculated`);
+        return { after, buildingId, tenantId };
+      });
+    } catch (error) {
+      await recordReviewRefusal(db, error);
+      throw error;
+    }
 
     invalidateTenantAndBuilding(done.tenantId, done.buildingId);
     return { jsonBody: { review: toReviewDto(done.after, today) }, status: 200 };

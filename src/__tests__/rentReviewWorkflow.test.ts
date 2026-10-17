@@ -910,3 +910,32 @@ describe("L3: C7 reads the highest rung E3 reached since the review was submitte
     expect((await approve()).status).toBe(200);
   });
 });
+
+// ── L5: calculate and submit are the owner's, or a manager's ──────────────────
+
+describe("L5: only the review's owner, or an accounts manager and up, calculates and submits it", () => {
+  const AL = { kind: "user", name: "Al Accounts", role: "accounts", userId: 12 } as const;
+
+  it("refuses another accounts user at calculate, ledgered as denied, and lets a manager", async () => {
+    seed(world);
+    caller = AL as unknown as Person;
+    const res = await calculate();
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual({ code: "forbidden", error: "Only the review's owner, or an accounts manager or above, can calculate it" });
+    expect(world.ledgerRows()).toEqual([expect.objectContaining({ Action: "denied", ActorUserId: 12, RuleApplied: "not_owner_or_manager" })]);
+    expect(world.review("rev-1").Calc).toBeNull();
+    as(PEOPLE.bo);
+    expect((await calculate()).status).toBe(200);
+  });
+
+  it("refuses another accounts user at submit, ledgered as denied; the owner and a director may", async () => {
+    await calculated();
+    caller = AL as unknown as Person;
+    const res = await submit();
+    expect(res.status).toBe(403);
+    expect(world.ledgerRows()).toEqual([expect.objectContaining({ Action: "denied", RuleApplied: "not_owner_or_manager" })]);
+    expect(world.ledgerRows()[0].before).toEqual({ attempted: "rent_review.submit", state: "in_progress" });
+    as(PEOPLE.dee);
+    expect((await submit()).status).toBe(200);
+  });
+});

@@ -151,12 +151,17 @@ describe("returnRentReview", () => {
     expect((await call(returnRentReview)).jsonBody).toMatchObject({ code: "reason_required" });
   });
 
-  it("is the approvers' action: accounts staff and admin are refused", async () => {
+  it("is the approvers' action: accounts staff and admin are refused, admin's attempt ledgered as denied (L4)", async () => {
     await waiting();
     as(PEOPLE.ann);
     expect((await call(returnRentReview, { note: "x" })).status).toBe(403);
     as(PEOPLE.ada);
-    expect((await call(returnRentReview, { note: "x" })).status).toBe(403);
+    const res = await call(returnRentReview, { note: "x" });
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toMatchObject({ code: "forbidden" });
+    expect(world.ledgerRows()).toEqual([expect.objectContaining({ Action: "denied", ActorUserId: 11, RuleApplied: "role_not_permitted", SubjectId: "rev-1" })]);
+    expect(world.ledgerRows()[0].before).toEqual({ attempted: "rent_review.return", state: "awaiting_approval" });
+    expect(world.review("rev-1").State).toBe("awaiting_approval");
   });
 
   it("only returns a review that is waiting for approval", async () => {
@@ -409,6 +414,11 @@ describe("revertRentReview", () => {
     expect((await call(revertRentReview, { reason: "x" })).status).toBe(403);
     as(PEOPLE.ada);
     expect((await call(revertRentReview, { reason: "x" })).status).toBe(403);
+    // L4: admin's attempt is in the ledger, as denied.
+    expect(since().filter((row) => row.Action === "denied")).toEqual([
+      expect.objectContaining({ ActorUserId: 11, RuleApplied: "role_not_permitted", SubjectId: "rev-1" }),
+    ]);
+    expect(since().find((row) => row.Action === "denied")?.before).toEqual({ attempted: "rent_review.revert", state: "approved" });
     world.review("rev-1").State = "completed";
     as(PEOPLE.bo);
     expect((await call(revertRentReview, { reason: "x" })).jsonBody).toMatchObject({ code: "invalid_state", error: "This review has been completed, so it can't be reverted" });
@@ -435,5 +445,46 @@ describe("approve after a return", () => {
     expect((await call(submitRentReview)).jsonBody).toMatchObject({ applied: false });
     as(PEOPLE.bo);
     expect((await call(approveRentReview)).status).toBe(200);
+  });
+});
+
+// ── L1, L2: collisions ask to try again ───────────────────────────────────────
+
+describe("L1-L2: a collision is a 409 try again, never a 500, and changes nothing", () => {
+  const deadlock = () => Object.assign(new Error("Transaction (Process ID 61) was deadlocked on lock resources with another process"), { number: 1205 });
+
+  it("an approval chosen as a deadlock's victim", async () => {
+    await waiting();
+    const before = world.picture();
+    world.failSql = (sql) => (/UPDATE dbo\.Tenants SET/.test(sql) ? deadlock() : null);
+    as(PEOPLE.bo);
+    const res = await call(approveRentReview);
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toEqual({ code: "try_again", error: "Someone else was changing this tenancy at the same moment, so nothing was changed. Try again." });
+    expect(world.picture()).toBe(before);
+  });
+
+  it("a revert chosen as a deadlock's victim", async () => {
+    await applied();
+    world.failSql = (sql) => (/UPDATE dbo\.Tenants SET/.test(sql) ? deadlock() : null);
+    as(PEOPLE.bo);
+    expect((await call(revertRentReview, { reason: "x" })).jsonBody).toMatchObject({ code: "try_again" });
+    expect(world.review("rev-1").State).toBe("approved");
+  });
+
+  it("a revert racing a review opened on the tenancy (the one-open-review index)", async () => {
+    await applied();
+    world.failSql = (sql) =>
+      /UPDATE dbo\.RentReviews/.test(sql) && sql.includes("ApprovedById = NULL")
+        ? Object.assign(new Error("Cannot insert duplicate key row in object 'dbo.RentReviews' with unique index 'UX_RentReviews_OpenPerTenant'"), { number: 2601 })
+        : null;
+    as(PEOPLE.bo);
+    const res = await call(revertRentReview, { reason: "x" });
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toEqual({
+      code: "try_again",
+      error: "Another review was opened on this tenancy at the same moment, so this one wasn't reverted. Try again.",
+    });
+    expect(world.review("rev-1").State).toBe("approved");
   });
 });
