@@ -121,3 +121,31 @@ describe("sendDirectorApprovalEmail: what it reports back", () => {
     await expect(send()).rejects.toThrow("Graph sendMail 503");
   });
 });
+
+describe("the link opens the step the director acts on (J6)", () => {
+  const ORIGINAL_BASE = process.env.APP_BASE_URL;
+  afterEach(() => {
+    if (ORIGINAL_BASE === undefined) delete process.env.APP_BASE_URL;
+    else process.env.APP_BASE_URL = ORIGINAL_BASE;
+  });
+  const body = () => graph.graphSendMail.mock.calls[0][2] as string;
+
+  it("a quote packet links to the quotes step and names the quote", async () => {
+    process.env.APP_BASE_URL = "https://floorplan.example/";
+    await sendDirectorApprovalEmail({ amount: 25000, connection, currency: "AUD", jobId: 9, stage: "quote", subjectId: 7 });
+    expect(body()).toContain("Approve or decline in Floorplan: https://floorplan.example/jobs?jobId=9&step=quotes&quoteId=7\n");
+  });
+
+  it("an invoice packet links to the invoices step and names the invoice", async () => {
+    process.env.APP_BASE_URL = "https://floorplan.example";
+    await sendDirectorApprovalEmail({ amount: 25000, connection, currency: "AUD", jobId: 9, stage: "invoice", subjectId: 5 });
+    expect(body()).toContain("https://floorplan.example/jobs?jobId=9&step=invoices&invoiceId=5\n");
+  });
+
+  it("without APP_BASE_URL it still goes, pointing to Floorplan in words", async () => {
+    delete process.env.APP_BASE_URL;
+    await send();
+    expect(body()).toContain("Open the job in Floorplan to approve or decline.");
+    expect(body()).not.toContain("jobId=");
+  });
+});

@@ -192,7 +192,7 @@ export function buildEmail(
 
 function linkFor(row: EscalationRow, env: NodeJS.ProcessEnv): string | null {
   const adapter = getAdapter(row.subjectType);
-  return adapter ? absoluteLink(adapter.deepLink(row.subjectId), env) : null;
+  return adapter ? absoluteLink(adapter.deepLink(row.subjectId, row), env) : null;
 }
 
 // ── Sending ──────────────────────────────────────────────────────────────────
@@ -250,6 +250,15 @@ async function remember(
     // The escalation is committed and the email may have gone; bookkeeping that
     // can't be written is logged and the sweep's retry will sort it out.
     options.log?.(`escalation ${row.escalationId}: could not record the notification outcome: ${errorText(error)}`);
+    return;
+  }
+  // J6: the subject's own flag (Jobs.EscalatedAt) is set only once a send is on
+  // record, so it is brought in step now that one is.
+  if (outcome.state !== "sent") return;
+  try {
+    await getAdapter(row.subjectType)?.onChange?.(connection, row);
+  } catch (error) {
+    options.log?.(`escalation ${row.escalationId}: could not update the subject after the email went: ${errorText(error)}`);
   }
 }
 

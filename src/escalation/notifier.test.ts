@@ -14,13 +14,15 @@ import {
 } from "./notifier";
 import { MAX_NOTIFICATION_ATTEMPTS } from "./config";
 import type { DirectoryUser, EscalationRow } from "./types";
-import "./adapters";
+import { getAdapter } from "./adapters";
 
 jest.mock("./store", () => ({
   listActiveUsers: jest.fn(),
   recordNotification: jest.fn().mockResolvedValue(undefined),
 }));
 const store = require("./store") as { listActiveUsers: jest.Mock; recordNotification: jest.Mock };
+// The job adapter's onChange runs after a send (J6); its UPDATE goes nowhere here.
+jest.mock("../db", () => ({ executeQuery: jest.fn().mockResolvedValue([]) }));
 
 const conn = {} as Connection;
 const NOW = new Date("2026-10-13T01:00:00Z");
@@ -169,6 +171,58 @@ describe("raise: email the targets", () => {
 
     expect(o.sendMail.mock.calls.map((c) => c[1].split(":")[0])).toEqual(["Escalated to you", "Reminder", "New email on an escalation"]);
     expect(o.sendMail.mock.calls[0][0]).toEqual(["dee@example.com", "eli@example.com"]);
+  });
+});
+
+describe("the subject's flag follows a recorded send (J6: EscalatedAt only with a delivery record)", () => {
+  const onChange = () => jest.spyOn(getAdapter("job")!, "onChange" as never) as unknown as jest.Mock;
+
+  it("brings the job's EscalatedAt in step once the send is on record, after it is recorded", async () => {
+    const spy = onChange();
+    await notifyTargets(conn, row(), "raise", options());
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][1]).toMatchObject({ escalationId: 42, subjectId: "12" });
+    expect(store.recordNotification.mock.invocationCallOrder[0]).toBeLessThan(spy.mock.invocationCallOrder[0]);
+    spy.mockRestore();
+  });
+
+  it.each([
+    ["failed", options({ sendMail: jest.fn().mockRejectedValue(new Error("Graph 503")) })],
+    ["pending (settings missing)", options({ env: { ...ENV, APP_BASE_URL: "" } })],
+    ["none (nobody to tell)", options({ users: [] })],
+  ])("leaves the job unflagged when the send is %s", async (_label, o) => {
+    const spy = onChange();
+    await notifyTargets(conn, row(), "raise", o);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("does not touch the job when the send could not even be recorded", async () => {
+    const spy = onChange();
+    store.recordNotification.mockRejectedValueOnce(new Error("deadlock"));
+    await notifyTargets(conn, row(), "raise", options({ log: jest.fn() }));
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("never throws when updating the job fails: the email has gone", async () => {
+    const spy = onChange().mockRejectedValueOnce(new Error("timeout") as never);
+    const log = jest.fn();
+    await expect(notifyTargets(conn, row(), "raise", options({ log }))).resolves.toMatchObject({ state: "sent" });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("could not update the subject after the email went"));
+    spy.mockRestore();
+  });
+});
+
+describe("links name the step the escalation is about (J6)", () => {
+  it.each([
+    ["job.invoice_waiting", "Open it in Floorplan: https://floorplan.example/jobs?jobId=12&step=invoices\n"],
+    ["job.quote_not_back", "Open it in Floorplan: https://floorplan.example/jobs?jobId=12&step=quotes\n"],
+    ["job.stalled_unacknowledged", "Open it in Floorplan: https://floorplan.example/jobs?jobId=12\n"],
+  ])("%s", async (policyKey, line) => {
+    const o = options();
+    await notifyTargets(conn, row({ policyKey }), "raise", o);
+    expect(o.sendMail.mock.calls[0][2]).toContain(line);
   });
 });
 

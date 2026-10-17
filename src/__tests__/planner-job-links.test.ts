@@ -26,4 +26,11 @@ describe("job deep links", () => {
     process.env.APP_BASE_URL = "https://floorplan.example.com/";
     expect(jobLink(process.env.APP_BASE_URL, 7)).toBe(buildJobUrl(7));
   });
+
+  it("agrees on the step and record too (J6)", () => {
+    process.env.APP_BASE_URL = "https://floorplan.example.com";
+    const target = { quoteId: 3, step: "quotes" } as const;
+    expect(jobLink(process.env.APP_BASE_URL, 7, target)).toBe(buildJobUrl(7, target));
+    expect(buildJobUrl(7, target)).toBe("https://floorplan.example.com/jobs?jobId=7&step=quotes&quoteId=3");
+  });
 });

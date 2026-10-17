@@ -107,7 +107,7 @@ export function toChaseDto(row: EscalationRow | null, directory: readonly { name
   if (!row) return null;
   const adapter = getAdapter(row.subjectType);
   return {
-    deepLink: adapter ? adapter.deepLink(row.subjectId) : null,
+    deepLink: adapter ? adapter.deepLink(row.subjectId, row) : null,
     dueAt: iso(row.dueAt),
     escalationId: row.escalationId,
     isOverdue: row.status === "open" && row.dueAt !== null && row.dueAt.getTime() <= now.getTime(),

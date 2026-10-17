@@ -197,9 +197,9 @@ describe("what the inbox offers", () => {
     expect(availableActions(viewer(CAM), row)).toMatchObject({ acknowledge: false, resolve: false });
   });
 
-  it("goes out in the DTO with the same actions, and the deep link to the job", () => {
+  it("goes out in the DTO with the same actions, and the deep link to the job's decision (J6)", () => {
     const dto = toDto(step(), viewer(ALANA), NOW, USERS);
-    expect(dto).toMatchObject({ deepLink: "/jobs?jobId=12", kind: "attention", policyKey: "job.next_step", targetUserName: "Alana" });
+    expect(dto).toMatchObject({ deepLink: "/jobs?jobId=12&step=decision&decisionRequestId=7#decision", kind: "attention", policyKey: "job.next_step", targetUserName: "Alana" });
     expect(dto.actions).toEqual({ acknowledge: false, escalateFurther: true, resolve: false, withdraw: false });
   });
 });

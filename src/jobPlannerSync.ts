@@ -520,6 +520,8 @@ export async function syncJobDirectorApproval(
   if (rows.length === 0) return;
   // The final-state rule (directorNeeded.ts): a stage-1 invoice below the
   // director gate needs nobody.
+  // Read before withDirectorNeeded drops it: the task opens on the quote when one waits.
+  const step = Number(rows[0].QuotesAwaitingDirector ?? 0) > 0 ? "quotes" : "invoices";
   const r = (await withDirectorNeeded(connection, rows))[0];
   if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
@@ -543,7 +545,7 @@ export async function syncJobDirectorApproval(
     shouldHaveTask,
     planType: "accounts",
     title: buildTaskTitle(job.title, "director_approval", 0),
-    description: buildDirectorApprovalTaskDescription(job, appBaseUrl),
+    description: buildDirectorApprovalTaskDescription(job, appBaseUrl, step),
     dueDate: toIsoDateString(new Date()),
     assigneeIds,
     log,

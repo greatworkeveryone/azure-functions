@@ -13,6 +13,7 @@ export type TriggerType =
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
 
+import { jobUrl, type JobLinkStep, type JobLinkTarget } from "./jobLinks";
 import { optionNoticeWindow } from "./leaseOptions";
 
 export interface PlannerTenantRow {
@@ -189,15 +190,16 @@ export function buildJobTaskDescription(
   const due = job.expectedProgressUpdate
     ? formatDDMMYYYY(job.expectedProgressUpdate)
     : "—";
-  return `${location ? location + "\n" : ""}Expected update: ${due}\n${appBaseUrl}/jobs`;
+  return `${location ? location + "\n" : ""}Expected update: ${due}\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 /** Deep link to a job in the web app. The app has NO `/jobs/:id` path — the
- *  Jobs board is query-param routed and `?jobId=` opens the job modal. Same
- *  format as `buildJobUrl` in email/director-emails.ts; every Planner task that
- *  points at a job must go through here so the links can't drift again. */
-export function jobLink(appBaseUrl: string, jobId: number): string {
-  return `${appBaseUrl.trim().replace(/\/+$/, "")}/jobs?jobId=${jobId}`;
+ *  Jobs board is query-param routed and `?jobId=` opens the job modal, `&step=`
+ *  the tab the task is about (J6). Built by jobLinks.ts, as `buildJobUrl` in
+ *  email/director-emails.ts is; every Planner task that points at a job must go
+ *  through here so the links can't drift again. */
+export function jobLink(appBaseUrl: string, jobId: number, target: JobLinkTarget = {}): string {
+  return jobUrl(appBaseUrl, jobId, target);
 }
 
 export function buildStalledJobTaskDescription(
@@ -214,7 +216,7 @@ export function buildAwaitingAccountsTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Awaiting accounts action\n${jobLink(appBaseUrl, job.jobId)}`;
+  return `${location ? location + "\n" : ""}Awaiting accounts action\n${jobLink(appBaseUrl, job.jobId, { step: "invoices" })}`;
 }
 
 export function buildAwaitingFacilitiesApprovalTaskDescription(
@@ -222,15 +224,17 @@ export function buildAwaitingFacilitiesApprovalTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Quote awaiting approval\n${jobLink(appBaseUrl, job.jobId)}`;
+  return `${location ? location + "\n" : ""}Quote awaiting approval\n${jobLink(appBaseUrl, job.jobId, { step: "quotes" })}`;
 }
 
+/** `step`: quotes while a quote waits on the director, otherwise invoices. */
 export function buildDirectorApprovalTaskDescription(
   job: PlannerAccountsJobRow,
   appBaseUrl: string,
+  step: Extract<JobLinkStep, "invoices" | "quotes"> = "quotes",
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${jobLink(appBaseUrl, job.jobId)}`;
+  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${jobLink(appBaseUrl, job.jobId, { step })}`;
 }
 
 export function buildOnchargeTaskDescription(
@@ -243,7 +247,7 @@ export function buildOnchargeTaskDescription(
       ? `$${job.onchargeAmount.toLocaleString()}`
       : "TBC";
   const notesLine = job.onchargeNotes ? `\nNotes: ${job.onchargeNotes}` : "";
-  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${jobLink(appBaseUrl, job.jobId)}`;
+  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${jobLink(appBaseUrl, job.jobId, { step: "invoices" })}`;
 }
 
 // ── Escalation thresholds (WP18a) ────────────────────────────────────────────

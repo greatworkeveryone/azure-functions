@@ -488,6 +488,75 @@ describe("rejectJobInvoice", () => {
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 
+  describe("declining an invoice that waits on a director (J6)", () => {
+    // Above the accounts manager's $1,000 the stage-1 approval waits on a director.
+    const waiting = () => invoiceRow({ Amount: 5000, Status: "approved" });
+    const decline = (extra: Record<string, unknown> = { Reason: "Not the work we ordered" }) =>
+      rejectJobInvoice(makeRequest({ JobInvoiceID: 5, ...extra }), ctx);
+    const eventText = () =>
+      (db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO JobEvents/.test(String(c[1])))?.[2] as { name: string; value: unknown }[] | undefined)?.find(
+        (p) => p.name === "Text",
+      )?.value;
+
+    it("a director's decline is invoice.director_reject, with the reason on the row and on the job", async () => {
+      auth.rolesForRequest.mockResolvedValue(["director"]);
+      mockSql([APP_USER, JOB_BUILDING, waiting(), STORED]);
+
+      const res = await decline();
+
+      expect(res.status).toBe(200);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({
+          action: "invoice.director_reject",
+          actorRole: "director",
+          after: { ...FACTS, amount: 5000, status: "rejected" },
+          before: expect.objectContaining({ status: "approved" }),
+          reason: "Not the work we ordered",
+        }),
+      ]);
+      expect(eventText()).toBe("Director declined invoice IV-9-1 — Not the work we ordered");
+    });
+
+    it.each([{}, { Reason: "" }, { Reason: "  " }, { Reason: null }])("without a reason (%p) it is refused, ledgered, and nothing changes", async (extra) => {
+      auth.rolesForRequest.mockResolvedValue(["director"]);
+      mockSql([APP_USER, JOB_BUILDING, waiting(), STORED]);
+
+      const res = await decline(extra);
+
+      expect(res).toEqual({
+        jsonBody: { code: "reason_required", error: "Say why you're declining this invoice. The reason is recorded on the job for whoever raised it." },
+        status: 422,
+      });
+      expect(ran(/SET Status = 'rejected'/)).toBe(false);
+      expect(ran(/INSERT INTO JobEvents/)).toBe(false);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ action: "denied", before: { attempted: "invoice.director_reject", status: "approved" }, ruleApplied: "reason_required" }),
+      ]);
+    });
+
+    it("an accounts manager turning it down still needs the reason, and it is a plain invoice.reject", async () => {
+      mockSql([APP_USER, JOB_BUILDING, waiting(), STORED]);
+      expect((await decline({})).status).toBe(422);
+      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "denied", before: { attempted: "invoice.reject" } });
+
+      db.executeQuery.mockClear();
+      mockSql([APP_USER, JOB_BUILDING, waiting(), STORED]);
+      expect((await decline()).status).toBe(200);
+      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.reject", reason: "Not the work we ordered" });
+      expect(eventText()).toBe("Rejected invoice IV-9-1 — Not the work we ordered");
+    });
+
+    it("an approved invoice below the director gate is final, not waiting: no reason needed", async () => {
+      auth.rolesForRequest.mockResolvedValue(["director"]);
+      mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 500, Status: "approved" }), STORED]);
+
+      const res = await reject();
+
+      expect(res.status).toBe(200);
+      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.reject", reason: null });
+    });
+  });
+
   it("records a refused role as `denied` and answers with the gate's own 403", async () => {
     const gate = { jsonBody: { details: "Required role: accounts_manager. Have: accounts", error: "Forbidden" }, status: 403 };
     auth.requireRole.mockResolvedValue(gate);

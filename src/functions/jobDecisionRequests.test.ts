@@ -466,7 +466,7 @@ describe("requestJobDecision", () => {
     });
     expect(typeof body.request.rowVersion).toBe("string");
     expect(body.chase).toMatchObject({
-      deepLink: "/jobs?jobId=12",
+      deepLink: "/jobs?jobId=12&step=decision&decisionRequestId=7#decision",
       dueAt: "2026-10-19T07:30:00.000Z",
       escalationId: 100,
       isOverdue: false,
@@ -483,7 +483,8 @@ describe("requestJobDecision", () => {
   it("writes the request, raises the escalation and ledgers both in one transaction, and emails only after the commit", async () => {
     await ask();
 
-    expect(mockWorld.events).toEqual(["begin", "insert request", "job flag", "ledger:escalation.raise", "ledger:decision.requested", "commit", "send"]);
+    // The job's flag is brought in step again once the email is on record (J6).
+    expect(mockWorld.events).toEqual(["begin", "insert request", "job flag", "ledger:escalation.raise", "ledger:decision.requested", "commit", "send", "job flag"]);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
     expect(db.rollbackTransaction).not.toHaveBeenCalled();
   });

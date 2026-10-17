@@ -313,10 +313,10 @@ describe("the DTO", () => {
     expect(toDto(request(), viewer(CAM), NOW, [CAM]).targetNames).toEqual(["Cam"]);
   });
 
-  it("shows the actions the viewer has, and the deep link to the job", () => {
+  it("shows the actions the viewer has, and the deep link to the job's decision (J6)", () => {
     const dto = toDto(request(), viewer(CAM), NOW, dir);
     expect(dto.actions).toEqual({ acknowledge: false, escalateFurther: true, resolve: false, withdraw: false });
-    expect(dto.deepLink).toBe("/jobs?jobId=12");
+    expect(dto.deepLink).toBe("/jobs?jobId=12&step=decision&decisionRequestId=7#decision");
     expect(dto.context).toMatchObject({ decision: { requestId: 7 }, userTargets: [3, 5] });
   });
 });

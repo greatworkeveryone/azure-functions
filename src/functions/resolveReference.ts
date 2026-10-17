@@ -15,6 +15,7 @@ import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { parseReference, periodToUtcRange, type ParsedReference } from "../reference-codes";
 import { validateSearchQuery } from "../searchUtils";
+import { jobPath } from "../jobLinks";
 
 export const RESOLVE_REFERENCE_CAP = 50;
 
@@ -48,7 +49,11 @@ export interface DecodedMatch {
   href: string;
 }
 
-const jobHref = (jobId: number) => `/jobs?jobId=${jobId}`;
+const jobHref = (jobId: number) => jobPath(jobId);
+// A money record opens its job at that record's step (J6).
+const poHref = (jobId: number, poId: number) => jobPath(jobId, { poId, step: "po" });
+const invoiceHref = (jobId: number, invoiceId: number) => jobPath(jobId, { invoiceId, step: "invoices" });
+const quoteHref = (jobId: number, quoteId: number) => jobPath(jobId, { quoteId, step: "quotes" });
 const capParam = { name: "Cap", type: TYPES.Int, value: RESOLVE_REFERENCE_CAP };
 
 async function findExact(connection: Connection, ref: string): Promise<ExactMatch[]> {
@@ -68,7 +73,7 @@ async function findExact(connection: Connection, ref: string): Promise<ExactMatc
       jobId: r.JobID as number,
       number: r.PONumber as string,
       matchedOn: "PONumber",
-      href: jobHref(r.JobID as number),
+      href: poHref(r.JobID as number, r.PurchaseOrderID as number),
     });
   }
 
@@ -89,7 +94,7 @@ async function findExact(connection: Connection, ref: string): Promise<ExactMatc
       jobId: r.JobID as number,
       number: (bySupplier ? supplier : (r.InvoiceNumber as string)) as string,
       matchedOn: bySupplier ? "SupplierInvoiceNumber" : "InvoiceNumber",
-      href: jobHref(r.JobID as number),
+      href: invoiceHref(r.JobID as number, r.JobInvoiceID as number),
     });
   }
 
@@ -106,7 +111,7 @@ async function findExact(connection: Connection, ref: string): Promise<ExactMatc
       jobId: r.JobID as number,
       number: r.QuoteNumber as string,
       matchedOn: "QuoteNumber",
-      href: jobHref(r.JobID as number),
+      href: quoteHref(r.JobID as number, r.QuoteID as number),
     });
   }
   return matches;
@@ -161,7 +166,7 @@ async function findDecoded(connection: Connection, decomposition: ParsedReferenc
         buildingId,
         label: (r.PONumber as string | null) ?? `PO #${r.PurchaseOrderID}`,
         createdAt: iso(r.CreatedAt),
-        href: jobHref(r.JobID as number),
+        href: poHref(r.JobID as number, r.PurchaseOrderID as number),
       });
     }
 

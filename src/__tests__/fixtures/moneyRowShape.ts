@@ -50,6 +50,7 @@ export const ADJUSTMENT_CODES: readonly string[] = [
 export const PLAIN_MONEY_CODES: readonly string[] = [
   "invoice.approve",
   "invoice.director_approve",
+  "invoice.director_reject",
   "invoice.director_request_failed",
   "invoice.director_request_sent",
   "invoice.myob_created",

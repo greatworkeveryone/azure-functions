@@ -29,7 +29,7 @@ import { SUBJECT_ELIGIBLE_ROLES } from "../approvalAuthority";
 import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
-import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
+import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse, rejectReason } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
@@ -828,6 +828,8 @@ const IN_APP_REJECTABLE_STATUSES = ["pending", "awaiting_director"] as const;
 
 interface RejectQuoteBody {
   QuoteID?: unknown;
+  /** Why it is turned down; required when declining a quote that waits on a director (J6). */
+  Reason?: unknown;
 }
 
 const REJECT_QUOTE_TARGET: RefusalTarget = { attempted: "quote.reject", idField: "QuoteID", subjectType: "quote" };
@@ -856,6 +858,7 @@ export async function rejectQuote(
     if (typeof QuoteID !== "number") {
       return { status: 400, jsonBody: { error: "QuoteID (number) required" } };
     }
+    const reason = rejectReason(body.Reason);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -868,11 +871,25 @@ export async function rejectQuote(
     try {
       outcome = await rejectQuoteWrite(connection, {
         expectedStatuses: IN_APP_REJECTABLE_STATUSES,
+        note: reason,
         quoteId: QuoteID,
+        reasonRequiredFrom: ["awaiting_director"],
         rejectedBy: identity.name,
       });
       if (!outcome.ok) {
         await rollbackTransaction(connection).catch(() => {});
+        if ("code" in outcome) {
+          // A decline without its reason (J6): a refused attempt, ledgered.
+          const asDirector = actor.kind === "user" && actor.role === AppRole.DIRECTOR;
+          await recordRefusal(
+            connection,
+            actor,
+            { id: QuoteID, type: "quote" },
+            { attempted: asDirector ? "quote.director_reject" : "quote.reject", code: outcome.code, message: outcome.error },
+            outcome.jobId,
+          );
+          return { status: outcome.status, jsonBody: { code: outcome.code, error: outcome.error } };
+        }
         return { status: outcome.status, jsonBody: { error: outcome.error } };
       }
       const scope = await jobScope(connection, outcome.jobId);
@@ -888,6 +905,7 @@ export async function rejectQuote(
         before: { status: outcome.previousStatus ?? null, ...contractorFacts(outcome.quote) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
+        reason,
         subject: { id: QuoteID, type: "quote" },
       });
       await commitTransaction(connection);

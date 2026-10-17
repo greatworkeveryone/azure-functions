@@ -78,7 +78,7 @@ export function toDto(row: EscalationRow, viewer: Viewer, now: Date, directory: 
     buildingId: row.buildingId,
     context: row.context,
     createdAt: row.createdAt.toISOString(),
-    deepLink: adapter ? adapter.deepLink(row.subjectId) : null,
+    deepLink: adapter ? adapter.deepLink(row.subjectId, row) : null,
     dueAt: iso(row.dueAt),
     escalationId: row.escalationId,
     isOverdue: row.status === "open" && row.dueAt !== null && row.dueAt.getTime() <= now.getTime(),
