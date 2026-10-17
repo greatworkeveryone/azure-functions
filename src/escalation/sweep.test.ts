@@ -1024,3 +1024,213 @@ describe("running it twice", () => {
     expect(world.calls.autoResolve).toHaveLength(1);
   });
 });
+
+// ── A decision request's schedule (jobs plan A1) ─────────────────────────────
+
+describe("scheduled reminders (a decision request's)", () => {
+  /** A pending decision request: authority, asked of two named people, with reminders at the given hours from NOW. */
+  const decisionRow = (remindHoursFromNow: number[], over: Partial<EscalationRow> = {}): EscalationRow =>
+    esc({
+      context: { decision: { question: "Pay it?", requestId: 7 }, schedule: { remindAt: remindHoursFromNow.map((h) => ago(-h).toISOString()) }, userTargets: [3, 5] },
+      createdAt: ago(48),
+      dueAt: ago(-100),
+      kind: "authority",
+      lastNotifiedAt: ago(47),
+      policyKey: "job.decision_pending",
+      subjectId: "12",
+      targetRole: null,
+      ...over,
+    });
+
+  /** Like the real notifier: a reminder that went out is when the people were last told. */
+  function remindingWorld(): World {
+    const world = makeWorld();
+    world.policies["job.decision_pending"] = policy("job.decision_pending", {
+      kind: "authority",
+      ladder: [{ userTarget: true }, { token: "raiser_manager", slaHours: 16 }, { role: "director" }],
+    });
+    world.deps.notifyTargets = async (_c, row, event, options) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      (world.calls as unknown as { options: unknown[] }).options = [...(((world.calls as unknown as { options?: unknown[] }).options) ?? []), options];
+      const found = world.rows.find((r) => r.escalationId === row.escalationId);
+      if (found) found.lastNotifiedAt = NOW;
+      return { attempts: 1, error: null, recipients: [], state: "sent" };
+    };
+    return world;
+  }
+
+  it("emails the reminder that is due, as a reminder, and writes no new row", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
+    expect(world.rows).toHaveLength(1);
+    expect(world.calls.escalateFurther).toEqual([]);
+    expect(report.errors).toEqual([]);
+  });
+
+  it("costs the row no attempts when it goes through: the notifier is asked to count failures only", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+
+    await sweep(world);
+
+    const options = (world.calls as unknown as { options: { countAttempts?: string }[] }).options;
+    expect(options).toHaveLength(1);
+    expect(options[0].countAttempts).toBe("failures");
+  });
+
+  it("does nothing before its time", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([5, 30])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("sends one for the time that has come and, run again, nothing more", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2, 30])];
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.scheduledReminders).toBe(1);
+    expect(second.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toHaveLength(1);
+  });
+
+  it("sends one reminder, not several, when more than one time has passed (the sweep was off)", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-30, -20, -2])];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toHaveLength(1);
+  });
+
+  it("still reminds a row someone has acknowledged: the decision has not been made", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { acknowledgedAt: ago(5), status: "acknowledged", targetUserId: 3 })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+  });
+
+  it("in a dry run says what it would send and sends nothing", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    const log = jest.fn();
+
+    const report = await sweep(world, { dryRun: true, log });
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("would remind the people on #1 job.decision_pending on job 12"));
+  });
+
+  it("moves a request up first when its deadline has passed, and does not remind the row it left or the one it made", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { dueAt: ago(1) })];
+
+    const report = await sweep(world);
+
+    expect(report.superseded).toBe(1);
+    expect(world.calls.escalateFurther[0]).toMatchObject({ code: "sla_breach", mode: "next_level", onlyIfOpen: true });
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("reports a send that failed as a problem of the run, so system.health hears of it, and tries again next run", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    world.deps.notifyTargets = async (_c, row, event) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      return { attempts: 3, error: "Graph sendMail failed: 503", recipients: ["dee@example.com"], state: "failed" };
+    };
+
+    const first = await sweep(world);
+    const second = await sweep(world);
+
+    expect(first.scheduledReminders).toBe(0);
+    expect(first.errors).toEqual([expect.stringContaining("reminding on escalation #1: Graph sendMail failed: 503")]);
+    expect(world.calls.notify).toHaveLength(2);
+    expect(second.errors).toHaveLength(1);
+  });
+
+  it("only logs, and reports no problem, when there was nobody to tell or the mail settings are missing", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    world.deps.notifyTargets = async (_c, row, event) => {
+      world.calls.notify.push({ event, id: row.escalationId });
+      return { attempts: 0, error: "No one with an email address is at this level", recipients: [], state: "none" };
+    };
+    const log = jest.fn();
+
+    const report = await sweep(world, { log });
+
+    expect(report.errors).toEqual([]);
+    expect(report.scheduledReminders).toBe(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("no reminder sent on #1 (none: No one with an email address is at this level)"));
+  });
+
+  it("counts its sends against the run's allowance", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2], { subjectId: "12" }), decisionRow([-2], { subjectId: "13" })];
+
+    const report = await sweep(world, { env: { ...ENV, ESCALATION_SWEEP_MAX_ACTIONS: "1" } as NodeJS.ProcessEnv });
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(report.truncated).toBe(true);
+  });
+
+  it("leaves every escalation without a schedule alone", async () => {
+    const world = remindingWorld();
+    world.jobs = [job({ statusSince: ago(9 * DAY) })];
+    world.rows = [esc({ dueAt: ago(-5) }), esc({ context: { schedule: { remindAt: [] } }, dueAt: ago(-5), subjectId: "2" })];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(0);
+    expect(world.calls.notify).toEqual([]);
+  });
+
+  it("does not end a pending decision request whose job meets no condition: it ends with the decision", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([30])];
+
+    const report = await sweep(world);
+
+    expect(report.autoResolved).toBe(0);
+    expect(world.calls.autoResolve).toEqual([]);
+    expect(world.rows[0].status).toBe("open");
+  });
+
+  it("does not restart a pending decision request's clock when mail about the job arrives", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([30])];
+    world.arrivals.set(12, ago(1));
+
+    const report = await sweep(world);
+
+    expect(report.followUps).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+  });
+
+  it("puts the count in the run's one-line summary", async () => {
+    const world = remindingWorld();
+    world.rows = [decisionRow([-2])];
+    const log = jest.fn();
+
+    await sweep(world, { log });
+
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/scheduledReminders=1 /));
+  });
+});

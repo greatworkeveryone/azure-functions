@@ -11,6 +11,7 @@
 // The inbox query (store.ts buildListWhere) expresses the same visibility in
 // SQL; keep the two in step.
 
+import { isDecisionRow, namedTargetIds } from "./decisionRows";
 import { EscalationError } from "./errors";
 import { isAbove, normaliseRole, ROLES, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { EscalationRow, Viewer } from "./types";
@@ -27,12 +28,21 @@ export function isRaiser(viewer: Viewer, row: Pick<EscalationRow, "raisedByUserI
   return viewer.userId !== null && row.raisedByUserId === viewer.userId;
 }
 
+/** Whether the viewer is one of the several named people a row goes to. */
+const isNamedTarget = (viewer: Viewer, row: Pick<EscalationRow, "context" | "noIndependentTarget" | "targetRole">): boolean =>
+  viewer.userId !== null && namedTargetIds(row).includes(viewer.userId);
+
 /** Whether the viewer is one of the people the escalation goes to. */
-export function isTargetOf(viewer: Viewer, row: Pick<EscalationRow, "noIndependentTarget" | "status" | "targetRole" | "targetUserId">): boolean {
+export function isTargetOf(
+  viewer: Viewer,
+  row: Pick<EscalationRow, "context" | "noIndependentTarget" | "status" | "targetRole" | "targetUserId">,
+): boolean {
   const roles = rolesOf(viewer);
   if (row.noIndependentTarget && roles.some((role) => OVERSIGHT.has(role))) return true;
   // Named: the raiser picked this person, or they acknowledged it.
   if (row.targetUserId !== null && viewer.userId === row.targetUserId) return true;
+  // One of several named people (a decision request's), whoever has acknowledged it.
+  if (isNamedTarget(viewer, row)) return true;
   const role = normaliseRole(row.targetRole);
   if (role === "" || !roles.includes(role)) return false;
   // At role level everyone in the role is a target until somebody is named by the
@@ -48,6 +58,7 @@ export function canSee(viewer: Viewer, row: EscalationRow, raiserRole?: string |
   if (isOversight(viewer)) return true;
   if (isRaiser(viewer, row)) return true;
   if (viewer.userId !== null && row.targetUserId === viewer.userId) return true;
+  if (isNamedTarget(viewer, row)) return true;
   const roles = rolesOf(viewer);
   const target = normaliseRole(row.targetRole);
   if (target !== "" && roles.includes(target)) return true;
@@ -88,11 +99,13 @@ export interface ActionAvailability {
 export function availableActions(viewer: Viewer, row: EscalationRow): ActionAvailability {
   const live = row.status === "open" || row.status === "acknowledged";
   return {
-    acknowledge: live && row.status === "open" && canAct(viewer, row),
+    // A decision request is answered, not acknowledged (engine.acknowledge refuses it).
+    acknowledge: live && row.status === "open" && !isDecisionRow(row) && canAct(viewer, row),
     escalateFurther: live && canEscalateFurther(viewer, row),
     // Authority escalations end with the decision on the subject.
     resolve: live && row.kind === "attention" && canAct(viewer, row),
-    withdraw: row.status === "open" && canWithdraw(viewer, row),
+    // A decision request is withdrawn from the request, which ends this too.
+    withdraw: row.status === "open" && !isDecisionRow(row) && canWithdraw(viewer, row),
   };
 }
 

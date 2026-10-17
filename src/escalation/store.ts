@@ -384,18 +384,23 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
   const userId = viewer.userId ?? -1;
   params.push({ name: "ViewerUserId", type: TYPES.Int, value: userId });
 
+  // A level of several named people (a decision request's) puts no role on the
+  // row, so the people it is for are the userTargets in its context. It stays true
+  // when one of them has acknowledged it. Mirrors decisionRows.namedTargetIds.
+  const namedForMe = `(e.TargetRole IS NULL AND e.NoIndependentTarget = 0 AND EXISTS (
+      SELECT 1 FROM OPENJSON(ISNULL(e.Context, N'{}'), N'$.userTargets') t WHERE TRY_CONVERT(INT, t.[value]) = @ViewerUserId))`;
   // "For me": named for me, or aimed at my role and not yet named for someone
   // else. An escalation flagged NoIndependentTarget is for every director and
   // admin: nobody independent has it, so they all should.
   const mine = (): string => {
     const placeholders = rolePlaceholders("MineRole", roles.length ? roles : [""], params);
     const oversight = roles.some((role) => role === "director" || role === "admin") ? " OR e.NoIndependentTarget = 1" : "";
-    return `(e.TargetUserId = @ViewerUserId OR (e.TargetUserId IS NULL AND e.TargetRole IN (${placeholders}))${oversight})`;
+    return `(e.TargetUserId = @ViewerUserId OR (e.TargetUserId IS NULL AND e.TargetRole IN (${placeholders}))${oversight} OR ${namedForMe})`;
   };
   // Everything aimed at my role, whoever it is named for: colleagues cover for each other.
   const myRole = (): string => {
     const placeholders = rolePlaceholders("OwnRole", roles.length ? roles : [""], params);
-    return `(e.TargetUserId = @ViewerUserId OR e.TargetRole IN (${placeholders}))`;
+    return `(e.TargetUserId = @ViewerUserId OR e.TargetRole IN (${placeholders}) OR ${namedForMe})`;
   };
   const raised = (): string => "e.RaisedByUserId = @ViewerUserId";
   // Policy domains the viewer oversees in full (the CFO's finance. alerts),

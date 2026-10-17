@@ -128,6 +128,56 @@ describe("dbo.JobDecisionRequests", () => {
   });
 });
 
+describe("the code and the table agree", () => {
+  const store = readFileSync(join(__dirname, "..", "jobDecisions", "store.ts"), "utf8");
+  const tableColumns = tableBody
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^[A-Z]\w+\s+(INT|NVARCHAR|DATETIME2|ROWVERSION)/.test(line))
+    .map((line) => line.split(/\s+/)[0]);
+
+  it("finds the table's columns", () => {
+    expect(tableColumns).toEqual([
+      "RequestId", "JobId", "Question", "DecisionMakers", "AssignmentMode", "Tier", "RespondBy", "RoutineWeeks", "SourceAttachmentId",
+      "State", "RequestedBy", "RequestedByUserId", "RequestedAt", "WithdrawnAt", "WithdrawnBy", "WithdrawnByUserId", "WithdrawnReason", "RowVersion",
+    ]);
+  });
+
+  it("has every column the store inserts", () => {
+    const insert = store.match(/INSERT INTO dbo\.JobDecisionRequests\s*\(([^)]*)\)/);
+    expect(insert).not.toBeNull();
+    const columns = (insert as RegExpMatchArray)[1].split(",").map((c) => c.trim());
+    expect(columns.length).toBeGreaterThan(8);
+    for (const column of columns) expect(tableColumns).toContain(column);
+  });
+
+  it("has every column the store selects", () => {
+    const list = store.match(/const REQUEST_COLUMNS = `([^`]*)`/);
+    expect(list).not.toBeNull();
+    const columns = (list as RegExpMatchArray)[1].split(",").map((c) => c.trim());
+    expect(columns.sort()).toEqual([...tableColumns].sort());
+  });
+
+  it("has every column the store updates when a request is withdrawn", () => {
+    const set = store.match(/const WITHDRAW_SET = `([^`]*)`/);
+    expect(set).not.toBeNull();
+    const columns = (set as RegExpMatchArray)[1].split(",").map((part) => part.split("=")[0].trim());
+    expect(columns).toEqual(["State", "WithdrawnAt", "WithdrawnBy", "WithdrawnByUserId", "WithdrawnReason"]);
+    for (const column of columns) expect(tableColumns).toContain(column);
+  });
+
+  it("states the same vocabularies the code does", () => {
+    const { DECISION_TIERS } = require("../jobDecisions/tiers") as typeof import("../jobDecisions/tiers");
+    const checked = tableBody.match(/Tier IN \(([^)]*)\)/)![1].split(",").map((t) => t.trim().replace(/^N'|'$/g, ""));
+    expect(checked).toEqual([...DECISION_TIERS]);
+  });
+
+  it("seeds the policy under the key the code raises", () => {
+    const { DECISION_PENDING_POLICY } = require("../escalation/decisionRows") as typeof import("../escalation/decisionRows");
+    expect(code).toContain(`N'${DECISION_PENDING_POLICY}'`);
+  });
+});
+
 describe("the job.decision_pending policy seed", () => {
   const seed = [...code.matchAll(/\(N'([a-z_.]+)', N'(attention|authority)', ([01]), N'(business|wall)', N'(yes|reminder|nudge|no)',\s*N'(\[.*?\])', ([01])\)/g)].map((m) => ({
     active: m[7] === "1",

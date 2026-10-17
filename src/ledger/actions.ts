@@ -143,6 +143,14 @@ export const LEDGER_ACTIONS = {
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.withdraw": { exception: true, reasonRequired: true, subjects: ["escalation"] },
 
+  // Decision requests (jobs plan A1). The subject is the job the question is about
+  // and `after` is the request itself; the escalation that chases it writes its own
+  // rows beside, under the same correlation id. Taking a question back is the one
+  // exception: a person decided it needed no answer, and says why. The answers
+  // (slice A2) add their own codes.
+  "decision.requested": { exception: false, reasonRequired: false, subjects: ["job"] },
+  "decision.withdrawn": { exception: true, reasonRequired: true, subjects: ["job"] },
+
   // Access-pattern monitoring (beta sprint S10, decision 15). The subject is the
   // person (UserID, or Entra oid when they have no AppUsers row); the actor of an
   // anomaly is the monitor. A profile change loosens or tightens what counts as

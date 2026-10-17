@@ -302,7 +302,8 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     for (const role of ["director", "admin"]) {
       expect(where({ view: "mine", viewer: viewer([role]) }).whereSql).toContain("OR e.NoIndependentTarget = 1");
     }
-    expect(where({ view: "mine", viewer: viewer(["facilities_manager"]) }).whereSql).not.toContain("NoIndependentTarget");
+    // other roles get no oversight clause (the named-people clause mentions the column too, to leave flagged rows out)
+    expect(where({ view: "mine", viewer: viewer(["facilities_manager"]) }).whereSql).not.toContain("OR e.NoIndependentTarget = 1");
   });
 
   it("raised: the ones I raised", () => {
