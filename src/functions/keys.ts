@@ -13,6 +13,7 @@ import {
   createRequestConnection,
   createServiceConnection,
   executeQuery,
+  type SqlParam,
 } from "../db";
 import {
   AppRole,
@@ -75,6 +76,9 @@ const CODE_SUB_TYPES = [
 const ITEM_TYPES = ["key", "code"] as const;
 const REGISTRATIONS = ["standard", "registered"] as const;
 
+/** Text with something in it: a description of spaces is no description (createKey and updateKey). */
+const hasText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
+
 // ── Notification stub ────────────────────────────────────────────────────────
 // TODO: send Graph API email to key manager when key is overdue
 async function notifyOverdueKey(_keyId: number): Promise<void> {
@@ -135,6 +139,8 @@ function formatKey(row: Record<string, unknown>) {
     subType: row.SubType ?? null,
     registration: row.Registration,
     description: row.Description,
+    // The stored reference (a blob name) next to the readable link: an edit sends it back unchanged to keep the photo.
+    photoBlobUrl: (row.PhotoBlobUrl as string | null) ?? null,
     photoUrl: row.PhotoBlobUrl
       ? keyPhotoReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
       : null,
@@ -387,7 +393,7 @@ async function createKey(
 
     // Level is optional: a building with no configured levels (a house, a
     // single-storey site) has nothing to pick. It is stored as '' (the column is NOT NULL).
-    if (!BuildingId || !KeyNumber || !Description) {
+    if (!BuildingId || !KeyNumber || !hasText(Description)) {
       return { status: 400, jsonBody: { error: "BuildingId, KeyNumber, Description required" } };
     }
 
@@ -451,8 +457,13 @@ async function createKey(
 }
 
 // ── PUT /api/updateKey ────────────────────────────────────────────────────────
-// Body: { Id, rowVersion, TenancyId, Level, SubType, Registration, Description,
-//         PhotoBlobUrl, StorageLocation }
+// Body: { Id, rowVersion, and any of: TenancyId, Level, SubType, Registration,
+//         Description, PhotoBlobUrl, StorageLocation }
+//
+// Only the fields the request carries are written. One it leaves out is not
+// touched; one sent as null is cleared. Description is required text: it can be
+// changed, not cleared, and a description of spaces is refused as in createKey.
+//
 // rowVersion is the one the key was read with (getKeys, getKeyDetail). The row
 // is read under an update lock and the versions compared before anything is
 // written; if someone changed the key since, nothing is saved and the answer
@@ -464,6 +475,22 @@ async function createKey(
 // BuildingId, ItemType and KeyNumber are deliberately never read. A key's
 // building, type and number are fixed when it is registered (the edit form
 // shows them locked), so a body that carries them changes nothing.
+
+/**
+ * What an edit may change, in the order it is written, and what a field sent as
+ * null becomes. Level and Registration are NOT NULL columns, so "cleared" is the
+ * value a key gets when none is given: createKey stores '' for no level and the
+ * column defaults to 'standard'.
+ */
+const EDITABLE_KEY_COLUMNS: ReadonlyArray<{ cleared: string | null; column: string; type: SqlParam["type"] }> = [
+  { cleared: null, column: "TenancyId", type: TYPES.Int },
+  { cleared: "", column: "Level", type: TYPES.NVarChar },
+  { cleared: null, column: "SubType", type: TYPES.NVarChar },
+  { cleared: "standard", column: "Registration", type: TYPES.NVarChar },
+  { cleared: null, column: "Description", type: TYPES.NVarChar },
+  { cleared: null, column: "PhotoBlobUrl", type: TYPES.NVarChar },
+  { cleared: null, column: "StorageLocation", type: TYPES.NVarChar },
+];
 
 const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
 const STALE_KEY_MESSAGE = "Someone else changed this key — it has been refreshed. Check it and save again.";
@@ -487,9 +514,8 @@ async function updateKey(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { Id, TenancyId, Level, SubType, Registration, Description,
-            PhotoBlobUrl, StorageLocation, rowVersion } = body ?? {};
+    const body = ((await request.json()) as any) ?? {};
+    const { Id, rowVersion } = body;
 
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
     const readVersion = typeof rowVersion === "string" ? rowVersion.trim().toLowerCase() : "";
@@ -502,6 +528,10 @@ async function updateKey(
         },
       };
     }
+    if (body.Description !== undefined && !hasText(body.Description)) {
+      return { status: 400, jsonBody: { error: "Description required" } };
+    }
+    const changes = EDITABLE_KEY_COLUMNS.filter(({ column }) => body[column] !== undefined);
 
     connection = await createRequestConnection(token);
     const idParam = { name: "Id", type: TYPES.Int, value: Id };
@@ -525,26 +555,23 @@ async function updateKey(
         };
       }
 
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Keys
-         SET TenancyId = @TenancyId, Level = @Level, SubType = @SubType,
-             Registration = @Registration, Description = @Description,
-             PhotoBlobUrl = @PhotoBlobUrl, StorageLocation = @StorageLocation
-         WHERE Id = @Id`,
-        [
-          idParam,
-          { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-          { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
-          { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
-          { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? null },
-          { name: "Description",     type: TYPES.NVarChar,  value: Description },
-          { name: "PhotoBlobUrl",    type: TYPES.NVarChar,  value: PhotoBlobUrl ?? null },
-          { name: "StorageLocation", type: TYPES.NVarChar,  value: StorageLocation ?? null },
-        ],
-      );
+      // Column names come from EDITABLE_KEY_COLUMNS above, never from the request.
+      if (changes.length > 0) {
+        await executeQuery(
+          connection,
+          `UPDATE dbo.Keys SET ${changes.map(({ column }) => `${column} = @${column}`).join(", ")} WHERE Id = @Id`,
+          [
+            idParam,
+            ...changes.map(({ cleared, column, type }) => ({
+              name: column,
+              type,
+              value: body[column] === null ? cleared : body[column],
+            })),
+          ],
+        );
+      }
 
-      const rows = await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]);
+      const rows = changes.length > 0 ? await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]) : locked;
       await commitTransaction(connection);
       return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
     } catch (error) {

@@ -1,9 +1,11 @@
 /// <reference types="jest" />
-// Editing a key must not silently overwrite what someone else saved meanwhile.
-// Every key read carries the row's version (rowVersion, 16 hex characters from
-// Keys.Version, migration 139); updateKey requires it, reads the row under an
-// update lock, and answers 409 with the current key when it has moved. The key's
-// building, type and number are never written. There is no SQL Server here: a
+// Editing a key must not silently overwrite what someone else saved meanwhile,
+// nor what the edit did not touch. Every key read carries the row's version
+// (rowVersion, 16 hex characters from Keys.Version, migration 139); updateKey
+// requires it, reads the row under an update lock, and answers 409 with the
+// current key when it has moved. It writes only the fields the request carries
+// (absent: unchanged, null: cleared). The key's building, type and number are
+// never written. There is no SQL Server here: a
 // small fake keeps the row, stamps a new version on every write, and rolls back
 // with the transaction, so these tests follow what a stale save does to the row.
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
@@ -86,13 +88,13 @@ const keyRow = (over: Row = {}): Row => ({
   LostById: null,
   LostByName: null,
   LostComment: null,
-  PhotoBlobUrl: null,
+  PhotoBlobUrl: "keys/front-door.jpg",
   Registration: "registered",
   Status: "active",
   StorageLocation: "Cabinet B",
   SubType: "BiLock",
-  TenancyId: null,
-  TenancyName: null,
+  TenancyId: 12,
+  TenancyName: "Acme Pty Ltd",
   Version: versionOf(1),
   ...over,
 });
@@ -145,7 +147,13 @@ function serve() {
       return [];
     }
     if (/INSERT INTO dbo\.Keys\b/.test(sql)) {
-      stored = keyRow({ Id: 9, KeyNumber: param("KeyNumber"), Version: versionOf(++versionCounter) });
+      stored = keyRow({
+        Description: param("Description"),
+        Id: 9,
+        KeyNumber: param("KeyNumber"),
+        PhotoBlobUrl: param("PhotoBlobUrl"),
+        Version: versionOf(++versionCounter),
+      });
       return [{ Id: 9 }];
     }
     if (/FROM dbo\.Keys k\s+JOIN dbo\.Buildings b[\s\S]*OUTER APPLY/.test(sql)) return stored ? [project(sql, stored)] : [];
@@ -201,6 +209,15 @@ describe("every key read carries the version the next edit must send back", () =
     expect((res.jsonBody as { key: { rowVersion: string } }).key.rowVersion).toBe("000000000000beef");
   });
 
+  it("gives the photo as the stored reference an edit sends back, next to the link that shows it", async () => {
+    const res = await handlers.get("getKeys")!(jsonRequest(null), context);
+    const [key] = (res.jsonBody as { keys: Array<Record<string, unknown>> }).keys;
+    expect(key).toMatchObject({ photoBlobUrl: "keys/front-door.jpg", photoUrl: "https://photo.example/keys/front-door.jpg" });
+    stored = keyRow({ PhotoBlobUrl: null });
+    const none = (await handlers.get("getKeys")!(jsonRequest(null), context)).jsonBody as { keys: Array<Record<string, unknown>> };
+    expect(none.keys[0]).toMatchObject({ photoBlobUrl: null, photoUrl: null });
+  });
+
   it("createKey returns the new key with the version it was created at", async () => {
     const res = await handlers.get("createKey")!(
       jsonRequest({ BuildingId: 3, Description: "Back door", KeyNumber: "K-002", Level: "Ground" }),
@@ -209,21 +226,35 @@ describe("every key read carries the version the next edit must send back", () =
     expect(res.status).toBe(200);
     expect((res.jsonBody as { key: { rowVersion: string } }).key.rowVersion).toBe(hex(2));
   });
+
+  it.each([
+    ["empty", ""],
+    ["spaces", "   "],
+    ["missing", undefined],
+    ["null", null],
+  ])("createKey refuses a description that is %s", async (_label, Description) => {
+    const res = await handlers.get("createKey")!(jsonRequest({ BuildingId: 3, Description, KeyNumber: "K-002", Level: "Ground" }), context);
+    expect(res.status).toBe(400);
+    expect(db.executeQuery.mock.calls.filter((call) => /INSERT INTO dbo\.Keys/.test(call[1] as string))).toHaveLength(0);
+  });
 });
 
 // ── updateKey ────────────────────────────────────────────────────────────────
 
+// What the edit form sends for a key it has not otherwise changed: every field as it was, the description edited.
 const EDIT = {
   Description: "Front door (edited)",
   Id: 7,
   Level: "Ground",
-  PhotoBlobUrl: null,
+  PhotoBlobUrl: "keys/front-door.jpg",
   Registration: "registered",
   StorageLocation: "Cabinet B",
   SubType: "BiLock",
-  TenancyId: null,
+  TenancyId: 12,
 };
 const update = (body: Row = {}) => handlers.get("updateKey")!(jsonRequest({ ...EDIT, rowVersion: hex(1), ...body }), context);
+/** A request that carries only the key, its version and what the test names. */
+const send = (body: Row = {}) => handlers.get("updateKey")!(jsonRequest({ Id: 7, rowVersion: hex(1), ...body }), context);
 const updates = () => db.executeQuery.mock.calls.filter((call) => /^\s*UPDATE dbo\.Keys\b/.test(call[1] as string));
 const keyOf = (res: HttpResponseInit) => (res.jsonBody as { key: Row }).key;
 
@@ -292,15 +323,123 @@ describe("updateKey with the version it was read at", () => {
     expect(stored).toMatchObject({ Description: "Front door (edited)" });
   });
 
-  it("writes exactly the editable columns and nothing else", async () => {
+  it("writes the editable fields it was sent, in a fixed order, and nothing else", async () => {
     await update();
-    const [[, sql, params]] = updates() as unknown as Array<[unknown, string, Param[]]>;
-    expect(assignedColumns(sql).map(([column]) => column)).toEqual([
-      "TenancyId", "Level", "SubType", "Registration", "Description", "PhotoBlobUrl", "StorageLocation",
-    ]);
-    expect(params.map((p) => p.name)).toEqual([
-      "Id", "TenancyId", "Level", "SubType", "Registration", "Description", "PhotoBlobUrl", "StorageLocation",
-    ]);
+    expect(written()).toEqual({
+      columns: ["TenancyId", "Level", "SubType", "Registration", "Description", "PhotoBlobUrl", "StorageLocation"],
+      params: ["Id", "TenancyId", "Level", "SubType", "Registration", "Description", "PhotoBlobUrl", "StorageLocation"],
+    });
+  });
+});
+
+/** The columns the UPDATE set and the parameters it was given. */
+function written() {
+  const [[, sql, params]] = updates() as unknown as Array<[unknown, string, Param[]]>;
+  return { columns: assignedColumns(sql).map(([column]) => column), params: params.map((p) => p.name) };
+}
+
+describe("updateKey writes only the fields the request carries", () => {
+  it("writes the fields it was sent and no others", async () => {
+    await send({ Description: "Front door (north)", StorageLocation: "Plant room" });
+    expect(written()).toEqual({ columns: ["Description", "StorageLocation"], params: ["Id", "Description", "StorageLocation"] });
+  });
+
+  it.each([
+    ["TenancyId", 12],
+    ["Level", "Ground"],
+    ["SubType", "BiLock"],
+    ["Registration", "registered"],
+    ["PhotoBlobUrl", "keys/front-door.jpg"],
+    ["StorageLocation", "Cabinet B"],
+  ])("leaves %s as it is when the request does not mention it", async (field, was) => {
+    const res = await send({ Description: "Front door (north)" });
+    expect(res.status).toBe(200);
+    expect(written().columns).toEqual(["Description"]);
+    expect(stored).toMatchObject({ Description: "Front door (north)", [field]: was });
+  });
+
+  it.each([
+    ["TenancyId", null],
+    ["Level", ""],
+    ["SubType", null],
+    ["Registration", "standard"],
+    ["PhotoBlobUrl", null],
+    ["StorageLocation", null],
+  ])("clears %s when it is sent as null, and touches nothing else", async (field, cleared) => {
+    const before = { ...(stored as Row) };
+    const res = await send({ [field]: null });
+    expect(res.status).toBe(200);
+    expect(written().columns).toEqual([field]);
+    expect(stored).toMatchObject({ [field]: cleared });
+    expect({ ...stored, [field]: 0, Version: 0 }).toEqual({ ...before, [field]: 0, Version: 0 });
+  });
+
+  it("sets a field to the value it is sent", async () => {
+    const res = await send({ Level: "Level 1", SubType: "Dimpled", TenancyId: 15 });
+    expect(res.status).toBe(200);
+    expect(written().columns).toEqual(["TenancyId", "Level", "SubType"]);
+    expect(stored).toMatchObject({ Level: "Level 1", SubType: "Dimpled", TenancyId: 15 });
+    expect(keyOf(res)).toMatchObject({ level: "Level 1", subType: "Dimpled", tenancyId: 15 });
+  });
+
+  it("an edit with nothing to change writes nothing and moves no version", async () => {
+    const res = await send();
+    expect(res.status).toBe(200);
+    expect(events).toEqual(["begin", "lock", "commit"]);
+    expect(updates()).toHaveLength(0);
+    expect(keyOf(res)).toMatchObject({ description: "Front door", rowVersion: hex(1) });
+  });
+
+  it("and is still refused when its version is stale", async () => {
+    anotherWriterChanges({ Description: "Front door (Bob)" });
+    expect((await send()).status).toBe(409);
+  });
+});
+
+describe("updateKey and the key's photo", () => {
+  it("keeps it when the edit sends it back unchanged, as the edit form does", async () => {
+    const res = await update();
+    expect(stored).toMatchObject({ PhotoBlobUrl: "keys/front-door.jpg" });
+    expect(keyOf(res)).toMatchObject({ photoBlobUrl: "keys/front-door.jpg", photoUrl: "https://photo.example/keys/front-door.jpg" });
+  });
+
+  it("keeps it when the edit does not mention it", async () => {
+    const res = await send({ Description: "Front door (north)", StorageLocation: "Plant room" });
+    expect(stored).toMatchObject({ PhotoBlobUrl: "keys/front-door.jpg", StorageLocation: "Plant room" });
+    expect(keyOf(res)).toMatchObject({ photoBlobUrl: "keys/front-door.jpg" });
+  });
+
+  it("removes it only when the edit says so, with an explicit null", async () => {
+    const res = await update({ PhotoBlobUrl: null });
+    expect(stored).toMatchObject({ PhotoBlobUrl: null });
+    expect(keyOf(res)).toMatchObject({ photoBlobUrl: null, photoUrl: null });
+  });
+
+  it("replaces it with a new one when the edit sends one", async () => {
+    const res = await update({ PhotoBlobUrl: "keys/new-door.jpg" });
+    expect(keyOf(res)).toMatchObject({ photoBlobUrl: "keys/new-door.jpg", photoUrl: "https://photo.example/keys/new-door.jpg" });
+  });
+});
+
+describe("updateKey and the description", () => {
+  it.each([
+    ["empty", ""],
+    ["only spaces", "   "],
+    ["null", null],
+    ["not text", 5],
+  ])("refuses a description that is %s, before it opens a connection", async (_label, Description) => {
+    const res = await send({ Description });
+    expect(res.status).toBe(400);
+    expect(res.jsonBody).toEqual({ error: "Description required" });
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(stored).toMatchObject({ Description: "Front door" });
+  });
+
+  it("changes it to the text it is sent, and lets an edit leave it out", async () => {
+    const first = await send({ Description: "  Front door (north)  " });
+    expect(stored).toMatchObject({ Description: "  Front door (north)  " });
+    await send({ Level: "Level 1", rowVersion: keyOf(first).rowVersion });
+    expect(stored).toMatchObject({ Description: "  Front door (north)  ", Level: "Level 1" });
   });
 });
 
