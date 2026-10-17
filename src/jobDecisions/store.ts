@@ -14,6 +14,9 @@ export type AssignmentMode = "named" | "role";
 
 export interface DecisionRequestRow {
   assignmentMode: AssignmentMode;
+  /** Moves up to the raiser's manager on its own when unanswered. Always true for
+   *  soon, routine and fixed, never for an emergency; for urgent, the raiser's tick. */
+  autoEscalate: boolean;
   /** Who was asked: the userIds it went to, and the role when everyone in one was asked. */
   decisionMakers: { role: string | null; userIds: number[] };
   jobId: number;
@@ -36,7 +39,7 @@ export interface DecisionRequestRow {
 }
 
 const REQUEST_COLUMNS = `RequestId, JobId, Question, DecisionMakers, AssignmentMode, Tier, RespondBy, RoutineWeeks,
-  SourceAttachmentId, State, RequestedBy, RequestedByUserId, RequestedAt, WithdrawnAt, WithdrawnBy, WithdrawnByUserId,
+  AutoEscalate, SourceAttachmentId, State, RequestedBy, RequestedByUserId, RequestedAt, WithdrawnAt, WithdrawnBy, WithdrawnByUserId,
   WithdrawnReason, RowVersion`;
 
 const asDate = (value: unknown): Date | null => (value instanceof Date ? value : null);
@@ -60,6 +63,7 @@ export function toRequestRow(raw: SqlRow): DecisionRequestRow {
   const tier = String(raw.Tier);
   return {
     assignmentMode: raw.AssignmentMode === "role" ? "role" : "named",
+    autoEscalate: raw.AutoEscalate === true || raw.AutoEscalate === 1,
     decisionMakers: parseMakers(raw.DecisionMakers),
     jobId: Number(raw.JobId),
     question: String(raw.Question),
@@ -227,6 +231,7 @@ export async function peopleByIds(
 
 export interface NewRequest {
   assignmentMode: AssignmentMode;
+  autoEscalate: boolean;
   decisionMakers: { role: string | null; userIds: number[] };
   jobId: number;
   question: string;
@@ -243,11 +248,11 @@ export async function insertRequest(connection: Connection, request: NewRequest)
   const rows = await executeQuery(
     connection,
     `INSERT INTO dbo.JobDecisionRequests
-       (JobId, Question, DecisionMakers, AssignmentMode, Tier, RespondBy, RoutineWeeks, SourceAttachmentId,
+       (JobId, Question, DecisionMakers, AssignmentMode, Tier, RespondBy, RoutineWeeks, AutoEscalate, SourceAttachmentId,
         RequestedBy, RequestedByUserId)
      OUTPUT INSERTED.RequestId
      VALUES
-       (@JobId, @Question, @DecisionMakers, @AssignmentMode, @Tier, @RespondBy, @RoutineWeeks, @SourceAttachmentId,
+       (@JobId, @Question, @DecisionMakers, @AssignmentMode, @Tier, @RespondBy, @RoutineWeeks, @AutoEscalate, @SourceAttachmentId,
         @RequestedBy, @RequestedByUserId)`,
     [
       { name: "JobId", type: TYPES.Int, value: request.jobId },
@@ -257,6 +262,7 @@ export async function insertRequest(connection: Connection, request: NewRequest)
       { name: "Tier", type: TYPES.NVarChar, value: request.tier },
       { name: "RespondBy", type: TYPES.DateTime2, value: request.respondBy, options: { scale: 3 } },
       { name: "RoutineWeeks", type: TYPES.Int, value: request.routineWeeks },
+      { name: "AutoEscalate", type: TYPES.Bit, value: request.autoEscalate },
       { name: "SourceAttachmentId", type: TYPES.Int, value: request.sourceAttachmentId },
       { name: "RequestedBy", type: TYPES.NVarChar, value: request.requestedBy },
       { name: "RequestedByUserId", type: TYPES.Int, value: request.requestedByUserId },

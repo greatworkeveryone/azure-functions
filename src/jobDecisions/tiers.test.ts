@@ -62,6 +62,7 @@ describe("emergency", () => {
     const schedule = scheduleFor({ tier: "emergency" }, darwin("2026-10-12 10:00"), NO_HOLIDAYS);
 
     expect(schedule).toEqual({
+      autoEscalate: false,
       callThem: true,
       dueDate: null,
       escalateAt: null,
@@ -81,10 +82,18 @@ describe("emergency", () => {
       expect(schedule).toMatchObject({ callThem: true, escalateAt: null, remindAt: [], respondBy: null, timed: false });
     }
   });
+
+  it("ignores the auto-escalate tick: an emergency is never chased, ticked or not", () => {
+    const start = darwin("2026-10-12 10:00");
+    const plain = scheduleFor({ tier: "emergency" }, start, NO_HOLIDAYS);
+    for (const autoEscalate of [true, false]) {
+      expect(scheduleFor({ autoEscalate, tier: "emergency" }, start, NO_HOLIDAYS)).toEqual(plain);
+    }
+  });
 });
 
-describe("urgent: by tomorrow, reminded at 24 hours, moved up at 36", () => {
-  const urgent: TierRequest = { tier: "urgent" };
+describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up at 36", () => {
+  const urgent: TierRequest = { autoEscalate: true, tier: "urgent" };
 
   it("asked on a Monday morning: due Tuesday close of business, reminded that morning, moved up Wednesday morning", () => {
     expect(ask(urgent, "2026-10-12 09:00")).toEqual({
@@ -178,10 +187,99 @@ describe("urgent: by tomorrow, reminded at 24 hours, moved up at 36", () => {
 
   it("is raised as urgent, with one reminder, and has a deadline to chase", () => {
     const schedule = scheduleFor(urgent, darwin("2026-10-12 09:00"), NO_HOLIDAYS);
-    expect(schedule).toMatchObject({ callThem: false, dueDate: "2026-10-13", routineWeeks: null, timed: true, urgent: true });
+    expect(schedule).toMatchObject({ autoEscalate: true, callThem: false, dueDate: "2026-10-13", routineWeeks: null, timed: true, urgent: true });
     expect(schedule.remindAt).toHaveLength(1);
   });
 });
+
+describe("urgent, not ticked to move up (the default): same deadline and reminder, nothing moves up", () => {
+  const unticked: TierRequest = { tier: "urgent" };
+  const ticked: TierRequest = { autoEscalate: true, tier: "urgent" };
+  const explicitlyOff: TierRequest = { autoEscalate: false, tier: "urgent" };
+
+  it("asked on a Monday morning: due Tuesday close of business, reminded that morning, never moved up", () => {
+    expect(ask(unticked, "2026-10-12 09:00")).toEqual({
+      escalateAt: null,
+      remindAt: ["2026-10-13 09:00"],
+      respondBy: "2026-10-13 17:00",
+    });
+  });
+
+  it("is untouched by the tick in everything but the move-up, whenever and wherever it falls", () => {
+    const calendars = [NO_HOLIDAYS, holidays("2026-10-13"), holidays("2026-10-14"), holidays("2026-10-19")];
+    for (const start of [
+      "2026-10-12 06:00",
+      "2026-10-12 08:30",
+      "2026-10-12 09:00",
+      "2026-10-12 16:45",
+      "2026-10-12 17:00",
+      "2026-10-12 23:59",
+      "2026-10-15 11:00",
+      "2026-10-16 15:00",
+      "2026-10-17 10:00",
+      "2026-10-18 22:00",
+    ]) {
+      for (const days of calendars) {
+        const moves = ask(ticked, start, days);
+        expect(moves.escalateAt).not.toBeNull();
+        expect(ask(unticked, start, days)).toEqual({ ...moves, escalateAt: null });
+        expect(ask(explicitlyOff, start, days)).toEqual({ ...moves, escalateAt: null });
+      }
+    }
+  });
+
+  it("keeps the 24-hour reminder, so the people are still told", () => {
+    const schedule = scheduleFor(unticked, darwin("2026-10-12 09:00"), NO_HOLIDAYS);
+    expect(schedule.remindAt).toHaveLength(1);
+    expect(show(schedule.remindAt[0])).toBe("2026-10-13 09:00");
+    expect(ask(unticked, "2026-10-12 16:45").remindAt).toEqual(["2026-10-13 16:45"]);
+    expect(ask(unticked, "2026-10-12 18:00").remindAt).toEqual(["2026-10-13 08:30"]);
+  });
+
+  it("is still raised as urgent and timed; only the move-up is off", () => {
+    expect(scheduleFor(unticked, darwin("2026-10-12 09:00"), NO_HOLIDAYS)).toMatchObject({
+      autoEscalate: false,
+      callThem: false,
+      dueDate: "2026-10-13",
+      escalateAt: null,
+      timed: true,
+      urgent: true,
+    });
+    expect(scheduleFor(explicitlyOff, darwin("2026-10-12 09:00"), NO_HOLIDAYS).autoEscalate).toBe(false);
+  });
+
+  it("the tick turns the move-up on at the 36-hour mark", () => {
+    expect(scheduleFor(ticked, darwin("2026-10-12 09:00"), NO_HOLIDAYS)).toMatchObject({ autoEscalate: true });
+    expect(ask(ticked, "2026-10-12 09:00").escalateAt).toBe("2026-10-14 08:30");
+  });
+});
+
+describe("soon, routine and fixed always move up", () => {
+  const start = darwin("2026-10-12 10:00");
+  const requests: [string, TierRequest][] = [
+    ["soon", { tier: "soon" }],
+    ["routine", { routineWeeks: 3, tier: "routine" }],
+    ["fixed", { fixedDate: "2026-10-23", tier: "fixed" }],
+  ];
+
+  it.each(requests)("%s has a move-up at its deadline", (_tier, request) => {
+    const schedule = scheduleFor(request, start, NO_HOLIDAYS);
+    expect(schedule.autoEscalate).toBe(true);
+    expect(schedule.escalateAt).not.toBeNull();
+    expect(schedule.escalateAt).toEqual(schedule.respondBy);
+  });
+
+  it.each(requests)("%s accepts the tick set to true, which changes nothing", (_tier, request) => {
+    expect(scheduleFor({ ...request, autoEscalate: true }, start, NO_HOLIDAYS)).toEqual(scheduleFor(request, start, NO_HOLIDAYS));
+  });
+
+  it.each(requests)("%s refuses to be told not to move up, whatever calls it", (_tier, request) => {
+    expect(() => scheduleFor({ ...request, autoEscalate: false }, start, NO_HOLIDAYS)).toThrow(
+      expect.objectContaining({ code: "auto_escalate_not_optional", name: "TierError", status: 400 }),
+    );
+  });
+});
+
 
 describe("soon: a week, reminded the business day before", () => {
   const soon: TierRequest = { tier: "soon" };
@@ -403,6 +501,55 @@ describe("parseTierRequest", () => {
     expect(parseTierRequest({ fixedDate: "2026-10-23", tier: "fixed" })).toEqual({ fixedDate: "2026-10-23", tier: "fixed" });
   });
 
+  describe("autoEscalate", () => {
+    it("is absent for an urgent request that does not mention it, so it defaults to off", () => {
+      expect(parseTierRequest({ tier: "urgent" })).toEqual({ tier: "urgent" });
+      expect(parseTierRequest({ autoEscalate: null, tier: "urgent" })).toEqual({ tier: "urgent" });
+      expect(parseTierRequest({ autoEscalate: undefined, tier: "urgent" })).toEqual({ tier: "urgent" });
+      expect(scheduleFor(parseTierRequest({ tier: "urgent" }), darwin("2026-10-12 09:00"), NO_HOLIDAYS).escalateAt).toBeNull();
+    });
+
+    it("is read from an urgent request, true or false", () => {
+      expect(parseTierRequest({ autoEscalate: true, tier: "urgent" })).toEqual({ autoEscalate: true, tier: "urgent" });
+      expect(parseTierRequest({ autoEscalate: false, tier: "urgent" })).toEqual({ autoEscalate: false, tier: "urgent" });
+      expect(scheduleFor(parseTierRequest({ autoEscalate: true, tier: "urgent" }), darwin("2026-10-12 09:00"), NO_HOLIDAYS).escalateAt).not.toBeNull();
+      expect(scheduleFor(parseTierRequest({ autoEscalate: false, tier: "urgent" }), darwin("2026-10-12 09:00"), NO_HOLIDAYS).escalateAt).toBeNull();
+    });
+
+    it("is accepted as true on soon, routine and fixed, which always move up anyway", () => {
+      expect(parseTierRequest({ autoEscalate: true, tier: "soon" })).toEqual({ tier: "soon" });
+      expect(parseTierRequest({ autoEscalate: true, routineWeeks: 4, tier: "routine" })).toEqual({ routineWeeks: 4, tier: "routine" });
+      expect(parseTierRequest({ autoEscalate: true, fixedDate: "2026-10-23", tier: "fixed" })).toEqual({ fixedDate: "2026-10-23", tier: "fixed" });
+      expect(parseTierRequest({ autoEscalate: null, tier: "soon" })).toEqual({ tier: "soon" });
+    });
+
+    it("is refused as false on soon, routine and fixed with a 400", () => {
+      for (const raw of [
+        { autoEscalate: false, tier: "soon" },
+        { autoEscalate: false, routineWeeks: 4, tier: "routine" },
+        { autoEscalate: false, fixedDate: "2026-10-23", tier: "fixed" },
+      ]) {
+        expect(() => parseTierRequest(raw)).toThrow(expect.objectContaining({ code: "auto_escalate_not_optional", name: "TierError", status: 400 }));
+      }
+    });
+
+    it("is ignored on an emergency, which is never chased", () => {
+      expect(parseTierRequest({ autoEscalate: true, tier: "emergency" })).toEqual({ tier: "emergency" });
+      expect(parseTierRequest({ autoEscalate: false, tier: "emergency" })).toEqual({ tier: "emergency" });
+    });
+
+    it.each(["yes", "true", "false", 1, 0, [], {}, [true]])("refuses %j, which is not true or false, on every tier", (autoEscalate) => {
+      for (const extra of [{ tier: "emergency" }, { tier: "urgent" }, { tier: "soon" }, { routineWeeks: 3, tier: "routine" }, { fixedDate: "2026-10-23", tier: "fixed" }]) {
+        expect(() => parseTierRequest({ autoEscalate, ...extra })).toThrow(expect.objectContaining({ code: "auto_escalate_invalid", status: 400 }));
+      }
+    });
+
+    it("checks the tier's own input first, so the first thing wrong is what gets said", () => {
+      expect(() => parseTierRequest({ autoEscalate: false, tier: "routine" })).toThrow(expect.objectContaining({ code: "routine_weeks_required" }));
+      expect(() => parseTierRequest({ autoEscalate: false, tier: "fixed" })).toThrow(expect.objectContaining({ code: "fixed_date_required" }));
+    });
+  });
+
   it("lets an input a tier does not take be null or empty", () => {
     expect(parseTierRequest({ fixedDate: null, routineWeeks: null, tier: "soon" })).toEqual({ tier: "soon" });
     expect(parseTierRequest({ fixedDate: "", tier: "urgent" })).toEqual({ tier: "urgent" });
@@ -461,6 +608,8 @@ describe("whenever it is asked", () => {
     if (tier === "routine") return { routineWeeks: 2 + (Math.floor(now.getTime() / 86_400_000) % 7), tier };
     // The first business day at least three days out.
     if (tier === "fixed") return { fixedDate: nextBusinessDay(addCalendarDays(darwinDateKey(now), 3), CALENDAR), tier };
+    // An urgent request only moves up when ticked; the unticked one is below.
+    if (tier === "urgent") return { autoEscalate: true, tier };
     return { tier };
   }
 
@@ -491,6 +640,20 @@ describe("whenever it is asked", () => {
       // the move-up is also inside business hours, or at close of business itself
       const escMinute = darwinMinuteOfDay(s.escalateAt!);
       expect({ label, ok: isBusinessDay(darwinDateKey(s.escalateAt!), CALENDAR) && escMinute >= 510 && escMinute <= 1020 }).toEqual({ label, ok: true });
+    }
+  });
+
+  it("urgent not ticked is the ticked one with nothing to move up, whenever it is asked", () => {
+    for (const now of starts) {
+      const ticked = scheduleFor({ autoEscalate: true, tier: "urgent" }, now, CALENDAR);
+      const unticked = scheduleFor({ tier: "urgent" }, now, CALENDAR);
+      const label = `urgent asked ${show(now)}`;
+
+      expect({ label, ok: unticked.escalateAt === null && unticked.autoEscalate === false }).toEqual({ label, ok: true });
+      expect({ label, ok: ticked.escalateAt !== null && ticked.autoEscalate === true }).toEqual({ label, ok: true });
+      expect({ label, schedule: { ...unticked, autoEscalate: true, escalateAt: ticked.escalateAt } }).toEqual({ label, schedule: ticked });
+      // the reminder is still there
+      expect({ label, reminders: unticked.remindAt.length }).toEqual({ label, reminders: 1 });
     }
   });
 

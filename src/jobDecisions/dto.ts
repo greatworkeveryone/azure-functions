@@ -18,6 +18,10 @@ export interface PersonDto {
 
 export interface RequestDto {
   assignmentMode: "named" | "role";
+  /** Whether it moves up to the raiser's manager on its own when unanswered. Always
+   *  true for soon, routine and fixed; false for an emergency; for urgent, the raiser's
+   *  tick (off unless ticked). The reminders go out either way. */
+  autoEscalate: boolean;
   /** Emergency: nobody is chased; the screen says call them. */
   callThem: boolean;
   decisionMakers: { people: PersonDto[]; role: string | null; roleLabel: string | null };
@@ -47,6 +51,7 @@ const iso = (date: Date | null): string | null => (date ? date.toISOString() : n
 export function toRequestDto(row: DecisionRequestRow, people: PeopleById): RequestDto {
   return {
     assignmentMode: row.assignmentMode,
+    autoEscalate: row.autoEscalate,
     callThem: row.tier === "emergency",
     decisionMakers: {
       people: row.decisionMakers.userIds.map((userId) => {
@@ -79,7 +84,8 @@ export function toRequestDto(row: DecisionRequestRow, people: PeopleById): Reque
  *  up and when the people first asked are reminded. */
 export interface ChaseDto {
   deepLink: string | null;
-  /** When it moves up if nobody has acted; null = never (an emergency, or the top). */
+  /** When it moves up if nobody has acted; null = never (an emergency, an urgent
+   *  request not ticked to move up, or the top of the ladder). */
   dueAt: string | null;
   escalationId: number;
   isOverdue: boolean;

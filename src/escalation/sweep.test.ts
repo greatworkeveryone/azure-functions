@@ -1136,6 +1136,33 @@ describe("scheduled reminders (a decision request's)", () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining("would remind the people on #1 job.decision_pending on job 12"));
   });
 
+  it("reminds a request with no due moment (an urgent one not ticked to move up), and never moves it up, however far past its respond-by", async () => {
+    const world = remindingWorld();
+    world.rows = [
+      decisionRow([-2], {
+        context: {
+          decision: { autoEscalate: false, question: "Pay it?", requestId: 7, respondBy: ago(30).toISOString(), tier: "urgent" },
+          schedule: { escalateAt: null, remindAt: [ago(2).toISOString()] },
+          userTargets: [3, 5],
+        },
+        createdAt: ago(100),
+        dueAt: null,
+        lastNotifiedAt: ago(99),
+        urgent: true,
+      }),
+    ];
+
+    const report = await sweep(world);
+
+    expect(report.scheduledReminders).toBe(1);
+    expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
+    expect(report.superseded).toBe(0);
+    expect(report.reminded).toBe(0);
+    expect(world.calls.escalateFurther).toEqual([]);
+    expect(world.rows).toHaveLength(1);
+    expect(world.rows[0]).toMatchObject({ dueAt: null, level: 1, status: "open" });
+  });
+
   it("moves a request up first when its deadline has passed, and does not remind the row it left or the one it made", async () => {
     const world = remindingWorld();
     world.rows = [decisionRow([-2], { dueAt: ago(1) })];

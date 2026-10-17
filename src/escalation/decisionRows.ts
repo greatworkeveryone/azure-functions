@@ -14,8 +14,10 @@
 //
 // The context block, written by the decision request and read here:
 //
-//   decision  { requestId, question, tier, assignmentMode, respondBy, callThem, jobLabel }
-//   schedule  { remindAt: [ISO], escalateAt: ISO | null }
+//   decision  { requestId, question, tier, assignmentMode, respondBy, callThem, autoEscalate, jobLabel }
+//   schedule  { remindAt: [ISO], escalateAt: ISO | null }   (escalateAt is null, and the
+//             row has no due moment, when autoEscalate is off: an emergency, or an
+//             urgent request the raiser did not tick to move up)
 //   userTargets  [userId]   (the engine's own, from RaiseInput.userTargets)
 
 import { normaliseRole } from "./roles";

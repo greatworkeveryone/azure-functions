@@ -68,13 +68,14 @@ describe("dbo.JobDecisionRequests", () => {
   it("has the columns the plan names", () => {
     for (const column of [
       "RequestId", "JobId", "Question", "DecisionMakers", "AssignmentMode", "Tier", "RespondBy", "RoutineWeeks",
-      "SourceAttachmentId", "State", "RequestedBy", "RequestedAt", "RowVersion",
+      "AutoEscalate", "SourceAttachmentId", "State", "RequestedBy", "RequestedAt", "RowVersion",
     ]) {
       expect(tableBody).toContain(column);
     }
     expect(tableBody).toMatch(/RequestId\s+INT\s+IDENTITY\(1,1\)\s+NOT NULL/);
     expect(tableBody).toMatch(/Question\s+NVARCHAR\(2000\)\s+NOT NULL/);
     expect(tableBody).toMatch(/RespondBy\s+DATETIME2\(3\)\s+NULL/);
+    expect(tableBody).toMatch(/AutoEscalate\s+BIT\s+NOT NULL,/);
     expect(tableBody).toMatch(/SourceAttachmentId\s+INT\s+NULL/);
     expect(tableBody).toMatch(/RowVersion\s+ROWVERSION\s+NOT NULL/);
     expect(tableBody).toMatch(/PRIMARY KEY CLUSTERED \(RequestId\)/);
@@ -107,6 +108,13 @@ describe("dbo.JobDecisionRequests", () => {
     expect(tableBody).toMatch(/Tier <> N'emergency' AND RespondBy IS NOT NULL/);
   });
 
+  it("ties the move-up to the tier: always for soon, routine and fixed, never for an emergency, the raiser's tick for urgent", () => {
+    expect(tableBody).toMatch(/CONSTRAINT CK_JobDecisionRequests_AutoEscalate CHECK/);
+    expect(tableBody).toMatch(/Tier = N'emergency' AND AutoEscalate = 0/);
+    expect(tableBody).toMatch(/OR Tier = N'urgent'\s/);
+    expect(tableBody).toMatch(/Tier IN \(N'soon', N'routine', N'fixed'\) AND AutoEscalate = 1/);
+  });
+
   it("makes a withdrawal carry its time and reason", () => {
     expect(tableBody).toMatch(/State = N'withdrawn' AND WithdrawnAt IS NOT NULL AND WithdrawnReason IS NOT NULL/);
     expect(tableBody).toMatch(/State <> N'withdrawn' AND WithdrawnAt IS NULL/);
@@ -133,13 +141,13 @@ describe("the code and the table agree", () => {
   const tableColumns = tableBody
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => /^[A-Z]\w+\s+(INT|NVARCHAR|DATETIME2|ROWVERSION)/.test(line))
+    .filter((line) => /^[A-Z]\w+\s+(INT|BIT|NVARCHAR|DATETIME2|ROWVERSION)/.test(line))
     .map((line) => line.split(/\s+/)[0]);
 
   it("finds the table's columns", () => {
     expect(tableColumns).toEqual([
-      "RequestId", "JobId", "Question", "DecisionMakers", "AssignmentMode", "Tier", "RespondBy", "RoutineWeeks", "SourceAttachmentId",
-      "State", "RequestedBy", "RequestedByUserId", "RequestedAt", "WithdrawnAt", "WithdrawnBy", "WithdrawnByUserId", "WithdrawnReason", "RowVersion",
+      "RequestId", "JobId", "Question", "DecisionMakers", "AssignmentMode", "Tier", "RespondBy", "RoutineWeeks", "AutoEscalate",
+      "SourceAttachmentId", "State", "RequestedBy", "RequestedByUserId", "RequestedAt", "WithdrawnAt", "WithdrawnBy", "WithdrawnByUserId", "WithdrawnReason", "RowVersion",
     ]);
   });
 
@@ -170,6 +178,22 @@ describe("the code and the table agree", () => {
     const { DECISION_TIERS } = require("../jobDecisions/tiers") as typeof import("../jobDecisions/tiers");
     const checked = tableBody.match(/Tier IN \(([^)]*)\)/)![1].split(",").map((t) => t.trim().replace(/^N'|'$/g, ""));
     expect(checked).toEqual([...DECISION_TIERS]);
+  });
+
+  it("never produces a schedule the AutoEscalate CHECK would refuse", () => {
+    const { DECISION_TIERS, scheduleFor } = require("../jobDecisions/tiers") as typeof import("../jobDecisions/tiers");
+    // The CHECK, written out: emergency off, urgent either, the rest on.
+    const allowed = (tier: string, autoEscalate: boolean): boolean => (tier === "emergency" ? !autoEscalate : tier === "urgent" ? true : autoEscalate);
+    const now = new Date("2026-10-12T00:30:00Z");
+    const own: Record<string, object> = { fixed: { fixedDate: "2026-10-23" }, routine: { routineWeeks: 3 } };
+    for (const tier of DECISION_TIERS) {
+      for (const tick of [undefined, true]) {
+        const schedule = scheduleFor({ ...own[tier], ...(tick === undefined ? {} : { autoEscalate: tick }), tier }, now);
+        expect({ allowed: allowed(tier, schedule.autoEscalate), tick, tier }).toEqual({ allowed: true, tick, tier });
+        // and what is stored says what the engine will do: no due moment, no move-up
+        expect({ moves: schedule.escalateAt !== null, tier }).toEqual({ moves: schedule.autoEscalate, tier });
+      }
+    }
   });
 
   it("seeds the policy under the key the code raises", () => {

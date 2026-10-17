@@ -10,7 +10,7 @@ import type { EscalationRow } from "../escalation/types";
 import { record } from "../ledger";
 import { RequestError, parseRequestBody } from "./request";
 import { requestDecision, withdrawDecision, type UserActor } from "./service";
-import { TierError } from "./tiers";
+import { TierError, type TierRequest } from "./tiers";
 
 jest.mock("../db", () => ({
   beginTransaction: jest.fn(),
@@ -66,7 +66,7 @@ function installDatabase(): void {
       if (world.insertError) throw world.insertError;
       const RequestId = 7 + world.requests.length;
       world.requests.push({
-        AssignmentMode: p.AssignmentMode, DecisionMakers: p.DecisionMakers, JobId: p.JobId, Question: p.Question, RequestId, RequestedAt: NOW,
+        AssignmentMode: p.AssignmentMode, AutoEscalate: p.AutoEscalate, DecisionMakers: p.DecisionMakers, JobId: p.JobId, Question: p.Question, RequestId, RequestedAt: NOW,
         RequestedBy: p.RequestedBy, RequestedByUserId: p.RequestedByUserId, RespondBy: p.RespondBy, RoutineWeeks: p.RoutineWeeks, RowVersion: rowVersion(1),
         SourceAttachmentId: p.SourceAttachmentId, State: "pending", Tier: p.Tier, WithdrawnAt: null, WithdrawnBy: null, WithdrawnByUserId: null, WithdrawnReason: null,
       });
@@ -188,6 +188,7 @@ describe("requestDecision", () => {
     expect(input.context).toEqual({
       decision: {
         assignmentMode: "named",
+        autoEscalate: true,
         callThem: false,
         jobLabel: "Job #12 · Superseded lighting invoice · 25 Temira Crescent",
         question: "Pay the superseded lighting invoice?",
@@ -205,6 +206,7 @@ describe("requestDecision", () => {
     expect(world.requests).toHaveLength(1);
     expect(world.requests[0]).toMatchObject({
       AssignmentMode: "named",
+      AutoEscalate: true,
       JobId: 12,
       Question: "Pay the superseded lighting invoice?",
       RequestedBy: "Alana",
@@ -232,6 +234,7 @@ describe("requestDecision", () => {
     });
     expect(entry.after).toMatchObject({
       assignmentMode: "named",
+      autoEscalate: true,
       callThem: false,
       decisionMakers: { role: null, userIds: [3, 5] },
       escalateAt: "2026-10-19T07:30:00.000Z",
@@ -258,19 +261,46 @@ describe("requestDecision", () => {
   });
 
   describe("the tiers", () => {
-    it("urgent: raised urgent, one reminder at 24 hours, moved up the next business morning after the respond-by", async () => {
-      await requestDecision(conn, ctx(), body({ tier: "urgent" }));
+    it("urgent, ticked to move up: raised urgent, one reminder at 24 hours, moved up the next business morning after the respond-by", async () => {
+      const outcome = await requestDecision(conn, ctx(), body({ autoEscalate: true, tier: "urgent" }));
 
       const input = raise.mock.calls[0][1];
       expect(input.urgent).toBe(true);
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: true, Tier: "urgent" });
       expect(world.requests[0].RespondBy).toEqual(new Date("2026-10-13T07:30:00Z")); // Tue 13 Oct 17:00 Darwin
-      expect(input.context).toMatchObject({ schedule: { remindAt: ["2026-10-12T23:30:00.000Z"] } }); // Tue 13 Oct 09:00 Darwin
+      expect(input.context).toMatchObject({
+        decision: { autoEscalate: true },
+        schedule: { escalateAt: "2026-10-13T23:00:00.000Z", remindAt: ["2026-10-12T23:30:00.000Z"] }, // Tue 13 Oct 09:00 Darwin
+      });
       expect(input.dueAt).toEqual(new Date("2026-10-13T23:00:00Z")); // Wed 14 Oct 08:30 Darwin
+      expect(outcome.request.autoEscalate).toBe(true);
+      expect(outcome.schedule).toMatchObject({ autoEscalate: true, urgent: true });
+      expect(ledger.mock.calls[0][1].after).toMatchObject({ autoEscalate: true, escalateAt: "2026-10-13T23:00:00.000Z" });
     });
+
+    it.each([[{}], [{ autoEscalate: false }], [{ autoEscalate: null }]])(
+      "urgent, not ticked (%j, the default): same deadline and 24-hour reminder, but no due moment, so the engine never moves it up",
+      async (extra) => {
+        const outcome = await requestDecision(conn, ctx(), body({ tier: "urgent", ...extra }));
+
+        const input = raise.mock.calls[0][1];
+        expect(input.urgent).toBe(true);
+        expect(input.dueAt).toBeNull();
+        expect(input.context).toMatchObject({
+          decision: { autoEscalate: false, respondBy: "2026-10-13T07:30:00.000Z" },
+          schedule: { escalateAt: null, remindAt: ["2026-10-12T23:30:00.000Z"] },
+        });
+        expect(world.requests[0]).toMatchObject({ AutoEscalate: false, RespondBy: new Date("2026-10-13T07:30:00Z"), Tier: "urgent" });
+        expect(outcome.request.autoEscalate).toBe(false);
+        expect(outcome.schedule).toMatchObject({ autoEscalate: false, escalateAt: null, urgent: true });
+        expect(ledger.mock.calls[0][1].after).toMatchObject({ autoEscalate: false, escalateAt: null, remindAt: ["2026-10-12T23:30:00.000Z"] });
+        expect(world.events).toEqual(["begin", "insert request", "raise", "ledger:decision.requested", "commit", "announce"]);
+      },
+    );
 
     it("routine: the weeks are kept on the request", async () => {
       await requestDecision(conn, ctx(), body({ routineWeeks: 3, tier: "routine" }));
-      expect(world.requests[0]).toMatchObject({ RoutineWeeks: 3, Tier: "routine" });
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: true, RoutineWeeks: 3, Tier: "routine" });
       expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-11-02T07:30:00Z"));
     });
 
@@ -279,6 +309,30 @@ describe("requestDecision", () => {
       const input = raise.mock.calls[0][1];
       expect(input.dueAt).toEqual(new Date("2026-10-23T07:30:00Z"));
       expect((input.context as { schedule: { remindAt: string[] } }).schedule.remindAt).toHaveLength(4);
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: true });
+    });
+
+    it("soon, routine and fixed refuse to be told not to move up, before they touch the database", async () => {
+      const refused: TierRequest[] = [
+        { autoEscalate: false, tier: "soon" },
+        { autoEscalate: false, routineWeeks: 3, tier: "routine" },
+        { autoEscalate: false, fixedDate: "2026-10-23", tier: "fixed" },
+      ];
+      for (const tier of refused) {
+        await expect(requestDecision(conn, ctx(), { ...body(), tier })).rejects.toMatchObject({
+          code: "auto_escalate_not_optional",
+          name: "TierError",
+          status: 400,
+        });
+      }
+      expect(world.events).toEqual([]);
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+    });
+
+    it("soon, routine and fixed take the tick set to true and move up as they always do", async () => {
+      await requestDecision(conn, ctx(), body({ autoEscalate: true, tier: "soon" }));
+      expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-10-19T07:30:00Z"));
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: true, Tier: "soon" });
     });
 
     it("emergency: no deadline, no reminders, nothing timed; raised urgent, to be recorded and not chased", async () => {
@@ -291,9 +345,17 @@ describe("requestDecision", () => {
         decision: { callThem: true, respondBy: null, tier: "emergency" },
         schedule: { escalateAt: null, remindAt: [] },
       });
-      expect(world.requests[0]).toMatchObject({ RespondBy: null, RoutineWeeks: null, Tier: "emergency" });
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: false, RespondBy: null, RoutineWeeks: null, Tier: "emergency" });
       expect(ledger.mock.calls[0][1].after).toMatchObject({ callThem: true, escalateAt: null, remindAt: [], respondBy: null });
       expect(outcome.schedule).toMatchObject({ callThem: true, timed: false });
+    });
+
+    it.each([[true], [false]])("emergency ignores the tick (%j): it is never chased, so it is stored as not moving up", async (autoEscalate) => {
+      const outcome = await requestDecision(conn, ctx(), body({ autoEscalate, tier: "emergency" }));
+
+      expect(raise.mock.calls[0][1].dueAt).toBeNull();
+      expect(world.requests[0]).toMatchObject({ AutoEscalate: false, Tier: "emergency" });
+      expect(outcome.request.autoEscalate).toBe(false);
     });
 
     it("refuses a bad date before it touches the database", async () => {

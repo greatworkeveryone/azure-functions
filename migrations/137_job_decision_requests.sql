@@ -19,6 +19,12 @@
 --   RespondBy        when an answer is due, UTC; NULL only for an emergency, which
 --                    has no deadline and is never chased.
 --   RoutineWeeks     2 to 8, for a routine request only.
+--   AutoEscalate     whether the request moves up to the raiser's manager on its own
+--                    when nobody has answered (D5). Always true for soon, routine and
+--                    fixed; always false for an emergency, which is never chased; for
+--                    urgent it is the raiser's tick, and it is OFF unless they ticked
+--                    it. An urgent request that is not ticked still gets its reminder.
+--                    There is no default: the app says which, every time.
 --   SourceAttachmentId  the file the decision is about (an email attachment or an
 --                    uploaded PDF), on the same job. The app refuses to delete a
 --                    file a request points at; the foreign key is the backstop.
@@ -37,8 +43,8 @@
 -- The ladder is the people named when it is raised (userTarget), then the raiser's
 -- manager for 16 business hours, then a director. When it first moves up, and when
 -- reminders go out, comes from the tier, not from a number in this row (the engine
--- takes the due moment from the request); the 16 hours is only how long the manager
--- has before a director is told.
+-- takes the due moment from the request, and no due moment at all when AutoEscalate
+-- is off); the 16 hours is only how long the manager has before a director is told.
 --
 -- Additive and re-runnable: the table and each index sit behind an existence check
 -- and nothing existing is touched. The policy is seeded with MERGE ... WHEN NOT
@@ -63,6 +69,7 @@ BEGIN
     Tier                NVARCHAR(12)   NOT NULL,
     RespondBy           DATETIME2(3)   NULL,
     RoutineWeeks        INT            NULL,
+    AutoEscalate        BIT            NOT NULL,
     SourceAttachmentId  INT            NULL,
     State               NVARCHAR(10)   NOT NULL CONSTRAINT DF_JobDecisionRequests_State DEFAULT N'pending',
     RequestedBy         NVARCHAR(200)  NOT NULL,
@@ -86,6 +93,11 @@ BEGIN
     CONSTRAINT CK_JobDecisionRequests_RoutineWeeks CHECK (
       (Tier = N'routine' AND RoutineWeeks IS NOT NULL AND RoutineWeeks BETWEEN 2 AND 8)
       OR (Tier <> N'routine' AND RoutineWeeks IS NULL)
+    ),
+    CONSTRAINT CK_JobDecisionRequests_AutoEscalate CHECK (
+      (Tier = N'emergency' AND AutoEscalate = 0)
+      OR Tier = N'urgent'
+      OR (Tier IN (N'soon', N'routine', N'fixed') AND AutoEscalate = 1)
     ),
     CONSTRAINT CK_JobDecisionRequests_RespondBy CHECK (
       (Tier = N'emergency' AND RespondBy IS NULL)

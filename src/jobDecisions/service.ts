@@ -68,6 +68,7 @@ const isoOrNull = (date: Date | null): string | null => (date ? date.toISOString
 export function requestSnapshot(request: DecisionRequestRow, schedule?: TierSchedule): Record<string, unknown> {
   return {
     assignmentMode: request.assignmentMode,
+    autoEscalate: request.autoEscalate,
     callThem: request.tier === "emergency",
     decisionMakers: request.decisionMakers,
     jobId: request.jobId,
@@ -140,6 +141,7 @@ export async function requestDecision(connection: Connection, context: RequestCo
 
     requestId = await insertRequest(connection, {
       assignmentMode: parsed.makers.mode,
+      autoEscalate: schedule.autoEscalate,
       decisionMakers: { role: makers.role, userIds: makers.userIds },
       jobId: job.jobId,
       question: parsed.question,
@@ -157,6 +159,7 @@ export async function requestDecision(connection: Connection, context: RequestCo
       context: {
         decision: {
           assignmentMode: parsed.makers.mode,
+          autoEscalate: schedule.autoEscalate,
           callThem: schedule.callThem,
           jobLabel: label,
           question: parsed.question,

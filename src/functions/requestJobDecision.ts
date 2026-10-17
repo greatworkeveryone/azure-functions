@@ -14,6 +14,11 @@
 //   assignmentMode: "named" | "role",
 //   decisionMakers: { userIds: [3, 5] }  |  { role: "accounts_manager" },
 //   tier: "emergency" | "urgent" | "soon" | "routine" | "fixed",
+//   autoEscalate?   urgent only: true moves it up to the raiser's manager at the 36-hour
+//                   mark; absent or false (the default) never moves it up, though the
+//                   24-hour reminder still goes. soon / routine / fixed always move up
+//                   and refuse false (400 auto_escalate_not_optional); an emergency
+//                   ignores it
 //   routineWeeks?   2 to 8, routine only
 //   fixedDate?      "YYYY-MM-DD", a Darwin working day, fixed only
 //   sourceAttachmentId?   a file on this job
@@ -21,9 +26,11 @@
 //
 // 201 { request: RequestDto, chase: ChaseDto, callThem }
 //   callThem is true for an emergency: nothing is timed or chased, so the screen
-//   says "call them".
+//   says "call them". request.autoEscalate says whether it will move up on its own;
+//   chase.dueAt is null when it will not (an emergency, or an urgent one not ticked).
 // 400 malformed (code bad_request, or a tier code: invalid_tier, routine_weeks_*,
-//     fixed_date_required, fixed_date_invalid, unexpected_*)
+//     fixed_date_required, fixed_date_invalid, unexpected_*, auto_escalate_invalid,
+//     auto_escalate_not_optional)
 // 403 not a role that may edit jobs
 // 404 job_not_found
 // 409 already_pending (carries the request that is), job_closed

@@ -11,6 +11,12 @@
 //   decisionMakers      { userIds: [3, 5] }  for named, 1 to 25 AppUsers ids
 //                       { role: "accounts_manager" }  for role
 //   tier                emergency | urgent | soon | routine | fixed
+//   autoEscalate        optional true | false. Urgent only: true moves it up to the
+//                       raiser's manager at the 36-hour mark if still unanswered;
+//                       absent or false (the default) never moves it up, and the
+//                       reminder at 24 hours goes either way. Soon, routine and fixed
+//                       always move up, so false is refused (400); an emergency
+//                       ignores it.
 //   routineWeeks        2 to 8, routine only
 //   fixedDate           YYYY-MM-DD, a working day in Darwin, fixed only
 //   sourceAttachmentId  optional: the file on this job the decision is about

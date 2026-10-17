@@ -253,7 +253,7 @@ function installDatabase(): void {
       mockWorld.events.push("insert request");
       const RequestId = 7 + mockWorld.requests.length;
       mockWorld.requests.push({
-        AssignmentMode: p.AssignmentMode, DecisionMakers: p.DecisionMakers, JobId: p.JobId, Question: p.Question, RequestId, RequestedAt: new Date("2026-10-12T00:00:00Z"),
+        AssignmentMode: p.AssignmentMode, AutoEscalate: p.AutoEscalate, DecisionMakers: p.DecisionMakers, JobId: p.JobId, Question: p.Question, RequestId, RequestedAt: new Date("2026-10-12T00:00:00Z"),
         RequestedBy: p.RequestedBy, RequestedByUserId: p.RequestedByUserId, RespondBy: p.RespondBy, RoutineWeeks: p.RoutineWeeks, RowVersion: rowVersion(1),
         SourceAttachmentId: p.SourceAttachmentId, State: "pending", Tier: p.Tier, WithdrawnAt: null, WithdrawnBy: null, WithdrawnByUserId: null, WithdrawnReason: null,
       });
@@ -601,7 +601,7 @@ describe("requestJobDecision", () => {
       expect(res.status).toBe(201);
       const body = json(res);
       expect(body.callThem).toBe(true);
-      expect(body.request).toMatchObject({ callThem: true, respondBy: null, tier: "emergency" });
+      expect(body.request).toMatchObject({ autoEscalate: false, callThem: true, respondBy: null, tier: "emergency" });
       expect(body.chase).toMatchObject({ dueAt: null, remindAt: [], urgent: true });
       const row = [...mockWorld.escalations.values()][0];
       expect(row.dueAt).toBeNull();
@@ -611,22 +611,74 @@ describe("requestJobDecision", () => {
       expect(mockWorld.mail[0].body).not.toContain("Respond by:");
     });
 
-    it("urgent: due by the close of tomorrow, one reminder that morning", async () => {
-      const body = json(await ask({ tier: "urgent" }));
-      expect(body.request.respondBy).toBe("2026-10-13T07:30:00.000Z");
+    it("urgent, ticked to move up: due by the close of tomorrow, one reminder that morning, moves up the morning after", async () => {
+      const res = await ask({ autoEscalate: true, tier: "urgent" });
+      expect(res.status).toBe(201);
+      const body = json(res);
+      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-10-13T07:30:00.000Z", tier: "urgent" });
       expect(body.chase.remindAt).toEqual(["2026-10-12T23:30:00.000Z"]);
       expect(body.chase.dueAt).toBe("2026-10-13T23:00:00.000Z");
+      expect([...mockWorld.escalations.values()][0].dueAt).toEqual(new Date("2026-10-13T23:00:00Z"));
+      expect(mockWorld.requests[0]).toMatchObject({ AutoEscalate: true });
+      expect(json(await get(12)).request.autoEscalate).toBe(true);
+    });
+
+    it.each([[{}], [{ autoEscalate: false }], [{ autoEscalate: null }]])(
+      "urgent, not ticked (%j, the default): the same deadline and reminder, and nothing moves it up",
+      async (extra) => {
+        const res = await ask({ tier: "urgent", ...extra });
+
+        expect(res.status).toBe(201);
+        const body = json(res);
+        expect(body.request).toMatchObject({ autoEscalate: false, callThem: false, respondBy: "2026-10-13T07:30:00.000Z", tier: "urgent" });
+        expect(body.chase).toMatchObject({ dueAt: null, isOverdue: false, remindAt: ["2026-10-12T23:30:00.000Z"], urgent: true });
+        const row = [...mockWorld.escalations.values()][0];
+        expect(row.dueAt).toBeNull();
+        expect(row.context).toMatchObject({
+          decision: { autoEscalate: false },
+          schedule: { escalateAt: null, remindAt: ["2026-10-12T23:30:00.000Z"] },
+        });
+        expect(mockWorld.requests[0]).toMatchObject({ AutoEscalate: false });
+        // the people are told just the same, with the respond-by and as urgent
+        expect(mockWorld.mail).toHaveLength(1);
+        expect(mockWorld.mail[0].subject).toMatch(/^URGENT decision needed: /);
+        expect(mockWorld.mail[0].body).toContain("Respond by: 13/10/2026 17:00 Darwin time");
+        // and what reads it back sees the same
+        const read = json(await get(12));
+        expect(read.request.autoEscalate).toBe(false);
+        expect(read.chase.dueAt).toBeNull();
+        expect(mockWorld.ledger.find((e) => e.action === "decision.requested")?.after).toMatchObject({
+          autoEscalate: false,
+          escalateAt: null,
+          remindAt: ["2026-10-12T23:30:00.000Z"],
+        });
+      },
+    );
+
+    it("soon always moves up: its request says so and the chase is due at the deadline", async () => {
+      const body = json(await ask({ tier: "soon" }));
+      expect(body.request.autoEscalate).toBe(true);
+      expect(body.chase.dueAt).toBe(body.request.respondBy);
+    });
+
+    it("soon accepts the tick set to true, which changes nothing", async () => {
+      const plain = json(await ask({ tier: "soon" }));
+      mockWorld.requests = [];
+      mockWorld.escalations = new Map();
+      const ticked = json(await ask({ autoEscalate: true, tier: "soon" }));
+      expect(ticked.request).toMatchObject({ autoEscalate: true, respondBy: plain.request.respondBy });
+      expect(ticked.chase.dueAt).toBe(plain.chase.dueAt);
     });
 
     it("routine: the weeks are kept", async () => {
       const body = json(await ask({ routineWeeks: 3, tier: "routine" }));
-      expect(body.request).toMatchObject({ respondBy: "2026-11-02T07:30:00.000Z", routineWeeks: 3, tier: "routine" });
+      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-11-02T07:30:00.000Z", routineWeeks: 3, tier: "routine" });
       expect(body.chase.remindAt).toEqual(["2026-10-25T23:00:00.000Z"]); // Mon 26 Oct 08:30 Darwin: a week before
     });
 
     it("fixed: the date given, with reminders 4, 2 and 1 days before and on the day", async () => {
       const body = json(await ask({ fixedDate: "2026-10-23", tier: "fixed" }));
-      expect(body.request).toMatchObject({ fixedDate: "2026-10-23", respondBy: "2026-10-23T07:30:00.000Z", tier: "fixed" });
+      expect(body.request).toMatchObject({ autoEscalate: true, fixedDate: "2026-10-23", respondBy: "2026-10-23T07:30:00.000Z", tier: "fixed" });
       expect(body.chase.remindAt).toEqual([
         "2026-10-18T23:00:00.000Z",
         "2026-10-20T23:00:00.000Z",
@@ -643,6 +695,12 @@ describe("requestJobDecision", () => {
 
     it.each([
       [{ tier: "whenever" }, 400, "invalid_tier"],
+      [{ autoEscalate: false, tier: "soon" }, 400, "auto_escalate_not_optional"],
+      [{ autoEscalate: false, routineWeeks: 3, tier: "routine" }, 400, "auto_escalate_not_optional"],
+      [{ autoEscalate: false, fixedDate: "2026-10-23", tier: "fixed" }, 400, "auto_escalate_not_optional"],
+      [{ autoEscalate: "yes", tier: "urgent" }, 400, "auto_escalate_invalid"],
+      [{ autoEscalate: 0, tier: "urgent" }, 400, "auto_escalate_invalid"],
+      [{ autoEscalate: "false", tier: "emergency" }, 400, "auto_escalate_invalid"],
       [{ tier: "routine" }, 400, "routine_weeks_required"],
       [{ routineWeeks: 12, tier: "routine" }, 400, "routine_weeks_invalid"],
       [{ tier: "fixed" }, 400, "fixed_date_required"],
