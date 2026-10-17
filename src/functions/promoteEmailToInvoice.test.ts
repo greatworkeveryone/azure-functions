@@ -100,3 +100,78 @@ describe("promoteEmailToInvoice — SupplierInvoiceNumber", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("promoteEmailToInvoice — the contractor", () => {
+  const contractorLookups = () =>
+    db.executeQuery.mock.calls.filter((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
+
+  beforeEach(() => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/INSERT INTO JobInvoices/.test(sql)) return [{ JobInvoiceID: 11 }];
+      if (/FROM dbo\.Contractors WHERE ContractorID/.test(sql)) return [{ ContractorName: "Acme Pty Ltd" }];
+      return [];
+    });
+  });
+
+  it("stores the contractor's id with the name when the request has both", async () => {
+    const res = await promoteEmailToInvoice(
+      makeRequest({ ContractorID: 7, ContractorName: "Acme", EmailID: 3, JobID: 42 }),
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(insertParams()).toMatchObject({ ContractorID: 7, ContractorName: "Acme" });
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO JobInvoices/.test(String(c[1])))!;
+    expect(String(insert[1])).toMatch(/\(JobID, Amount, ContractorID, ContractorName,/);
+  });
+
+  it("checks the id against the contractors we have, binding it", async () => {
+    await promoteEmailToInvoice(makeRequest({ ContractorID: 7, EmailID: 3, JobID: 42 }), ctx);
+
+    expect(contractorLookups()).toHaveLength(1);
+    expect(String(contractorLookups()[0][1])).toBe("SELECT ContractorName FROM dbo.Contractors WHERE ContractorID = @ContractorID");
+    expect(contractorLookups()[0][2]).toEqual([expect.objectContaining({ name: "ContractorID", value: 7 })]);
+  });
+
+  it("takes the contractor's own name when only the id comes", async () => {
+    await promoteEmailToInvoice(makeRequest({ ContractorID: 7, EmailID: 3, JobID: 42 }), ctx);
+
+    expect(insertParams()).toMatchObject({ ContractorID: 7, ContractorName: "Acme Pty Ltd" });
+  });
+
+  it("keeps a name that came with the id, even if it isn't the contractor's own", async () => {
+    await promoteEmailToInvoice(makeRequest({ ContractorID: 7, ContractorName: "Acme Plumbing", EmailID: 3, JobID: 42 }), ctx);
+
+    expect(insertParams()).toMatchObject({ ContractorID: 7, ContractorName: "Acme Plumbing" });
+  });
+
+  it("leaves the id null when only a name comes, and never looks the name up", async () => {
+    await promoteEmailToInvoice(makeRequest({ ContractorName: "Acme Plumbing", EmailID: 3, JobID: 42 }), ctx);
+
+    expect(insertParams()).toMatchObject({ ContractorID: null, ContractorName: "Acme Plumbing" });
+    expect(contractorLookups()).toHaveLength(0);
+  });
+
+  it("stores neither when the request names no contractor", async () => {
+    await promoteEmailToInvoice(makeRequest({ EmailID: 3, JobID: 42 }), ctx);
+
+    expect(insertParams()).toMatchObject({ ContractorID: null, ContractorName: null });
+    expect(contractorLookups()).toHaveLength(0);
+  });
+
+  it("refuses an id that isn't a contractor, writing nothing", async () => {
+    db.executeQuery.mockImplementation(async () => []);
+
+    const res = await promoteEmailToInvoice(makeRequest({ ContractorID: 999, EmailID: 3, JobID: 42 }), ctx);
+
+    expect(res).toEqual({ jsonBody: { error: "ContractorID does not match a contractor" }, status: 400 });
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => /INSERT INTO JobInvoices|UPDATE Emails/.test(String(c[1])))).toBe(false);
+  });
+
+  it.each([0, -3, 1.5, "7", 2147483648, true])("refuses %p as an id without looking anything up", async (bad) => {
+    const res = await promoteEmailToInvoice(makeRequest({ ContractorID: bad, EmailID: 3, JobID: 42 }), ctx);
+
+    expect(res).toEqual({ jsonBody: { error: "ContractorID must be a whole number" }, status: 400 });
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+});

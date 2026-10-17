@@ -20,7 +20,6 @@ import {
   commitTransaction,
   createRequestConnection,
   executeQuery,
-  rollbackTransaction,
   SqlParam,
   SqlRow,
 } from "../db";
@@ -82,7 +81,6 @@ import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import {
   deriveNextReviewDate,
-  nextAnniversary,
   nextReviewInputFromRow,
   RESOLVED_REVIEW_DATES_SQL,
   sqlDateToIso,
@@ -100,6 +98,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import {
   CLEAR_SIGN_OFF_SQL,
   readSignOffClearReason,
@@ -301,6 +300,9 @@ interface RegisterTenantApi {
   reviewRatchet: boolean;
   reviewState: "amber" | "green" | "grey" | "red";
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
+  /** Set when the tenancy is archived (D4): out of the register unless asked for. */
+  archivedAt: string | null;
+  archivedBy: string | null;
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
   scheduleVersion: number;
@@ -563,6 +565,8 @@ function tenantRowToApi(
     reviewRatchet,
     reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
+    archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
+    archivedBy: (row.ArchivedBy as string | null) ?? null,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     scheduleSignOff: scheduleSignOffFromRow(row),
@@ -674,8 +678,15 @@ const TENANT_COLUMNS = `
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
+  ArchivedAt, ArchivedBy,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
+
+// The building register: archived tenancies (D4) only when asked for.
+const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+ ORDER BY LegalName`;
+const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+ ORDER BY LegalName`;
 
 const OCCUPANCY_COLUMNS = `
   OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm,
@@ -714,7 +725,9 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
-  const cached = getCachedTenantList(buildingId);
+  // Archived tenancies (D4) are left out unless asked for; that view isn't cached.
+  const includeArchived = request.query.get("includeArchived") === "true";
+  const cached = includeArchived ? null : getCachedTenantList(buildingId);
   if (cached) return { status: 200, jsonBody: cached };
 
   let connection;
@@ -723,8 +736,7 @@ async function getRegisterTenants(
 
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
-       ORDER BY LegalName`,
+      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
 
@@ -785,7 +797,7 @@ async function getRegisterTenants(
     });
 
     const body = { tenants };
-    setCachedTenantList(buildingId, body);
+    if (!includeArchived) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
@@ -2016,9 +2028,10 @@ async function deleteTenantNote(
 }
 
 // ── POST /api/deleteRegisterTenant ───────────────────────────────────────────
-// Hard-deletes a tenant. ON DELETE CASCADE handles occupancies, notes, history
-// and reviews. Refuses if Jobs.TenantID still references this tenant — the
-// caller has to reassign jobs first (mirrors the legacy /deleteTenant behaviour).
+// Body { TenantId }. Hard-deletes an empty draft only (D4, DL-04); anything a
+// tenancy holds or has had recorded against it answers 422 "… Archive it
+// instead." (jobs keep their 400 "Reassign first"). The rule, the lock and the
+// ledger row live in deleteTenancyDraft, shared with deleteTenant.
 
 async function deleteRegisterTenant(
   request: HttpRequest,
@@ -2026,252 +2039,15 @@ async function deleteRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  let body: Record<string, any> | null = null;
-  try {
-    body = (await request.json()) as Record<string, any>;
-    const tenantId = body?.TenantId;
-    if (typeof tenantId !== "number") {
-      return { status: 400, jsonBody: { error: "TenantId (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-
-    const refCount = await executeQuery(
-      connection,
-      "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    if ((refCount[0]?.N as number) > 0) {
-      return {
-        status: 400,
-        jsonBody: {
-          error:
-            "Cannot delete — tenant is assigned to at least one job. Reassign first.",
-        },
-      };
-    }
-
-    invalidateTenant(tenantId);
-    await executeQuery(
-      connection,
-      "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    return { status: 200, jsonBody: { deleted: true, tenantId } };
-  } catch (error: any) {
-    const formatted = formatSqlError(error);
-    context.error("deleteRegisterTenant failed", {
-      error: formatted,
-      payload: summariseBody(body),
-      stack: error?.stack,
-    });
-    return errorResponse("Delete register tenant failed", formatted);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantId?: unknown } | null;
+  const tenantId = body?.TenantId;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantId (number) required" } };
   }
-}
-
-// ── POST /api/applyRentReview ────────────────────────────────────────────────
-// Atomically: completes the RentReviews row, updates Tenants.RentPerAnnum,
-// LastReviewDate (the review's own date), LastReviewIncreasePercent and
-// NextReviewDate — derived from the schedule and the lease anniversary, so a
-// review processed late doesn't move the next one (WP23b). Legacy: WP25
-// replaces this with the review workflow.
-
-async function applyRentReview(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
-  if (roleCheck) return roleCheck;
-  const caller = callerFromToken(token);
-
-  let connection;
-  try {
-    const body = (await request.json()) as Record<string, any>;
-    const {
-      ReviewId,
-      NewRentPerAnnum,
-      IncreasePercent,
-      Source,
-      CpiBaseValue,
-      CpiCurrentValue,
-      CpiIndexUsed,
-    } = body;
-    if (typeof ReviewId !== "string" || !ReviewId) {
-      return { status: 400, jsonBody: { error: "ReviewId required" } };
-    }
-    if (
-      typeof NewRentPerAnnum !== "number" ||
-      !Number.isFinite(NewRentPerAnnum)
-    ) {
-      return { status: 400, jsonBody: { error: "NewRentPerAnnum required" } };
-    }
-
-    connection = await createRequestConnection(token);
-    const reviewRows = await executeQuery(
-      connection,
-      `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, t.RentPerAnnum, t.ReviewIntervalMonths,
-              t.Commencement, t.ScheduledRateSteps, ${RESOLVED_REVIEW_DATES_SQL}
-       FROM dbo.RentReviews r
-       INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
-       WHERE r.ReviewId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: ReviewId }],
-    );
-    if (reviewRows.length === 0) {
-      return { status: 404, jsonBody: { error: "Review not found" } };
-    }
-    const r = reviewRows[0];
-    const tenantId = r.TenantId as number;
-    const oldRent = (r.RentPerAnnum as number | null) ?? 0;
-    const computedIncrease =
-      typeof IncreasePercent === "number"
-        ? IncreasePercent
-        : oldRent > 0
-          ? Math.round(((NewRentPerAnnum - oldRent) / oldRent) * 10000) / 100
-          : 0;
-    const intervalMonths = (r.ReviewIntervalMonths as number | null) ?? 12;
-    // The review settles its own date; the next one follows the schedule or
-    // the anniversary after it, however late this one is processed.
-    const reviewDate = sqlDateToIso(r.ScheduledFor) ?? todayInDarwin();
-    const steps = parseSteps(r.ScheduledRateSteps as string | null | undefined);
-    const settled = nextReviewInputFromRow({ ...r, LastReviewDate: reviewDate, NextReviewDate: null }, steps);
-    const nextReviewIso =
-      (steps.length > 0
-        ? deriveNextReviewDate({
-            ...settled,
-            resolvedReviewDates: new Set([...settled.resolvedReviewDates, reviewDate]),
-          })
-        : nextAnniversary(settled.commencement ?? reviewDate, intervalMonths > 0 ? intervalMonths : 12, reviewDate)) ??
-      reviewDate;
-
-    await beginTransaction(connection);
-    try {
-      await executeQuery(
-        connection,
-        `UPDATE dbo.RentReviews SET
-           Status = 'completed',
-           OldRentPerAnnum = @OldRent,
-           NewRentPerAnnum = @NewRent,
-           IncreasePercent = @IncreasePercent,
-           CpiIndexUsed = @CpiIndexUsed,
-           CpiBaseValue = @CpiBaseValue,
-           CpiCurrentValue = @CpiCurrentValue,
-           CompletedAt = SYSUTCDATETIME(),
-           CompletedById = @CompletedById,
-           CompletedByName = @CompletedByName,
-           Notes = @Notes
-         WHERE ReviewId = @Id`,
-        [
-          { name: "Id", type: TYPES.NVarChar, value: ReviewId },
-          {
-            name: "OldRent",
-            type: TYPES.Decimal,
-            value: oldRent,
-            options: DECIMAL_OPTS.OldRentPerAnnum,
-          },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          {
-            name: "CpiIndexUsed",
-            type: TYPES.NVarChar,
-            value: CpiIndexUsed ?? null,
-          },
-          {
-            name: "CpiBaseValue",
-            type: TYPES.Decimal,
-            value: CpiBaseValue ?? null,
-            options: DECIMAL_OPTS.CpiBaseValue,
-          },
-          {
-            name: "CpiCurrentValue",
-            type: TYPES.Decimal,
-            value: CpiCurrentValue ?? null,
-            options: DECIMAL_OPTS.CpiCurrentValue,
-          },
-          { name: "CompletedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
-          {
-            name: "Notes",
-            type: TYPES.NVarChar,
-            value: Source ? `Applied via ${Source}` : null,
-          },
-        ],
-      );
-
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Tenants SET
-           RentPerAnnum = @NewRent,
-           LastReviewDate = @LastReview,
-           LastReviewIncreasePercent = @IncreasePercent,
-           NextReviewDate = @NextReview,
-           UpdatedAt = SYSUTCDATETIME(),
-           UpdatedById = @UpdatedById,
-           UpdatedByName = @UpdatedByName
-         WHERE TenantId = @TenantId`,
-        [
-          { name: "TenantId", type: TYPES.Int, value: tenantId },
-          {
-            name: "NewRent",
-            type: TYPES.Decimal,
-            value: NewRentPerAnnum,
-            options: DECIMAL_OPTS.NewRentPerAnnum,
-          },
-          { name: "LastReview", type: TYPES.Date, value: reviewDate },
-          {
-            name: "IncreasePercent",
-            type: TYPES.Decimal,
-            value: computedIncrease,
-            options: DECIMAL_OPTS.IncreasePercent,
-          },
-          { name: "NextReview", type: TYPES.Date, value: nextReviewIso },
-          { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-          { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        ],
-      );
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection);
-      throw err;
-    }
-
-    invalidateTenant(tenantId);
-    resolveActivePlannerTasks("tenant", tenantId, ["rent_review"]).catch(
-      (err: unknown) => context.warn("plannerResolve (applyRentReview):", err instanceof Error ? err.message : String(err)),
-    );
-    return {
-      status: 200,
-      jsonBody: {
-        applied: true,
-        increasePercent: computedIncrease,
-        nextReviewDate: nextReviewIso,
-        reviewId: ReviewId,
-        tenantId,
-      },
-    };
-  } catch (error: any) {
-    context.error("applyRentReview failed:", error.message);
-    return errorResponse("Apply rent review failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteRegisterTenant");
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
@@ -2330,7 +2106,7 @@ async function getReviewsDue(
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} (
+       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
          OR (Expiry IS NOT NULL
@@ -2413,6 +2189,7 @@ async function getPortfolioOccupancy(
          FROM dbo.TenantOccupancies
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
+       WHERE t.ArchivedAt IS NULL
        GROUP BY t.BuildingId`,
       [],
     );
@@ -3965,11 +3742,6 @@ app.http("deleteRegisterTenant", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: deleteRegisterTenant,
-});
-app.http("applyRentReview", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: applyRentReview,
 });
 app.http("getReviewsDue", {
   methods: ["GET"],

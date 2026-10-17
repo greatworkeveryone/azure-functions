@@ -41,6 +41,7 @@ function job(over: Partial<JobFacts> = {}): JobFacts {
     firstQuoteRequestAt: null,
     isArchived: false,
     jobId: 1,
+    kind: "facilities",
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
@@ -407,6 +408,77 @@ describe("job policies", () => {
       expect.arrayContaining(["job.stalled_unacknowledged:1", "job.unassigned:2", "system.health:notification_config"]),
     );
     expect(report.errors).toEqual([]);
+  });
+});
+
+describe("Admin / Accounts jobs (plan D2) are on none of the job policies", () => {
+  // The same facts for every kind: a job stuck waiting on a quote and an invoice,
+  // stalled and past its update date; and one nobody owns.
+  const stuck = (jobId: number, kind: string): JobFacts =>
+    job({
+      expectedProgressUpdate: ago(5 * DAY),
+      firstQuoteRequestAt: ago(10 * DAY),
+      jobId,
+      kind,
+      oldestPendingInvoiceAt: ago(10 * DAY),
+      pendingInvoices: 1,
+      requestedContractors: 1,
+      status: "Quote",
+      statusSince: ago(30 * DAY),
+    });
+  const unowned = (jobId: number, kind: string): JobFacts =>
+    job({ assigned: false, createdAt: ago(3 * DAY), jobId, kind, statusSince: ago(3 * DAY) });
+  const raisedFor = (world: World, jobId: number): string[] =>
+    world.calls.raise.filter((c) => c.subjectId === String(jobId)).map((c) => c.policyKey).sort();
+
+  it("raises quote_not_back, invoice_waiting and the rest for facilities and maintenance jobs, and none of them for an admin job that qualifies for every one", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(1, "facilities"), stuck(2, "maintenance"), stuck(3, "admin"), unowned(4, "facilities"), unowned(5, "admin")];
+
+    const report = await sweep(world);
+
+    const WORK = ["job.invoice_waiting", "job.past_due", "job.quote_not_back", "job.stalled_unacknowledged"];
+    expect(raisedFor(world, 1)).toEqual(WORK);
+    expect(raisedFor(world, 2)).toEqual(WORK);
+    expect(raisedFor(world, 4)).toEqual(["job.unassigned"]);
+    expect(raisedFor(world, 3)).toEqual([]);
+    expect(raisedFor(world, 5)).toEqual([]);
+    expect(report.raised).toBe(9);
+  });
+
+  it("selects kinds by name: a job of a kind nobody listed is left alone too", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(6, "projects"), unowned(7, "projects")];
+
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("ends a contractor-flow escalation an admin job already has, as cleared, and keeps the same one on a facilities job", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(3, "admin"), stuck(1, "facilities")];
+    world.rows = [
+      esc({ dueAt: ago(-5), policyKey: "job.quote_not_back", subjectId: "3" }),
+      esc({ dueAt: ago(-5), policyKey: "job.quote_not_back", subjectId: "1" }),
+    ];
+
+    await sweep(world);
+
+    expect(world.calls.autoResolve.map((c) => c.escalationId)).toEqual([1]);
+    expect(world.rows[0]).toMatchObject({ resolutionCode: "condition_cleared", subjectId: "3" });
+    expect(world.rows[1]).toMatchObject({ status: "open", subjectId: "1" });
+  });
+
+  it("still lets a person escalate an admin job by hand: job.manual follows the job being live, not its kind", async () => {
+    const world = makeWorld();
+    world.jobs = [stuck(3, "admin")];
+    world.rows = [esc({ dueAt: ago(-5), policyKey: "job.manual", raisedByKind: "user", subjectId: "3" })];
+
+    await sweep(world);
+
+    expect(world.calls.autoResolve).toEqual([]);
+    expect(world.rows[0].status).toBe("open");
   });
 });
 

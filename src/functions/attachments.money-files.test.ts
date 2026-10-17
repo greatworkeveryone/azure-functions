@@ -42,14 +42,17 @@ const post = (body: unknown) => ({ headers: { get: () => null }, json: async () 
 
 let links: { Id: number; Kind: string; Number: string | null }[];
 let target: Record<string, unknown> | null;
+let tenancyDocument: { LegalName: string }[];
 
 beforeEach(() => {
   jest.clearAllMocks();
   links = [];
+  tenancyDocument = [];
   target = { FileName: "quote.pdf", JobID: 42, Linked: 1, LockedBecause: null, Number: "261014-QT-42-ACM-1" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM Attachments a\s+LEFT JOIN Jobs/.test(sql)) return [{ BlobName: "attachments/jobs/42/3f2b6c1e-8a4d-4f7e-9b21-6c0d5e7a9f10.pdf", JobID: 42, MyBuildingsConfirmedAt: null, UploadedBy: "fay-oid" }];
     if (/AS Kind/.test(sql)) return links;
+    if (/FROM dbo\.TenancyAttachments ta\s+JOIN dbo\.Tenants t/.test(sql)) return tenancyDocument;
     if (/FROM dbo\.(Quotes|PurchaseOrders) r WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return target ? [target] : [];
     if (/FROM dbo\.AppUsers WHERE EntraOid/.test(sql)) return [{ UserID: 3 }];
     if (/SELECT BuildingID FROM Jobs/.test(sql)) return [{ BuildingID: 5 }];
@@ -91,6 +94,17 @@ describe("deleteAttachment", () => {
     await handler("deleteAttachment")(post({ AttachmentID: 7 }), ctx);
     const sql = String(db.executeQuery.mock.calls.find((c: unknown[]) => /AS Kind/.test(String(c[1])))[1]);
     expect(sql).toMatch(/IF OBJECT_ID\(N'dbo\.JobInvoiceAttachments', N'U'\) IS NOT NULL/);
+  });
+
+  it("refuses (422) a tenancy's lease document — those are archived, never deleted (DL-19)", async () => {
+    tenancyDocument = [{ LegalName: "Acme Pty Ltd" }];
+    const res = await handler("deleteAttachment")(post({ AttachmentID: 7 }), ctx);
+    expect(res).toEqual({
+      jsonBody: { error: "This file is a lease document of Acme Pty Ltd, so it can't be deleted. Archive it instead." },
+      status: 422,
+    });
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+    expect(ran(/DELETE FROM Attachments/)).toBe(false);
   });
 
   it("still deletes a file nothing links, for its uploader", async () => {

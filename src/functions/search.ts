@@ -33,8 +33,9 @@ const TENANTS_SQL = `
     b.BuildingName AS subtitle
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.Id = t.BuildingId
-  WHERE t.LegalName    LIKE @q ESCAPE '\\'
-     OR t.TradingName  LIKE @q ESCAPE '\\'
+  WHERE (t.LegalName  LIKE @q ESCAPE '\\'
+     OR t.TradingName  LIKE @q ESCAPE '\\')
+    AND t.ArchivedAt IS NULL
   ORDER BY
     CASE WHEN t.LegalName LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     t.LegalName

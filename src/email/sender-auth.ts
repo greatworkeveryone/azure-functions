@@ -41,7 +41,7 @@ export function orgEmailDomains(): string[] {
     .filter((d) => d.length > 0);
 }
 
-function domainOf(address: string): string | null {
+export function domainOf(address: string): string | null {
   const at = address.trim().lastIndexOf("@");
   const domain = at >= 0 ? address.trim().slice(at + 1).toLowerCase() : "";
   return domain.length > 0 ? domain : null;

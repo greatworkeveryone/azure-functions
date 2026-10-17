@@ -14,7 +14,7 @@ import type { LedgerAction } from "./actions";
 import { resolveLedgerActor } from "./actor";
 import { record } from "./index";
 import { jobScope, ledgerReason, type LedgerScope } from "./moneyDecisions";
-import type { LedgerActor } from "./types";
+import type { LedgerActor, LedgerEntryInput } from "./types";
 
 // Refused attempts (WP19b): when an approval endpoint turns a decision down,
 // one `denied` row (or `sod_blocked` for self-approval) lands in the ledger so
@@ -75,9 +75,42 @@ async function subjectScope(connection: Connection, subject: RefusalSubject): Pr
   };
 }
 
-function report(attempted: string, subject: string, err: unknown): void {
-  console.error(`[ledger] could not record a refused ${attempted} on ${subject}:`, err instanceof Error ? err.message : err);
-  Sentry.captureException(err, { extra: { attempted, subject }, tags: { area: "ledger-refusal" } });
+function report(attempted: string, subject: string, err: unknown, area = "ledger-refusal"): void {
+  console.error(`[ledger] could not record a ${attempted} on ${subject}:`, err instanceof Error ? err.message : err);
+  Sentry.captureException(err, { extra: { attempted, subject }, tags: { area } });
+}
+
+/**
+ * False once this person has had their share of refusal and failure rows for
+ * the minute. Both are written to a table that can never be emptied, so a
+ * person hammering a refused (or failing) endpoint must not fill it.
+ */
+export function underRowLimit(actor: LedgerActor, what: string): boolean {
+  const who = actor.kind === "user" ? (actor.userId ?? actor.name) : actor.name;
+  if (checkRateLimit(`ledger-refusal:${who}`, { limit: REFUSALS_PER_MINUTE }).allowed) return true;
+  console.warn(`[ledger] rows for ${who} are rate limited; not recording this ${what}`);
+  return false;
+}
+
+/**
+ * Writes one row of its own, in a transaction of its own, and never throws: for
+ * a row about something that did not happen (a refused attempt, a send that
+ * failed), which must neither undo nor change the answer the caller was going
+ * to get anyway.
+ */
+export async function recordApart(connection: Connection, entry: LedgerEntryInput, what: string, area?: string): Promise<void> {
+  try {
+    await beginTransaction(connection);
+    try {
+      await record(connection, entry);
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+  } catch (err) {
+    report(what, `${entry.subject.type} ${entry.subject.id}`, err, area);
+  }
 }
 
 /**
@@ -99,17 +132,13 @@ export async function recordRefusal(
     // An account with no role yet has no authority to be refused, and the
     // ledger can't name it: nothing to record.
     if (actor.kind === "user" && !actor.role.trim()) return;
-    const who = actor.kind === "user" ? (actor.userId ?? actor.name) : actor.name;
-    if (!checkRateLimit(`ledger-refusal:${who}`, { limit: REFUSALS_PER_MINUTE }).allowed) {
-      console.warn(`[ledger] refusal rows for ${who} are rate limited; not recording this ${refusal.attempted}`);
-      return;
-    }
+    if (!underRowLimit(actor, `refused ${refusal.attempted}`)) return;
     const scope = jobId !== undefined ? await jobScope(connection, jobId) : await subjectScope(connection, subject);
     if (!scope) return;
 
-    await beginTransaction(connection);
-    try {
-      await record(connection, {
+    await recordApart(
+      connection,
+      {
         action: refusal.action ?? "denied",
         actor,
         before: { attempted: refusal.attempted, ...refusal.state },
@@ -118,14 +147,11 @@ export async function recordRefusal(
         reason: ledgerReason(refusal.message),
         ruleApplied: refusal.code,
         subject,
-      });
-      await commitTransaction(connection);
-    } catch (err) {
-      await rollbackTransaction(connection).catch(() => {});
-      throw err;
-    }
+      },
+      `refused ${refusal.attempted}`,
+    );
   } catch (err) {
-    report(refusal.attempted, `${subject.type} ${subject.id}`, err);
+    report(`refused ${refusal.attempted}`, `${subject.type} ${subject.id}`, err);
   }
 }
 
@@ -139,33 +165,57 @@ export interface RefusalTarget {
   subjectType: RefusalSubjectType;
 }
 
+/** The first target the request body fits: it names an existing-looking record
+ *  and is a decision this target ledgers. */
+function matchTarget(
+  targets: RefusalTarget[],
+  body: Record<string, unknown>,
+): { attempted: LedgerAction; id: number; subjectType: RefusalSubjectType } | null {
+  for (const target of targets) {
+    const id = body[target.idField];
+    if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) continue;
+    const attempted = typeof target.attempted === "function" ? target.attempted(body) : target.attempted;
+    if (attempted !== null) return { attempted, id, subjectType: target.subjectType };
+  }
+  return null;
+}
+
 /**
  * For a refusal that happens before the handler has a connection or has read
  * its body (the role gate, the director-only check): finds the subject from the
  * request body and records the refusal. Does nothing when the body names no
  * existing record. Never throws.
+ *
+ * An endpoint whose decisions are about different records (a payment is made
+ * against an invoice, but its amount is changed on the payment) lists one
+ * target for each; the first the body fits is used.
  */
 export async function recordRefusalForRequest(
   request: HttpRequest,
   token: string,
-  target: RefusalTarget,
+  target: RefusalTarget | RefusalTarget[],
   refusal: Omit<Refusal, "attempted">,
 ): Promise<void> {
+  const targets = Array.isArray(target) ? target : [target];
   let connection: Connection | undefined;
   try {
     const raw = await request.json().catch(() => null);
     const body: Record<string, unknown> = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
-    const id = body[target.idField];
-    if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) return;
-    const attempted = typeof target.attempted === "function" ? target.attempted(body) : target.attempted;
-    if (attempted === null) return;
+    const match = matchTarget(targets, body);
+    if (!match) return;
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return;
-    await recordRefusal(connection, actor, { id, type: target.subjectType }, { ...refusal, attempted });
+    await recordRefusal(
+      connection,
+      actor,
+      { id: match.id, type: match.subjectType },
+      { ...refusal, attempted: match.attempted },
+    );
   } catch (err) {
-    report(typeof target.attempted === "function" ? "decision" : target.attempted, target.subjectType, err);
+    const first = targets[0];
+    report(`refused ${typeof first.attempted === "function" ? "decision" : first.attempted}`, first.subjectType, err);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -180,7 +230,7 @@ export async function recordRoleRefusal(
   request: HttpRequest,
   token: string,
   denied: HttpResponseInit,
-  target: RefusalTarget,
+  target: RefusalTarget | RefusalTarget[],
 ): Promise<void> {
   if (denied.status !== 403) return;
   const details = (denied.jsonBody as { details?: unknown } | undefined)?.details;

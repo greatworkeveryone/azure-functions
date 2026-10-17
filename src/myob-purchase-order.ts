@@ -1,203 +1,127 @@
-// MYOB Purchase Order (Service Order) API client.
+// MYOB Purchases client: Service Quotes, Orders and Bills in one company file.
+// Every call goes through myobRequest, so the allowlist, the period guard on
+// the bytes sent, the file's mode and the CFO's controls apply, and headers
+// (with the token) are built only after those pass. Bodies are passed as the
+// exact string to send: the proposal pipeline hands over the canonical JSON
+// whose hash the person approved (decision 12).
 //
-// Wraps the MYOB AccountRight v2 Service Order endpoints.
-// Shares myob-client.ts's request path (and so myobRequest's audit log and
-// MYOB_WRITES_ENABLED gate): tokens come from dbo.MyobAuth via
-// getValidMyobAccessToken(), refreshed as needed. Every call takes the actor it
-// is made on behalf of and an optional correlationId.
+// There is no delete and no convert-to-bill here, by design (decision 11):
+// Floorplan never deletes anything in MYOB, and the order-to-bill path stays
+// off until the CFO approves it. A PUT is allowed only for a record Floorplan
+// created (myob-request-guard.ts checks MyobProposals).
 //
-// API reference: https://developer.myob.com/api/myob-business-api/v2/purchase/order/order_service/
-//
-// Required environment variables (same as myob-client.ts):
-//   MYOB_API_BASE          — e.g. https://api.myob.com/accountright
-//   MYOB_COMPANY_FILE_ID   — GUID of the company file
-//   MYOB_CLIENT_ID         — sent as x-myobapi-key header
-//   MYOB_CLIENT_SECRET     — used by the token-refresh flow
-//   MYOB_WEB_APP_URL       — base URL for "View on MYOB" links
+// API reference: developer.myob.com/api/myob-business-api/v2/purchase/order/order_service/
 
-import { myobRequest, type MyobActor } from "./myob-api-log";
-import { myobBase, myobFetch, myobHeaders } from "./myob-client";
+import { myobRequest, type MyobActor, type MyobResponse } from "./myob-api-log";
+import { myobHeaders } from "./myob-client";
+import { myobApiBase } from "./myob-endpoints";
 
-const MYOB_WEB_APP_URL     = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
+export type PurchaseKind = "Bill" | "Order" | "Quote";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+const MYOB_WEB_APP_URL = process.env.MYOB_WEB_APP_URL ?? "https://app.myob.com";
 
-export interface MyobSupplierRef {
-  UID: string;
-  Name?: string;
+const serviceUrl = (kind: PurchaseKind, companyFileId: string) => `${myobApiBase()}/${companyFileId}/Purchase/${kind}/Service`;
+const headers = (actor: MyobActor, correlationId?: string) => () => myobHeaders(null, actor, correlationId);
+
+export function myobWebUrl(kind: PurchaseKind, uid: string): string {
+  const path = kind === "Bill" ? "Bills/AccountsPayable/Bill" : kind === "Quote" ? "Purchase/Quotes/Quote" : "Purchase/Orders/Order";
+  return `${MYOB_WEB_APP_URL}/app/#/In/${path}/${uid}`;
 }
 
-export interface MyobAccountRef {
-  UID: string;
-  DisplayID?: string;
-  Name?: string;
+function ensureOk(response: MyobResponse, what: string): void {
+  if (!response.ok) throw new MyobPurchaseError(response.status, `MYOB refused to ${what} (HTTP ${response.status}): ${response.text.slice(0, 500)}`);
 }
 
-export interface MyobTaxCodeRef {
-  UID: string;
-  Code?: string;
+/** MYOB answered, and the answer was no. Its words are kept for the CFO. */
+export class MyobPurchaseError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "MyobPurchaseError";
+    this.status = status;
+  }
 }
 
-export type MyobServiceOrderLineType = "Account" | "Header" | "Subtotal";
-
-export interface MyobServiceOrderLine {
-  /** Line type — "Account" for a charge line, "Header" for a heading. */
-  Type: MyobServiceOrderLineType;
-  Description: string;
-  UnitPrice?: number;
-  Units?: number;
-  Total?: number;
-  TaxCode?: MyobTaxCodeRef;
-  Account?: MyobAccountRef;
-}
-
-export interface CreateMyobServiceOrderParams {
-  /** MYOB supplier (vendor) UID — required by the MYOB API. */
-  Supplier: MyobSupplierRef;
-  /** Purchase order number / reference. */
-  Number?: string;
-  /** ISO date string, e.g. "2026-04-25". */
-  Date?: string;
-  /** ISO date string for expected delivery. */
-  PromisedDate?: string;
-  Memo?: string;
-  Lines: MyobServiceOrderLine[];
-  IsTaxInclusive?: boolean;
-  ShipToAddress?: string;
-}
-
-export interface MyobServiceOrder extends CreateMyobServiceOrderParams {
-  UID: string;
-  RowVersion?: string;
-  LastModified?: string;
-  /** "Open" or "ConvertedToBill" */
-  Status?: string;
-  Subtotal?: number;
-  TotalTax?: number;
-  TotalAmount?: number;
-  BalanceDueAmount?: number;
-  URI?: string;
-}
-
-export interface MyobServiceOrderResponse {
-  uid: string;
-  /** Direct link to this order in the MYOB web app. */
-  url: string;
-}
-
-// ── URL builder ───────────────────────────────────────────────────────────────
-
-export function buildMyobOrderUrl(uid: string): string {
-  return `${MYOB_WEB_APP_URL}/app/#/In/Purchase/Orders/Order/${uid}`;
-}
-
-// ── API calls ─────────────────────────────────────────────────────────────────
-
-/**
- * Creates a Service Order (Purchase Order) in MYOB.
- * POST /{companyFileId}/Purchase/Order/Service
- * Returns 204 with the new UID in the Location header.
- */
-export async function myobCreateServiceOrder(
-  params: CreateMyobServiceOrderParams,
-  sqlToken: string | null,
+/** The record with this number, if MYOB already has one (so a retry links instead of duplicating). */
+export async function findPurchaseByNumber(
+  kind: PurchaseKind,
+  companyFileId: string,
+  number: string,
   actor: MyobActor,
   correlationId?: string,
-): Promise<MyobServiceOrderResponse> {
+): Promise<Record<string, unknown> | null> {
+  const filter = encodeURIComponent(`Number eq '${number.replace(/'/g, "''")}'`);
   const response = await myobRequest({
     actor,
-    body: params,
     correlationId,
-    headers: () => myobHeaders(sqlToken, actor, correlationId),
-    method: "POST",
-    purpose: "create-service-order",
-    url: `${myobBase()}/Purchase/Order/Service`,
-  });
-
-  if (!response.ok) {
-    throw new Error(`MYOB createServiceOrder ${response.status}: ${response.text}`);
-  }
-
-  // Location: https://api.myob.com/accountright/{cfId}/Purchase/Order/Service/{uid}
-  const uid = response.myobUid ?? "";
-  return { uid, url: buildMyobOrderUrl(uid) };
-}
-
-/**
- * Fetches a single Service Order by MYOB UID.
- * GET /{companyFileId}/Purchase/Order/Service/{uid}
- */
-export async function myobGetServiceOrder(
-  uid: string,
-  sqlToken: string | null,
-  actor: MyobActor,
-  correlationId?: string,
-): Promise<MyobServiceOrder> {
-  return myobFetch({
-    actor,
-    correlationId,
+    headers: headers(actor, correlationId),
     method: "GET",
-    path: `/Purchase/Order/Service/${uid}`,
-    purpose: "get-service-order",
-    sqlToken,
-  }) as Promise<MyobServiceOrder>;
+    purpose: `find-${kind.toLowerCase()}-by-number`,
+    url: `${serviceUrl(kind, companyFileId)}?$filter=${filter}`,
+  });
+  ensureOk(response, `look up ${kind.toLowerCase()} ${number}`);
+  const items = response.json<{ Items?: Record<string, unknown>[] }>().Items ?? [];
+  return items.find((item) => item.Number === number) ?? null;
 }
 
-/**
- * Updates an existing Service Order in MYOB.
- * PUT /{companyFileId}/Purchase/Order/Service/{uid}
- * RowVersion must be included (fetch the order first to get the current value).
- */
-export async function myobUpdateServiceOrder(
+export async function getPurchase(
+  kind: PurchaseKind,
+  companyFileId: string,
   uid: string,
-  params: Partial<MyobServiceOrder>,
-  sqlToken: string | null,
+  actor: MyobActor,
+  correlationId?: string,
+): Promise<Record<string, unknown>> {
+  const response = await myobRequest({
+    actor,
+    correlationId,
+    headers: headers(actor, correlationId),
+    method: "GET",
+    purpose: `read-back-${kind.toLowerCase()}`,
+    url: `${serviceUrl(kind, companyFileId)}/${uid}`,
+  });
+  ensureOk(response, `read ${kind.toLowerCase()} ${uid}`);
+  return response.json<Record<string, unknown>>();
+}
+
+/** POSTs the exact bytes given. Returns MYOB's uid for the new record. */
+export async function createPurchase(
+  kind: PurchaseKind,
+  companyFileId: string,
+  body: string,
+  actor: MyobActor,
+  correlationId?: string,
+): Promise<string> {
+  const response = await myobRequest({
+    actor,
+    body,
+    correlationId,
+    headers: headers(actor, correlationId),
+    method: "POST",
+    purpose: `create-${kind.toLowerCase()}`,
+    url: serviceUrl(kind, companyFileId),
+  });
+  ensureOk(response, `create the ${kind.toLowerCase()}`);
+  if (!response.myobUid) throw new MyobPurchaseError(response.status, "MYOB accepted the record but didn't say its UID");
+  return response.myobUid.toLowerCase();
+}
+
+/** PUTs the exact bytes given to a record Floorplan created. */
+export async function putPurchase(
+  kind: PurchaseKind,
+  companyFileId: string,
+  uid: string,
+  body: string,
   actor: MyobActor,
   correlationId?: string,
 ): Promise<void> {
-  await myobFetch({
+  const response = await myobRequest({
     actor,
-    body: params,
+    body,
     correlationId,
+    headers: headers(actor, correlationId),
     method: "PUT",
-    path: `/Purchase/Order/Service/${uid}`,
-    purpose: "update-service-order",
-    sqlToken,
+    purpose: `update-${kind.toLowerCase()}`,
+    url: `${serviceUrl(kind, companyFileId)}/${uid}`,
   });
-}
-
-/**
- * Deletes a Service Order in MYOB.
- * DELETE /{companyFileId}/Purchase/Order/Service/{uid}
- */
-export async function myobDeleteServiceOrder(
-  uid: string,
-  sqlToken: string | null,
-  actor: MyobActor,
-  correlationId?: string,
-): Promise<void> {
-  await myobFetch({
-    actor,
-    correlationId,
-    method: "DELETE",
-    path: `/Purchase/Order/Service/${uid}`,
-    purpose: "delete-service-order",
-    sqlToken,
-  });
-}
-
-/**
- * Converts a Service Order to a Purchase Bill.
- *
- * The MYOB AccountRight API does not expose a direct "convert order to bill"
- * endpoint. Convert the order to a bill manually in the MYOB web app. Track
- * https://developer.myob.com for future API support.
- */
-export async function myobConvertOrderToBill(
-  _uid: string,
-): Promise<{ billUid: string; billUrl: string }> {
-  throw new Error(
-    "myobConvertOrderToBill is not supported by the MYOB AccountRight API. " +
-      "Convert the order to a bill manually in the MYOB web app.",
-  );
+  ensureOk(response, `update ${kind.toLowerCase()} ${uid}`);
 }

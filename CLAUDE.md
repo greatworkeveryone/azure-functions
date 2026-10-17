@@ -41,10 +41,10 @@ migrations/         # SQL migration scripts
 
 No data loss once Floorplan is live. The full rules are in Connor's `~/.claude/rules/database-safety.md`; the ones that bite here:
 
-- Migrations run automatically at production startup (`functions/startup.ts` → `migrate.ts`, tracked in `dbo.schema_migrations`, filename order) and a failing one stops the API. Every migration is additive and idempotent; dry-run it on a restored copy of production before it merges to the deploy branch.
+- Production migrations are applied by hand: the app's SQL identity has no DDL rights, so startup only checks and warns. `npm run migrate` lists pending files; `npm run migrate -- --apply` applies them as the signed-in admin (`az login`). Every migration is additive and idempotent; dry-run it first on a restored copy (`npm run migrate -- --apply --target <server>/<copy>`). There is no default database.
 - Destructive SQL (DROP TABLE/COLUMN, TRUNCATE, DELETE, ALTER COLUMN, sp_rename) goes in its own migration with a `-- DESTRUCTIVE: <reason> · approved by <person> <YYYY-MM-DD>` header, after copying the affected rows to a backup table. Never edit or renumber an applied migration.
 - Archive, don't delete: business records get `ArchivedAt`/`ArchivedBy`. Hard deletes and `deleteBlob` calls live only at the reviewed call sites in `src/__tests__/db-safety-guards.test.ts`; adding one means reviewing it and editing that allowlist.
-- Timers that delete or rewrite are off unless their flag equals `"true"`, select positively (exactly what may go), and log counts.
+- Timers that delete or rewrite are off unless their flag equals `"true"`, select positively (exactly what may go), and log counts. New timers and blob deletes are listed in `src/__tests__/destructive-ops-inventory.test.ts`.
 - Writes to shared records carry a version and return 409 when stale.
 
 ## Auth

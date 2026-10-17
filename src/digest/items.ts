@@ -10,6 +10,10 @@
 //   due           a live job assigned to them whose next-update date is today or past
 //   keys          keys still out past their expected return, for facilities roles
 //
+// Approvals and due items are the contractor and money flow, so jobs whose kind
+// doesn't run it (Admin / Accounts, plan D2) never appear in them; escalations
+// about such a job still do, because someone was asked to act.
+//
 // Not here yet:
 //   purchase orders  no approval status exists on dbo.PurchaseOrders at this base.
 //   tenancies        "not signed off, for accounts managers" needs the schedule
@@ -22,6 +26,7 @@ import { canApprove, decideAuthority, type AuthorityFacts } from "../approvalAut
 import { darwinDateKey } from "../escalation/businessTime";
 import { targetUsers } from "../escalation/notifier";
 import type { DirectoryUser } from "../escalation/types";
+import { runsContractorFlow } from "../jobKinds";
 import { DIGEST_MAX_LINES } from "./config";
 import { clip, formatDisplayDate } from "./format";
 import type { DigestFacts, DigestItem, DigestItemKind, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
@@ -98,6 +103,7 @@ function mayApprove(user: DigestUser, approval: WaitingApproval, ctx: DeriveCont
 
 function approvalItems(user: DigestUser, facts: DigestFacts, ctx: DeriveContext): DigestItem[] {
   return facts.waitingApprovals
+    .filter((approval) => runsContractorFlow(approval.jobKind))
     .filter((approval) => mayApprove(user, approval, ctx))
     .map((approval) => ({
       dedupeKey: `job:${approval.jobId}`,
@@ -127,7 +133,7 @@ function dueItems(user: DigestUser, facts: DigestFacts, ctx: DeriveContext): Dig
   const todayKey = darwinDateKey(ctx.now);
   const items: DigestItem[] = [];
   for (const job of facts.dueJobs) {
-    if (job.assignedToUserId !== user.userId) continue;
+    if (job.assignedToUserId !== user.userId || !runsContractorFlow(job.kind)) continue;
     const item = dueItem(job, todayKey);
     if (item) items.push(item);
   }

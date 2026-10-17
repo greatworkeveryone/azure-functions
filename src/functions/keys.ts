@@ -4,6 +4,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import ExcelJS from "exceljs";
+import { assertSafeXlsx, XlsxRejectedError } from "../xlsx-safe";
 import { TYPES } from "tedious";
 import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import {
@@ -1169,6 +1170,13 @@ async function bulkImportKeys(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    // Refuse zip bombs before ExcelJS unpacks the file into memory (sprint F, code review 2).
+    try {
+      assertSafeXlsx(buffer);
+    } catch (error) {
+      if (error instanceof XlsxRejectedError) return { status: 400, jsonBody: { error: error.message } };
+      throw error;
+    }
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
     // Use "Keys" sheet by name — don't rely on index since the template has hidden reference sheets

@@ -3,6 +3,7 @@ import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { runsContractorFlow } from "../jobKinds";
 import {
   syncJobAwaitingAccounts,
   syncJobAwaitingFacilitiesApproval,
@@ -18,6 +19,7 @@ import {
   graphGetPlannerTask,
   resolveActivePlannerTasks,
 } from "../planner";
+import { plannerSyncEnabled } from "../plannerFlag";
 import {
   buildJobTaskDescription,
   buildTaskTitle,
@@ -73,6 +75,10 @@ export async function plannerSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
+  // Planner is being retired: unless PLANNER_SYNC_ENABLED is "true" this run does
+  // nothing, whatever else (APP_BASE_URL, the PLANNER_* ids) is set.
+  if (!plannerSyncEnabled()) return;
+
   context.log("plannerSyncTimer: starting");
 
   const {
@@ -128,6 +134,7 @@ export async function plannerSyncTimer(
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
+         AND t.ArchivedAt IS NULL
          AND (t.Expiry IS NOT NULL OR t.NextReviewDate IS NOT NULL)`,
     );
 
@@ -354,7 +361,7 @@ export async function plannerSyncTimer(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
+      `SELECT j.JobID, j.Title, j.Kind,
               COALESCE(b.BuildingName, '') AS BuildingName,
               CONVERT(VARCHAR(23), j.ExpectedProgressUpdate, 126) AS ExpectedProgressUpdate
        FROM Jobs j
@@ -368,12 +375,15 @@ export async function plannerSyncTimer(
          AND j.ExpectedProgressUpdate < DATEADD(DAY, 1, CAST(SYSUTCDATETIME() AS DATE))`,
     );
 
-    const jobs: PlannerJobRow[] = jobRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-      expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
-    }));
+    // Admin / Accounts jobs (plan D2) have no contractor to chase, so no update task.
+    const jobs: PlannerJobRow[] = jobRows
+      .filter((r) => runsContractorFlow(r.Kind))
+      .map((r) => ({
+        jobId: r.JobID as number,
+        title: r.Title as string,
+        buildingName: (r.BuildingName as string | null) ?? null,
+        expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
+      }));
 
     let jobCreated = 0;
     let jobSkipped = 0;

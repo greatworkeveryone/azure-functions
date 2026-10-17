@@ -270,6 +270,25 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     buildListWhere({ status: "active", ...over });
   const names = (params: { name: string }[]) => params.map((p) => p.name);
 
+  // What SQL Server does with `value LIKE pattern ESCAPE '\'`: % is any run of
+  // characters, _ any one character, [ opens a set, and a backslash makes the
+  // next character literal. Run on the pattern we actually bind.
+  const regexLiteral = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function sqlLike(pattern: string, value: string): boolean {
+    let source = "";
+    for (let i = 0; i < pattern.length; i += 1) {
+      const ch = pattern[i];
+      if (ch === "\\") {
+        i += 1;
+        source += regexLiteral(pattern[i] ?? "");
+      } else if (ch === "%") source += "[\\s\\S]*";
+      else if (ch === "_") source += "[\\s\\S]";
+      else if (ch === "[") throw new Error("an unescaped [ opens a character set");
+      else source += regexLiteral(ch);
+    }
+    return new RegExp(`^${source}$`).test(value);
+  }
+
   it("mine: named for me, or aimed at my role and not named for anyone else", () => {
     const { params, whereSql } = where({ view: "mine", viewer: viewer(["facilities_manager"]) });
 
@@ -344,6 +363,135 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     expect(whereSql).toContain("e.Kind = @Kind");
     expect(whereSql).toContain("e.Urgent = @Urgent");
     expect(names(params)).toEqual(expect.arrayContaining(["SubjectType", "SubjectId", "PolicyKey", "Kind", "Urgent"]));
+  });
+
+  describe("the policy filter: one exact key, or a domain by prefix", () => {
+    const KEYS = [
+      "finance.attribution_disputed",
+      "finance.variance_disputed",
+      "financex.attribution_disputed",
+      "finance",
+      "job.manual",
+      "job.past_due",
+      "rent_review.overdue",
+      "rentXreview.overdue",
+      "rent_review",
+    ];
+    // Status all and the director's all view add no clauses of their own, so
+    // what is left in the WHERE is the policy filter.
+    const filterBy = (over: Partial<ListFilter>) => where({ status: "all", view: "all", viewer: viewer(["director"]), ...over });
+    const boundPrefix = (prefix: string): string =>
+      filterBy({ policyKeyPrefix: prefix }).params.find((p) => p.name === "PolicyKeyPrefix")?.value as string;
+    const matching = (prefix: string): string[] => KEYS.filter((key) => sqlLike(boundPrefix(prefix), key));
+
+    it("an exact key is an equality on a bound value, with no LIKE", () => {
+      const { params, whereSql } = filterBy({ policyKey: "finance.myob_write_failed" });
+
+      expect(whereSql).toContain("e.PolicyKey = @PolicyKey");
+      expect(whereSql).not.toContain("LIKE");
+      expect(params.find((p) => p.name === "PolicyKey")).toEqual({ name: "PolicyKey", type: TYPES.NVarChar, value: "finance.myob_write_failed" });
+      expect(params.some((p) => p.name === "PolicyKeyPrefix")).toBe(false);
+    });
+
+    it("a prefix is an escaped LIKE on a bound pattern", () => {
+      const { params, whereSql } = filterBy({ policyKeyPrefix: "finance." });
+
+      expect(whereSql).toBe("WHERE e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'");
+      expect(params.find((p) => p.name === "PolicyKeyPrefix")).toEqual({ name: "PolicyKeyPrefix", type: TYPES.NVarChar, value: "finance.%" });
+      expect(params.some((p) => p.name === "PolicyKey")).toBe(false);
+    });
+
+    it("finance. matches both finance policies, and not financex. or a bare finance", () => {
+      expect(matching("finance.")).toEqual(["finance.attribution_disputed", "finance.variance_disputed"]);
+    });
+
+    it("underscores in a prefix are literal, not any-one-character", () => {
+      expect(boundPrefix("rent_review.")).toBe("rent\\_review.%");
+      expect(matching("rent_review.")).toEqual(["rent_review.overdue"]);
+      // The test would catch a missing escape: unescaped, _ matches the X.
+      expect(sqlLike("rent_review.%", "rentXreview.overdue")).toBe(true);
+    });
+
+    it("the other LIKE characters in a prefix are literal too", () => {
+      expect(boundPrefix("a%b[c\\d.")).toBe("a\\%b\\[c\\\\d.%");
+      expect(sqlLike(boundPrefix("a%b[c\\d."), "a%b[c\\d.rule")).toBe(true);
+      expect(sqlLike(boundPrefix("a%b[c\\d."), "axyzb[c\\d.rule")).toBe(false);
+    });
+
+    it("never puts the prefix in the SQL text", () => {
+      const { whereSql } = filterBy({ policyKeyPrefix: "x'; DROP--." });
+      expect(whereSql).not.toContain("x'");
+      expect(whereSql).not.toContain("DROP");
+      expect(whereSql).not.toContain("--");
+    });
+  });
+
+  describe("the CFO oversees finance. alerts, whoever they go to", () => {
+    const cfo = viewer(["cfo"], 4);
+    const SEEN = "e.PolicyKey LIKE @SeenPolicy0 ESCAPE '\\'";
+    const seenParams = <T extends { name: string }>(params: T[]): T[] => params.filter((p) => p.name.startsWith("SeenPolicy"));
+
+    it("team: the finance. prefix is one more way in, inside the team's own parentheses", () => {
+      const { params, whereSql } = where({ view: "team", viewer: cfo });
+
+      expect(whereSql).toMatch(
+        /^WHERE \(e\.TargetRole IN \(@TeamRole0.*\) OR e\.RaisedByUserId IN \(SELECT .*\) OR e\.PolicyKey LIKE @SeenPolicy0 ESCAPE '\\'\) AND e\.Status IN \('open', 'acknowledged'\)$/,
+      );
+      expect(seenParams(params)).toEqual([{ name: "SeenPolicy0", type: TYPES.NVarChar, value: "finance.%" }]);
+    });
+
+    it("visible: the same clause is part of everything she may see", () => {
+      const { params, whereSql } = where({ view: "visible", viewer: cfo });
+
+      expect(whereSql).toContain(`OR ${SEEN}))`); // closes the team group, then the visible group
+      expect(whereSql).toContain("e.RaisedByUserId = @ViewerUserId OR (e.TargetRole IN (");
+      expect(seenParams(params)).toHaveLength(1);
+    });
+
+    it("the pattern is a constant of ours, bound; no request value reaches it", () => {
+      const { params, whereSql } = where({ view: "team", viewer: cfo, subjectId: "x'; --", subjectType: "job" });
+
+      expect(whereSql).not.toContain("finance");
+      expect(seenParams(params)[0]).toMatchObject({ type: TYPES.NVarChar, value: "finance.%" });
+    });
+
+    it("the bound pattern matches finance. keys and nothing else", () => {
+      const pattern = String(seenParams(where({ view: "team", viewer: cfo }).params)[0].value);
+      const finance = ["finance.attribution_disputed", "finance.variance_disputed", "finance.repeated_denials", "finance.myob_write_failed"];
+      const others = ["financex.attribution_disputed", "finance", "job.critical", "rent_review.approval", "any.finance.alert", "system.health"];
+
+      expect([...finance, ...others].filter((key) => sqlLike(pattern, key))).toEqual(finance);
+    });
+
+    it("works alongside the policyKey filter", () => {
+      const { params, whereSql } = where({ policyKeyPrefix: "finance.", view: "team", viewer: cfo });
+
+      expect(whereSql).toContain(SEEN);
+      expect(whereSql).toContain("e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'");
+      expect(names(params)).toEqual(expect.arrayContaining(["SeenPolicy0", "PolicyKeyPrefix"]));
+    });
+
+    it("mine, raised and all are untouched: her own queue stays what is aimed at her", () => {
+      for (const view of ["mine", "raised", "all"] as const) {
+        const { params, whereSql } = where({ view, viewer: cfo });
+        expect(whereSql).not.toContain("SeenPolicy");
+        expect(seenParams(params)).toEqual([]);
+      }
+    });
+
+    it("nobody else gets it: other roles' team and visible views are as before", () => {
+      for (const role of ["facilities_manager", "accounts_manager", "facilities", "accounts", "user", "director", "admin"]) {
+        for (const view of ["team", "visible"] as const) {
+          const { params, whereSql } = where({ view, viewer: viewer([role]) });
+          expect(whereSql).not.toContain("SeenPolicy");
+          expect(seenParams(params)).toEqual([]);
+        }
+      }
+    });
+
+    it("a viewer who has the CFO role among others gets it once", () => {
+      expect(seenParams(where({ view: "team", viewer: viewer(["facilities", "cfo", "cfo"]) }).params)).toHaveLength(1);
+    });
   });
 
   it("status=open is just the ones nobody has acknowledged", () => {

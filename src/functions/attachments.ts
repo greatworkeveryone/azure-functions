@@ -20,6 +20,7 @@ import { checkRateLimit } from "../rateLimit";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope } from "../ledger/moneyDecisions";
+import { leaseDocumentRefusal, tenancyOfDocument } from "../tenancy-records";
 import {
   detachRefusal,
   isMoneyLinkTable,
@@ -39,7 +40,7 @@ function readSasOrNull(blobName: unknown): string | null {
 // BlobName is included because callers use it to mint a read SAS URL
 // (see `generateReadSasUrl(r.BlobName)` in the response mapping).
 // MyBuildingsConfirmedAt is included for the same SAS-vs-archived
-// decision in the response mapping.
+// decision in the response mapping (legacy — see the note on getAttachments).
 const ATTACHMENT_COLUMNS = `
   Id, WorkRequestID, JobID, JobCode,
   BlobName, OriginalName, Extension, ContentType, SizeBytes,
@@ -224,9 +225,11 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
           [{ name: "WorkRequestID", type: TYPES.Int, value: workRequestId }],
         );
 
-    // Mint a fresh read SAS for rows whose blob still exists. Once a blob has
-    // been cleaned up (MyBuildingsConfirmedAt set), the SAS would 404 — return
-    // null so the UI can show the row as archived.
+    // Mint a fresh read SAS for rows whose blob still exists. Rows stamped with
+    // MyBuildingsConfirmedAt had their blob deleted by the old cleanupAttachments
+    // timer (removed Oct 2026 — it reaped files that never went to myBuildings).
+    // Nothing sets the column any more; the null-SAS guard stays so those legacy
+    // rows show as archived instead of handing out a 404 link.
     // LinkedTo: the quotes, POs and invoices a file backs (D5), so the screen
     // can say why its delete is refused before anyone clicks.
     const linkedTo = jobId !== null ? await moneyLinksOfJob(connection, jobId) : new Map<number, string[]>();
@@ -507,9 +510,9 @@ async function listParentAttachments(
 // Body: { AttachmentID }. Deletes the local blob + the Attachments row, for its
 // uploader or an admin, and only while no quote, PO or invoice links it (D5):
 // a linked file answers 422 naming the records. (The link rows would go with
-// it through the cascading FKs of migrations 010 and 134.) Archived rows
-// (MyBuildingsConfirmedAt set) keep no local blob, so the storage delete is
-// skipped.
+// it through the cascading FKs of migrations 010 and 134.) Legacy archived rows
+// (MyBuildingsConfirmedAt set by the removed cleanup timer) keep no local blob,
+// so the storage delete is skipped.
 
 async function handleDeleteAttachment(
   request: HttpRequest,
@@ -577,6 +580,12 @@ async function handleDeleteAttachment(
     const links = await moneyLinksOf(connection, attachmentId);
     if (links.length > 0) {
       return { status: 422, jsonBody: { error: linkedFileRefusal(links) } };
+    }
+    // A lease document is archived, never deleted (D4, DL-19): the cascade
+    // would also drop its TenancyAttachments link with no record kept.
+    const tenancy = await tenancyOfDocument(connection, attachmentId);
+    if (tenancy) {
+      return { status: 422, jsonBody: { error: leaseDocumentRefusal(tenancy) } };
     }
 
     // Only a file uploaded to this row is the row's to delete. A claimed email

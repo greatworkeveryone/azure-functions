@@ -20,6 +20,7 @@ export type LedgerSubjectType =
   | "comm_template"
   | "correspondence"
   | "email"
+  | "defects_period"
   | "escalation"
   | "incentive"
   | "invoice"
@@ -28,12 +29,14 @@ export type LedgerSubjectType =
   | "misc_fee"
   | "myob_control"
   | "myob_link"
+  | "myob_proposal"
   | "occupancy"
   | "payment"
   | "purchase_order"
   | "quote"
   | "rate_step"
   | "rent_review"
+  | "service_schedule"
   | "tenancy";
 
 export type LedgerActor =

@@ -167,10 +167,10 @@ export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS)
 // Key handover photos.
 //
 // These are PERMANENT evidence/audit records (who held a key, with a photo of
-// the handover), so they must NOT share the transient `wr-attachments`
-// container — that container's blobs are reaped 48h after upload by
-// cleanupAttachments once ingested upstream. Key photos live in their own
-// private `key-photos` container that no cleanup job touches. Blob names keep
+// the handover), so they live in their own private `key-photos` container,
+// separate from `wr-attachments`. (wr-attachments used to be reaped 48h after
+// upload by a cleanup timer; that timer is gone, but the separation stays so
+// no future bulk job on attachments can touch key evidence.) Blob names keep
 // the historical `keys/<uuid>.<ext>` shape so stored DB values are unchanged;
 // only the container differs. Reads mint a short-lived SAS at the boundary.
 // ─────────────────────────────────────────────────────────────────────────────

@@ -134,6 +134,23 @@ describe("the job adapter", () => {
     expect(await jobAdapter.isConditionActive(conn, ref("job.manual", "abc"), NOW)).toBe(false);
   });
 
+  it("treats an Admin / Accounts job as outside the contractor-flow policies, and a facilities job with the same facts as inside", async () => {
+    const ref = (policyKey: string) => ({ policyKey, subjectId: "12", subjectType: "job" });
+    const quoteFacts = { FirstQuoteRequestAt: new Date(NOW.getTime() - 20 * DAY), RequestedContractors: 1, Status: "Quote" };
+    const invoiceFacts = { OldestPendingInvoiceAt: new Date(NOW.getTime() - 20 * DAY), PendingInvoices: 1 };
+
+    for (const [policyKey, facts] of [["job.quote_not_back", quoteFacts], ["job.invoice_waiting", invoiceFacts]] as const) {
+      db.executeQuery.mockResolvedValueOnce([jobRow({ ...facts, Kind: "facilities" })]);
+      expect(await jobAdapter.isConditionActive(conn, ref(policyKey), NOW)).toBe(true);
+
+      db.executeQuery.mockResolvedValueOnce([jobRow({ ...facts, Kind: "admin" })]);
+      expect(await jobAdapter.isConditionActive(conn, ref(policyKey), NOW)).toBe(false);
+    }
+
+    db.executeQuery.mockResolvedValueOnce([jobRow({ Kind: "admin" })]);
+    expect(await jobAdapter.isConditionActive(conn, ref("job.manual"), NOW)).toBe(true);
+  });
+
   describe("keeping Jobs.EscalatedAt in step (the dashboard flag)", () => {
     it("sets it while any escalation on the job is open, and clears it when none is", async () => {
       db.executeQuery.mockResolvedValueOnce([]);
@@ -189,6 +206,15 @@ describe("job facts", () => {
     expect(sql).toContain("ji.Direction = 'incoming' AND ji.Status = 'pending'");
     expect(sql).not.toContain("SELECT *");
     expect(jobs[0]).toMatchObject({ assigned: true, buildingName: "Tower A", jobId: 12, pendingInvoices: 0, priority: "Normal", requestedContractors: 0 });
+  });
+
+  it("reads each job's kind, and a job with none as facilities", async () => {
+    db.executeQuery.mockResolvedValueOnce([jobRow({ JobID: 1, Kind: "admin" }), jobRow({ JobID: 2, Kind: "maintenance" }), jobRow({ JobID: 3 })]);
+
+    const jobs = await loadLiveJobFacts(conn);
+
+    expect(lastCall()[1]).toContain("j.Kind");
+    expect(jobs.map((job) => job.kind)).toEqual(["admin", "maintenance", "facilities"]);
   });
 
   it("loads one job whether or not it is live", async () => {
