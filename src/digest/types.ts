@@ -23,6 +23,8 @@ export interface WaitingApproval {
   createdAt: Date;
   id: number;
   jobId: number;
+  /** Jobs.Kind of the job it belongs to. */
+  jobKind: string;
   jobTitle: string;
   /** Quotes.Status or JobInvoices.Status as stored. */
   status: string;
@@ -35,6 +37,8 @@ export interface DueJob {
   buildingName: string | null;
   expectedProgressUpdate: Date;
   jobId: number;
+  /** Jobs.Kind. */
+  kind: string;
   title: string;
 }
 

@@ -5,7 +5,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { errorResponse, extractToken, unauthorizedResponse } from "../auth";
 import {
   beginTransaction,
   closeConnection,
@@ -20,7 +20,7 @@ import {
   lockTenantForSignOff,
   readSignOffText,
   readTenantKey,
-  SIGN_OFF_ROLES,
+  requireSignOffRole,
 } from "../scheduleSignOff";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { ledgerRefusal, rollbackQuietly } from "../tenancyScheduleWrite";
@@ -31,7 +31,7 @@ export async function revokeTenancyScheduleSignOff(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, SIGN_OFF_ROLES);
+  const denied = await requireSignOffRole(request);
   if (denied) return denied;
 
   let connection;

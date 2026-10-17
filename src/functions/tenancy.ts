@@ -99,6 +99,7 @@ import {
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import {
   CLEAR_SIGN_OFF_SQL,
   readSignOffClearReason,
@@ -299,6 +300,9 @@ interface RegisterTenantApi {
   /** "No rent decreases on review" — the schedule holds every review at ≥ 0%. */
   reviewRatchet: boolean;
   reviewState: "amber" | "green" | "grey" | "red";
+  /** Set when the tenancy is archived (D4): out of the register unless asked for. */
+  archivedAt: string | null;
+  archivedBy: string | null;
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
@@ -562,6 +566,8 @@ function tenantRowToApi(
     reviewRatchet,
     reviewState: computeReviewState(nextReviewDate, status, today),
     reviewType: asStr(row.ReviewType) ?? "none",
+    archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
+    archivedBy: (row.ArchivedBy as string | null) ?? null,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     scheduleSignOff: scheduleSignOffFromRow(row),
@@ -673,8 +679,15 @@ const TENANT_COLUMNS = `
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
+  ArchivedAt, ArchivedBy,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
+
+// The building register: archived tenancies (D4) only when asked for.
+const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+ ORDER BY LegalName`;
+const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+ ORDER BY LegalName`;
 
 const OCCUPANCY_COLUMNS = `
   OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm,
@@ -713,7 +726,9 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
-  const cached = getCachedTenantList(buildingId);
+  // Archived tenancies (D4) are left out unless asked for; that view isn't cached.
+  const includeArchived = request.query.get("includeArchived") === "true";
+  const cached = includeArchived ? null : getCachedTenantList(buildingId);
   if (cached) return { status: 200, jsonBody: cached };
 
   let connection;
@@ -722,8 +737,7 @@ async function getRegisterTenants(
 
     const tenantRows = await executeQuery(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
-       ORDER BY LegalName`,
+      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
 
@@ -784,7 +798,7 @@ async function getRegisterTenants(
     });
 
     const body = { tenants };
-    setCachedTenantList(buildingId, body);
+    if (!includeArchived) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
@@ -2015,9 +2029,10 @@ async function deleteTenantNote(
 }
 
 // ── POST /api/deleteRegisterTenant ───────────────────────────────────────────
-// Hard-deletes a tenant. ON DELETE CASCADE handles occupancies, notes, history
-// and reviews. Refuses if Jobs.TenantID still references this tenant — the
-// caller has to reassign jobs first (mirrors the legacy /deleteTenant behaviour).
+// Body { TenantId }. Hard-deletes an empty draft only (D4, DL-04); anything a
+// tenancy holds or has had recorded against it answers 422 "… Archive it
+// instead." (jobs keep their 400 "Reassign first"). The rule, the lock and the
+// ledger row live in deleteTenancyDraft, shared with deleteTenant.
 
 async function deleteRegisterTenant(
   request: HttpRequest,
@@ -2025,53 +2040,15 @@ async function deleteRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  let body: Record<string, any> | null = null;
-  try {
-    body = (await request.json()) as Record<string, any>;
-    const tenantId = body?.TenantId;
-    if (typeof tenantId !== "number") {
-      return { status: 400, jsonBody: { error: "TenantId (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-
-    const refCount = await executeQuery(
-      connection,
-      "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    if ((refCount[0]?.N as number) > 0) {
-      return {
-        status: 400,
-        jsonBody: {
-          error:
-            "Cannot delete — tenant is assigned to at least one job. Reassign first.",
-        },
-      };
-    }
-
-    invalidateTenant(tenantId);
-    await executeQuery(
-      connection,
-      "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-      [{ name: "Id", type: TYPES.Int, value: tenantId }],
-    );
-    return { status: 200, jsonBody: { deleted: true, tenantId } };
-  } catch (error: any) {
-    const formatted = formatSqlError(error);
-    context.error("deleteRegisterTenant failed", {
-      error: formatted,
-      payload: summariseBody(body),
-      stack: error?.stack,
-    });
-    return errorResponse("Delete register tenant failed", formatted);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantId?: unknown } | null;
+  const tenantId = body?.TenantId;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantId (number) required" } };
   }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteRegisterTenant");
 }
 
 // ── GET /api/getReviewsDue[?buildingId=N] ────────────────────────────────────
@@ -2130,7 +2107,7 @@ async function getReviewsDue(
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} (
+       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
          OR (Expiry IS NOT NULL
@@ -2213,6 +2190,7 @@ async function getPortfolioOccupancy(
          FROM dbo.TenantOccupancies
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
+       WHERE t.ArchivedAt IS NULL
        GROUP BY t.BuildingId`,
       [],
     );

@@ -21,6 +21,9 @@ import {
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
+import { todayInDarwin } from "../darwinDate";
+import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
+import { isWorkCompletion, markServiceJobCompleted } from "../serviceScheduleRuns";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -41,6 +44,7 @@ import {
 } from "../jobStatusMachine";
 import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
+import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
 
 // Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
 // `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
@@ -255,9 +259,22 @@ const ALLOWED_PRIORITIES = ["Critical", "High", "Normal", "Low"] as const;
 
 const ALLOWED_CREATION_METHODS = ["manual", "wr", "email", "inspection"] as const;
 
-// Job kind — reactive Facilities works vs scheduled Maintenance servicing
-// (m079). Mirrors JobKind in command-centre/src/types/job.ts.
-const ALLOWED_KINDS = ["facilities", "maintenance"] as const;
+// Job kind — reactive Facilities works, scheduled Maintenance servicing (m079)
+// and Admin / Accounts decision jobs. Mirrors JobKind in
+// command-centre/src/types/job.ts; the list lives in ../jobKinds.
+const ALLOWED_KINDS = JOB_KINDS;
+
+// An Admin / Accounts job is in-house for good (plan D2): no quote, PO or
+// invoice. Its kind is fixed when it is raised, so these two refusals keep it
+// that way. Codes are for the frontend, the sentences for the person.
+const ADMIN_KIND_FIXED = {
+  code: "kind_fixed",
+  error: "An Admin / Accounts job keeps its kind, and no other job can become one. Raise a new job instead.",
+} as const;
+const ADMIN_STAYS_INTERNAL = {
+  code: "admin_is_internal",
+  error: "An Admin / Accounts job is always in-house, with no quote, purchase order or invoice, so that can't be switched off.",
+} as const;
 
 const MAX_LEN: Partial<Record<JobColumn, number>> = {
   Title: 200,
@@ -555,7 +572,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 // Body: { JobID?, ...job columns }. Omit JobID to create; include to update.
 // Events are NOT touched by this endpoint — use addJobEvent for those.
 
-async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -606,8 +623,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       if (fields.AwaitingRole === undefined || fields.AwaitingRole === null) {
         fields.AwaitingRole = "facilities";
       }
+      // An Admin / Accounts job is stored in-house whatever the payload says: the
+      // kind decides that, not a person, so the manager gate below leaves it alone
+      // and the internal close path (jobTransitionGuard) is open to it.
+      const isAdminJob = fields.Kind === ADMIN_KIND;
+      if (isAdminJob) fields.IsInternal = true;
       // N4 (J2): only a manager starts a job as contract or internal.
-      if (fields.IsContract || fields.IsInternal) {
+      if (fields.IsContract || (fields.IsInternal && !isAdminJob)) {
         const refusal = flagChangeRefusal({ actor: { kind: "user", roles: await rolesForRequest(request) }, hasMoneyRecords: false });
         if (refusal) {
           return { status: refusal.code === "role_not_permitted" ? 403 : 422, jsonBody: { code: refusal.code, error: refusal.reason } };
@@ -652,6 +674,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
     }
 
     connection = await createRequestConnection(token);
+
+    // Defects liability periods (sprint F1, LAUNCH-READINESS §5): new planned
+    // maintenance on a covered scope is refused (409) unless a manager books it
+    // anyway with a reason; anything else covered comes back as a warning.
+    const defects =
+      JobID === undefined
+        ? await guardNewJob(connection, request, body as Record<string, unknown>, fields, todayInDarwin())
+        : null;
+    if (defects?.response) return defects.response;
 
     const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
@@ -700,6 +731,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           insertParams,
         );
         newJobId = inserted[0].JobID as number;
+
+        if (defects?.override) {
+          await recordDefectsOverride(connection, request, {
+            buildingId: fields.BuildingID as number,
+            callerName: identity.name,
+            jobId: newJobId,
+            override: defects.override,
+          });
+        }
 
         // If the job was created from a Work Request, claim any attachments
         // that arrived with the WR. They were inserted earlier with JobID NULL
@@ -771,6 +811,20 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
         previousPriority = previous?.Priority ?? null;
+
+        // Admin / Accounts jobs keep their kind and stay in-house (plan D2). No job
+        // becomes one, because only a manager may skip the money path (N4) and
+        // nothing here checks the job has no quote, PO or invoice; and none turns
+        // into another kind, so a decision job never lands on the contractor flow.
+        if (previous !== undefined) {
+          const wasAdmin = previous.Kind === ADMIN_KIND;
+          const changesKind = fields.Kind !== undefined && (fields.Kind === ADMIN_KIND) !== wasAdmin;
+          const unsetsInternal = wasAdmin && fields.IsInternal !== undefined && !fields.IsInternal;
+          if (changesKind || unsetsInternal) {
+            await rollbackTransaction(connection).catch(() => {});
+            return { status: 422, jsonBody: changesKind ? ADMIN_KIND_FIXED : ADMIN_STAYS_INTERNAL };
+          }
+        }
 
         // N4 (J2): IsContract / IsInternal decide which money path the job
         // takes, so only a manager changes them, and never once a quote, PO
@@ -956,7 +1010,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       await syncJobActionTriggersStandalone(newJobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { job: { ...stored[0], Events: events } } };
+    return {
+      status: 200,
+      jsonBody: {
+        job: { ...stored[0], Events: events },
+        ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
+      },
+    };
   } catch (error: any) {
     context.error("upsertJob failed:", error.message);
     return errorResponse("Upsert failed", error.message);
@@ -1203,7 +1263,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
 //   NewAssignee           → Jobs.AssignedTo
 // Always bumps Jobs.LastModifiedDate.
 
-async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
@@ -1507,6 +1567,12 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
           updateParams,
         );
+      }
+
+      // Service schedules (sprint F2, WP50): completing a scheduled job's work
+      // moves its schedule on to the next due date of the anchor series.
+      if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
+        await markServiceJobCompleted(connection, JobID, identity.name);
       }
 
       await commitTransaction(connection);

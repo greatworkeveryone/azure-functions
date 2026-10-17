@@ -13,7 +13,7 @@ export type TriggerType =
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
 
-import { optionNoticeDate } from "./tenancyLeaseEvents";
+import { optionNoticeWindow } from "./leaseOptions";
 
 export interface PlannerTenantRow {
   tenantId: number;
@@ -23,6 +23,8 @@ export interface PlannerTenantRow {
   firstOccupancy: string | null;
   expiry: string | null;
   optionNoticeMonths: number | null;
+  /** The free-text option field: "Nil" or text we can't read means there is no option deadline. */
+  optionPeriods: string | null;
   nextReviewDate: string | null;
   reviewType: string | null;
   /** Whether someone has signed this tenancy's schedule off as verified (m097). */
@@ -69,15 +71,20 @@ export function formatDDMMYYYY(isoDate: string): string {
 /**
  * The last day to give option notice: the expiry less the notice period,
  * month-end safe (31 Aug less 6 months is 28/29 Feb, never early March), so a
- * reminder never lands after the deadline. Null when either is missing.
+ * reminder never lands after the deadline. Null when there is nothing to give
+ * notice of: no option text we can read ("Nil" included), no notice period, or no
+ * expiry. The same rule the lease-events feed and the tenancy screens use
+ * (optionNoticeWindow).
  */
 function optionDeadlineDate(tenant: PlannerTenantRow): Date | null {
-  if (!tenant.expiry || tenant.optionNoticeMonths == null) return null;
-  const iso = optionNoticeDate({
-    expiry: tenant.expiry.slice(0, 10),
-    optionNoticeMonths: tenant.optionNoticeMonths,
-  });
-  return iso ? new Date(`${iso}T00:00:00Z`) : null;
+  if (!tenant.expiry) return null;
+  const expiry = tenant.expiry.slice(0, 10);
+  // The deadline doesn't depend on the day it is asked on; any real date will do.
+  const { deadline } = optionNoticeWindow(
+    { expiry, optionNoticeMonths: tenant.optionNoticeMonths, optionPeriods: tenant.optionPeriods },
+    expiry,
+  );
+  return deadline ? new Date(`${deadline}T00:00:00Z`) : null;
 }
 
 export function addDaysUTC(date: Date, days: number): Date {
@@ -381,8 +388,9 @@ export function groupPlannerTasksByKey(
 /**
  * Which tenancies get lease tasks this run (PLAN D7, D21). A schedule nobody has
  * signed off is unverified, so its 90/60/30-day expiry, option and review tasks
- * are not raised, and any already open are removed: `removeFor` is the unsigned
- * tenancies that still have an active task.
+ * are not raised. `removeFor` is the unsigned tenancies that still have an active
+ * task; the timer takes those down only when PLANNER_UNSIGNED_HOLDBACK_ENABLED
+ * is "true" (plannerFlag.ts) and otherwise just logs them.
  */
 export function leaseTaskPlan(
   tenants: readonly PlannerTenantRow[],

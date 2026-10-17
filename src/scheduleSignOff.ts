@@ -4,15 +4,38 @@
 // writer must supply a reason when the tenancy is signed off, and the clearing
 // is its own ledger entry (schedule.sign_off_cleared) in the edit's transaction.
 
-import type { HttpResponseInit } from "@azure/functions";
+import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
-import { AppRole } from "./auth";
+import { AppRole, forbiddenResponse, requireRole, rolesForRequest, serviceUnavailableResponse } from "./auth";
 import { executeQuery, SqlRow } from "./db";
 import * as ledger from "./ledger";
 import type { LedgerActor } from "./ledger";
 
-/** Who may sign a schedule off or revoke it (admin passes every role gate). */
+/** Who may sign a schedule off or revoke it. Admin is not on the list and, unlike every other gate, does not pass it: see requireSignOffRole. */
 export const SIGN_OFF_ROLES = [AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] as const;
+
+/**
+ * The role gate for signing a schedule off or taking the sign-off back: null when
+ * the caller may, a 403 (or 503 when roles can't be read) when not. requireRole
+ * lets `admin` through every gate, but a sign-off says "a person with
+ * accountability checked this against the lease", so an admin who is none of an
+ * accounts manager, the CFO or a director is refused. The frontend capability
+ * (signOffTenancySchedule in roles.ts) lists the same three.
+ */
+export async function requireSignOffRole(request: HttpRequest): Promise<HttpResponseInit | null> {
+  const denied = await requireRole(request, SIGN_OFF_ROLES);
+  if (denied) return denied;
+  let roles: string[];
+  try {
+    roles = await rolesForRequest(request);
+  } catch {
+    return serviceUnavailableResponse();
+  }
+  if (SIGN_OFF_ROLES.some((role) => roles.includes(role))) return null;
+  return forbiddenResponse(
+    `Required role: ${SIGN_OFF_ROLES.join(" | ")}. Have: ${roles.join(", ") || "(none)"}. Admin alone cannot sign a schedule off.`,
+  );
+}
 
 /** Appended to the SELECT of any statement that locks a tenant row for a schedule write. */
 export const SIGN_OFF_COLUMNS =
@@ -120,14 +143,14 @@ export function readTenantKey(body: unknown): { buildingId: number | undefined; 
   return { buildingId: BuildingId as number | undefined, tenantId: TenantId };
 }
 
-/** Locks the tenant row inside the caller's transaction. */
+/** Locks the tenant row inside the caller's transaction. An archived tenancy is refused (409). A sign-off made before it was archived stays on record. */
 export async function lockTenantForSignOff(
   connection: Connection,
   key: { buildingId: number | undefined; tenantId: number },
 ): Promise<LockedTenant> {
   const rows = await executeQuery(
     connection,
-    `SELECT TenantId, BuildingId, Status, ScheduleVersion, UpdatedAt, UpdatedByName, ${SIGN_OFF_COLUMNS}
+    `SELECT TenantId, BuildingId, Status, ArchivedAt, ScheduleVersion, UpdatedAt, UpdatedByName, ${SIGN_OFF_COLUMNS}
        FROM dbo.Tenants WITH (UPDLOCK, ROWLOCK)
       WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: key.tenantId }],
@@ -137,6 +160,18 @@ export async function lockTenantForSignOff(
     return {
       kind: "refused",
       response: { status: 404, jsonBody: { error: "Tenant not found for the given BuildingId" } },
+    };
+  }
+  if (row.ArchivedAt) {
+    return {
+      kind: "refused",
+      response: {
+        status: 409,
+        jsonBody: {
+          code: "TENANCY_ARCHIVED",
+          error: "An archived tenancy is out of the register, so its schedule can't be signed off or have its sign-off taken back. Restore it first.",
+        },
+      },
     };
   }
   return { kind: "ok", row, signOff: scheduleSignOffFromRow(row) };

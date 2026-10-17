@@ -12,6 +12,7 @@ import { executeQuery, type SqlRow } from "../db";
 import { darwinDateKey } from "../escalation/businessTime";
 import { normaliseRole } from "../escalation/roles";
 import { listLiveEscalations } from "../escalation/store";
+import { jobKindOf } from "../jobKinds";
 import { darwinNextDayStartUtc, parseDarwinDate } from "../ledger/darwinTime";
 import type { DigestFacts, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
 
@@ -50,6 +51,7 @@ function toWaiting(subject: WaitingApproval["subject"], idColumn: string, row: S
     createdAt: asDate(row.CreatedAt),
     id: Number(row[idColumn]),
     jobId: Number(row.JobID),
+    jobKind: jobKindOf(row.Kind),
     jobTitle: asText(row.Title) ?? `Job #${row.JobID}`,
     status: String(row.Status),
     subject,
@@ -68,7 +70,7 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
   // D9: exclude IsTest = 1
   const quotes = await executeQuery(
     connection,
-    `SELECT TOP (1000) q.QuoteID, q.JobID, q.Amount, q.Status, q.CreatedAt, j.Title, j.BuildingID, b.BuildingName
+    `SELECT TOP (1000) q.QuoteID, q.JobID, q.Amount, q.Status, q.CreatedAt, j.Title, j.Kind, j.BuildingID, b.BuildingName
        FROM dbo.Quotes q
        JOIN dbo.Jobs j ON j.JobID = q.JobID
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
@@ -80,7 +82,7 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
   // D9: exclude IsTest = 1
   const invoices = await executeQuery(
     connection,
-    `SELECT TOP (1000) ji.JobInvoiceID, ji.JobID, ji.Amount, ji.Status, ji.CreatedAt, j.Title, j.BuildingID, b.BuildingName
+    `SELECT TOP (1000) ji.JobInvoiceID, ji.JobID, ji.Amount, ji.Status, ji.CreatedAt, j.Title, j.Kind, j.BuildingID, b.BuildingName
        FROM dbo.JobInvoices ji
        JOIN dbo.Jobs j ON j.JobID = ji.JobID
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
@@ -105,7 +107,7 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
   // D9: exclude IsTest = 1
   const rows = await executeQuery(
     connection,
-    `SELECT TOP (1000) j.JobID, j.Title, j.AssignedToUserID, j.ExpectedProgressUpdate, b.BuildingName
+    `SELECT TOP (1000) j.JobID, j.Title, j.Kind, j.AssignedToUserID, j.ExpectedProgressUpdate, b.BuildingName
        FROM dbo.Jobs j
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
       WHERE j.IsArchived = 0
@@ -120,6 +122,7 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
     buildingName: asText(row.BuildingName),
     expectedProgressUpdate: asDate(row.ExpectedProgressUpdate),
     jobId: Number(row.JobID),
+    kind: jobKindOf(row.Kind),
     title: asText(row.Title) ?? `Job #${row.JobID}`,
   }));
 }

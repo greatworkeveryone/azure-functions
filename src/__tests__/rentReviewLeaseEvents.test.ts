@@ -18,6 +18,7 @@ const tenancy = (id: number, over: Partial<LeaseEventTenancy> = {}): LeaseEventT
   expiry: null,
   optionNoticeMonths: null,
   optionPeriods: null,
+  scheduleSignedOff: true,
   tenantId: id,
   tenantName: `Tenant ${id}`,
   ...over,
@@ -29,6 +30,7 @@ const review = (id: number, scheduledFor: string, over: Partial<LeaseEventReview
   ownerName: null,
   ownerUserId: null,
   reviewId: `rev-${id}`,
+  scheduleSignedOff: true,
   scheduledFor,
   state: "due",
   tenantId: id,
@@ -58,6 +60,7 @@ describe("review rows", () => {
       ownerName: "Ann",
       ownerUserId: 7,
       reviewId: "rev-1",
+      scheduleSignedOff: true,
       state: "in_progress",
       tenantId: 1,
       tenantName: "Tenant 1",
@@ -96,7 +99,7 @@ describe("expiry rows: every active tenancy, not only those with a review due (F
   it("lists a tenancy expiring inside the window though it has no review at all", () => {
     const events = build([tenancy(1, { expiry: DAY(45) })], []);
     expect(events).toEqual([
-      { buildingId: 5, date: DAY(45), kind: "expiry", overdue: false, tenantId: 1, tenantName: "Tenant 1" },
+      { buildingId: 5, date: DAY(45), kind: "expiry", overdue: false, scheduleSignedOff: true, tenantId: 1, tenantName: "Tenant 1" },
     ]);
   });
 
@@ -132,7 +135,7 @@ describe("option deadline rows", () => {
   it("lists the last day to give notice, for an option the text lets us date", () => {
     const events = build([optioned()], [], 90);
     expect(events).toEqual([
-      { buildingId: 5, date: addMonthsClamped(TODAY, 2), kind: "option_deadline", overdue: false, tenantId: 1, tenantName: "Tenant 1" },
+      { buildingId: 5, date: addMonthsClamped(TODAY, 2), kind: "option_deadline", overdue: false, scheduleSignedOff: true, tenantId: 1, tenantName: "Tenant 1" },
     ]);
   });
 
@@ -197,12 +200,31 @@ describe("what the rows hold", () => {
       [review(2, DAY(10))],
     );
     const allowed = new Set([
-      "buildingId", "date", "kind", "method", "overdue", "ownerName", "ownerUserId", "reviewId", "state", "tenantId", "tenantName",
+      "buildingId", "date", "kind", "method", "overdue", "ownerName", "ownerUserId", "reviewId", "scheduleSignedOff", "state", "tenantId", "tenantName",
     ]);
     expect(events.length).toBeGreaterThan(1);
     for (const event of events) {
       for (const key of Object.keys(event)) expect(allowed.has(key)).toBe(true);
     }
     expect(JSON.stringify(events)).not.toMatch(/100000|12 345|a@b\.c/);
+  });
+});
+
+describe("whether the schedule behind a row is signed off (PLAN D7)", () => {
+  it("is carried on every kind of row, so the dashboard can hold back an unverified schedule", () => {
+    const events = build(
+      [
+        tenancy(1, { expiry: DAY(30), optionNoticeMonths: 6, optionPeriods: "1 x 5 years", scheduleSignedOff: false }),
+        tenancy(2, { expiry: DAY(31), optionNoticeMonths: 6, optionPeriods: "1 x 5 years", scheduleSignedOff: true }),
+      ],
+      [review(3, DAY(10), { scheduleSignedOff: false }), review(4, DAY(11), { scheduleSignedOff: true })],
+    );
+    const byKey = Object.fromEntries(events.map((event) => [`${event.kind}:${event.tenantId}`, event.scheduleSignedOff]));
+    expect(byKey).toMatchObject({ "expiry:1": false, "expiry:2": true, "review:3": false, "review:4": true });
+  });
+
+  it("is on the option deadline row too, when the option text can be read", () => {
+    const [option] = build([tenancy(1, { expiry: addMonthsClamped(TODAY, 8), optionNoticeMonths: 6, optionPeriods: "2 x 5 years", scheduleSignedOff: false })], []);
+    expect(option).toMatchObject({ kind: "option_deadline", scheduleSignedOff: false });
   });
 });

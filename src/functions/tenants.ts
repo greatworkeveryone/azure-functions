@@ -11,6 +11,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
 
@@ -50,7 +51,8 @@ async function getTenants(
   const buildingId = request.query.get("buildingId");
   const tenantId = request.query.get("tenantId");
 
-  const whereParts: string[] = [];
+  // Archived tenancies (D4) stay out of the pickers jobs and keys use.
+  const whereParts: string[] = ["t.ArchivedAt IS NULL"];
   const params: { name: string; type: any; value: any }[] = [];
   if (buildingId) {
     whereParts.push("t.BuildingId = @BuildingId");
@@ -217,8 +219,8 @@ async function loadLegacyTenant(connection: any, id: number) {
 }
 
 // ── POST /api/deleteTenant ──────────────────────────────────────────────────
-// Refuses when the tenant is linked to any job. ON DELETE CASCADE handles
-// occupancies/notes/history/reviews under the new schema.
+// Body { TenantID }. The older route to the same rule as deleteRegisterTenant
+// (D4): same roles, and only an empty draft is deleted, by deleteTenancyDraft.
 
 async function deleteTenant(
   request: HttpRequest,
@@ -226,46 +228,15 @@ async function deleteTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_DELETE_ROLES);
   if (roleCheck) return roleCheck;
 
-  let connection;
-  try {
-    const body = (await request.json()) as any;
-    const { TenantID } = body ?? {};
-    if (typeof TenantID !== "number") {
-      return { status: 400, jsonBody: { error: "TenantID (number) required" } };
-    }
-
-    connection = await createRequestConnection(token);
-    const refCount = await executeQuery(
-      connection,
-      "SELECT COUNT(*) AS N FROM dbo.Jobs WHERE TenantID = @Id",
-      [{ name: "Id", type: TYPES.Int, value: TenantID }],
-    );
-    if ((refCount[0]?.N as number) > 0) {
-      return {
-        status: 400,
-        jsonBody: {
-          error: "Cannot delete — tenant is assigned to at least one job. Reassign first.",
-        },
-      };
-    }
-
-    await executeQuery(
-      connection,
-      "DELETE FROM dbo.Tenants WHERE TenantId = @Id",
-      [{ name: "Id", type: TYPES.Int, value: TenantID }],
-    );
-
-    invalidateTenant(TenantID);
-    return { status: 200, jsonBody: { deleted: true, tenantId: TenantID } };
-  } catch (error: any) {
-    context.error("deleteTenant failed:", error.message);
-    return errorResponse("Delete tenant failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
+  const body = (await request.json().catch(() => null)) as { TenantID?: unknown } | null;
+  const tenantId = body?.TenantID;
+  if (typeof tenantId !== "number") {
+    return { status: 400, jsonBody: { error: "TenantID (number) required" } };
   }
+  return deleteTenancyDraft(request, context, token, tenantId, "deleteTenant");
 }
 
 app.http("getTenants",   { methods: ["GET"],  authLevel: "anonymous", handler: getTenants });
