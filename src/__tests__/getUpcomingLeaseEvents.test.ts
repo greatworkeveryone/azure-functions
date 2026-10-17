@@ -59,7 +59,7 @@ beforeEach(() => {
   db.createRequestConnection.mockResolvedValue({});
   tenancies = [];
   reviews = [];
-  routeSql(db.executeQuery, [
+  routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
     [/FROM dbo\.RentReviews r/, () => reviews],
     [/FROM dbo\.Tenants t\s+WHERE/, () => tenancies],
   ]);
@@ -238,7 +238,7 @@ describe("the events", () => {
   });
 
   it("answers a failed query with a 500 and closes the connection", async () => {
-    routeSql(db.executeQuery, [[/FROM dbo\.Tenants/, () => Promise.reject(new Error("boom"))]]);
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.Tenants/, () => Promise.reject(new Error("boom"))]]);
     expect((await ask()).status).toBe(500);
     expect(db.closeConnection).toHaveBeenCalled();
   });

@@ -180,7 +180,7 @@ describe("getRegisterTenants", () => {
     db.executeQuery.mockResolvedValueOnce([]);
     const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
     expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ tenants: [] });
+    expect(res.jsonBody).toEqual({ pendingChanges: { count: 0, items: [] }, tenants: [] });
     expect(db.executeQuery).toHaveBeenCalledTimes(1);
   });
 
@@ -194,7 +194,10 @@ describe("getRegisterTenants", () => {
       ])
       .mockResolvedValueOnce([
         { TenantId: 1, AnchorKind: "tenant", OccupancyId: "", FieldKey: "", Cnt: 2 },
-      ]);
+      ])
+      // WP26c: the building's relief requests and reviews awaiting approval.
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
 
     const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
     expect(res.status).toBe(200);
@@ -259,6 +262,9 @@ describe("getRegisterTenant", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      // WP26c: the tenancy's relief requests and reviews awaiting approval.
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
 

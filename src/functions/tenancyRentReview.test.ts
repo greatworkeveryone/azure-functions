@@ -301,7 +301,7 @@ describe("getPortfolioOccupancy", () => {
         WaleNumeratorSqmDays: 800 * 365 * 3,
         WaleDenominatorSqm: 800,
       },
-    ]);
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
@@ -341,7 +341,7 @@ describe("getPortfolioOccupancy", () => {
         WaleNumeratorSqmDays: 0,
         WaleDenominatorSqm: 0,
       },
-    ]);
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
@@ -353,7 +353,7 @@ describe("getPortfolioOccupancy", () => {
   });
 
   it("returns an empty array when no buildings have tenants", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
+    db.executeQuery.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
     expect((res.jsonBody as { buildings: unknown[] }).buildings).toEqual([]);

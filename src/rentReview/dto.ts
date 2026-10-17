@@ -12,8 +12,8 @@ import {
   type RentReviewMethod,
   type RentReviewState,
 } from "../rentReviewMachine";
-import { parseReliefs } from "../scheduleCharges";
-import { parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
+import { chargedOn, computeCharges, parseReliefs } from "../scheduleCharges";
+import { computeScheduleRows, parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { isoTimestamp, rowVersionHex } from "../tenancyScheduleWrite";
@@ -205,6 +205,8 @@ export function toReviewDto(row: SqlRow, today: string): RentReviewDto {
 export interface TenancySummaryDto {
   buildingId: number;
   buildingName: string | null;
+  /** What is charged a year today (WP26c): effectiveRentPerAnnum less a ratified relief on the rent in force today. */
+  chargedRentPerAnnum: number;
   commencement: string | null;
   cpiCapPercent: number | null;
   cpiFloorPercent: number | null;
@@ -250,14 +252,22 @@ export function toTenancySummary(row: SqlRow, totalSqm: number, today: string): 
   const reviewRatchet = row.ReviewRatchet === true || row.ReviewRatchet === 1;
   const steps = parseSteps(row.ScheduledRateSteps as string | null | undefined);
   const terms = scheduleTermsOf(row);
+  const effectiveRentPerAnnum = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSqm, today, terms).annual;
+  const reliefs = parseReliefs(row.RentReliefs as string | null | undefined);
+  const inForce =
+    reliefs.length > 0
+      ? chargedOn(computeCharges(computeScheduleRows(steps, rentPerAnnum ?? 0, totalSqm, terms), { fallbackAnnual: rentPerAnnum ?? 0, reliefs }), today)
+      : null;
+  const relieved = inForce !== null && inForce.charged.rent !== null && inForce.charged.rent !== inForce.lease.rent;
   return {
     buildingId: Number(row.BuildingId),
     buildingName: text(row.BuildingName),
+    chargedRentPerAnnum: relieved && inForce?.charged.rent != null ? inForce.charged.rent : effectiveRentPerAnnum,
     commencement: sqlDateToIso(row.Commencement),
     cpiCapPercent,
     cpiFloorPercent,
     cpiRegion: text(row.CpiRegion),
-    effectiveRentPerAnnum: resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSqm, today, terms).annual,
+    effectiveRentPerAnnum,
     expiry: sqlDateToIso(row.Expiry),
     fixedReviewPercent: decimalOrNull(row.FixedReviewPercent),
     lastReviewDate: sqlDateToIso(row.LastReviewDate),

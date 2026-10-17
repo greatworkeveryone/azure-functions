@@ -251,9 +251,13 @@ describe("what the read endpoints say about sign-off", () => {
   });
 
   it("getPortfolioOccupancy counts the active tenancies not yet signed off", async () => {
-    db.executeQuery.mockResolvedValueOnce([
-      { ActiveSqm: 80, ActiveTenantCount: 4, AnnualRent: 400000, BuildingId: 5, TotalSqm: 100, UnsignedTenantCount: 3, WaleDenominatorSqm: 0, WaleNumeratorSqmDays: 0 },
-    ]);
+    db.executeQuery
+      .mockResolvedValueOnce([
+        { ActiveSqm: 80, ActiveTenantCount: 4, AnnualRent: 400000, BuildingId: 5, TotalSqm: 100, UnsignedTenantCount: 3, WaleDenominatorSqm: 0, WaleNumeratorSqmDays: 0 },
+      ])
+      // WP26c: the portfolio's relief requests and reviews awaiting approval.
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
     const res = await handlers.getPortfolioOccupancy(makeRequest(undefined), ctx);
     const { buildings } = res.jsonBody as { buildings: Array<{ unsignedTenantCount: number }> };
     expect(buildings[0].unsignedTenantCount).toBe(3);

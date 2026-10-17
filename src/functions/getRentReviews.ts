@@ -8,7 +8,9 @@
 // A list by building or state leaves out the reviews of archived tenancies (D4);
 // name the tenancy with tenantId and its reviews come back, so its page can show
 // the history. getRentReview returns any review.
-// 200 { asOf, reviews: RentReviewDto[], truncated? }. `asOf` is the Darwin date
+// 200 { asOf, reviews: RentReviewDto[], pendingChanges: { count, items }, truncated? }:
+// pendingChanges (WP26c) are the changes awaiting a decision for the tenancy
+// named, else the building, else every tenancy. `asOf` is the Darwin date
 // `overdue` was worked out for. Rows written before the workflow (no State) are
 // not reviews and are not listed; the tenancy's own reviews list still has them.
 //
@@ -22,6 +24,7 @@ import { RENT_REVIEW_STATES, type RentReviewState } from "../rentReviewMachine";
 import { toReviewDto } from "../rentReview/dto";
 import { RentReviewError, rentReviewErrorResponse, TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { loadReviews, REVIEW_LIST_LIMIT, type ReviewFilters } from "../rentReview/store";
+import { loadPendingChanges, pendingChangesOf } from "../scheduleChange/pending";
 
 const INT_MAX = 2_147_483_647;
 
@@ -68,9 +71,12 @@ export async function getRentReviews(request: HttpRequest, context: InvocationCo
     connection = await createRequestConnection(token);
     const rows = await loadReviews(connection, filters);
     const today = todayInDarwin();
+    const scope = filters.tenantId !== undefined ? { tenantId: filters.tenantId } : filters.buildingId !== undefined ? { buildingId: filters.buildingId } : { all: true as const };
+    const pending = await loadPendingChanges(connection, scope, "full");
     return {
       jsonBody: {
         asOf: today,
+        pendingChanges: pendingChangesOf(pending),
         reviews: rows.map((row) => toReviewDto(row, today)),
         ...(rows.length >= REVIEW_LIST_LIMIT ? { truncated: true } : {}),
       },

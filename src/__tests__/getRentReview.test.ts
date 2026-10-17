@@ -38,7 +38,7 @@ const STEP_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const BASE = "Sep 2025 = 100.0";
 
 function serve(options: { cpi?: Array<{ Period: string; IndexValue: number; ReferenceBase: string | null }>; review?: Record<string, unknown>; sqm?: number; tenancy?: Record<string, unknown> | null } = {}) {
-  routeSql(db.executeQuery, [
+  routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
     [/FROM dbo\.RentReviews r/, () => [reviewRow(options.review ?? {})]],
     [/FROM dbo\.Tenants t\s+LEFT JOIN dbo\.Buildings/, () => (options.tenancy === null ? [] : [tenancyRow(options.tenancy ?? {})])],
     [/FROM dbo\.TenantOccupancies/, () => [{ Sqm: options.sqm ?? 400 }]],
@@ -70,7 +70,7 @@ describe("who may ask, and what", () => {
   });
 
   it("is a 404 for a review that doesn't exist, and for one written before the workflow", async () => {
-    routeSql(db.executeQuery, [[/FROM dbo\.RentReviews r/, () => []]]);
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.RentReviews r/, () => []]]);
     expect((await ask("reviewId=nope")).status).toBe(404);
     const [{ sql }] = callsMatching(db.executeQuery, /FROM dbo\.RentReviews r/);
     expect(sql).toContain("r.State IS NOT NULL");

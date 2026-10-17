@@ -5,7 +5,9 @@
 //   200 {
 //     asOf,                 the Darwin date `overdue` was worked out for
 //     review,               RentReviewDto, including rowVersion for the writes
-//     tenancy,              TenancySummaryDto: names, the lease terms, today's rent
+//     tenancy,              TenancySummaryDto: names, the lease terms, today's rent, and
+//                           pendingChanges (WP26c): the tenancy's changes awaiting a
+//                           decision, this review included while it awaits approval
 //     step,                 the schedule step the review is linked to (set when it is
 //                           commenced), or null
 //     cpiSuggestion,        CPI reviews only, else null:
@@ -33,6 +35,7 @@ import { buildCpiSuggestion, previousQuarter, referenceQuarter } from "../rentRe
 import { toReviewDto, toTenancySummary } from "../rentReview/dto";
 import { readReviewId, RentReviewError, rentReviewErrorResponse, TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { loadCpiRows, loadReview, loadTenancyForReview, totalOccupancySqm } from "../rentReview/store";
+import { loadPendingChanges, pendingChangesOf } from "../scheduleChange/pending";
 
 const REGIONS: readonly string[] = ["AUS", "DARWIN"];
 
@@ -53,7 +56,8 @@ export async function getRentReview(request: HttpRequest, context: InvocationCon
     const review = toReviewDto(row, today);
     const tenancyRow = await loadTenancyForReview(connection, review.tenantId);
     if (!tenancyRow) throw new RentReviewError("not_found", "That review's tenancy doesn't exist");
-    const tenancy = toTenancySummary(tenancyRow, await totalOccupancySqm(connection, review.tenantId), today);
+    const summary = toTenancySummary(tenancyRow, await totalOccupancySqm(connection, review.tenantId), today);
+    const tenancy = { ...summary, pendingChanges: pendingChangesOf(await loadPendingChanges(connection, { tenantId: review.tenantId }, "full")) };
 
     const steps = parseSteps(tenancyRow.ScheduledRateSteps as string | null | undefined);
     const step = review.stepId === null ? null : (steps.find((candidate) => candidate.id === review.stepId) ?? null);

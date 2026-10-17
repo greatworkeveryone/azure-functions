@@ -17,7 +17,8 @@ const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as 
 type Body = { asOf: string; reviews: Array<Record<string, any>>; truncated?: boolean };
 
 const ask = (query: string, roles: string | null = "accounts") => getRentReviews(getRequest(query, roles), ctx);
-const lastSelect = () => callsMatching(db.executeQuery, /FROM dbo\.RentReviews/).at(-1)!;
+// The list's own query (the pending loader's, WP26c, also reads RentReviews).
+const lastSelect = () => callsMatching(db.executeQuery, /SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.RentReviews/).at(-1)!;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -26,7 +27,7 @@ beforeEach(() => {
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
   process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development"; // the override only applies there (jwt.ts isDevOverrideEnabled)
   db.createRequestConnection.mockResolvedValue({});
-  routeSql(db.executeQuery, [[/FROM dbo\.RentReviews/, () => []]]);
+  routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.RentReviews/, () => []]]);
 });
 
 describe("who may ask", () => {
@@ -135,7 +136,7 @@ describe("archived tenancies (D4)", () => {
   );
 
   it("passes through what the database returns for a named, archived tenancy, with the review as it was left", async () => {
-    routeSql(db.executeQuery, [
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
       [
         /FROM dbo\.RentReviews/,
         () => [reviewRow({ ReviewId: "old", ScheduledFor: asDate(DAY(-200)), State: "completed", Status: "completed", TenantArchivedAt: asDate(DAY(-20)), TenantStatus: "vacated" })],
@@ -151,7 +152,7 @@ describe("archived tenancies (D4)", () => {
 
 describe("what comes back", () => {
   it("lists reviews as the wire shape, with overdue worked out for today in Darwin", async () => {
-    routeSql(db.executeQuery, [
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
       [
         /FROM dbo\.RentReviews/,
         () => [
@@ -189,7 +190,7 @@ describe("what comes back", () => {
   });
 
   it("carries the last return on each review, as getRentReview does, from the same ledger lookup (WP26)", async () => {
-    routeSql(db.executeQuery, [
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
       [
         /FROM dbo\.RentReviews/,
         () => [
@@ -211,7 +212,7 @@ describe("what comes back", () => {
   });
 
   it("answers a failed query with a 500 and closes the connection", async () => {
-    routeSql(db.executeQuery, [[/FROM dbo\.RentReviews/, () => Promise.reject(new Error("boom"))]]);
+    routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.RentReviews/, () => Promise.reject(new Error("boom"))]]);
     const res = await ask("tenantId=7");
     expect(res.status).toBe(500);
     expect(db.closeConnection).toHaveBeenCalled();

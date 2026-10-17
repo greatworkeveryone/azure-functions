@@ -252,6 +252,17 @@ export class ReviewWorld {
       const ids = Object.entries(p).filter(([k]) => k.startsWith("Change")).map(([, v]) => v);
       return this.state.changeLog.filter((r) => r.TenantId === p.TenantId && ids.includes(r.ChangeId));
     }
+    // The pending loader (scheduleChange/pending.ts): relief requests, reviews awaiting approval.
+    if (/FROM dbo\.ScheduleChangeRequests c\s+INNER JOIN dbo\.Tenants t ON t\.TenantId = c\.TenantId\s+WHERE c\.State = N'pending'/.test(sql)) {
+      return this.state.changes
+        .filter((c) => c.State === "pending" && (p.TenantId === undefined || c.TenantId === p.TenantId))
+        .map((c) => this.changeView(c));
+    }
+    if (/^SELECT r\.ReviewId, r\.TenantId, r\.ScheduledFor, r\.State, r\.Calc/.test(sql.trim())) {
+      return this.state.reviews
+        .filter((r) => r.State === "awaiting_approval" && (p.TenantId === undefined || r.TenantId === p.TenantId))
+        .map((r) => ({ ...r, BuildingId: this.tenant(Number(r.TenantId)).BuildingId, LegalName: this.tenant(Number(r.TenantId)).LegalName, TradingName: this.tenant(Number(r.TenantId)).TradingName ?? null }));
+    }
     // Schedule change requests (WP26c)
     if (/INSERT INTO dbo\.ScheduleChangeRequests/.test(sql)) {
       if (this.state.changes.some((c) => c.RequestId === p.RequestId)) throw Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_ScheduleChangeRequests'"), { number: 2627 });

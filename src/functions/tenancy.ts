@@ -52,6 +52,7 @@ import {
 import {
   CarparkScheduleGroup,
   closeOpenPredecessor,
+  computeScheduleRows,
   deleteGroup,
   deleteMiscFee,
   deleteStep,
@@ -98,6 +99,8 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { resolveActivePlannerTasks } from "../planner";
+import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
+import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import {
@@ -255,6 +258,10 @@ interface RegisterTenantApi {
   createdBy: UserRef;
   daysToExpiry?: number;
   dollarsToExpiry?: number;
+  /** WP26c: the ratified reliefs in force today (a chip on the register). */
+  activeReliefIds: string[];
+  /** WP26c: what is charged a year today: effectiveRentPerAnnum (the lease's) less a ratified relief on the rent in force today. */
+  chargedRentPerAnnum: number;
   effectiveRentPerAnnum: number;
   escalationPercent?: number;
   escalationSchedule?: string;
@@ -271,6 +278,11 @@ interface RegisterTenantApi {
   infoSheetSections: InfoSheetSectionApi[];
   /** m078 — lease document administration (execution dates, licences, etc.). */
   leaseAdministration: LeaseAdministration;
+  /** WP26c: changes awaiting a director (relief requests, reviews awaiting approval),
+   *  on every read; absent from a write's response, which reads the row alone. */
+  pendingChanges?: PendingChanges;
+  /** WP26c (m099): the ratified rent reliefs, an overlay on the schedule (scheduleCharges.ts). */
+  rentReliefs: RentRelief[];
   /** Per m040 — text date like "5/1/19". */
   informationSheetAsAt?: string;
   /** Per m040 — file path/reference for the info-sheet doc. */
@@ -468,6 +480,7 @@ function tenantRowToApi(
   row: SqlRow,
   occupancies: TenantOccupancyApi[],
   noteCountByAnchor: Record<string, number>,
+  pending?: PendingChanges,
 ): RegisterTenantApi {
   const totalSizeSqm = occupancies.reduce(
     (sum, o) => sum + (o.sizeSqm || 0),
@@ -484,6 +497,17 @@ function tenantRowToApi(
   const reviewRatchet = terms.reviewRatchet === true;
   const resolved = resolveScheduleAnnual(steps, rentPerAnnum ?? 0, totalSizeSqm, today, terms);
   const effectiveRentPerAnnum = resolved.annual;
+  // WP26c: a ratified relief in force today lowers what is charged, never the lease's figure.
+  const rentReliefs = parseReliefs(row.RentReliefs as string | null | undefined);
+  const inForce =
+    rentReliefs.length > 0
+      ? chargedOn(
+          computeCharges(computeScheduleRows(steps, rentPerAnnum ?? 0, totalSizeSqm, terms), { fallbackAnnual: rentPerAnnum ?? 0, reliefs: rentReliefs }),
+          today,
+        )
+      : null;
+  const rentRelievedToday = inForce !== null && inForce.charged.rent !== null && inForce.charged.rent !== inForce.lease.rent;
+  const chargedRentPerAnnum = rentRelievedToday && inForce?.charged.rent != null ? inForce.charged.rent : effectiveRentPerAnnum;
   const monthlyRental = Math.round((effectiveRentPerAnnum / 12) * 100) / 100;
   const costPerSqm =
     totalSizeSqm > 0
@@ -509,8 +533,10 @@ function tenantRowToApi(
     accountsEmail: asStr(row.AccountsEmail),
     accountsPhone: asStr(row.AccountsPhone),
     acn: asStr(row.Acn),
+    activeReliefIds: inForce?.reliefIds ?? [],
     buildingId: row.BuildingId as number,
     businessTenanciesAct: asStr(row.BusinessTenanciesAct),
+    chargedRentPerAnnum,
     comments: asStr(row.Comments),
     commencement: toIsoDate(row.Commencement),
     costPerSqm,
@@ -551,6 +577,7 @@ function tenantRowToApi(
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
     optionPeriods: asStr(row.OptionPeriods),
+    ...(pending ? { pendingChanges: pending } : {}),
     postalAddress: asStr(row.PostalAddress),
     primaryContactEmail: asStr(row.PrimaryContactEmail),
     primaryContactName: asStr(row.PrimaryContactName),
@@ -558,6 +585,7 @@ function tenantRowToApi(
     holdoverTerms: asStr(row.HoldoverTerms),
     renewalLetterIssueBy: asStr(row.RenewalLetterIssueBy),
     rentPerAnnum,
+    rentReliefs,
     rentStartsOn: resolved.startsOn ?? undefined,
     reviewIntervalMonths: asNum(row.ReviewIntervalMonths),
     reviewRatchet,
@@ -670,6 +698,7 @@ const TENANT_COLUMNS = `
   ScheduledRateSteps,
   CarparkScheduleGroups,
   MiscFees,
+  RentReliefs,
   InfoSheetSections,
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
@@ -730,7 +759,7 @@ async function getRegisterTenants(
     );
 
     if (tenantRows.length === 0) {
-      return { status: 200, jsonBody: { tenants: [] } };
+      return { status: 200, jsonBody: { pendingChanges: pendingChangesOf([]), tenants: [] } };
     }
 
     const tenantIds = tenantRows.map((r) => r.TenantId as number);
@@ -776,16 +805,19 @@ async function getRegisterTenants(
       noteCountsByTenant.set(tid, map);
     }
 
+    // WP26c: the building's changes awaiting a director, on the list and on each tenancy.
+    const pending = await loadPendingChanges(connection, { buildingId }, "full");
     const tenants = tenantRows.map((row) => {
       const tid = row.TenantId as number;
       return tenantRowToApi(
         row,
         occupanciesByTenant.get(String(tid)) ?? [],
         noteCountsByTenant.get(tid) ?? {},
+        pendingFor(pending, tid),
       );
     });
 
-    const body = { tenants };
+    const body = { pendingChanges: pendingChangesOf(pending), tenants };
     setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
@@ -919,7 +951,9 @@ async function getRegisterTenant(
       noteCountByAnchor[key] = (noteCountByAnchor[key] ?? 0) + 1;
     }
 
-    const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor);
+    // WP26c: the tenancy's changes awaiting a director, with who asked and why.
+    const pending = await loadPendingChanges(connection, { tenantId }, "full");
+    const tenant = tenantRowToApi(row, occupancies, noteCountByAnchor, pendingChangesOf(pending));
     const displayName = (tenant as any).tradingName ?? (tenant as any).legalName;
     const plannerTasks = plannerTaskRows.map((r) => {
       const triggerType = r.TriggerType as string;
@@ -2219,6 +2253,9 @@ async function getPortfolioOccupancy(
       [],
     );
 
+    // WP26c: changes awaiting a director across the portfolio, dates and names
+    // only: facilities read these figures too.
+    const pending = await loadPendingChanges(connection, { all: true }, "dates_only");
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;
@@ -2234,6 +2271,8 @@ async function getPortfolioOccupancy(
         annualRent,
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
+        // The building's changes awaiting a director (WP26c): "Includes {n} changes awaiting a director".
+        pendingChangeCount: pending.filter((item) => item.buildingId === Number(r.BuildingId)).length,
         totalSqm,
         // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
         unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
@@ -2242,7 +2281,7 @@ async function getPortfolioOccupancy(
       };
     });
 
-    return { status: 200, jsonBody: { buildings } };
+    return { status: 200, jsonBody: { buildings, pendingChanges: pendingChangesOf(pending) } };
   } catch (error: any) {
     context.error("getPortfolioOccupancy failed:", error.message);
     return errorResponse("Failed to fetch portfolio occupancy", error.message);
