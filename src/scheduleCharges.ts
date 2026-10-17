@@ -144,8 +144,8 @@ export const reliefEnd = (relief: Pick<RentRelief, "to">): string => addDaysIso(
 
 const byStart = (a: RentRelief, b: RentRelief): number => a.from.localeCompare(b.from) || a.id.localeCompare(b.id);
 
-/** What a relief leaves of one charge. */
-function relieve(amount: number | null, relief: RentRelief, scope: ChargeScope): number | null {
+/** What a relief leaves of one charge (a year's worth). */
+export function relieve(amount: number | null, relief: RentRelief, scope: ChargeScope): number | null {
   if (amount === null) return null;
   if (relief.kind === "percent") return r2((amount * (100 - relief.value)) / 100);
   if (scope !== "rent") return amount;

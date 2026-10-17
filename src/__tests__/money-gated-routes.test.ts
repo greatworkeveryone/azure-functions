@@ -78,7 +78,7 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe("money-gated routes", () => {
-  it("lists the twelve money endpoints that exist today, WP26's four rent review decisions included", () => {
+  it("lists the fourteen money endpoints that exist today, WP26's four rent review decisions and WP26c's two schedule change decisions included", () => {
     expect(MONEY_GATED_ROUTES.map((r) => r.route)).toEqual([
       "setApprovalLimit",
       "upsertPayment",
@@ -92,6 +92,8 @@ describe("money-gated routes", () => {
       "approveRentReview",
       "waiveRentReview",
       "revertRentReview",
+      "ratifyScheduleChange",
+      "rejectScheduleChange",
     ]);
   });
 

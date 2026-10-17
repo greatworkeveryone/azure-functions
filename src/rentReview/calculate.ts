@@ -62,6 +62,7 @@ export async function workOutReview(connection: Connection, input: WorkOutInput)
     method: input.method,
     miscFees: schedule.miscFees,
     newStepId: randomUUID(),
+    reliefs: schedule.reliefs,
     reviewId,
     sanity: sanityBandFromEnv(),
     scheduledFor,

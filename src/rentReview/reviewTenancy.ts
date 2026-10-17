@@ -21,6 +21,7 @@ import {
   type MiscFee,
   type ScheduledRateStep,
 } from "../scheduledRateStepLogic";
+import { parseReliefs, type RentRelief } from "../scheduleCharges";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { RentReviewError, tenancyArchived } from "./http";
 import type { ScheduleContext } from "./stepPlan";
@@ -67,6 +68,8 @@ export interface ReviewSchedule {
   carparkGroups: CarparkScheduleGroup[];
   context: ScheduleContext;
   miscFees: MiscFee[];
+  /** The ratified rent reliefs (Tenants.RentReliefs, WP26c): a review's arrears for a relieved day are the relieved difference. */
+  reliefs: RentRelief[];
 }
 
 /** What the schedule engine needs about the tenancy, with these steps. */
@@ -81,6 +84,7 @@ export function scheduleOf(row: SqlRow, steps: ScheduledRateStep[], totalSqm: nu
       steps,
     },
     miscFees: parseMiscFees(row.MiscFees as string | null | undefined),
+    reliefs: parseReliefs(row.RentReliefs as string | null | undefined),
   };
 }
 

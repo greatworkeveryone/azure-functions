@@ -10,6 +10,7 @@
 // refuse it, so nobody is asked to approve one.
 
 import type { RentReviewCalc } from "../rentReviewCalc";
+import type { RentRelief } from "../scheduleCharges";
 import type { CarparkScheduleGroup, MiscFee, ScheduledRateStep, ScheduleRow } from "../scheduledRateStepLogic";
 import { arrearsFor, reviewChanges, type ArrearsLine } from "./arrears";
 import { computeCascade, type CascadeBounds, type CascadeRow } from "./cascade";
@@ -40,6 +41,8 @@ export interface WrittenReviewInput {
   miscFees: readonly MiscFee[];
   /** The CPI row's rate (informational) or the fixed %. */
   naturalRate: number;
+  /** The ratified reliefs: on the days they cover a charge, its arrears are the relieved difference (WP26c). */
+  reliefs?: readonly RentRelief[];
   reviewId: string;
   scheduledFor: string;
   /** The new annual rent, to the cent. */
@@ -83,7 +86,7 @@ export function writtenReview(input: WrittenReviewInput): WrittenReview | null {
     rowsThrough,
   });
   return {
-    arrears: arrearsFor(input.scheduledFor, input.today, reviewChanges(input.currentAnnual, input.target, cascade)),
+    arrears: arrearsFor(input.scheduledFor, input.today, reviewChanges(input.currentAnnual, input.target, cascade), input.reliefs ?? []),
     cascade,
     representation: written.representation,
     row: written.row,
@@ -149,6 +152,7 @@ export function writtenFromCalc(input: StoredCalcTarget): FromCalc {
     method: calc.method,
     miscFees: schedule.miscFees,
     naturalRate: calc.method === "fixed" ? (calc.fixedPercent ?? 0) : calc.appliedPercent,
+    reliefs: schedule.reliefs,
     reviewId: input.reviewId,
     scheduledFor: input.scheduledFor,
     target: input.target,

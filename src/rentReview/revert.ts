@@ -31,6 +31,7 @@ import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { appliedCascade, arrearsFor, parseCalc, reviewChanges } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog, loadChangeLogEntries } from "../rentScheduleChangeLog";
+import { parseReliefs } from "../scheduleCharges";
 import { diffSteps, parseSteps } from "../scheduledRateStepLogic";
 import { RentReviewError } from "./http";
 import {
@@ -250,7 +251,12 @@ export async function revertReview(connection: Connection, input: RevertInput): 
 
   const arrears =
     oldAnnual !== null && newAnnual !== null && appliedAt
-      ? arrearsFor(scheduledFor, todayInDarwin(appliedAt), reviewChanges(oldAnnual, newAnnual, appliedCascade(appliedCalc)))
+      ? arrearsFor(
+          scheduledFor,
+          todayInDarwin(appliedAt),
+          reviewChanges(oldAnnual, newAnnual, appliedCascade(appliedCalc)),
+          parseReliefs(tenancy.RentReliefs as string | null | undefined),
+        )
       : null;
   await ledger.record(connection, {
     action: "rent_review.revert",

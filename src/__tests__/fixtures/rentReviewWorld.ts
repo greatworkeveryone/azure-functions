@@ -1,6 +1,7 @@
 // An in-memory stand-in for the database behind the WP26 rent review endpoints:
 // RentReviews (with the one-open-review unique index), Tenants, the schedule
-// change log, the decision ledger, CpiIndex, occupancies and the live E3 lookup.
+// change log, the decision ledger, CpiIndex, occupancies and the live E3 lookup;
+// and, for WP26c, ScheduleChangeRequests.
 // It answers the SQL the code sends by its shape, applies UPDATE ... SET
 // clauses column by column, and snapshots itself on beginTransaction so a
 // rollback really restores every table: tests prove "all or nothing" against
@@ -15,6 +16,8 @@ const asIso = (value: unknown): string | null =>
 
 export interface WorldState {
   changeLog: Row[];
+  /** dbo.ScheduleChangeRequests (WP26c). */
+  changes: Row[];
   cpi: Row[];
   escalations: Row[];
   ledger: Row[];
@@ -24,7 +27,7 @@ export interface WorldState {
 }
 
 export class ReviewWorld {
-  state: WorldState = { changeLog: [], cpi: [], escalations: [], ledger: [], occupancySqm: {}, reviews: [], tenants: [] };
+  state: WorldState = { changeLog: [], changes: [], cpi: [], escalations: [], ledger: [], occupancySqm: {}, reviews: [], tenants: [] };
   private snapshot: string | null = null;
   private version = 0xa01;
   private ledgerId = 1;
@@ -56,6 +59,7 @@ export class ReviewWorld {
       const saved = JSON.parse(this.snapshot) as WorldState & { ledgerId: number; version: number };
       this.state = {
         changeLog: saved.changeLog,
+        changes: saved.changes,
         cpi: saved.cpi,
         escalations: saved.escalations,
         ledger: saved.ledger,
@@ -73,6 +77,18 @@ export class ReviewWorld {
   /** A JSON picture of every table, for "nothing changed" assertions. */
   picture(): string {
     return JSON.stringify(this.state);
+  }
+
+  change(requestId: string): Row {
+    const row = this.state.changes.find((c) => c.RequestId === requestId);
+    if (!row) throw new Error(`no schedule change ${requestId}`);
+    return row;
+  }
+
+  /** A request joined to its tenancy, as scheduleChange/store.ts selects it. */
+  private changeView(change: Row): Row {
+    const tenant = this.tenant(Number(change.TenantId));
+    return { ...change, BuildingId: tenant.BuildingId, LegalName: tenant.LegalName, TradingName: tenant.TradingName ?? null, Version: Buffer.from(String(change.Version), "hex") };
   }
 
   review(reviewId: string): Row {
@@ -155,6 +171,7 @@ export class ReviewWorld {
       OwnerName: review.OwnerUserId ? `User ${review.OwnerUserId}` : null,
       TenantArchivedAt: tenant.ArchivedAt ?? null,
       TenantBuildingId: tenant.BuildingId,
+      TenantRentReliefs: tenant.RentReliefs ?? null,
       TenantStatus: tenant.Status,
       TradingName: tenant.TradingName ?? null,
       Version: Buffer.from(String(review.Version), "hex"),
@@ -235,6 +252,50 @@ export class ReviewWorld {
       const ids = Object.entries(p).filter(([k]) => k.startsWith("Change")).map(([, v]) => v);
       return this.state.changeLog.filter((r) => r.TenantId === p.TenantId && ids.includes(r.ChangeId));
     }
+    // Schedule change requests (WP26c)
+    if (/INSERT INTO dbo\.ScheduleChangeRequests/.test(sql)) {
+      if (this.state.changes.some((c) => c.RequestId === p.RequestId)) throw Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_ScheduleChangeRequests'"), { number: 2627 });
+      this.state.changes.push({
+        DecidedAt: null,
+        DecidedById: null,
+        DecidedByName: null,
+        DecisionNote: null,
+        Kind: p.Kind,
+        Payload: p.Payload,
+        Reason: p.Reason,
+        RequestId: p.RequestId,
+        RequestedAt: new Date(),
+        RequestedById: p.RequestedById,
+        RequestedByName: p.RequestedByName,
+        State: "pending",
+        TenantId: p.TenantId,
+        Version: this.nextVersion(),
+      });
+      return [];
+    }
+    if (/^SELECT c\.RequestId, c\.Payload FROM dbo\.ScheduleChangeRequests c/.test(sql.trim())) {
+      return this.state.changes.filter((c) => c.TenantId === p.TenantId && c.State === "pending" && c.Kind === "relief").map((c) => ({ Payload: c.Payload, RequestId: c.RequestId }));
+    }
+    if (/FROM dbo\.ScheduleChangeRequests c[\s\S]*WHERE c\.RequestId = @RequestId/.test(sql)) {
+      const row = this.state.changes.find((c) => c.RequestId === p.RequestId);
+      return row ? [this.changeView(row)] : [];
+    }
+    if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.ScheduleChangeRequests c/.test(sql.trim())) {
+      const states = Object.entries(p).filter(([k]) => k.startsWith("State")).map(([, v]) => v);
+      return this.state.changes
+        .filter((c) => (p.TenantId === undefined || c.TenantId === p.TenantId) && (states.length === 0 || states.includes(c.State)))
+        .sort((a, b) => (b.RequestedAt as Date).getTime() - (a.RequestedAt as Date).getTime())
+        .map((c) => this.changeView(c));
+    }
+    if (/UPDATE dbo\.ScheduleChangeRequests/.test(sql)) {
+      const row = this.state.changes.find((c) => c.RequestId === p.RequestId && c.State === "pending");
+      if (!row) return [];
+      const setClause = (sql.match(/SET([\s\S]*?)OUTPUT/) as RegExpMatchArray)[1];
+      this.applySet(row, setClause, p);
+      row.Version = this.nextVersion();
+      return [{ RequestId: row.RequestId }];
+    }
+
     // Escalation reads of their own (not a review query's OUTER APPLY over them): nothing here.
     if (sql.match(/\bFROM\s+(dbo\.\w+)/)?.[1] === "dbo.Escalations") return [];
     if (/FROM dbo\.CpiIndex/.test(sql)) {

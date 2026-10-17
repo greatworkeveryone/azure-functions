@@ -34,7 +34,7 @@ const REVIEW_COLUMNS = `
   r.WaiveReason, r.ExpectedIndexAt, r.CreatedAt, r.UpdatedAt, r.Version,
   r.OldRentPerAnnum, r.NewRentPerAnnum, r.IncreasePercent,
   t.BuildingId AS TenantBuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus,
-  t.ArchivedAt AS TenantArchivedAt,
+  t.ArchivedAt AS TenantArchivedAt, t.RentReliefs AS TenantRentReliefs,
   u.DisplayName AS OwnerName,
   lr.ReturnedAt, lr.ReturnedByName, lr.ReturnNote,
   ia.IndexArrivedAt, ia.IndexArrivedQuarter,
@@ -170,7 +170,7 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
 const TENANCY_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.Commencement, t.Expiry, t.ReviewType, t.ReviewIntervalMonths, t.LastReviewDate, t.FixedReviewPercent,
     t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.RentPerAnnum, t.ScheduleVersion,
-    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, b.BuildingName,
+    t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, b.BuildingName,
     t.ScheduleSignedOffAt, t.ScheduleSignedOffByName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
@@ -185,7 +185,7 @@ export async function loadTenancyForReview(connection: Connection, tenantId: num
 const TENANCY_LOCKED_FOR_REVIEW = `SELECT t.TenantId, t.BuildingId, t.Status, t.ArchivedAt, t.ScheduleVersion,
     t.Commencement, t.LastReviewDate, t.LastReviewIncreasePercent, t.ReviewIntervalMonths, t.NextReviewDate,
     t.ReviewType, t.FixedReviewPercent, t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
-    t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.UpdatedAt, t.UpdatedByName,
+    t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, t.UpdatedAt, t.UpdatedByName,
     ${SIGN_OFF_COLUMNS},
     ${RESOLVED_REVIEW_DATES_SQL}
   FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK)

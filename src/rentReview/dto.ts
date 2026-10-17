@@ -12,6 +12,7 @@ import {
   type RentReviewMethod,
   type RentReviewState,
 } from "../rentReviewMachine";
+import { parseReliefs } from "../scheduleCharges";
 import { parseSteps, resolveScheduleAnnual } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { scheduleTermsOf } from "../scheduleTerms";
@@ -116,7 +117,8 @@ function outcomeOf(row: SqlRow, state: RentReviewState, scheduledFor: string): R
   if (oldAnnual === null || newAnnual === null) return null;
   const appliedAt = row.ApprovedAt instanceof Date ? todayInDarwin(row.ApprovedAt) : null;
   const cascade = appliedCascade(parseCalc(row.Calc));
-  const arrears = appliedAt ? arrearsFor(scheduledFor, appliedAt, reviewChanges(oldAnnual, newAnnual, cascade)) : null;
+  const reliefs = parseReliefs(row.TenantRentReliefs as string | null | undefined);
+  const arrears = appliedAt ? arrearsFor(scheduledFor, appliedAt, reviewChanges(oldAnnual, newAnnual, cascade), reliefs) : null;
   const billed = row.BillingConfirmedAt !== null && row.BillingConfirmedAt !== undefined;
   return {
     appliedPercent: r4(decimal(row.IncreasePercent) ?? 0),

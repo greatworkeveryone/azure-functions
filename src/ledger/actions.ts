@@ -93,6 +93,19 @@ export const LEDGER_ACTIONS = {
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // Pending schedule changes (WP26c, D24). The subject is the request
+  // (schedule_change); the scope columns carry the tenancy and building. Staff ask
+  // (change_requested, with why), a director ratifies or rejects it, the person
+  // who asked may withdraw it; each needs its reason (a rejection its note). A
+  // ratification is the exception: it writes the change onto the schedule, with
+  // financialImpact the charge forgone over the relief's own days (positive =
+  // money forgone) and how it was worked out in `computed`. Refused attempts are
+  // `denied` rows on the request.
+  "schedule.change_ratified": { exception: true, reasonRequired: true, subjects: ["schedule_change"] },
+  "schedule.change_rejected": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
+  "schedule.change_requested": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
+  "schedule.change_withdrawn": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
+
   // Schedule sign-off (WP24)
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.sign_off_cleared": { exception: true, reasonRequired: true, subjects: ["tenancy"] },

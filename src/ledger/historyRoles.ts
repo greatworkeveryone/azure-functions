@@ -56,6 +56,8 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["quote", QUOTE_READ],
   // A review is read through getRentReview, which has the tenancy's own gate.
   ["rent_review", TENANCY_READ],
+  // A schedule change is read through getScheduleChanges, which has the tenancy's own gate.
+  ["schedule_change", TENANCY_READ],
   ["tenancy", TENANCY_READ],
 ]);
 

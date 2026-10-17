@@ -44,6 +44,7 @@ import type { CascadeRow } from "./rentReview/cascade";
 import { expectedRelease, previousQuarter, referenceQuarter, type CpiIndexRow } from "./rentReview/cpi";
 import { appliedStep, reviewRow, type ScheduleContext, simulate, waivedStep } from "./rentReview/stepPlan";
 import { writtenReview } from "./rentReview/written";
+import type { RentRelief } from "./scheduleCharges";
 import type { CarparkScheduleGroup, MiscFee, ScheduledRateStep } from "./scheduledRateStepLogic";
 
 export { arrearsFor, computeArrears, reviewChanges, type ArrearsLine, type ArrearsPart } from "./rentReview/arrears";
@@ -261,6 +262,8 @@ export interface CalcInput {
   miscFees: readonly MiscFee[];
   /** Id for a schedule row the review adds (when none is dated on the review date). */
   newStepId: string;
+  /** The ratified rent reliefs (WP26c): the arrears for a relieved day are the relieved difference. */
+  reliefs?: readonly RentRelief[];
   reviewId: string;
   sanity: { maxPercent: number; minPercent: number };
   scheduledFor: string;
@@ -435,6 +438,7 @@ export function calculateReview(input: CalcInput): CalcResult {
     method: input.method,
     miscFees: input.miscFees,
     naturalRate: input.method === "fixed" ? (plan?.fixedPercent ?? 0) : appliedPercent,
+    reliefs: input.reliefs ?? [],
     reviewId: input.reviewId,
     scheduledFor: input.scheduledFor,
     target: newAnnual,
