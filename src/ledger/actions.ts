@@ -90,6 +90,13 @@ export const LEDGER_ACTIONS = {
   "schedule.recompute_next_review": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.terms_edit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // Tenancy archive (D4): a tenancy or a lease document leaves the register
+  // without being destroyed; only an empty draft is ever hard-deleted.
+  "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+  "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
+
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
