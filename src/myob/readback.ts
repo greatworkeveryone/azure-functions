@@ -57,7 +57,12 @@ export async function floorplanLastTouch(connection: Connection, proposal: Propo
   return row ? { action: String(row.Action), at: row.OccurredAt instanceof Date ? row.OccurredAt.toISOString() : "", name: String(row.ActorName) } : null;
 }
 
-/** Reads one record back from MYOB and compares it. A 404 means it is missing in MYOB. */
+/**
+ * Reads one record back from MYOB and compares it. A 404 means it is missing in
+ * MYOB. Everything is compared with the record as read back after sending (the
+ * same as what was sent, for a verified proposal), or, once the CFO accepted
+ * MYOB's record as the baseline (activity/acceptBaseline.ts), with that record.
+ */
 export async function readBackProposal(
   connection: Connection,
   proposal: ProposalRow,
@@ -80,7 +85,7 @@ export async function readBackProposal(
     myob: current,
     now,
     previousStatus: proposal.myobStatus,
-    sent: proposal.payload,
+    sent: proposal.readBack ?? proposal.payload,
     sentLabels: { supplier: proposal.rendered?.supplier ?? "the supplier Floorplan sent" },
   });
   return { record: current, verdict };
