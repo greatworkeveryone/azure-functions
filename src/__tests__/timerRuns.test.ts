@@ -58,9 +58,9 @@ describe("runTimer", () => {
   });
 
   it("records Outcome 'ok' with the counts the body returns", async () => {
-    await runTimer("cleanupAttachmentsTimer", async () => ({ deleted: 2, failed: 0, scanned: 2 }))(timer, ctx);
+    await runTimer("escalationSweepTimer", async () => ({ raised: 2, scanned: 2, skipped: 0 }))(timer, ctx);
     const finish = writes()[1];
-    expect(finish.params).toMatchObject({ Counts: '{"deleted":2,"failed":0,"scanned":2}', Error: null, Outcome: "ok" });
+    expect(finish.params).toMatchObject({ Counts: '{"raised":2,"scanned":2,"skipped":0}', Error: null, Outcome: "ok" });
   });
 
   it("still runs the timer, and still fails it, when the run can't be recorded", async () => {

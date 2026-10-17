@@ -77,7 +77,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   clearRoleCache();
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
-  delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   roleByOid = {};
   cpiRows = [];
   cpiQueries = [];

@@ -6,11 +6,12 @@
   "scripts": {
     "prestart": "npm run build",
     "start": "npx func start",
-    "build": "tsc && cp src/openapi.json dist/openapi.json",
+    "build": "rm -rf dist && tsc && cp src/openapi.json dist/openapi.json",
     "watch": "tsc -w",
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
+    "check:routes": "node scripts/check-routes.cjs",
     "migrate": "tsc && node scripts/migrate.cjs"
   },
   "dependencies": {

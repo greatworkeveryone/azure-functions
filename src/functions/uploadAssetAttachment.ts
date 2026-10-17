@@ -4,7 +4,7 @@
 // row - except that both rows are written in one transaction and the blob is
 // removed again if either fails. The asset must exist and be live (checked
 // BEFORE the upload so a rejected request never leaves a blob behind).
-// Blobs are keyed asset-<id>/...; cleanupAttachments only reaps work-request
+// Blobs are keyed asset-<id>/...; the removed cleanup timer only reaped work-request
 // rows, and these never carry a work request.
 // Response: { attachment } (AssetAttachmentApi, with sasUrl).
 

@@ -92,6 +92,25 @@ export function teamRolesOfAll(roles: readonly string[]): readonly string[] | nu
   return [...union];
 }
 
+/** The Finance workspace's alerts are policies whose key starts with this. */
+export const FINANCE_POLICY_PREFIX = "finance.";
+
+/** Policy-key prefixes a role can see in full, whoever the escalation goes to.
+ *  Oversight only: seeing an escalation never lets the role act on it. */
+export function seenPolicyPrefixesOf(role: string | null | undefined): readonly string[] {
+  switch (normaliseRole(role)) {
+    case ROLES.cfo:
+      return [FINANCE_POLICY_PREFIX];
+    default:
+      return [];
+  }
+}
+
+/** The union of seenPolicyPrefixesOf over several roles. */
+export function seenPolicyPrefixesOfAll(roles: readonly string[]): readonly string[] {
+  return [...new Set(roles.flatMap((role) => seenPolicyPrefixesOf(role)))];
+}
+
 /** Whether a holder of `viewerRole` is above `targetRole` in the ladder, so can
  *  see escalations aimed at it (§3.7 visibility: "every role above the target"). */
 export function isAbove(viewerRole: string, targetRole: string | null): boolean {

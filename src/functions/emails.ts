@@ -17,10 +17,13 @@ import {
 } from "../db";
 import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { GraphEmail } from "../graph";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { matchJobId } from "../email/job-match";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
+import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
+import { resolveInvoiceContractor } from "../invoice-contractor";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
@@ -29,10 +32,11 @@ import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
 import { record } from "../ledger";
 import { ledgerUserActor, resolveLedgerActor } from "../ledger/actor";
-import { jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
+import { contractorFacts, jobScope, ledgerReason, quoteFacts } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal } from "../ledger/refusals";
 import { LEDGER_LIMITS } from "../ledger/validate";
 import { parseMoneyField } from "../money";
+import { linkDirectorReply } from "../email/director-reply-link";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -66,8 +70,11 @@ function hydrateAttachments(
       const fileName = typeof n === "string"
         ? (blobName.split("/").pop() ?? blobName)
         : (n as { blobName: string; fileName: string }).fileName;
-      return { blobName, fileName, url: generateReadSasUrl(blobName, hour) };
-    });
+      return { blobName, fileName };
+    })
+    // A stored name that is not minted gets no link (SEC-01) rather than failing the inbox.
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
+    .map((a) => ({ ...a, url: generateReadSasUrl(a.blobName, hour) }));
 }
 
 const EMAIL_COLUMNS = `
@@ -95,7 +102,7 @@ export async function getEmails(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const rawStatuses = request.query.get("statuses") ?? "unread,matched";
@@ -177,7 +184,7 @@ async function getEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));
@@ -272,8 +279,8 @@ export async function ingestEmail(
           : (entry && typeof entry === "object" && "blobName" in entry && typeof (entry as { blobName: unknown }).blobName === "string"
             ? (entry as { blobName: string }).blobName
             : null);
-        if (!blobName || !EMAIL_BLOB_PREFIX_RE.test(blobName)) {
-          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must reference emails/{messageId}/..." } };
+        if (!isBlobName(blobName, EMAIL_ATTACHMENT_SHAPE)) {
+          return { status: 400, jsonBody: { error: "AttachmentBlobs entries must be email-attachments/{messageId}/{uuid} names" } };
         }
       }
     }
@@ -454,7 +461,9 @@ export async function promoteEmailToQuote(
 // ── POST /api/archiveEmail ──────────────────────────────────────────────────
 // Body: { EmailID: number }
 // Sets Status = 'archived' and stamps ProcessedAt so the email leaves the
-// active inbox without being tied to a job/quote/invoice.
+// active inbox without being tied to a job/quote/invoice. Who archived it and
+// when are stamped on the row (ArchivedBy/ArchivedAt, migration 133) and
+// ledgered (email.archive), all in one transaction (SEC-05).
 
 async function archiveEmail(
   request: HttpRequest,
@@ -463,7 +472,7 @@ async function archiveEmail(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -488,12 +497,39 @@ async function archiveEmail(
     }
 
     connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME()
-       WHERE EmailID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: EmailID }],
-    );
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    await beginTransaction(connection);
+    try {
+      const archived = await executeQuery(
+        connection,
+        `UPDATE Emails SET Status = 'archived', ProcessedAt = SYSUTCDATETIME(),
+                ArchivedAt = SYSUTCDATETIME(), ArchivedBy = @ArchivedBy
+         OUTPUT INSERTED.EmailID, INSERTED.MatchedJobID, DELETED.Status AS PreviousStatus
+         WHERE EmailID = @Id`,
+        [
+          { name: "Id", type: TYPES.Int, value: EmailID },
+          { name: "ArchivedBy", type: TYPES.NVarChar, value: identity.name },
+        ],
+      );
+      if (archived.length === 0) {
+        await rollbackTransaction(connection);
+        return { status: 404, jsonBody: { error: "Email not found" } };
+      }
+      await record(connection, {
+        action: "email.archive",
+        actor,
+        after: { status: "archived" },
+        before: { status: (archived[0].PreviousStatus as string | null) ?? null },
+        jobId: (archived[0].MatchedJobID as number | null) ?? null,
+        subject: { id: EmailID, type: "email" },
+      });
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
@@ -516,7 +552,7 @@ async function flagEmailForReview(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -645,8 +681,11 @@ async function promoteEmailToJob(
 }
 
 // ── POST /api/promoteEmailToInvoice ─────────────────────────────────────────
-// Body: { EmailID, JobID, Amount?, Description?, CreatedBy?, InvoiceNumber?, SupplierInvoiceNumber? }
+// Body: { EmailID, JobID, Amount?, ContractorID?, ContractorName?, Description?, CreatedBy?,
+//         InvoiceNumber?, SupplierInvoiceNumber? }
 // Creates an Invoice row linked to the job, marks the email as 'promoted'.
+// ContractorID is stored when the request has it (the picker, or the quote or
+// order the invoice answers); a name on its own is never matched to a contractor.
 
 export async function promoteEmailToInvoice(
   request: HttpRequest,
@@ -674,7 +713,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount: rawAmount, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -693,16 +732,21 @@ export async function promoteEmailToInvoice(
 
     connection = await createRequestConnection(token);
 
+    // The contractor by id, when the request names one; otherwise just the name.
+    const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
+    if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
+
     const inserted = await executeQuery(
       connection,
       `INSERT INTO JobInvoices
-         (JobID, Amount, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+         (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
        OUTPUT INSERTED.JobInvoiceID
-       VALUES (@JobID, @Amount, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
+       VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
-        { name: "ContractorName", type: TYPES.NVarChar, value: ContractorName ?? null },
+        { name: "ContractorID", type: TYPES.Int, value: contractor.id ?? null },
+        { name: "ContractorName", type: TYPES.NVarChar, value: contractor.name ?? null },
         { name: "InvoiceNumber", type: TYPES.NVarChar, value: InvoiceNumber ?? null },
         { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
         { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
@@ -923,8 +967,9 @@ export async function promoteEmailToJobUpdate(
 // (SenderAuthenticated = 1, see src/email/sender-auth.ts) — From is spoofable.
 // The actor stamped on the quote is that director's DisplayName, never the
 // body. Helpers + email flip + ledger row are one transaction.
-// EMAIL_REPLY_DECISIONS_ENABLED=false switches the whole path off (403, nothing
-// recorded); the default is on.
+// Reply-to-approve is OFF unless EMAIL_REPLY_DECISIONS_ENABLED is exactly
+// "true" (decision 2, SEC-07): the reply is then only filed on the job
+// (email.reply_linked) and the 403 answer carries the job's link.
 //
 // Ledger (PLAN §3.12): the same quote.director_approve / quote.director_reject
 // as the in-app buttons, ruleApplied "email_reply", the email in `after`. The
@@ -978,20 +1023,8 @@ export async function recordEmailQuoteDecision(
   if (!identity) return unauthorizedResponse();
 
   // Decisions belong in the app, where the approver is a verified sign-in rather
-  // than a reply's From address. Defaults to ON until the email deep link opens
-  // the approval step; read per call so it can be flipped without a redeploy.
-  if (process.env.EMAIL_REPLY_DECISIONS_ENABLED === "false") {
-    context.warn(
-      `recordEmailQuoteDecision: refused for ${identity.oid} — email-reply decisions are disabled (EMAIL_REPLY_DECISIONS_ENABLED=false); nothing recorded`,
-    );
-    return {
-      status: 403,
-      jsonBody: {
-        code: "EMAIL_REPLY_DECISIONS_DISABLED",
-        error: "Decisions are made in Floorplan — open the link in the email",
-      },
-    };
-  }
+  // than a reply's From address. Read per call so it can be flipped without a redeploy.
+  const replyDecisionsOn = process.env.EMAIL_REPLY_DECISIONS_ENABLED === "true";
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
@@ -1022,6 +1055,12 @@ export async function recordEmailQuoteDecision(
   try {
     const conn = await createRequestConnection(token);
     connection = conn;
+    if (!replyDecisionsOn) {
+      context.warn(
+        `recordEmailQuoteDecision: reply-to-approve is off — filing email ${EmailID} on the job for ${identity.oid}; no decision recorded`,
+      );
+      return await linkDirectorReply(conn, { emailId: EmailID, operatorName: identity.name, quoteId: QuoteID });
+    }
     // The signed-in person recording the reply (not who decided it).
     const operator = await resolveLedgerActor(request, conn);
     if (!operator) return unauthorizedResponse();
@@ -1157,7 +1196,7 @@ export async function recordEmailQuoteDecision(
         status: Decision === "approved" ? "approved" : "rejected",
         ...quoteFacts(outcome.quote),
       },
-      before: { status: "awaiting_director" },
+      before: { status: "awaiting_director", ...contractorFacts(outcome.quote) },
       buildingId: scope.buildingId,
       jobId: scope.jobId,
       reason: ledgerReason(Note),
@@ -1197,7 +1236,7 @@ async function getEmailThread(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL]);
   if (denied) return denied;
 
   const emailId = Number(request.query.get("emailId"));
@@ -1320,8 +1359,8 @@ export async function syncEmailsNow(
   const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
-  if (!process.env.GRAPH_MAILBOX_DEV) {
-    return { status: 500, jsonBody: { error: "GRAPH_MAILBOX_DEV not configured" } };
+  if (!incomingMailbox()) {
+    return { status: 500, jsonBody: { error: mailboxConfigError() } };
   }
 
   enqueueEmailSync(context, "manual");

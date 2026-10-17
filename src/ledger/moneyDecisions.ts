@@ -62,6 +62,16 @@ function iso(value: unknown): string | null {
   return Number.isNaN(when.getTime()) ? null : when.toISOString();
 }
 
+/** Who a record is for, under the keys every money row carries, in `before` as
+ *  in `after`. Quotes and orders hold the contractor's id; an invoice row
+ *  carries it once withContractorId has looked it up. */
+export function contractorFacts(row: SqlRow): { contractorId: number | null; contractorName: string | null } {
+  return {
+    contractorId: (row.ContractorID as number | null | undefined) ?? null,
+    contractorName: text(row.ContractorName),
+  };
+}
+
 // What the decision was about, as stored in a row's `after`: the amount, who
 // the money goes to, and the document's own number. Read from the table's own
 // column names, so one builder serves the row a handler loaded and the row it
@@ -70,8 +80,7 @@ function iso(value: unknown): string | null {
 export function quoteFacts(row: SqlRow): Record<string, unknown> {
   return {
     amount: money(row.Amount),
-    contractorId: (row.ContractorID as number | null | undefined) ?? null,
-    contractorName: text(row.ContractorName),
+    ...contractorFacts(row),
     currency: text(row.Currency),
     quoteNumber: text(row.QuoteNumber),
   };
@@ -80,17 +89,19 @@ export function quoteFacts(row: SqlRow): Record<string, unknown> {
 export function invoiceFacts(row: SqlRow): Record<string, unknown> {
   return {
     amount: money(row.Amount),
-    contractorName: text(row.ContractorName),
+    ...contractorFacts(row),
     direction: text(row.Direction),
     invoiceNumber: text(row.InvoiceNumber),
     supplierInvoiceNumber: text(row.SupplierInvoiceNumber),
   };
 }
 
+// A purchase order has no amount column: its estimated cost is the amount, as
+// the director's packet treats it too.
 export function purchaseOrderFacts(row: SqlRow): Record<string, unknown> {
   return {
-    contractorId: (row.ContractorID as number | null | undefined) ?? null,
-    contractorName: text(row.ContractorName),
+    amount: money(row.EstimatedCost),
+    ...contractorFacts(row),
     costNotToExceed: money(row.CostNotToExceed),
     estimatedCost: money(row.EstimatedCost),
     poNumber: text(row.PONumber),
@@ -102,7 +113,7 @@ export function purchaseOrderFacts(row: SqlRow): Record<string, unknown> {
 export function paymentFacts(row: SqlRow, invoice?: SqlRow): Record<string, unknown> {
   return {
     amount: money(row.Amount),
-    contractorName: text(invoice?.ContractorName),
+    ...contractorFacts(invoice ?? {}),
     invoiceNumber: text(invoice?.InvoiceNumber),
     jobInvoiceId: (row.JobInvoiceID as number | null | undefined) ?? null,
     myobBillUid: text(row.MyobID),
@@ -154,4 +165,170 @@ export function purchaseOrderSnapshot(row: SqlRow): Record<string, unknown> {
     sentAt: iso(row.SentAt),
     sentBy: text(row.SentBy),
   };
+}
+
+/** What an amount edit tears down on a quote or invoice: the amount the
+ *  approvals covered, who it is for, the status they held, and who gave the
+ *  approvals and when. */
+export function approvalSnapshot(row: SqlRow): Record<string, unknown> {
+  return {
+    amount: money(row.Amount),
+    approvedAt: iso(row.ApprovedAt),
+    approvedBy: text(row.ApprovedBy),
+    ...contractorFacts(row),
+    directorApprovedAt: iso(row.DirectorApprovedAt),
+    directorApprovedBy: text(row.DirectorApprovedBy),
+    status: text(row.Status),
+  };
+}
+
+/** What a cost edit tears down on a purchase order: the order as it stood (cost,
+ *  cap, who it is for) and the stamps of whichever markers are being cleared. */
+export function purchaseOrderMarkers(row: SqlRow, cleared: { myob: boolean; sent: boolean }): Record<string, unknown> {
+  return {
+    ...purchaseOrderFacts(row),
+    ...(cleared.sent ? { sentAt: iso(row.SentAt), sentBy: text(row.SentBy) } : {}),
+    ...(cleared.myob ? { myobCreatedAt: iso(row.MyobCreatedAt), myobCreatedBy: text(row.MyobCreatedBy) } : {}),
+  };
+}
+
+/** A payment's amount before and after an edit, with the invoice it pays, who
+ *  the money is for, and the MYOB bill it had already been sent to, if any. The
+ *  invoice it pays is the approval its amount is measured against. */
+export function paymentEdit(
+  existing: SqlRow,
+  amount: number,
+  invoice?: SqlRow,
+): { after: Record<string, unknown>; before: Record<string, unknown> } {
+  const same = {
+    ...contractorFacts(invoice ?? {}),
+    jobInvoiceId: (existing.JobInvoiceID as number | null | undefined) ?? null,
+    status: text(existing.Status),
+  };
+  return {
+    after: {
+      ...same,
+      amount: money(amount),
+      ...amountChange({ approved: invoice?.Amount, next: amount, previous: existing.Amount }),
+      invoiceNumber: text(invoice?.InvoiceNumber),
+      supplierInvoiceNumber: text(invoice?.SupplierInvoiceNumber),
+    },
+    before: { ...same, amount: money(existing.Amount), myobBillUid: text(existing.MyobID) },
+  };
+}
+
+// Amounts and contractors, for the trend reports directors and the CFO read
+// straight from the ledger (LAUNCH-READINESS R14): tolerance use, amounts just
+// under a threshold, splitting across orders, edits after approval, one user's
+// share of a contractor's work. Every money row says what it is worth in
+// `amount` and who it is for in `contractorId`/`contractorName`, under the same
+// keys whatever the record; every adjustment (an edit, a reversal or a
+// deletion) also says how far it moved the amount.
+
+/** What a decision moved a record's amount by, under the keys the reports read. */
+export interface AmountChange {
+  /** newAmount - previousAmount, to the cent. */
+  delta: number | null;
+  /** delta as a percentage of previousAmount, to 2 places; null when that is 0 or unknown. */
+  deltaPercent: number | null;
+  newAmount: number | null;
+  /** The amount an approval covered, when there is an approval to measure against. */
+  originalApprovedAmount: number | null;
+  previousAmount: number | null;
+}
+
+const toCents = (value: number): number => Math.round(value * 100);
+
+/**
+ * `previous` and `next` are the record's amount before and after the decision;
+ * `approved` is the amount an approval covered, when there is one. An unknown
+ * amount counts as nothing for the arithmetic but is left null in the row.
+ */
+export function amountChange(input: { approved?: unknown; next: unknown; previous: unknown }): AmountChange {
+  const previousAmount = money(input.previous);
+  const newAmount = money(input.next);
+  const previousCents = previousAmount === null ? 0 : toCents(previousAmount);
+  const deltaCents = (newAmount === null ? 0 : toCents(newAmount)) - previousCents;
+  const known = previousAmount !== null || newAmount !== null;
+  return {
+    delta: known ? deltaCents / 100 : null,
+    deltaPercent: known && previousCents !== 0 ? Math.round((deltaCents * 10000) / previousCents) / 100 : null,
+    newAmount,
+    originalApprovedAmount: money(input.approved),
+    previousAmount,
+  };
+}
+
+/** A reversal: the record stays and its amount with it, but an approval or a
+ *  marking is undone. */
+export function amountUnchanged(amount: unknown, approved?: unknown): AmountChange {
+  return amountChange({ approved, next: amount, previous: amount });
+}
+
+/** A deletion: the record goes, and with it its amount. */
+export function amountRemoved(amount: unknown, approved?: unknown): AmountChange {
+  return amountChange({ approved, next: 0, previous: amount });
+}
+
+/** `after` for a deletion: who the record was for and what it was worth, with
+ *  nothing left. The record itself is in `before`. */
+export function deletionAfter(facts: Record<string, unknown>, approved?: unknown): Record<string, unknown> {
+  return {
+    amount: 0,
+    contractorId: facts.contractorId ?? null,
+    contractorName: facts.contractorName ?? null,
+    deleted: true,
+    ...amountRemoved(facts.amount, approved),
+  };
+}
+
+/** The amount a quote or invoice was approved at, once it has been approved.
+ *  Editing an approved amount undoes the approval, so this is its amount now. */
+export function approvedAmount(row: SqlRow): number | null {
+  return row.ApprovedAt != null || row.DirectorApprovedAt != null ? money(row.Amount) : null;
+}
+
+/** The amount of the quote approved for a job, which its purchase orders are
+ *  measured against. Null when the job has none. */
+export async function approvedQuoteAmount(connection: Connection, jobId: number | null | undefined): Promise<number | null> {
+  if (jobId === null || jobId === undefined) return null;
+  const rows = await executeQuery(
+    connection,
+    "SELECT q.Amount FROM Jobs j INNER JOIN Quotes q ON q.QuoteID = j.ApprovedQuoteID WHERE j.JobID = @JobID",
+    [{ name: "JobID", type: TYPES.Int, value: jobId }],
+  );
+  return money(rows[0]?.Amount);
+}
+
+/**
+ * For an invoice that has no contractor id of its own (one made from free text,
+ * or before migration 112), the id a ledger row carries is looked up from the
+ * name: the one dbo.Contractors row that has it. A name nobody holds, or several
+ * do, leaves it null rather than guessed at. A lookup that fails is logged and
+ * leaves it null too: the id is worth recording, not worth losing the decision
+ * over.
+ */
+export async function contractorIdForName(connection: Connection, name: unknown): Promise<number | null> {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  if (!trimmed) return null;
+  try {
+    const rows = await executeQuery(connection, "SELECT TOP 2 ContractorID FROM dbo.Contractors WHERE ContractorName = @Name", [
+      { name: "Name", type: TYPES.NVarChar, value: trimmed },
+    ]);
+    return rows.length === 1 ? ((rows[0].ContractorID as number | null | undefined) ?? null) : null;
+  } catch (err) {
+    console.warn("[ledger] could not look up the contractor id for an invoice:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * An invoice row with the contractor id its ledger facts need: the id the
+ * invoice recorded when it was made (JobInvoices.ContractorID) if it has one,
+ * and only otherwise the one looked up from its name (see above). The row has to
+ * be read with its ContractorID column for the first to apply.
+ */
+export async function withContractorId(connection: Connection, row: SqlRow): Promise<SqlRow> {
+  if (typeof row.ContractorID === "number") return row;
+  return { ...row, ContractorID: await contractorIdForName(connection, row.ContractorName) };
 }

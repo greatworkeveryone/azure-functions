@@ -13,6 +13,7 @@ import { TYPES } from "tedious";
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { uploadAttachment } from "../mybuildings-client";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
@@ -29,17 +30,17 @@ import {
   readDetachTarget,
 } from "../money-record-files";
 
-// Server-generated email-attachment blobs land under emails/{messageId}/...
-// where {messageId} is a sanitised, URL-safe slug. Any blob name claimed via
-// handleClaimEmailAttachment must match this pattern — a caller cannot point
-// the Attachments row at an arbitrary blob path.
-const EMAIL_BLOB_PREFIX_RE = /^emails\/[A-Za-z0-9_-]+\//;
+// A stored name that is not a minted wr-attachments name (a legacy row, or
+// one claimed before SEC-01 was fixed) gets no link rather than failing the list.
+function readSasOrNull(blobName: unknown): string | null {
+  return isBlobName(blobName, WR_ATTACHMENTS_SHAPES) ? generateReadSasUrl(blobName) : null;
+}
 
 // Explicit column list — mirrors JOB_COLUMNS pattern in jobs.ts.
 // BlobName is included because callers use it to mint a read SAS URL
 // (see `generateReadSasUrl(r.BlobName)` in the response mapping).
 // MyBuildingsConfirmedAt is included for the same SAS-vs-archived
-// decision in the response mapping.
+// decision in the response mapping (legacy — see the note on getAttachments).
 const ATTACHMENT_COLUMNS = `
   Id, WorkRequestID, JobID, JobCode,
   BlobName, OriginalName, Extension, ContentType, SizeBytes,
@@ -182,7 +183,7 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
   const callerOid = oidFromToken(token) ?? "unknown";
@@ -224,16 +225,18 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
           [{ name: "WorkRequestID", type: TYPES.Int, value: workRequestId }],
         );
 
-    // Mint a fresh read SAS for rows whose blob still exists. Once a blob has
-    // been cleaned up (MyBuildingsConfirmedAt set), the SAS would 404 — return
-    // null so the UI can show the row as archived.
+    // Mint a fresh read SAS for rows whose blob still exists. Rows stamped with
+    // MyBuildingsConfirmedAt had their blob deleted by the old cleanupAttachments
+    // timer (removed Oct 2026 — it reaped files that never went to myBuildings).
+    // Nothing sets the column any more; the null-SAS guard stays so those legacy
+    // rows show as archived instead of handing out a 404 link.
     // LinkedTo: the quotes, POs and invoices a file backs (D5), so the screen
     // can say why its delete is refused before anyone clicks.
     const linkedTo = jobId !== null ? await moneyLinksOfJob(connection, jobId) : new Map<number, string[]>();
     const attachments = rows.map((r: any) => ({
       ...r,
       LinkedTo: linkedTo.get(r.Id) ?? [],
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
 
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
@@ -245,13 +248,22 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
   }
 }
 
-// ── Join-table helpers (PurchaseOrderAttachments / QuoteAttachments) ────────
+// ── Join-table helpers (PurchaseOrderAttachments / QuoteAttachments / JobInvoiceAttachments)
 // One pair of endpoints per parent. Idempotent attach (NOT EXISTS guard) so
 // the FE can call without first checking; detach refuses a record that has
 // been approved, paid, sent or marked in MYOB, and is ledgered (D5).
+//
+// A file links to a parent only when it is on the parent's job
+// (Attachments.JobID = parent.JobID; a NULL JobID matches nothing), and the
+// list applies the same rule. Files with no job, such as tenancy leases and
+// key signatures, have their own narrower read routes; without this, linking
+// one to any PO, quote or invoice exposed its read link to every role that can
+// list that parent's files (J9 review).
 
 interface JoinSpec {
   table: string;
+  /** The parent's own table; its key column is `parentColumn` and it has a JobID. */
+  parentTable: string;
   parentColumn: string;
   parentParam: string;
 }
@@ -259,13 +271,25 @@ interface JoinSpec {
 const PO_JOIN: JoinSpec = {
   parentColumn: "PurchaseOrderID",
   parentParam: "PurchaseOrderID",
+  parentTable: "PurchaseOrders",
   table: "PurchaseOrderAttachments",
 };
 const QUOTE_JOIN: JoinSpec = {
   parentColumn: "QuoteID",
   parentParam: "QuoteID",
+  parentTable: "Quotes",
   table: "QuoteAttachments",
 };
+// Migration 134 (J9). The frontend sends InvoiceID in the body and invoiceId
+// as the list query param (src/lib/attachments.ts).
+const INVOICE_JOIN: JoinSpec = {
+  parentColumn: "JobInvoiceID",
+  parentParam: "InvoiceID",
+  parentTable: "JobInvoices",
+  table: "JobInvoiceAttachments",
+};
+
+const NOT_ON_THIS_JOB = "That file isn't on this job.";
 
 async function attachToParent(
   request: HttpRequest,
@@ -278,12 +302,16 @@ async function attachToParent(
   const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
+  // AttachedBy is an audit column stamped from the verified token (SEC-23, J9);
+  // a body AttachedBy is ignored.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as any;
     const parentId = body?.[spec.parentParam];
     const attachmentId = body?.AttachmentID;
-    const attachedBy = body?.AttachedBy ?? null;
     if (typeof parentId !== "number" || typeof attachmentId !== "number") {
       return {
         status: 400,
@@ -292,22 +320,43 @@ async function attachToParent(
     }
 
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
-    await executeQuery(
+    // The link is written by one statement whose own WHERE carries the job
+    // match and the not-yet-linked check, so it is atomic: a file that isn't
+    // on the parent's job (or has no job) writes nothing. The SELECT after it
+    // answers whether the file is on the job, which is also true when the
+    // link already existed (attach is idempotent).
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+    const result = await executeQuery(
       connection,
-      `IF NOT EXISTS (
-         SELECT 1 FROM ${spec.table}
-          WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID
-       )
-       INSERT INTO ${spec.table} (${spec.parentColumn}, AttachmentID, AttachedBy)
-       VALUES (@ParentID, @AttachmentID, @AttachedBy)`,
+      `INSERT INTO ${spec.table} (${spec.parentColumn}, AttachmentID, AttachedBy)
+       SELECT @ParentID, @AttachmentID, @AttachedBy
+        WHERE EXISTS (
+                SELECT 1
+                  FROM Attachments a
+                  JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = @ParentID
+                 WHERE a.Id = @AttachmentID AND a.JobID = p.JobID
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM ${spec.table}
+                 WHERE ${spec.parentColumn} = @ParentID AND AttachmentID = @AttachmentID
+              );
+       SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1
+                  FROM Attachments a
+                  JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = @ParentID
+                 WHERE a.Id = @AttachmentID AND a.JobID = p.JobID
+              ) THEN 1 ELSE 0 END AS BIT) AS Linked;`,
       [
         { name: "ParentID", type: TYPES.Int, value: parentId },
         { name: "AttachmentID", type: TYPES.Int, value: attachmentId },
-        { name: "AttachedBy", type: TYPES.NVarChar, value: attachedBy },
+        { name: "AttachedBy", type: TYPES.NVarChar, value: identity.name },
       ],
     );
     /* eslint-enable local/no-sql-interpolation */
+    const linked = result[0]?.Linked;
+    if (!(linked === true || linked === 1)) {
+      return { status: 422, jsonBody: { error: NOT_ON_THIS_JOB } };
+    }
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     context.error(`attach (${spec.table}) failed:`, error.message);
@@ -362,7 +411,7 @@ async function detachFromParent(
         return { status: 422, jsonBody: { error: detachRefusal(target, parentId) } };
       }
 
-      /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+      /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
       await executeQuery(
         connection,
         `DELETE FROM ${spec.table}
@@ -406,7 +455,7 @@ async function listParentAttachments(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.USER, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
   if (denied) return denied;
 
   const callerOid = oidFromToken(token) ?? "unknown";
@@ -431,20 +480,22 @@ async function listParentAttachments(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN or QUOTE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
+    /* eslint-disable local/no-sql-interpolation -- spec is always PO_JOIN, QUOTE_JOIN or INVOICE_JOIN (compile-time JoinSpec consts bound at app.http registration), not user input. */
     const rows = await executeQuery(
       connection,
       `SELECT a.*
          FROM ${spec.table} j
          JOIN Attachments a ON a.Id = j.AttachmentID
+         JOIN ${spec.parentTable} p ON p.${spec.parentColumn} = j.${spec.parentColumn}
         WHERE j.${spec.parentColumn} = @ParentID
+          AND a.JobID = p.JobID
         ORDER BY j.AttachedAt DESC`,
       [{ name: "ParentID", type: TYPES.Int, value: parentId }],
     );
     /* eslint-enable local/no-sql-interpolation */
     const attachments = rows.map((r: any) => ({
       ...r,
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
   } catch (error: any) {
@@ -459,9 +510,9 @@ async function listParentAttachments(
 // Body: { AttachmentID }. Deletes the local blob + the Attachments row, for its
 // uploader or an admin, and only while no quote, PO or invoice links it (D5):
 // a linked file answers 422 naming the records. (The link rows would go with
-// it through the cascading FKs of migrations 010 and 134.) Archived rows
-// (MyBuildingsConfirmedAt set) keep no local blob, so the storage delete is
-// skipped.
+// it through the cascading FKs of migrations 010 and 134.) Legacy archived rows
+// (MyBuildingsConfirmedAt set by the removed cleanup timer) keep no local blob,
+// so the storage delete is skipped.
 
 async function handleDeleteAttachment(
   request: HttpRequest,
@@ -537,7 +588,14 @@ async function handleDeleteAttachment(
       return { status: 422, jsonBody: { error: leaseDocumentRefusal(tenancy) } };
     }
 
-    if (!archived) {
+    // Only a file uploaded to this row is the row's to delete. A claimed email
+    // attachment belongs to its email and an inspection photo to its
+    // inspection; both keep their blob, as does any name that is not minted.
+    const ownsBlob = isBlobName(blobName, ATTACHMENT_SHAPE);
+    if (!archived && !ownsBlob) {
+      context.log(`deleteAttachment: row ${attachmentId} removed; its blob is not this row's to delete`);
+    }
+    if (!archived && ownsBlob) {
       try {
         await deleteBlob(blobName);
       } catch (err: any) {
@@ -596,9 +654,9 @@ async function handleClaimEmailAttachment(
     if (!BlobName || typeof BlobName !== "string") {
       return { status: 400, jsonBody: { error: "BlobName (string) required" } };
     }
-    // Only blobs landed by the email-sync pipeline (under emails/{messageId}/)
-    // can be claimed — caller cannot point the row at an arbitrary blob path.
-    if (!EMAIL_BLOB_PREFIX_RE.test(BlobName)) {
+    // Only a blob the mail sync minted (email-attachments/<messageId>/<uuid>[.ext],
+    // anchored at both ends) can be claimed — never an arbitrary or traversal path.
+    if (!isBlobName(BlobName, EMAIL_ATTACHMENT_SHAPE)) {
       return { status: 400, jsonBody: { error: "Invalid attachment reference" } };
     }
     if (!JobID || typeof JobID !== "number") {
@@ -718,7 +776,7 @@ async function handleUpdateAttachmentComment(
       jsonBody: {
         attachment: {
           ...r,
-          sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+          sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
         },
       },
     };
@@ -765,5 +823,21 @@ app.http("detachFromQuote", {
 app.http("getQuoteAttachments", {
   authLevel: "anonymous",
   handler: (req, ctx) => listParentAttachments(req, ctx, QUOTE_JOIN, "quoteId"),
+  methods: ["GET"],
+});
+
+app.http("attachToInvoice", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => attachToParent(req, ctx, INVOICE_JOIN),
+  methods: ["POST"],
+});
+app.http("detachFromInvoice", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => detachFromParent(req, ctx, INVOICE_JOIN),
+  methods: ["POST"],
+});
+app.http("getInvoiceAttachments", {
+  authLevel: "anonymous",
+  handler: (req, ctx) => listParentAttachments(req, ctx, INVOICE_JOIN, "invoiceId"),
   methods: ["GET"],
 });

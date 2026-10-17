@@ -3,7 +3,7 @@ import type { HttpRequest } from "@azure/functions";
 import type { Connection } from "tedious";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
 import { _resetRateLimitForTests } from "../rateLimit";
-import { recordRefusal, recordRefusalForRequest, recordRoleRefusal } from "./refusals";
+import { recordApart, recordRefusal, recordRefusalForRequest, recordRoleRefusal, underRowLimit } from "./refusals";
 import type { LedgerActor } from "./types";
 
 jest.mock("../db", () => ({
@@ -306,6 +306,67 @@ describe("recordRefusalForRequest", () => {
     ]);
   });
 
+  describe("an endpoint whose decisions are about different records lists a target for each", () => {
+    // Recording a payment is about the invoice it pays; changing its amount is about the payment.
+    const create = {
+      attempted: (body: Record<string, unknown>) => (body.PaymentID === undefined ? "payment.create" : null),
+      idField: "JobInvoiceID",
+      subjectType: "invoice",
+    } as const;
+    const amountChange = {
+      attempted: (body: Record<string, unknown>) =>
+        body.PaymentID !== undefined && typeof body.Amount === "number" ? "payment.amount_change" : null,
+      idField: "PaymentID",
+      subjectType: "payment",
+    } as const;
+    const refuse = (body: unknown) => recordRefusalForRequest(request(body), "the-token", [create, amountChange], { code: "x" });
+
+    beforeEach(() => {
+      mockSql([
+        { match: "FROM dbo.AppUsers WHERE EntraOid", rows: [{ UserID: 11 }] },
+        { match: "FROM JobInvoices s INNER JOIN Jobs j", rows: [{ BuildingID: 5, JobID: 9 }] },
+        { match: "FROM Payments s INNER JOIN Jobs j", rows: [{ BuildingID: 6, JobID: 10 }] },
+      ]);
+    });
+
+    it("records a new payment against its invoice", async () => {
+      await refuse({ Amount: 100, JobID: 9, JobInvoiceID: 5 });
+
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ before: { attempted: "payment.create" }, buildingId: 5, jobId: 9, subjectId: "5", subjectType: "invoice" }),
+      ]);
+    });
+
+    it("records an amount change against the payment, even though the body also names an invoice", async () => {
+      await refuse({ Amount: 150, JobInvoiceID: 5, PaymentID: 11 });
+
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ before: { attempted: "payment.amount_change" }, buildingId: 6, jobId: 10, subjectId: "11", subjectType: "payment" }),
+      ]);
+    });
+
+    it("records nothing for an edit that changes no amount: no target takes it", async () => {
+      await refuse({ JobInvoiceID: 5, Notes: "typo", PaymentID: 11 });
+
+      expect(db.createRequestConnection).not.toHaveBeenCalled();
+      expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    });
+
+    it("skips a target whose id the body doesn't carry and tries the next", async () => {
+      await refuse({ Amount: 150, PaymentID: 11 });
+
+      expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ subjectId: "11", subjectType: "payment" })]);
+    });
+
+    it("is what recordRoleRefusal passes on", async () => {
+      await recordRoleRefusal(request({ Amount: 150, PaymentID: 11 }), "the-token", { status: 403 }, [create, amountChange]);
+
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ before: { attempted: "payment.amount_change" }, ruleApplied: "role_not_permitted", subjectType: "payment" }),
+      ]);
+    });
+  });
+
   it("does nothing when the body can't be read", async () => {
     const unreadable = { json: jest.fn().mockRejectedValue(new Error("Unexpected end of JSON")) } as unknown as HttpRequest;
 
@@ -386,5 +447,101 @@ describe("recordRoleRefusal", () => {
 
     expect(db.createRequestConnection).not.toHaveBeenCalled();
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+  });
+});
+
+describe("recordApart", () => {
+  const entry = {
+    action: "quote.director_request_failed",
+    actor: fay,
+    after: { amount: 5000, currency: "AUD", resend: false },
+    buildingId: 5,
+    jobId: 9,
+    reason: "The director approval email could not be sent",
+    ruleApplied: "send_failed",
+    subject: { id: 7, type: "quote" },
+  } as const;
+
+  it("writes the one row in a transaction of its own: begin, INSERT, commit", async () => {
+    await recordApart(connection, entry, "failed quote director request");
+
+    const rows = ledgerInserts(db.executeQuery);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: "quote.director_request_failed",
+        actorName: "Fay Staff",
+        after: { amount: 5000, currency: "AUD", resend: false },
+        isException: true,
+        ruleApplied: "send_failed",
+        subjectId: "7",
+      }),
+    ]);
+    expect(db.beginTransaction.mock.invocationCallOrder[0]).toBeLessThan(rows[0].order);
+    expect(rows[0].order).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+    expect(db.rollbackTransaction).not.toHaveBeenCalled();
+  });
+
+  it("never throws: a failed write is rolled back and reported under the area it was given", async () => {
+    mockSql([{ match: "INSERT INTO dbo.DecisionLedger", reject: new Error("ledger unavailable") }]);
+
+    await expect(recordApart(connection, entry, "failed quote director request", "ledger-send-failure")).resolves.toBeUndefined();
+
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(sentry.Sentry.captureException).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "ledger unavailable" }),
+      expect.objectContaining({ tags: { area: "ledger-send-failure" } }),
+    );
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("failed quote director request on quote 7"), "ledger unavailable");
+  });
+
+  it("is reported as a refusal unless told otherwise", async () => {
+    mockSql([{ match: "INSERT INTO dbo.DecisionLedger", reject: new Error("ledger unavailable") }]);
+
+    await recordApart(connection, entry, "refused quote.approve");
+
+    expect(sentry.Sentry.captureException).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tags: { area: "ledger-refusal" } }));
+  });
+
+  it("swallows an entry the ledger refuses, without sending any SQL for it", async () => {
+    await expect(recordApart(connection, { ...entry, ruleApplied: "x".repeat(65) }, "failed quote director request")).resolves.toBeUndefined();
+
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("underRowLimit", () => {
+  const mo: LedgerActor = { kind: "user", name: "Mo Manager", role: "facilities_manager", userId: 12 };
+
+  it("allows 20 rows a minute from one person, then says no and says why", () => {
+    const results = Array.from({ length: 22 }, () => underRowLimit(fay, "failed quote director request"));
+
+    expect(results.filter(Boolean)).toHaveLength(20);
+    expect(results.slice(20)).toEqual([false, false]);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("not recording this failed quote director request"));
+  });
+
+  it("counts each person separately", () => {
+    for (let i = 0; i < 25; i++) underRowLimit(fay, "x");
+
+    expect(underRowLimit(mo, "x")).toBe(true);
+  });
+
+  it("shares one budget between refused attempts and failed sends, since both land in a table nothing can empty", async () => {
+    for (let i = 0; i < 20; i++) {
+      await recordRefusal(connection, fay, { id: 7, type: "quote" }, { attempted: "quote.approve", code: "x" }, 9);
+    }
+
+    expect(underRowLimit(fay, "failed quote director request")).toBe(false);
+  });
+
+  it("keys a system actor by its name", () => {
+    const system: LedgerActor = { kind: "system", name: "planner-sync" };
+
+    for (let i = 0; i < 20; i++) underRowLimit(system, "x");
+
+    expect(underRowLimit(system, "x")).toBe(false);
+    expect(underRowLimit(fay, "x")).toBe(true);
   });
 });

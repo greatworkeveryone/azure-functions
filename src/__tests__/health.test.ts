@@ -27,7 +27,7 @@ const { checkMigrations } = jest.requireMock("../migrate") as { checkMigrations:
 const auth = jest.requireMock("../auth") as { requireRole: jest.Mock };
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
-const deep = { query: new URLSearchParams("deep=true") } as unknown as HttpRequest;
+const deep = { headers: new Headers(), query: new URLSearchParams("deep=true") } as unknown as HttpRequest;
 const SAVED = { ...process.env };
 
 function setAllSettings() {
@@ -41,7 +41,7 @@ beforeEach(() => {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM STRING_SPLIT/.test(sql)) {
       return [
-        { Error: null, FinishedAt: new Date("2026-10-14T03:00:05Z"), Name: "cleanupAttachmentsTimer", Outcome: "ok", StartedAt: new Date("2026-10-14T03:00:00Z") },
+        { Error: null, FinishedAt: new Date("2026-10-14T03:00:05Z"), Name: "ledgerVerifyTimer", Outcome: "ok", StartedAt: new Date("2026-10-14T03:00:00Z") },
         { Error: null, FinishedAt: null, Name: "plannerSyncTimer", Outcome: null, StartedAt: null },
       ];
     }
@@ -96,7 +96,7 @@ describe("health?deep=true", () => {
     const body = (await health(deep, ctx)).jsonBody as { timers: { lastRun: unknown; name: string }[] };
     expect(body.timers).toContainEqual({
       lastRun: { error: null, finishedAt: "2026-10-14T03:00:05.000Z", outcome: "ok", startedAt: "2026-10-14T03:00:00.000Z" },
-      name: "cleanupAttachmentsTimer",
+      name: "ledgerVerifyTimer",
     });
     expect(body.timers).toContainEqual({ lastRun: null, name: "plannerSyncTimer" });
   });
@@ -123,7 +123,7 @@ describe("health?deep=true", () => {
   it("stays admin-only and minimal without deep", async () => {
     auth.requireRole.mockResolvedValueOnce({ status: 403, jsonBody: { error: "Forbidden" } });
     expect((await health(deep, ctx)).status).toBe(403);
-    const shallow = await health({ query: new URLSearchParams() } as unknown as HttpRequest, ctx);
+    const shallow = await health({ headers: new Headers(), query: new URLSearchParams() } as unknown as HttpRequest, ctx);
     expect(shallow.jsonBody).toEqual({ ok: true });
   });
 });

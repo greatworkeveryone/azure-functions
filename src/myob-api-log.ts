@@ -7,6 +7,12 @@
 // can audit every MYOB interaction. Nothing outside this file may call fetch()
 // against MYOB; src/__tests__/myob-single-client.test.ts enforces that.
 //
+// Before anything is logged as sent, myob-request-guard.ts decides whether the
+// call may leave at all (allowlist, period, write switch, Floorplan-created
+// records only). A refusal leaves one 'error' row and throws. Every call has a
+// 30 s timeout; a 429 is retried once, and so is a 5xx on a read (never on a
+// write, where a retry could create a duplicate).
+//
 // Env:
 //   MYOB_WRITES_ENABLED — only the exact string "true" lets a non-GET request
 //                         reach the company file. Anything else refuses it.
@@ -15,82 +21,24 @@
 import { randomUUID } from "crypto";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "./db";
+import { extractMyobUid, loggablePath, redactedResponse, serialiseBody } from "./myob-api-log-format";
+import { MYOB_TIMEOUT_MS, MyobAuditLogError, MyobRequestRefusedError, MyobTimeoutError } from "./myob-errors";
+import { MYOB_HEALTH_SUBJECTS, raiseMyobHealth } from "./myob-health";
+import type { MyobActor, MyobRequestInput, MyobResponse } from "./myob-api-types";
+import { guardMyobRequest, withCompanyFileCredentials, type GuardedRequest } from "./myob-request-guard";
 import { Sentry } from "./sentry";
 
-/**
- * Who is behind a call. Kept structurally compatible with the decision
- * ledger's actor so a decision row and its MYOB calls name the same person.
- */
-export type MyobActor =
-  | { kind: "user"; name: string; role?: string; userId?: number | null; oid?: string }
-  | { kind: "system"; name: string };
+export { userActor, type MyobActor, type MyobRequestInput, type MyobResponse } from "./myob-api-types";
 
-/** Actor for a signed-in caller. `roles` is the caller's app roles, first wins. */
-export function userActor(
-  identity: { name: string; oid?: string },
-  roles?: readonly string[],
-): MyobActor {
-  const role = roles?.[0];
-  return {
-    kind: "user",
-    name: identity.name,
-    ...(identity.oid ? { oid: identity.oid } : {}),
-    ...(role ? { role } : {}),
-  };
-}
-
-export const WRITES_DISABLED_MESSAGE = "MYOB writes disabled (MYOB_WRITES_ENABLED)";
-
-/** Thrown instead of sending a write while MYOB_WRITES_ENABLED is not "true". */
-export class MyobWritesDisabledError extends Error {
-  constructor() {
-    super(WRITES_DISABLED_MESSAGE);
-    this.name = "MyobWritesDisabledError";
-  }
-}
-
-/** The 'request' audit row could not be written, so MYOB was not called. */
-export class MyobAuditLogError extends Error {
-  readonly cause: unknown;
-  constructor(cause: unknown) {
-    super(
-      `MYOB was not called because the audit log could not be written: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
-    );
-    this.name = "MyobAuditLogError";
-    this.cause = cause;
-  }
-}
-
-export interface MyobRequestInput {
-  method: "GET" | "POST" | "PUT" | "DELETE";
-  url: string;
-  /** Objects are sent as JSON, URLSearchParams as form-encoded, strings as-is. */
-  body?: unknown;
-  /** Sent, never logged. */
-  headers: Record<string, string>;
-  actor: MyobActor;
-  /** Short reason for the call, e.g. "create-bill". Stored in MyobApiLog.Purpose. */
-  purpose: string;
-  /** Links this call's rows to a decision-ledger row. Generated when omitted. */
-  correlationId?: string;
-  /** 1 unless a caller retries; stored as MyobApiLog.Attempt. */
-  attempt?: number;
-}
-
-export interface MyobResponse {
-  ok: boolean;
-  status: number;
-  statusText: string;
-  headers: Headers;
-  /** The raw body, read once. */
-  text: string;
-  correlationId: string;
-  /** From the Location header or the response's UID, when MYOB gave one. */
-  myobUid: string | null;
-  json<T = unknown>(): T;
-}
+export { MAX_LOGGED_RESPONSE_CHARS, redactSecrets } from "./myob-api-log-format";
+export {
+  MYOB_TIMEOUT_MS,
+  MyobAuditLogError,
+  MyobRequestRefusedError,
+  MyobTimeoutError,
+  MyobWritesDisabledError,
+  WRITES_DISABLED_MESSAGE,
+} from "./myob-errors";
 
 type Phase = "request" | "response" | "error";
 
@@ -111,93 +59,6 @@ interface LogRow {
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SENSITIVE_KEY = /secret|token|password|code|refresh|authorization/i;
-const REDACTED = "[redacted]";
-export const MAX_LOGGED_RESPONSE_CHARS = 32_000;
-const TRUNCATED_MARKER = "…[truncated]";
-
-// The OAuth token exchange and refresh talk to MYOB's auth server, not the
-// company file, so the write switch doesn't apply to them. Decided from the
-// URL itself so a caller can't claim the exemption for a company-file write.
-function isOAuthServerUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.origin === "https://secure.myob.com" && parsed.pathname.startsWith("/oauth2/");
-  } catch {
-    return false;
-  }
-}
-
-/** Replaces the value of any key that looks like a credential, at any depth. */
-export function redactSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSecrets);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, inner] of Object.entries(value)) {
-      out[key] = SENSITIVE_KEY.test(key) ? REDACTED : redactSecrets(inner);
-    }
-    return out;
-  }
-  return value;
-}
-
-function redactedJson(text: string): string | null {
-  try {
-    return JSON.stringify(redactSecrets(JSON.parse(text)));
-  } catch {
-    return null;
-  }
-}
-
-// What goes on the wire, and what is safe to store about it.
-function serialiseBody(body: unknown): { loggable: string | null; wire: string | undefined } {
-  if (body === undefined) return { loggable: null, wire: undefined };
-  if (body instanceof URLSearchParams) {
-    return {
-      loggable: JSON.stringify(redactSecrets(Object.fromEntries(body))),
-      wire: body.toString(),
-    };
-  }
-  const wire = typeof body === "string" ? body : JSON.stringify(body);
-  return { loggable: redactedJson(wire) ?? "[non-JSON body not logged]", wire };
-}
-
-function redactedResponse(text: string): string {
-  const shown = redactedJson(text) ?? text;
-  if (shown.length <= MAX_LOGGED_RESPONSE_CHARS) return shown;
-  return shown.slice(0, MAX_LOGGED_RESPONSE_CHARS - TRUNCATED_MARKER.length) + TRUNCATED_MARKER;
-}
-
-// Path and query only: the host is implied, and credential-looking query
-// values never reach the log.
-function loggablePath(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const query: string[] = [];
-    parsed.searchParams.forEach((value, key) => {
-      query.push(`${key}=${SENSITIVE_KEY.test(key) ? REDACTED : encodeURIComponent(value)}`);
-    });
-    return (parsed.pathname + (query.length ? `?${query.join("&")}` : "")).slice(0, 500);
-  } catch {
-    return "[unparseable url]";
-  }
-}
-
-function extractMyobUid(headers: Headers, text: string): string | null {
-  const location = headers.get("Location");
-  if (location) {
-    const last = location.split("?")[0].replace(/\/+$/, "").split("/").pop();
-    if (last) return last.slice(0, 100);
-  }
-  try {
-    const uid = (JSON.parse(text) as { UID?: unknown } | null)?.UID;
-    if (typeof uid === "string" && uid) return uid.slice(0, 100);
-  } catch {
-    // Not JSON (e.g. 204 No Content): no UID to record.
-  }
-  return null;
-}
-
 const INSERT_LOG_SQL = `INSERT INTO dbo.MyobApiLog
   (CorrelationId, Phase, Method, Path, Purpose,
    ActorKind, ActorName, ActorRole, ActorOid,
@@ -262,76 +123,149 @@ async function insertOutcomeRow(row: LogRow): Promise<void> {
   }
 }
 
+const MAX_TRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+const MAX_RETRY_DELAY_MS = 10_000;
+
+// 429 means MYOB did nothing, so any call may try once more. A 5xx on a write
+// may have landed: retrying could create a duplicate, so only reads retry.
+function shouldRetry(method: string, status: number): boolean {
+  return status === 429 || (method === "GET" && status >= 500);
+}
+
+function retryDelayMs(response: Response): number {
+  const header = response.headers.get("Retry-After");
+  const seconds = header === null ? NaN : Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return DEFAULT_RETRY_DELAY_MS;
+  return Math.min(seconds * 1000, MAX_RETRY_DELAY_MS);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// One HTTP exchange, abandoned after MYOB_TIMEOUT_MS (headers and body).
+async function send(url: string, init: RequestInit): Promise<{ response: Response; text: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new MyobTimeoutError()), MYOB_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return { response, text: await response.text() };
+  } catch (err) {
+    throw controller.signal.aborted ? new MyobTimeoutError() : err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A dry run keeps the exact payload it would have sent (redacted), so the CFO
+// can read what Floorplan was about to do. Other refusals log no body.
+async function refuse(base: Omit<LogRow, "phase">, err: unknown, loggableBody: string | null): Promise<never> {
+  const dryRun = err instanceof MyobRequestRefusedError && err.code === "dry_run";
+  await insertOutcomeRow({
+    ...base,
+    errorMessage: err instanceof Error ? err.message : String(err),
+    phase: "error",
+    requestBody: dryRun ? loggableBody : null,
+  });
+  if (err instanceof MyobRequestRefusedError && err.forbiddenCentre) {
+    await raiseMyobHealth(MYOB_HEALTH_SUBJECTS.agreement, `Refused ${base.method} ${base.path}: ${err.message}`, {
+      actor: base.actor.name,
+      centre: err.forbiddenCentre,
+      correlationId: base.correlationId,
+      method: base.method,
+      path: base.path,
+      purpose: base.purpose,
+    });
+  }
+  throw err;
+}
+
 /**
  * The only way to make an HTTP call to MYOB.
  *
- * Order matters: a write is refused before anything is logged as sent; the
- * 'request' row is committed before MYOB is called (if it can't be written,
- * MYOB is not called); the outcome row is best-effort because the side effect
- * has already happened by then.
+ * Order matters: a refused call is logged and thrown before anything is
+ * logged as sent; the 'request' row is committed before MYOB is called (if it
+ * can't be written, MYOB is not called); the outcome row is best-effort
+ * because the side effect has already happened by then.
  */
 export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse> {
-  const { actor, headers, method, purpose, url } = input;
+  const { actor, method, purpose, url } = input;
   if (input.correlationId !== undefined && !GUID.test(input.correlationId)) {
     throw new TypeError("myobRequest: correlationId must be a UUID");
   }
   const correlationId = input.correlationId ?? randomUUID();
-  const base = {
-    actor,
-    attempt: input.attempt ?? 1,
-    correlationId,
-    method,
-    path: loggablePath(url),
-    purpose,
-  };
+  const base = { actor, attempt: input.attempt ?? 1, correlationId, method, path: loggablePath(url), purpose };
 
-  if (method !== "GET" && !isOAuthServerUrl(url) && process.env.MYOB_WRITES_ENABLED !== "true") {
-    await insertOutcomeRow({ ...base, errorMessage: WRITES_DISABLED_MESSAGE, phase: "error" });
-    throw new MyobWritesDisabledError();
-  }
-
+  // Guard the bytes that will be sent, not the caller's object: toJSON and
+  // duplicate keys can't show the guard one thing and MYOB another.
   const { loggable, wire } = serialiseBody(input.body);
+  let guarded: GuardedRequest;
   try {
-    await insertLogRow({ ...base, phase: "request", requestBody: loggable });
+    guarded = await guardMyobRequest({ body: wire, method, url });
   } catch (err) {
-    throw new MyobAuditLogError(err);
+    return refuse(base, err, loggable);
   }
+  const isTokenCall = guarded.operation === "oauth.token";
 
-  const startedAt = Date.now();
-  let response: Response;
-  let text: string;
+  // Only now may headers be built: a function here may refresh the token, and
+  // a refused or paused call must never cause a refresh.
+  let headers: Record<string, string>;
   try {
-    response = await fetch(url, { body: wire, headers, method });
-    text = await response.text();
+    const callerHeaders = typeof input.headers === "function" ? await input.headers() : input.headers;
+    headers = withCompanyFileCredentials(callerHeaders, guarded.operation);
   } catch (err) {
-    await insertOutcomeRow({
-      ...base,
-      durationMs: Date.now() - startedAt,
-      errorMessage: err instanceof Error ? err.message : String(err),
-      phase: "error",
-    });
+    if (err instanceof MyobRequestRefusedError) return refuse(base, err, loggable);
     throw err;
   }
 
-  const myobUid = extractMyobUid(response.headers, text);
-  await insertOutcomeRow({
-    ...base,
-    durationMs: Date.now() - startedAt,
-    errorMessage: response.ok ? undefined : `MYOB responded HTTP ${response.status}`,
-    httpStatus: response.status,
-    myobUid,
-    phase: "response",
-    responseBody: redactedResponse(text),
-  });
+  for (let tries = 1; ; tries += 1) {
+    const attempt = base.attempt + tries - 1;
+    try {
+      await insertLogRow({ ...base, attempt, phase: "request", requestBody: loggable });
+    } catch (err) {
+      throw new MyobAuditLogError(err);
+    }
 
-  return {
-    correlationId,
-    headers: response.headers,
-    json: <T = unknown>() => JSON.parse(text) as T,
-    myobUid,
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    text,
-  };
+    const startedAt = Date.now();
+    let exchange: { response: Response; text: string };
+    try {
+      exchange = await send(url, { body: wire, headers, method });
+    } catch (err) {
+      await insertOutcomeRow({
+        ...base,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        phase: "error",
+      });
+      throw err;
+    }
+
+    const { response, text } = exchange;
+    const myobUid = extractMyobUid(response.headers, text);
+    await insertOutcomeRow({
+      ...base,
+      attempt,
+      durationMs: Date.now() - startedAt,
+      errorMessage: response.ok ? undefined : `MYOB responded HTTP ${response.status}`,
+      httpStatus: response.status,
+      myobUid,
+      phase: "response",
+      responseBody: redactedResponse(text, { rawAllowed: !isTokenCall }),
+    });
+
+    if (tries < MAX_TRIES && shouldRetry(method, response.status)) {
+      await sleep(retryDelayMs(response));
+      continue;
+    }
+    return {
+      correlationId,
+      headers: response.headers,
+      json: <T = unknown>() => JSON.parse(text) as T,
+      myobUid,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      text,
+    };
+  }
 }

@@ -5,18 +5,16 @@ import { createServiceRequestConnection } from "../db";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
 import { extractToken, oidFromToken, userInfoFromToken } from "../auth";
+import { devOverrideMisconfigured } from "../jwt";
 
 initSentry();
 
-// Refuse to boot if production + dev role override would coexist. That
-// combination lets any caller spoof roles via the X-Dev-Roles header and
-// must never reach a deployed environment.
-if (
-  process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production" &&
-  process.env.DEV_ROLE_OVERRIDE_ENABLED === "true"
-) {
+// Refuse to boot if the dev role override is switched on anywhere it cannot
+// apply — any Azure-hosted app, or a host not labelled Development. The switch
+// is inert there (jwt.ts), but a set switch means someone expected a bypass.
+if (devOverrideMisconfigured()) {
   throw new Error(
-    "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true in a Production environment. Unset it in the Function App configuration.",
+    "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true outside local Development. Unset it in the Function App configuration.",
   );
 }
 

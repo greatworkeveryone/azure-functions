@@ -4,6 +4,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import ExcelJS from "exceljs";
+import { assertSafeXlsx, XlsxRejectedError } from "../xlsx-safe";
 import { TYPES } from "tedious";
 import { createRequestConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
 import {
@@ -15,6 +16,7 @@ import {
   oidFromToken,
 } from "../auth";
 import { uploadKeyPhotoBlob, keyPhotoReadSasUrl } from "../blob-storage";
+import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "../keyRoles";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
 
@@ -47,13 +49,11 @@ function callerFromToken(token: string): UserRef {
   return { id, name };
 }
 
-const KEY_STORAGE_LOCATIONS = [
-  "Randazzo Properties Office",
-  "Randazzo Center (Harry Potter Room)",
-  "9 Cavanagh (Plant Room)",
-  "66 Smith (Plant Room)",
-  "Bov Plaza (Site Office)",
-] as const;
+// Storage location is free text ("Cabinet B, hook 14"); the screens suggest
+// what other keys already use. There is deliberately no fixed list.
+
+/** Largest key spreadsheet accepted. A real register is well under 1 MB. */
+const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 
 const KEY_SUB_TYPES = [
   "Normal", "BiLock", "Dimpled", "Safe", "Laser Tracked", "Cylinder",
@@ -286,6 +286,7 @@ async function getKeyDetail(
       `SELECT DISTINCT
          kb.Id AS BatchId, kb.CheckedOutBy, kb.CheckedOutTo,
          kb.CheckedOutAt, kb.ExpectedReturnAt, kb.CheckOutPhotoBlobUrl, kb.Notes,
+         sig.BlobName AS SignatureBlobName,
          CASE WHEN EXISTS (
            SELECT 1 FROM dbo.KeyCheckouts kc2
            WHERE kc2.BatchId = kb.Id AND kc2.KeyId = @Id AND kc2.CheckedInAt IS NULL
@@ -293,6 +294,7 @@ async function getKeyDetail(
          THEN 1 ELSE 0 END AS IsOverdue
        FROM dbo.KeyCheckoutBatches kb
        JOIN dbo.KeyCheckouts kco ON kco.BatchId = kb.Id AND kco.KeyId = @Id
+       LEFT JOIN dbo.Attachments sig ON sig.Id = kb.SignatureAttachmentId
        ORDER BY kb.CheckedOutAt DESC`,
       [{ name: "Id", type: TYPES.Int, value: id }],
     );
@@ -324,6 +326,10 @@ async function getKeyDetail(
         ? keyPhotoReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
         : null,
       notes: row.Notes ?? null,
+      // Only here, never in the key list: the history is for people who can open a key.
+      signatureUrl: row.SignatureBlobName
+        ? keyPhotoReadSasUrl(row.SignatureBlobName as string, 4 * 60 * 60 * 1000)
+        : null,
       isOverdue: row.IsOverdue === 1,
       checkouts: (checkoutsByBatch.get(row.BatchId as number) ?? []).map((co) => ({
         id: co.Id,
@@ -368,8 +374,10 @@ async function createKey(
     const { BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
             Registration, Description, PhotoBlobUrl, StorageLocation } = body ?? {};
 
-    if (!BuildingId || !Level || !KeyNumber || !Description) {
-      return { status: 400, jsonBody: { error: "BuildingId, Level, KeyNumber, Description required" } };
+    // Level is optional: a building with no configured levels (a house, a
+    // single-storey site) has nothing to pick. It is stored as '' (the column is NOT NULL).
+    if (!BuildingId || !KeyNumber || !Description) {
+      return { status: 400, jsonBody: { error: "BuildingId, KeyNumber, Description required" } };
     }
 
     const caller = callerFromToken(token);
@@ -389,7 +397,7 @@ async function createKey(
       [
         { name: "BuildingId",      type: TYPES.Int,      value: BuildingId },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-        { name: "Level",           type: TYPES.NVarChar,  value: Level },
+        { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
         { name: "KeyNumber",       type: TYPES.NVarChar,  value: KeyNumber },
         { name: "ItemType",        type: TYPES.NVarChar,  value: ItemType ?? "key" },
         { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
@@ -462,7 +470,7 @@ async function updateKey(
       [
         { name: "Id",              type: TYPES.Int,      value: Id },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-        { name: "Level",           type: TYPES.NVarChar,  value: Level },
+        { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
         { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
         { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? null },
         { name: "Description",     type: TYPES.NVarChar,  value: Description },
@@ -685,9 +693,56 @@ async function restoreKey(
   }
 }
 
+function signatureInvalid(): HttpResponseInit {
+  return {
+    status: 400,
+    jsonBody: { error: "That signature could not be used. Ask them to sign again.", code: "SIGNATURE_INVALID" },
+  };
+}
+
+/**
+ * The signature must be a PNG this caller stored through uploadKeySignature (the
+ * only thing that writes an Attachments row into the key-photos container, whose
+ * blobs are named keys/...) and no other handover uses. Never trust an
+ * attachment id on its own: it could be anyone's file.
+ */
+async function checkSignature(
+  connection: Awaited<ReturnType<typeof createRequestConnection>>,
+  attachmentId: number,
+  callerId: string,
+): Promise<HttpResponseInit | null> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT a.Id, a.BlobName, a.ContentType, a.UploadedBy,
+            (SELECT TOP 1 kb.Id FROM dbo.KeyCheckoutBatches kb WHERE kb.SignatureAttachmentId = a.Id) AS LinkedBatchId
+       FROM dbo.Attachments a
+      WHERE a.Id = @Id`,
+    [{ name: "Id", type: TYPES.Int, value: attachmentId }],
+  );
+  const row = rows[0];
+  if (
+    !row ||
+    row.UploadedBy !== callerId ||
+    row.ContentType !== "image/png" ||
+    !String(row.BlobName).startsWith("keys/")
+  ) {
+    return signatureInvalid();
+  }
+  if (row.LinkedBatchId != null) {
+    return {
+      status: 409,
+      jsonBody: { error: "That signature has already been used for another handover.", code: "SIGNATURE_ALREADY_USED" },
+    };
+  }
+  return null;
+}
+
 // ── POST /api/checkoutKeys ────────────────────────────────────────────────────
-// Body: { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl, StorageLocation?, Notes? }
-// CheckedOutBy is read from the JWT — not supplied by the caller.
+// Body: { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl, StorageLocation?, Notes?,
+//         SignatureAttachmentId? }
+// CheckedOutBy is read from the JWT — not supplied by the caller. The signature
+// is the id returned by uploadKeySignature; it must be a PNG that this caller
+// uploaded there and that no other handover uses.
 
 async function checkoutKeys(
   request: HttpRequest,
@@ -696,14 +751,14 @@ async function checkoutKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, CHECKOUT_KEYS_ROLES);
   if (denied) return denied;
 
   let connection;
   try {
     const body = (await request.json()) as any;
     const { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl,
-            StorageLocation, Notes } = body ?? {};
+            StorageLocation, Notes, SignatureAttachmentId } = body ?? {};
 
     if (!Array.isArray(KeyIds) || KeyIds.length === 0) {
       return { status: 400, jsonBody: { error: "KeyIds (non-empty array) required" } };
@@ -718,9 +773,20 @@ async function checkoutKeys(
         ? CheckOutPhotoBlobUrl
         : null;
 
-    const checkedOutBy = callerFromToken(token).name;
+    const hasSignature = SignatureAttachmentId !== undefined && SignatureAttachmentId !== null;
+    if (hasSignature && !(Number.isInteger(SignatureAttachmentId) && SignatureAttachmentId > 0)) {
+      return signatureInvalid();
+    }
+
+    const caller = callerFromToken(token);
+    const checkedOutBy = caller.name;
 
     connection = await createRequestConnection(token);
+
+    if (hasSignature) {
+      const problem = await checkSignature(connection, SignatureAttachmentId as number, caller.id);
+      if (problem) return problem;
+    }
 
     const placeholders = KeyIds.map((_: number, i: number) => `@K${i}`).join(",");
     const params = KeyIds.map((id: number, i: number) => ({ name: `K${i}`, type: TYPES.Int, value: id }));
@@ -799,16 +865,19 @@ async function checkoutKeys(
     const batchInserted = await executeQuery(
       connection,
       `INSERT INTO dbo.KeyCheckoutBatches
-         (CheckedOutBy, CheckedOutTo, CheckedOutAt, ExpectedReturnAt, CheckOutPhotoBlobUrl, Notes)
+         (CheckedOutBy, CheckedOutTo, CheckedOutAt, ExpectedReturnAt, CheckOutPhotoBlobUrl, Notes,
+          SignatureAttachmentId)
        OUTPUT INSERTED.Id
        VALUES
-         (@CheckedOutBy, @CheckedOutTo, SYSUTCDATETIME(), @ExpectedReturnAt, @Photo, @Notes)`,
+         (@CheckedOutBy, @CheckedOutTo, SYSUTCDATETIME(), @ExpectedReturnAt, @Photo, @Notes,
+          @SignatureAttachmentId)`,
       [
         { name: "CheckedOutBy",  type: TYPES.NVarChar, value: checkedOutBy },
         { name: "CheckedOutTo",  type: TYPES.NVarChar, value: CheckedOutTo },
         { name: "ExpectedReturnAt", type: TYPES.NVarChar, value: ExpectedReturnAt },
         { name: "Photo",         type: TYPES.NVarChar, value: photoBlob },
         { name: "Notes",         type: TYPES.NVarChar, value: Notes ?? null },
+        { name: "SignatureAttachmentId", type: TYPES.Int, value: hasSignature ? SignatureAttachmentId : null },
       ],
     );
     const batchId = batchInserted[0].Id as number;
@@ -856,7 +925,7 @@ async function checkinKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, CHECKIN_KEYS_ROLES);
   if (denied) return denied;
 
   let connection;
@@ -1005,7 +1074,6 @@ async function keyImportTemplate(
     // All subtypes combined — Item Type determines which apply, but XLSX
     // can't do conditional validation without VBA, so we show the full set.
     const allSubTypes = [...KEY_SUB_TYPES, ...CODE_SUB_TYPES];
-    const storageLocations = [...KEY_STORAGE_LOCATIONS];
 
     const wb = new ExcelJS.Workbook();
 
@@ -1023,7 +1091,6 @@ async function keyImportTemplate(
     dvs.add("B2:B1000", { type: "list", allowBlank: true, formulae: [`_Buildings!$A$1:$A$${buildingNames.length || 1}`] });
     dvs.add("F2:F1000", { type: "list", allowBlank: true, formulae: [`_SubTypes!$A$1:$A$${allSubTypes.length}`] });
     dvs.add("H2:H1000", { type: "list", allowBlank: true, formulae: ['"standard,registered"'] });
-    dvs.add("I2:I1000", { type: "list", allowBlank: true, formulae: [`_StorageLocations!$A$1:$A$${storageLocations.length}`] });
 
     // Info sheet — visible reference for valid values
     const infoWs = wb.addWorksheet("Info");
@@ -1034,13 +1101,13 @@ async function keyImportTemplate(
       ["Sub Type (keys)", KEY_SUB_TYPES.join(", ")],
       ["Sub Type (codes)", CODE_SUB_TYPES.join(", ")],
       [null, null],
-      ["Storage Location", null],
-      ...storageLocations.map((loc) => [null, loc]),
+      ["Storage Location", "Any text, e.g. Cabinet B, hook 14. Leave blank if you do not know yet."],
       [null, null],
       ["Notes", null],
       [null, "• Building must match exactly (use the dropdown in the Keys sheet)"],
       [null, "• Tenancy Name is optional — leave blank if not applicable"],
       [null, "• Key Number must be unique per building"],
+      [null, "• Level is optional for a building with no levels"],
       [null, "• Sub Type and Storage Location are optional for codes"],
     ];
     infoData.forEach((row) => infoWs.addRow(row));
@@ -1053,9 +1120,6 @@ async function keyImportTemplate(
 
     const subTypesWs = wb.addWorksheet("_SubTypes", { state: "veryHidden" });
     allSubTypes.forEach((n) => subTypesWs.addRow([n]));
-
-    const storageWs = wb.addWorksheet("_StorageLocations", { state: "veryHidden" });
-    storageLocations.forEach((n) => storageWs.addRow([n]));
 
     const buf = Buffer.from(await wb.xlsx.writeBuffer());
 
@@ -1096,8 +1160,23 @@ async function bulkImportKeys(
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'file' field required" } };
+    if (file.size > MAX_IMPORT_BYTES) {
+      return {
+        status: 413,
+        jsonBody: {
+          error: `That file is ${(file.size / 1024 / 1024).toFixed(0)} MB. Keys sheets are normally under 1 MB; the limit is 10 MB. Save it as .xlsx and remove blank rows.`,
+        },
+      };
+    }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    // Refuse zip bombs before ExcelJS unpacks the file into memory (sprint F, code review 2).
+    try {
+      assertSafeXlsx(buffer);
+    } catch (error) {
+      if (error instanceof XlsxRejectedError) return { status: 400, jsonBody: { error: error.message } };
+      throw error;
+    }
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
     // Use "Keys" sheet by name — don't rely on index since the template has hidden reference sheets
@@ -1158,8 +1237,8 @@ async function bulkImportKeys(
       const description = (r["Description"] ?? "").trim();
       const itemType = (r["Item Type"] ?? "key").trim().toLowerCase() || "key";
 
-      if (!buildingName || !keyNumber || !level || !description) {
-        errors.push({ row: rowNum, reason: "Building, Key Number, Level, and Description are required" });
+      if (!buildingName || !keyNumber || !description) {
+        errors.push({ row: rowNum, reason: "Building, Key Number, and Description are required" });
         continue;
       }
 
@@ -1192,12 +1271,6 @@ async function bulkImportKeys(
           errors.push({ row: rowNum, reason: `Sub Type "${subType}" is not valid for item type "${itemType}"` });
           continue;
         }
-      }
-
-      // Validate storage location if provided
-      if (storageLocation && !(KEY_STORAGE_LOCATIONS as readonly string[]).includes(storageLocation)) {
-        errors.push({ row: rowNum, reason: `Storage location "${storageLocation}" is not a known location` });
-        continue;
       }
 
       try {

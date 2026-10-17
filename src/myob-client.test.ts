@@ -9,12 +9,6 @@ jest.mock("./myob-api-log", () => ({
 }));
 
 import { applyMyobPayment, createMyobBill } from "./myob-client";
-import {
-  myobCreateServiceOrder,
-  myobDeleteServiceOrder,
-  myobGetServiceOrder,
-  myobUpdateServiceOrder,
-} from "./myob-purchase-order";
 import { MyobWritesDisabledError, type MyobActor } from "./myob-api-log";
 
 const { myobRequest } = require("./myob-api-log") as { myobRequest: jest.Mock };
@@ -36,10 +30,17 @@ const response = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// Like myobRequest, build the headers (refreshing the token) only when called.
+const respond = (over: Record<string, unknown> = {}) =>
+  myobRequest.mockImplementation(async (req: { headers: unknown; resolvedHeaders?: unknown }) => {
+    req.resolvedHeaders = typeof req.headers === "function" ? await req.headers() : req.headers;
+    return response(over);
+  });
+
 beforeEach(() => {
   jest.clearAllMocks();
   getValidMyobAccessToken.mockResolvedValue("access-token");
-  myobRequest.mockResolvedValue(response());
+  respond();
 });
 
 const lastRequest = () => myobRequest.mock.calls[myobRequest.mock.calls.length - 1][0];
@@ -53,9 +54,9 @@ describe("createMyobBill", () => {
     expect(result.uid).toBe("new-uid");
     expect(lastRequest()).toMatchObject({
       actor: ACTOR,
-      headers: { Authorization: "Bearer access-token" },
       method: "POST",
       purpose: "create-bill",
+      resolvedHeaders: { Authorization: "Bearer access-token" },
     });
     expect(lastRequest().url).toMatch(/\/Purchase\/Bill\/Service$/);
   });
@@ -75,7 +76,7 @@ describe("createMyobBill", () => {
   });
 
   it("throws on a non-2xx response", async () => {
-    myobRequest.mockResolvedValue(response({ ok: false, status: 400, text: "bad supplier" }));
+    respond({ ok: false, status: 400, text: "bad supplier" });
 
     await expect(createMyobBill({ ...bill, actor: ACTOR })).rejects.toThrow("MYOB createBill 400: bad supplier");
   });
@@ -87,9 +88,20 @@ describe("createMyobBill", () => {
   });
 });
 
+describe("headers", () => {
+  it("are built inside myobRequest, after its guards, so a refused call never refreshes the token", async () => {
+    myobRequest.mockResolvedValue(response());
+
+    await createMyobBill({ actor: ACTOR, amount: 1, jobId: 1, jobTitle: "t", referenceNumber: "r", sqlToken: null });
+
+    expect(typeof lastRequest().headers).toBe("function");
+    expect(getValidMyobAccessToken).not.toHaveBeenCalled();
+  });
+});
+
 describe("applyMyobPayment", () => {
   it("POSTs through myobRequest with the actor and correlationId", async () => {
-    myobRequest.mockResolvedValue(response({ status: 204 }));
+    respond({ status: 204 });
 
     await applyMyobPayment({ actor: ACTOR, amount: 50, billUid: "bill-1", correlationId: CORRELATION, sqlToken: "t" });
 
@@ -105,7 +117,7 @@ describe("applyMyobPayment", () => {
   });
 
   it("leaves the correlationId unset when none is supplied", async () => {
-    myobRequest.mockResolvedValue(response({ status: 204 }));
+    respond({ status: 204 });
 
     await applyMyobPayment({ actor: TIMER, amount: 50, billUid: "bill-1", sqlToken: null });
 
@@ -113,64 +125,10 @@ describe("applyMyobPayment", () => {
   });
 
   it("throws on a non-2xx response", async () => {
-    myobRequest.mockResolvedValue(response({ ok: false, status: 404, statusText: "Not Found", text: "no bill" }));
+    respond({ ok: false, status: 404, statusText: "Not Found", text: "no bill" });
 
     await expect(applyMyobPayment({ actor: ACTOR, amount: 50, billUid: "x", sqlToken: null })).rejects.toThrow(
       "MYOB API 404 Not Found: no bill",
     );
-  });
-});
-
-describe("service orders", () => {
-  const order = { Lines: [], Supplier: { UID: "s-1" } };
-
-  it("create: POST with actor and correlationId, returning the new uid", async () => {
-    const result = await myobCreateServiceOrder(order, "t", ACTOR, CORRELATION);
-
-    expect(result.uid).toBe("new-uid");
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, correlationId: CORRELATION, method: "POST", purpose: "create-service-order" });
-    expect(lastRequest().url).toMatch(/\/Purchase\/Order\/Service$/);
-    expect(getValidMyobAccessToken).toHaveBeenCalledWith("t", ACTOR, CORRELATION);
-  });
-
-  it("get: GET with actor and correlationId", async () => {
-    myobRequest.mockResolvedValue(response({ json: () => ({ UID: "o-1" }), status: 200, text: '{"UID":"o-1"}' }));
-
-    const result = await myobGetServiceOrder("o-1", "t", TIMER, CORRELATION);
-
-    expect(result.UID).toBe("o-1");
-    expect(lastRequest()).toMatchObject({ actor: TIMER, correlationId: CORRELATION, method: "GET", purpose: "get-service-order" });
-    expect(lastRequest().url).toMatch(/\/Purchase\/Order\/Service\/o-1$/);
-  });
-
-  it("update: PUT with actor and correlationId", async () => {
-    myobRequest.mockResolvedValue(response({ status: 204 }));
-
-    await myobUpdateServiceOrder("o-1", { Memo: "m" }, "t", ACTOR, CORRELATION);
-
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, body: { Memo: "m" }, correlationId: CORRELATION, method: "PUT", purpose: "update-service-order" });
-  });
-
-  it("delete: DELETE with actor and correlationId", async () => {
-    myobRequest.mockResolvedValue(response({ status: 204 }));
-
-    await myobDeleteServiceOrder("o-1", "t", ACTOR, CORRELATION);
-
-    expect(lastRequest()).toMatchObject({ actor: ACTOR, correlationId: CORRELATION, method: "DELETE", purpose: "delete-service-order" });
-  });
-
-  it("leave the correlationId unset when none is supplied", async () => {
-    myobRequest.mockResolvedValue(response({ status: 204 }));
-
-    await myobDeleteServiceOrder("o-1", "t", ACTOR);
-    await myobCreateServiceOrder(order, "t", ACTOR);
-
-    for (const [req] of myobRequest.mock.calls) expect(req.correlationId).toBeUndefined();
-  });
-
-  it("create throws on a non-2xx response", async () => {
-    myobRequest.mockResolvedValue(response({ ok: false, status: 422, text: "supplier required" }));
-
-    await expect(myobCreateServiceOrder(order, "t", ACTOR)).rejects.toThrow("MYOB createServiceOrder 422: supplier required");
   });
 });
