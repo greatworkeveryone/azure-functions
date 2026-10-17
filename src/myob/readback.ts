@@ -1,8 +1,9 @@
 // The read-back sync (plan M10): MYOB has no webhooks, so Floorplan reads back
 // the records it created and says when MYOB and Floorplan disagree. Reads only,
 // Purchases only (decision 11): one GET per record through the GET-only reader
-// (readbackClient.ts) and myobRequest, so the file's mode and the CFO's
-// purchases.read switch apply, and the read-back can never write.
+// (readbackClient.ts), whose getPurchase goes through the logged MYOB client,
+// so the file's mode and the CFO's purchases.read switch apply, and the
+// read-back can never write.
 //
 // It selects positively: the latest verified proposal for each MYOB record
 // Floorplan created, by proposal id, oldest check first. Records Floorplan

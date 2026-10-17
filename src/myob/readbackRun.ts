@@ -10,7 +10,8 @@
 import type { Connection } from "tedious";
 import { beginTransaction, commitTransaction, rollbackTransaction } from "../db";
 import type { LedgerActor } from "../ledger";
-import { MyobRequestRefusedError, MyobWritesDisabledError, type MyobActor } from "../myob-api-log";
+import type { MyobActor } from "../myob-api-log";
+import { MyobRequestRefusedError, MyobWritesDisabledError } from "../myob-errors";
 import type { ProposalRow } from "./proposalRow";
 import { readBackProposal, recordReadback, selectForReadback } from "./readback";
 
