@@ -7,6 +7,7 @@ import type { Connection } from "tedious";
 import { addDaysIso, todayInDarwin } from "../darwinDate";
 import {
   approvalOutcomeCode,
+  INDEX_GRACE_DAYS,
   NOT_COMMENCED_LEAD_DAYS,
   REVIEW_POLICIES,
   reviewConditionActive,
@@ -74,6 +75,22 @@ describe("the conditions", () => {
   it("E3 holds while it waits for approval", () => {
     expect(reviewConditionActive(REVIEW_POLICIES.approval, facts({ state: "awaiting_approval" }), TODAY)).toBe(true);
     expect(reviewConditionActive(REVIEW_POLICIES.approval, facts({ state: "in_progress" }), TODAY)).toBe(false);
+  });
+
+  it("H2: E1 and E2 don't hold while the tenancy's schedule isn't signed off; E3 still does", () => {
+    const unsigned = { signedOff: false };
+    expect(reviewConditionActive(REVIEW_POLICIES.notCommenced, facts({ ...unsigned, scheduledFor: DAY(3) }), TODAY)).toBe(false);
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, facts({ ...unsigned, scheduledFor: DAY(-9), state: "in_progress" }), TODAY)).toBe(false);
+    expect(reviewConditionActive(REVIEW_POLICIES.approval, facts({ ...unsigned, state: "awaiting_approval" }), TODAY)).toBe(true);
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, facts({ scheduledFor: DAY(-9), signedOff: true, state: "in_progress" }), TODAY)).toBe(true);
+  });
+
+  it(`M5: E2 waits while the index is awaited, until ${INDEX_GRACE_DAYS} days past its expected date`, () => {
+    const waiting = (expectedIndexAt: string) => facts({ expectedIndexAt, scheduledFor: DAY(-40), state: "awaiting_index" });
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, waiting(DAY(-INDEX_GRACE_DAYS)), TODAY)).toBe(false);
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, waiting(DAY(5)), TODAY)).toBe(false);
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, waiting(DAY(-INDEX_GRACE_DAYS - 1)), TODAY)).toBe(true);
+    expect(reviewConditionActive(REVIEW_POLICIES.overdue, facts({ expectedIndexAt: null, scheduledFor: DAY(-40), state: "awaiting_index" }), TODAY)).toBe(true);
   });
 
   it("none holds for a vacated or archived tenancy", () => {
@@ -231,8 +248,10 @@ describe("settleReviewEscalations (after a decision commits)", () => {
 describe("runReviewEscalations (the generator's step)", () => {
   const openRow = (over: Record<string, unknown> = {}) => ({
     Calc: null,
+    ExpectedIndexAt: null,
     PreparedById: null,
     ReviewId: "rev-1",
+    ScheduleSignedOffAt: new Date("2026-09-01T00:00:00Z"),
     ScheduledFor: new Date(`${DAY(-3)}T00:00:00Z`),
     State: "due",
     SubmittedAt: null,
@@ -336,6 +355,16 @@ describe("runReviewEscalations (the generator's step)", () => {
     serve([openRow({ ReviewId: "a" }), openRow({ ReviewId: "b" })]);
     const result = await runStep({ env: { ESCALATION_SWEEP_MAX_ACTIONS: "3" } });
     expect(result).toMatchObject({ raised: 3, truncated: true });
+  });
+
+  it("raises neither E1 nor E2 on a tenancy whose schedule isn't signed off (H2)", async () => {
+    serve([openRow({ ScheduleSignedOffAt: null })]);
+    expect(await runStep()).toMatchObject({ raised: 0 });
+  });
+
+  it("holds E2 back for a review waiting for an index that isn't late yet (M5)", async () => {
+    serve([openRow({ ExpectedIndexAt: new Date(`${DAY(-2)}T00:00:00Z`), ScheduledFor: new Date(`${DAY(-40)}T00:00:00Z`), State: "awaiting_index" })]);
+    expect(await runStep()).toMatchObject({ raised: 0 });
   });
 
   it("leaves a vacated tenancy's review alone", async () => {

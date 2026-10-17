@@ -1,6 +1,8 @@
 // The rent review adapter (WP26, PLAN §3.4, §3.7): describes a review to the
 // engine, says whether its E1 / E2 condition still holds (rentReview/
-// escalationRules.ts, read for today's Darwin date from the review's own date),
+// escalationRules.ts, read for today's Darwin date from the review's own date,
+// the tenancy's sign-off and the date a waiting index is expected), so the
+// escalation sweep ends one whose condition has cleared,
 // links to /tenancy/reviews/{id}, and limits who may see these to the roles
 // that may read a tenancy, the CFO included.
 
@@ -10,6 +12,7 @@ import { executeQuery } from "../../db";
 import { formatDisplayDate } from "../../digest/format";
 import { sqlDateToIso } from "../../nextReviewDate";
 import { RENT_REVIEW_STATES, type RentReviewState } from "../../rentReviewMachine";
+import { scheduleSignOffFromRow } from "../../scheduleSignOff";
 import { REVIEW_POLICIES, reviewConditionActive } from "../../rentReview/escalationRules";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
@@ -30,8 +33,9 @@ const REVIEW_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
 const METHOD_LABEL: Record<string, string> = { cpi: "CPI review", fixed: "Fixed review", market: "Market review", other: "Rent review" };
 
-const REVIEW_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method,
-    t.BuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus, t.ArchivedAt AS TenantArchivedAt, b.BuildingName
+const REVIEW_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method, r.ExpectedIndexAt,
+    t.BuildingId, t.LegalName, t.TradingName, t.Status AS TenantStatus, t.ArchivedAt AS TenantArchivedAt,
+    t.ScheduleSignedOffAt, b.BuildingName
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
@@ -58,7 +62,9 @@ export const rentReviewAdapter: EscalationAdapter = {
     return reviewConditionActive(
       ref.policyKey,
       {
+        expectedIndexAt: sqlDateToIso(row.ExpectedIndexAt),
         scheduledFor: sqlDateToIso(row.ScheduledFor) ?? "",
+        signedOff: scheduleSignOffFromRow(row) !== null,
         state: row.State as RentReviewState,
         tenancyClosed: row.TenantStatus === "vacated" || (row.TenantArchivedAt !== null && row.TenantArchivedAt !== undefined),
       },

@@ -5,6 +5,8 @@
 // CFO included) see these.
 import type { Connection } from "tedious";
 import { addDaysIso, todayInDarwin } from "../../darwinDate";
+import { runSweep, type SweepDeps } from "../sweep";
+import type { EscalationRow } from "../types";
 import { getAdapter, registeredSubjectTypes } from "./registry";
 import { rentReviewAdapter } from "./rentReview";
 import "./index";
@@ -21,6 +23,8 @@ const ref = (policyKey: string, subjectId = "rev-1") => ({ policyKey, subjectId,
 const row = (over: Record<string, unknown> = {}) => ({
   ArchivedAt: null,
   BuildingId: 5,
+  ExpectedIndexAt: null,
+  ScheduleSignedOffAt: new Date("2026-09-01T00:00:00Z"),
   BuildingName: "Tower A",
   LegalName: "Acme Pty Ltd",
   Method: "cpi",
@@ -132,6 +136,63 @@ describe("E2 rent_review.overdue", () => {
   it("clears for a review that has gone", async () => {
     db.executeQuery.mockResolvedValue([]);
     await expect(rentReviewAdapter.isConditionActive(conn, ref("rent_review.overdue"), NOW)).resolves.toBe(false);
+  });
+});
+
+describe("H2 and M5: what isn't chased", () => {
+  const active = (policyKey: string, over: Record<string, unknown>) => {
+    db.executeQuery.mockResolvedValue([row(over)]);
+    return rentReviewAdapter.isConditionActive(conn, ref(policyKey), NOW);
+  };
+
+  it("clears E1 and E2 while the tenancy's schedule isn't signed off", async () => {
+    await expect(active("rent_review.not_commenced", { ScheduleSignedOffAt: null, ScheduledFor: asDate(addDaysIso(TODAY, 3)) })).resolves.toBe(false);
+    await expect(active("rent_review.overdue", { ScheduleSignedOffAt: null, ScheduledFor: asDate(addDaysIso(TODAY, -9)), State: "in_progress" })).resolves.toBe(false);
+    expect(db.executeQuery.mock.calls.at(-1)?.[1]).toContain("t.ScheduleSignedOffAt");
+  });
+
+  it("clears E2 while the index is awaited until a week past its expected date", async () => {
+    const waiting = (days: number) => ({ ExpectedIndexAt: asDate(addDaysIso(TODAY, days)), ScheduledFor: asDate(addDaysIso(TODAY, -40)), State: "awaiting_index" });
+    await expect(active("rent_review.overdue", waiting(-7))).resolves.toBe(false);
+    await expect(active("rent_review.overdue", waiting(-8))).resolves.toBe(true);
+  });
+
+  it("is withdrawn by the escalation sweep when the sign-off goes: the live E2 ends as condition_cleared", async () => {
+    const live = {
+      acknowledgedAt: null,
+      dueAt: null,
+      escalationId: 31,
+      kind: "attention",
+      level: 1,
+      notificationAttempts: 1,
+      notificationState: "sent",
+      policyKey: "rent_review.overdue",
+      rowVersion: "v1",
+      status: "open",
+      subjectId: "rev-1",
+      subjectType: "rent_review",
+    } as unknown as EscalationRow;
+    db.executeQuery.mockResolvedValue([row({ ScheduleSignedOffAt: null, ScheduledFor: asDate(addDaysIso(TODAY, -9)), State: "in_progress" })]);
+    const autoResolve = jest.fn().mockImplementation(async () => ({ ...live, resolutionCode: "condition_cleared", status: "withdrawn" }));
+    const deps = {
+      autoResolve,
+      countExhaustedNotifications: async () => 0,
+      escalateFurther: jest.fn(),
+      getAdapter: (type: string) => (type === "rent_review" ? rentReviewAdapter : null),
+      getPolicy: async () => null,
+      hasNextLevel: async () => false,
+      latestEmailArrivals: async () => new Map(),
+      latestTimesBySubject: async () => new Map(),
+      listLiveEscalations: async () => [live],
+      loadLiveJobFacts: async () => [],
+      notifyTargets: jest.fn(),
+      // The sweep's own health checks raise system.health; nothing to do with the review.
+      raise: jest.fn(async () => ({ created: false, escalation: live })),
+    } as unknown as SweepDeps;
+    const report = await runSweep(conn, { dryRun: false, env: {}, log: jest.fn(), now: NOW, warn: jest.fn() }, deps);
+    expect(autoResolve).toHaveBeenCalledWith(conn, expect.objectContaining({ escalationId: 31, expectedRowVersion: "v1" }));
+    expect(report.autoResolved).toBe(1);
+    expect(report.errors).toEqual([]);
   });
 });
 

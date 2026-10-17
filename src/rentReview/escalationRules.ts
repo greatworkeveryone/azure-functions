@@ -15,9 +15,13 @@
 // overdue review that nobody has started has both: it is late, and it hasn't
 // been started. Every condition is read for today's Darwin date from the
 // review's own date, never a stored next-review column. A vacated or archived
-// tenancy's review is not chased.
+// tenancy's review is not chased, nor is E1 or E2 one whose tenancy's schedule
+// isn't signed off (H2): it can't be applied until it is (C3), and the sign-off
+// is what to chase; the sweep ends a live one when the sign-off goes. E2 also
+// waits while a CPI review waits for its index, until a week after the date the
+// quarter is expected (M5): the index being late is not the review being late.
 
-import { daysBetweenIso } from "../darwinDate";
+import { addDaysIso, daysBetweenIso } from "../darwinDate";
 import { isOpenState, isOverdue, type RentReviewState } from "../rentReviewMachine";
 
 export const REVIEW_POLICIES = {
@@ -31,6 +35,9 @@ export const GENERATOR_POLICIES = [REVIEW_POLICIES.notCommenced, REVIEW_POLICIES
 /** E1 starts this many days before the review date. */
 export const NOT_COMMENCED_LEAD_DAYS = 14;
 
+/** E2 holds off this many days past a waiting review's ExpectedIndexAt (M5). */
+export const INDEX_GRACE_DAYS = 7;
+
 /** What ended a review's escalation, stored as its ResolutionCode (the review's decision). */
 export const REVIEW_DECISION_CODES = {
   approved: "approved",
@@ -42,7 +49,12 @@ export const REVIEW_DECISION_CODES = {
 } as const;
 
 export interface ReviewConditionFacts {
+  /** RentReviews.ExpectedIndexAt while a CPI review waits for its index. */
+  expectedIndexAt?: string | null;
   scheduledFor: string;
+  /** The tenancy's schedule is signed off. Left out (a decision that doesn't
+   *  know it): taken as signed, so only what the decision cleared ends. */
+  signedOff?: boolean;
   state: RentReviewState;
   /** The tenancy is vacated or archived: its review isn't chased. */
   tenancyClosed: boolean;
@@ -54,8 +66,13 @@ export function reviewConditionActive(policyKey: string, facts: ReviewConditionF
   if (facts.tenancyClosed) return false;
   switch (policyKey) {
     case REVIEW_POLICIES.notCommenced:
+      if (facts.signedOff === false) return false;
       return (facts.state === "scheduled" || facts.state === "due") && daysBetweenIso(today, facts.scheduledFor) <= NOT_COMMENCED_LEAD_DAYS;
     case REVIEW_POLICIES.overdue:
+      if (facts.signedOff === false) return false;
+      if (facts.state === "awaiting_index" && facts.expectedIndexAt && today <= addDaysIso(facts.expectedIndexAt, INDEX_GRACE_DAYS)) {
+        return false;
+      }
       return isOverdue(facts.state, facts.scheduledFor, today);
     case REVIEW_POLICIES.approval:
       return facts.state === "awaiting_approval";

@@ -29,6 +29,7 @@ import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewState } from "../rentReviewMachine";
 import { approvalReasonsOf, chosenFigures, isReduction, parseCalc } from "../rentReviewCalc";
+import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { Sentry } from "../sentry";
 import {
   approvalOutcomeCode,
@@ -157,8 +158,8 @@ export async function settleReviewEscalations(connection: Connection, input: Set
 
 const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).join(", ");
 
-const OPEN_REVIEWS_SQL = `SELECT r.ReviewId, r.ScheduledFor, r.State, r.PreparedById, r.SubmittedAt, r.Calc,
-    t.Status AS TenantStatus, t.ArchivedAt AS TenantArchivedAt
+const OPEN_REVIEWS_SQL = `SELECT r.ReviewId, r.ScheduledFor, r.State, r.PreparedById, r.SubmittedAt, r.Calc, r.ExpectedIndexAt,
+    t.Status AS TenantStatus, t.ArchivedAt AS TenantArchivedAt, t.ScheduleSignedOffAt
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   WHERE r.State IN (${OPEN_STATE_LIST})`;
@@ -179,9 +180,11 @@ const STRANDED_APPROVALS_SQL = `SELECT e.SubjectId, r.State, r.ScheduledFor
 
 export interface OpenReviewFacts {
   calc: ReturnType<typeof parseCalc>;
+  expectedIndexAt?: string | null;
   preparedById: number | null;
   reviewId: string;
   scheduledFor: string;
+  signedOff?: boolean;
   state: RentReviewState;
   submittedAt: Date | null;
   tenancyClosed: boolean;
@@ -305,9 +308,11 @@ const dateOf = (value: unknown): Date | null => (value instanceof Date && !Numbe
 export async function runReviewEscalations(connection: Connection, run: ReviewEscalationRun): Promise<ReviewEscalationReport> {
   const reviews: OpenReviewFacts[] = (await executeQuery(connection, OPEN_REVIEWS_SQL)).map((row) => ({
     calc: parseCalc(row.Calc),
+    expectedIndexAt: sqlDateToIso(row.ExpectedIndexAt),
     preparedById: row.PreparedById === null || row.PreparedById === undefined ? null : Number(row.PreparedById),
     reviewId: String(row.ReviewId),
     scheduledFor: sqlDateToIso(row.ScheduledFor) ?? "",
+    signedOff: scheduleSignOffFromRow(row) !== null,
     state: row.State as RentReviewState,
     submittedAt: dateOf(row.SubmittedAt),
     tenancyClosed: row.TenantStatus === "vacated" || (row.TenantArchivedAt !== null && row.TenantArchivedAt !== undefined),
