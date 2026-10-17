@@ -21,7 +21,7 @@ then the real switch.
 | `RENT_REVIEW_GENERATOR_ENABLED` · `_DRY_RUN` | off | Creates and moves rent reviews (WP25). Each live run also raises E1/E2, re-raises a lost E3 at the rung it reached, and writes the RentPerAnnum cache of a review applied ahead of its date once the date comes (WP26); at most `ESCALATION_SWEEP_MAX_ACTIONS` escalations a run. Pair with the Rent reviews flag | After a dry run |
 | `REVIEW_WINDOW_DAYS` | 60 | Days before its date a scheduled rent review becomes due | Leave at 60 |
 | `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
-| `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row | The day WP25/WP26 go live (gate B) |
+| `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row From WP26c, an unresolved review row dated on or after it shows as pending (awaiting review) on the schedule until a review applies it | The day WP25/WP26 go live (gate B) |
 | `CPI_SYNC_ENABLED` · `_DRY_RUN` | off | Daily ABS CPI sync into `CpiIndex`; then CPI reviews waiting for their index come back in progress, calculated, even when the ABS fetch fails (WP26) | After a dry run |
 | `PLANNER_SYNC_ENABLED` | off | Microsoft Planner sync, being retired | Leave off |
 | `PLANNER_UNSIGNED_HOLDBACK_ENABLED` | off | Only matters if Planner sync is on. The nightly timer never raises lease tasks (expiry, option, review) for a tenancy whose schedule is not signed off. This switch also lets it take down the ones already open; off, it leaves them and logs each tenancy with its open task count | Only if Planner sync is turned on, after reading the "not removed" line in the log |
@@ -86,3 +86,12 @@ Migration 101 (`101_rent_review_workflow.sql`, WP25) is hand-applied like the re
 It is numbered below migrations already applied, so the runner applies it out of
 order with a warning only. Apply it before turning on the Rent reviews flag or the
 generator. WP26 adds no migration.
+
+Migration 099 (`099_schedule_change_requests.sql`, WP26c) is hand-applied like the
+rest. It is numbered below applied migrations, so the runner applies it out of order
+with a warning only. Apply it before deploying WP26c's backend: the register reads
+select its new columns.
+
+## Escalations
+
+`schedule.change_ratification` (seeded active): a requested rent relief goes to the directors; 16h per rung.
