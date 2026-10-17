@@ -34,7 +34,7 @@ import * as ledger from "../ledger";
 import { requireMoneyContext } from "../moneyGate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
-import { parseCalc } from "../rentReviewCalc";
+import { chosenFigures, parseCalc } from "../rentReviewCalc";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { afterReviewDecision } from "../rentReview/afterDecision";
 import { applyReview } from "../rentReview/apply";
@@ -55,8 +55,6 @@ import {
   staleReview,
 } from "../rentReview/http";
 import { inTransaction, loadReview, reviewForUpdate } from "../rentReview/store";
-
-const r4 = (n: number): number => Math.round(n * 10000) / 10000 || 0;
 
 const ROLE_WORDS: Record<string, string> = { accounts_manager: "an accounts manager", cfo: "the CFO", director: "a director" };
 
@@ -129,8 +127,7 @@ export async function approveRentReview(request: HttpRequest, context: Invocatio
           throw new RentReviewError("approval_level", message, { requiredRole: required }, refusal("denied", "approval_level", message));
         }
 
-        const chosen = calc.override?.newAnnual ?? calc.newAnnual;
-        const chosenPercent = calc.override ? r4((chosen / calc.currentAnnual - 1) * 100) : calc.appliedPercent;
+        const { appliedPercent: chosenPercent, newAnnual: chosen } = chosenFigures(calc);
         await ledger.record(db, {
           action: "rent_review.approve",
           actor: caller.actor,

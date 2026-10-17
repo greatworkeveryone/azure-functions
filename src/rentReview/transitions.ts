@@ -85,6 +85,8 @@ export interface ApprovedOutcome {
   /** "auto_in_bounds" (the preparer applied an in-bounds result) or "approved" (a second person). */
   approvalBasis: string;
   approver: Person;
+  /** The calc as applied (the submitted one, with any override and its receipt). */
+  calcJson: string;
   cpi: { current: number; indexUsed: string; previous: number } | null;
   increasePercent: number;
   newAnnual: number;
@@ -95,7 +97,8 @@ export interface ApprovedOutcome {
 }
 
 /** APPLY's review half: in_progress (SUBMIT, one step) or awaiting_approval
- *  (APPROVE) -> approved, with the outcome in the review's own columns. */
+ *  (APPROVE) -> approved, with the outcome in the review's own columns and the
+ *  calc as applied, whose receipt the outcome's arrears are read from. */
 export async function markApproved(
   connection: Connection,
   reviewId: string,
@@ -112,8 +115,10 @@ export async function markApproved(
     "approved",
     `ApprovedById = @ApprovedById, ApprovedByName = @ApprovedByName, ApprovedAt = SYSUTCDATETIME(), ApprovalBasis = @ApprovalBasis,
      OldRentPerAnnum = @OldRentPerAnnum, NewRentPerAnnum = @NewRentPerAnnum, IncreasePercent = @IncreasePercent,
-     CpiIndexUsed = @CpiIndexUsed, CpiBaseValue = @CpiBaseValue, CpiCurrentValue = @CpiCurrentValue, StepId = @StepId${prepared}`,
+     CpiIndexUsed = @CpiIndexUsed, CpiBaseValue = @CpiBaseValue, CpiCurrentValue = @CpiCurrentValue, StepId = @StepId,
+     Calc = @Calc${prepared}`,
     [
+      { name: "Calc", type: TYPES.NVarChar, value: outcome.calcJson },
       { name: "ApprovedById", type: TYPES.Int, value: outcome.approver.userId },
       { name: "ApprovedByName", type: TYPES.NVarChar, value: outcome.approver.name },
       { name: "ApprovalBasis", type: TYPES.NVarChar, value: outcome.approvalBasis },

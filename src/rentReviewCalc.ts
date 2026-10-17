@@ -28,16 +28,25 @@
 //     fixedPercent?, manual?: { newAnnual, explanation },
 //     appliedPercent, newAnnual, perMonth, perSqm,
 //     cascade: [{ kind, label, currentAnnual, newAnnual, appliedPercent, note }],
-//     arrears: { from, to, months, amount } | null,
+//     arrears: { from, to, months, amount, lines: [{ kind, label, amount }] } | null,
+//     departures: [the basis terms that differ from the lease's],
 //     sanity: { minPercent, maxPercent, inBand },
-//     override?: { newAnnual, reason, differenceAnnual } }     set by submit
+//     override?: { newAnnual, reason, differenceAnnual, appliedPercent, perMonth,     set by submit:
+//                  perSqm, cascade, arrears, ancillaryDifferenceAnnual } }            the chosen rent's receipt
+// The top level is always the computed result; an override carries the chosen
+// rent's own receipt. Either receipt is the schedule as APPLY writes that rent
+// (rentReview/written.ts), and the arrears cover the rent, AHAC, car parks and
+// misc fees alike.
 // Money is to the cent, percentages to 4 dp, the index ratio to 6.
 
-import { daysBetweenIso } from "./darwinDate";
-import { computeCascade, type CascadeRow } from "./rentReview/cascade";
+import type { ArrearsLine } from "./rentReview/arrears";
+import type { CascadeRow } from "./rentReview/cascade";
 import { expectedRelease, previousQuarter, referenceQuarter, type CpiIndexRow } from "./rentReview/cpi";
 import { appliedStep, reviewRow, type ScheduleContext, simulate, waivedStep } from "./rentReview/stepPlan";
+import { writtenReview } from "./rentReview/written";
 import type { CarparkScheduleGroup, MiscFee, ScheduledRateStep } from "./scheduledRateStepLogic";
+
+export { arrearsFor, computeArrears, reviewChanges, type ArrearsLine, type ArrearsPart } from "./rentReview/arrears";
 
 export type CalcMethod = "cpi" | "fixed" | "other";
 
@@ -60,22 +69,27 @@ export interface CalcBounds {
   ratcheted: boolean;
 }
 
-export interface ArrearsLine {
-  amount: number;
-  from: string;
-  months: number;
-  to: string;
-}
-
 export interface SanityBand {
   inBand: boolean;
   maxPercent: number;
   minPercent: number;
 }
 
+/** The rent chosen instead of the computed one (SUBMIT), with its own receipt:
+ *  the cascade and arrears worked from the schedule as APPLY writes the chosen
+ *  rent, so the approver sees what the schedule will say (H1). */
 export interface CalcOverride {
+  /** Annual AHAC, car parks and misc fees at the chosen rent less at the computed one. */
+  ancillaryDifferenceAnnual?: number;
+  /** The chosen rent against the rent before the review (4 dp). */
+  appliedPercent?: number;
+  arrears?: ArrearsLine | null;
+  cascade?: CascadeRow[];
+  /** The chosen rent less the computed one. */
   differenceAnnual: number;
   newAnnual: number;
+  perMonth?: number;
+  perSqm?: number | null;
   reason: string;
 }
 
@@ -159,19 +173,6 @@ export function boundFactor(
   return { clampedBy, factor, ratcheted };
 }
 
-/**
- * What the new rent owes for the time already passed since the review date:
- * from the review date to `to` (exclusive, as a schedule row ends), pro rata by
- * day on a 365-day year; months is the same span in months. Null when the date
- * hasn't passed or the rent doesn't change. A decrease gives a credit (negative).
- */
-export function computeArrears(from: string, to: string, currentAnnual: number, newAnnual: number): ArrearsLine | null {
-  const days = daysBetweenIso(from, to);
-  const difference = r2(newAnnual - currentAnnual);
-  if (days <= 0 || difference === 0) return null;
-  return { amount: r2((difference * days) / 365), from, months: r2((days * 12) / 365), to };
-}
-
 const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 
 export type CalcRefusalCode =
@@ -180,7 +181,33 @@ export type CalcRefusalCode =
   | "earlier_review_pending"
   | "manual_required"
   | "no_current_rent"
+  | "not_representable"
+  | "ratchet"
   | "step_settled";
+
+/**
+ * C9 on a lease with a ratchet: the schedule engine holds every review row of
+ * such a lease at no decrease, so a lower rent can't be written. A director
+ * override of the lease's ratchet needs a per-row exemption in the engine of
+ * both repos (WP26c); until then it is refused for everyone, directors too.
+ */
+export const LEASE_RATCHET_MESSAGE =
+  "This lease has a ratchet, so its rent can't go down on review, and a director can't override the lease's ratchet here yet. " +
+  "To depart from the lease, a director turns the ratchet off in the lease's terms (a recorded change) and the review is calculated again.";
+
+const money = (value: number): string => new Intl.NumberFormat("en-AU", { currency: "AUD", style: "currency" }).format(value);
+
+/** Why the schedule can't hold a rent (L6): the lease's ratchet against a
+ *  decrease, else a change past what one review row can carry (±100%). */
+export function unrepresentableRent(newAnnual: number, currentAnnual: number, leaseRatchet: boolean): { code: "not_representable" | "ratchet"; message: string } {
+  if (newAnnual < currentAnnual && leaseRatchet) return { code: "ratchet", message: LEASE_RATCHET_MESSAGE };
+  return {
+    code: "not_representable",
+    message:
+      `The schedule can't hold a new rent of ${money(newAnnual)} against ${money(currentAnnual)} on this lease, so it can't be applied. ` +
+      "One review can't more than double the rent or take it to nothing; check the figures.",
+  };
+}
 
 export type CalcResult =
   | { calc: RentReviewCalc; kind: "calc" }
@@ -198,6 +225,8 @@ export interface CalcInput {
   /** The review's basis snapshot (rentReview/basis.ts). */
   basis: Record<string, unknown>;
   carparkGroups: readonly CarparkScheduleGroup[];
+  /** The basis terms that differ from the lease's (leaseDepartures); none when left out. */
+  departures?: readonly string[];
   computedAt: string;
   computedBy: { name: string; userId: number | null };
   /** CpiIndex rows for the basis's region (only the two quarters matter). */
@@ -341,14 +370,13 @@ export function calculateReview(input: CalcInput): CalcResult {
   if (!(currentAnnual > 0)) {
     return refused("no_current_rent", "The schedule has no rent on this review's date, so there is nothing to review. Check the schedule's starting rent.");
   }
-  const rowIndex = before.rows.indexOf(row);
   const area = row.areaMissing ? 0 : row.sqm;
+  const departures = [...(input.departures ?? [])];
 
   let factor: number;
   let newAnnual: number;
   let plan: FactorPlan | null = null;
   let manual: RentReviewCalc["manual"];
-  let afterRow = null as ReturnType<typeof simulate>["row"];
 
   if (input.method === "other") {
     const keyed = input.manual;
@@ -362,38 +390,49 @@ export function calculateReview(input: CalcInput): CalcResult {
     newAnnual = r2(keyed.newAnnual);
     factor = newAnnual / currentAnnual;
     manual = { explanation, newAnnual };
-    afterRow = simulate(context, appliedStep(placed.base, input.reviewId, { methodKind: "other", ratePercent: 0 })).row;
   } else {
     const worked = input.method === "cpi" ? cpiFactor(input, placed.base) : fixedFactor(input, placed.base);
     if ("kind" in worked) return worked;
     plan = worked;
     factor = worked.factor;
-    afterRow = simulate(context, worked.natural).row;
     // The engine agrees when the review keeps to the lease: then its own figure is the new rent.
-    const agrees = afterRow !== null && !afterRow.pending && afterRow.factor !== null && Math.abs(afterRow.factor - factor) < 1e-12;
-    newAnnual = agrees && afterRow ? afterRow.annual : r2(currentAnnual * factor);
-    if (!agrees) afterRow = null;
+    const natural = simulate(context, worked.natural).row;
+    const agrees = natural !== null && !natural.pending && natural.factor !== null && Math.abs(natural.factor - factor) < 1e-12;
+    newAnnual = agrees && natural ? natural.annual : r2(currentAnnual * factor);
   }
 
   const appliedPercent = input.method === "other" ? r4((newAnnual / currentAnnual - 1) * 100) : r4((factor - 1) * 100);
-  const cascade = computeCascade({
-    ahac: { after: afterRow && input.method !== "other" ? afterRow.ahacAnnual : null, before: row.ahacAnnual },
+  // The receipt is the schedule as APPLY writes this rent (rentReview/written.ts).
+  const written = writtenReview({
+    base: placed.base,
+    before,
     bounds: plan?.bounds ? { capPercent: plan.bounds.capPercent, floorPercent: plan.bounds.floorPercent } : null,
     carparkGroups: input.carparkGroups,
-    factor,
+    context,
+    cpi: plan?.cpi ? { current: plan.cpi.current, previous: plan.cpi.previous } : null,
+    currentAnnual,
+    departs: departures.length > 0,
+    method: input.method,
     miscFees: input.miscFees,
-    reviewBaseline: plan?.cpi ? plan.cpi.previous : (afterRow?.cpiBaseline ?? row.cpiBaseline),
-    reviewRow: row,
-    rowsBefore: before.rows.slice(0, rowIndex),
+    naturalRate: input.method === "fixed" ? (plan?.fixedPercent ?? 0) : appliedPercent,
+    reviewId: input.reviewId,
+    scheduledFor: input.scheduledFor,
+    target: newAnnual,
+    today: input.today,
   });
+  if (!written) {
+    const why = unrepresentableRent(newAnnual, currentAnnual, input.lease.reviewRatchet);
+    return refused(why.code, why.message);
+  }
 
   const calc: RentReviewCalc = {
     appliedPercent,
-    arrears: computeArrears(input.scheduledFor, input.today, currentAnnual, newAnnual),
-    cascade,
+    arrears: written.arrears,
+    cascade: written.cascade,
     computedAt: input.computedAt,
     computedBy: input.computedBy,
     currentAnnual,
+    departures,
     method: input.method,
     newAnnual,
     perMonth: r2(newAnnual / 12),
@@ -409,6 +448,35 @@ export function calculateReview(input: CalcInput): CalcResult {
 }
 
 // ── Reading a stored calc ────────────────────────────────────────────────────
+
+/** The rent the review applies and its %: the override's when there is one
+ *  (its own %, never the computed one), else the computed result. */
+export function chosenFigures(calc: RentReviewCalc): { appliedPercent: number; currentAnnual: number; newAnnual: number } {
+  if (!calc.override) return { appliedPercent: calc.appliedPercent, currentAnnual: calc.currentAnnual, newAnnual: calc.newAnnual };
+  const newAnnual = calc.override.newAnnual;
+  return {
+    appliedPercent: calc.override.appliedPercent ?? r4((newAnnual / calc.currentAnnual - 1) * 100),
+    currentAnnual: calc.currentAnnual,
+    newAnnual,
+  };
+}
+
+/** Why a submitted review needs a second person, from its calc alone (E3's headline). */
+export function approvalReasonsOf(calc: RentReviewCalc): string[] {
+  return [
+    ...(calc.override ? ["override"] : []),
+    ...(calc.sanity && !calc.sanity.inBand ? ["out_of_band"] : []),
+    ...(calc.method === "other" ? ["manual_method"] : []),
+    ...((calc.departures?.length ?? 0) > 0 ? ["basis_departs_from_lease"] : []),
+  ];
+}
+
+/** The charges that follow the rent as the review applies them: the chosen
+ *  rent's cascade when there is an override, else the computed one. */
+export function appliedCascade(calc: RentReviewCalc | null): CascadeRow[] {
+  if (!calc) return [];
+  return calc.override?.cascade ?? calc.cascade ?? [];
+}
 
 /** RentReviews.Calc as a calc, or null when it is empty or not one. */
 export function parseCalc(raw: unknown): RentReviewCalc | null {

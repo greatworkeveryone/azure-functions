@@ -6,14 +6,18 @@
 // src/helpers/miscFeeSchedule.ts (miscFeeScheduleRows), which draw the
 // schedule people read. A change to either side changes both.
 //
-// Each group or fee is walked through the schedule rows before the review the
-// way the frontend walks it (the running amount kept unrounded, car park
-// overrides rounded where the frontend rounds them), then the review row's rule
-// is applied once:
+// Each group or fee is walked the way the frontend walks it (the running amount
+// kept unrounded, car park overrides rounded where the frontend rounds them)
+// twice: through the schedule rows before the review row (what it is now), and
+// through the rows as APPLY will write them, the review row included (what it
+// becomes). So the receipt is the schedule after APPLY, whatever the review row
+// is written as. On the review row:
 //   an override dated in the review's period    its own rule: a new amount, its
 //                                               own CPI index pair, or its own %
-//   no override                                 the rent's increase, after the
-//                                               lease's cap, floor and ratchet
+//   no override                                 the review row's factor: the
+//                                               rent's increase after the lease's
+//                                               cap, floor and ratchet, or the
+//                                               exact rate an override is written at
 // Decided per row (the WP23 review's follow-up): a row with its own CPI
 // override keeps its own index ratio and is NOT limited by the lease's cap or
 // floor, because that is how the schedule computes it; the row's note says so,
@@ -120,18 +124,18 @@ export interface CascadeBounds {
 }
 
 export interface CascadeInput {
+  /** AHAC on the review date before the review (the review row waived) and after it (as written). */
   ahac: { after: number | null; before: number | null };
   bounds: CascadeBounds | null;
   carparkGroups: readonly CarparkScheduleGroup[];
-  /** The rent's factor after the cap, floor and ratchet: what a following row takes. */
-  factor: number;
   miscFees: readonly MiscFee[];
-  /** The review row (its period decides which override applies). */
+  /** The review row as APPLY writes it: its period decides which override applies,
+   *  and its CPI baseline is the one an override's own index is read against. */
   reviewRow: ScheduleRow;
-  /** The CPI baseline on the review row as written: the previous index for a CPI review. */
-  reviewBaseline: number | null;
   /** Every row before the review row, in date order. */
   rowsBefore: readonly ScheduleRow[];
+  /** Every row up to and including the review row, as the schedule holds them after APPLY. */
+  rowsThrough: readonly ScheduleRow[];
 }
 
 const pct = (value: number): string => `${r2(value).toFixed(2)}%`;
@@ -144,49 +148,33 @@ function boundsNote(percent: number, bounds: CascadeBounds | null): string {
   return "";
 }
 
-interface Outcome {
-  after: number;
-  note: string | null;
-}
-
 /**
- * The review row's rule applied to a running amount, with what to say about it.
- * Car parks round an override's result and, when their override for the date
- * sets nothing usable, still follow the rent; misc fees keep the unrounded
- * amount and stay as they are. Both as the frontend does it.
+ * What to say about the review row's rule for a group or fee: nothing when it
+ * follows the rent; its own amount, CPI pair or rate when its override for the
+ * date sets one. A car park whose override sets nothing usable still follows the
+ * rent; a misc fee's stays as it is. Both as the frontend computes them.
  */
-function reviewOutcome(
-  before: number,
+function noteFor(
   rateStep: CarparkRateStep | MiscFeeRateStep | undefined,
   newAmount: number | undefined,
   input: CascadeInput,
   kind: "carpark" | "misc_fee",
   unit: string,
-): Outcome {
-  const round = (n: number) => (kind === "carpark" ? r2(n) : n);
-  if (!rateStep) return { after: before * input.factor, note: null };
-  if (newAmount != null) {
-    return { after: newAmount, note: `Set to ${money(newAmount)} ${unit} by its own amount for this date; the rent's increase doesn't apply` };
-  }
-  const baseline = rateStep.cpiValuePrev ?? input.reviewBaseline;
+): string | null {
+  if (!rateStep) return null;
+  if (newAmount != null) return `Set to ${money(newAmount)} ${unit} by its own amount for this date; the rent's increase doesn't apply`;
+  const baseline = rateStep.cpiValuePrev ?? input.reviewRow.cpiBaseline;
   if (rateStep.methodKind === "cpi" && rateStep.cpiValue != null && baseline != null) {
-    const ratio = rateStep.cpiValue / baseline;
-    const percent = (ratio - 1) * 100;
-    return {
-      after: round(before * ratio),
-      note:
-        `Own CPI override (${rateStep.cpiValue} ÷ ${baseline} = ${pct(percent)}): not limited by the lease's cap or floor` +
-        boundsNote(percent, input.bounds),
-    };
+    const percent = (rateStep.cpiValue / baseline - 1) * 100;
+    return (
+      `Own CPI override (${rateStep.cpiValue} ÷ ${baseline} = ${pct(percent)}): not limited by the lease's cap or floor` +
+      boundsNote(percent, input.bounds)
+    );
   }
   if (rateStep.ratePercent != null) {
-    return {
-      after: round(before * (1 + rateStep.ratePercent / 100)),
-      note: `Own rate of ${pct(rateStep.ratePercent)} for this date: not limited by the lease's cap or floor` + boundsNote(rateStep.ratePercent, input.bounds),
-    };
+    return `Own rate of ${pct(rateStep.ratePercent)} for this date: not limited by the lease's cap or floor` + boundsNote(rateStep.ratePercent, input.bounds);
   }
-  if (kind === "carpark") return { after: before * input.factor, note: null };
-  return { after: before, note: "Its entry for this date sets no amount or rate, so it stays as it is" };
+  return kind === "carpark" ? null : "Its entry for this date sets no amount or rate, so it stays as it is";
 }
 
 /** One cascade row. The % compares the running amounts, so rounding a monthly
@@ -212,7 +200,7 @@ export function computeCascade(input: CascadeInput): CascadeRow[] {
   const rows: CascadeRow[] = [];
   if (input.ahac.before !== null && input.ahac.before > 0) {
     const before = input.ahac.before;
-    const after = input.ahac.after ?? before * input.factor;
+    const after = input.ahac.after ?? before;
     rows.push(cascadeRow("ahac", "After-hours air-conditioning", { after, afterAnnual: after, before, beforeAnnual: before }, null));
   }
 
@@ -221,8 +209,9 @@ export function computeCascade(input: CascadeInput): CascadeRow[] {
   for (const group of input.carparkGroups) {
     const before = carparkRunning(input.rowsBefore, group);
     if (before === null) continue;
+    const after = carparkRunning(input.rowsThrough, group) ?? before;
     const rateStep = overrideFor(input.reviewRow, group.rateSteps);
-    const { after, note } = reviewOutcome(before, rateStep, rateStep?.newMonthlyRate, input, "carpark", "a month");
+    const note = noteFor(rateStep, rateStep?.newMonthlyRate, input, "carpark", "a month");
     rows.push(cascadeRow("carpark", group.label, { after, afterAnnual: r2(after) * 12, before, beforeAnnual: r2(before) * 12 }, note));
   }
 
@@ -230,10 +219,11 @@ export function computeCascade(input: CascadeInput): CascadeRow[] {
     if (fee.endsAt && input.reviewRow.step.effectiveFrom > fee.endsAt) continue;
     const before = miscFeeRunning(input.rowsBefore, fee);
     if (before === null) continue;
+    const after = miscFeeRunning(input.rowsThrough, fee) ?? before;
     const rateStep = overrideFor(input.reviewRow, fee.rateSteps);
     const perYear = PERIODS_PER_YEAR[fee.frequency] ?? 1;
     const unit = fee.frequency === "monthly" ? "a month" : fee.frequency === "quarterly" ? "a quarter" : "a year";
-    const { after, note } = reviewOutcome(before, rateStep, rateStep?.newAmount, input, "misc_fee", unit);
+    const note = noteFor(rateStep, rateStep?.newAmount, input, "misc_fee", unit);
     rows.push(cascadeRow("misc_fee", fee.title, { after, afterAnnual: after * perYear, before, beforeAnnual: before * perYear }, note));
   }
   return rows;

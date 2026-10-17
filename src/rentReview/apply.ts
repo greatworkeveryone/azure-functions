@@ -25,17 +25,26 @@ import type { SqlRow } from "../db";
 import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
-import { leaseDepartures, type RentReviewCalc } from "../rentReviewCalc";
+import { leaseDepartures, type RentReviewCalc, unrepresentableRent } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
 import { diffSteps, parseSteps, type ScheduledRateStep } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { parseBasis } from "./basis";
 import { RentReviewError } from "./http";
 import { stepOnDate } from "./method";
-import { derivedNextReview, leaseTermsOf, refuseClosedTenancy, scheduleOf, tenancyReviewFields, writeTenancyForReview } from "./reviewTenancy";
-import { rentPerAnnumIsCache, representStep, reviewRow, simulate, stepChanges, waivedStep } from "./stepPlan";
+import {
+  derivedNextReview,
+  isReviewRatchetOn,
+  leaseTermsOf,
+  refuseClosedTenancy,
+  scheduleOf,
+  tenancyReviewFields,
+  writeTenancyForReview,
+} from "./reviewTenancy";
+import { rentPerAnnumIsCache, stepChanges } from "./stepPlan";
 import { lockTenancyForReview, totalOccupancySqm } from "./store";
 import { markApproved, type Person } from "./transitions";
+import { writtenFromCalc } from "./written";
 
 export interface ApplyInput {
   actor: Extract<LedgerActor, { kind: "user" }>;
@@ -97,38 +106,29 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
 
   const buildingId = Number(tenancy.BuildingId);
   const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
-  const placedRow = reviewRow(steps, {
-    method: calc.method,
+  const schedule = scheduleOf(tenancy, steps, await totalOccupancySqm(connection, tenantId));
+  // The rent written exactly as SUBMIT showed it to the approver (rentReview/written.ts).
+  const result = writtenFromCalc({
+    calc,
+    departs: calc.override !== undefined || departuresOf(calc, review, tenancy, steps, scheduledFor).length > 0,
     newStepId: input.newStepId,
     reviewId,
+    schedule,
     scheduledFor,
     stepId: typeof review.StepId === "string" ? review.StepId : null,
+    target: input.chosenNewAnnual,
+    today: input.today,
   });
-  if (!placedRow.ok) {
+  if (result.kind === "step_settled") {
     throw new RentReviewError("step_settled", "The schedule row on this review's date is already settled by another review.");
   }
-  const { context } = scheduleOf(tenancy, steps, await totalOccupancySqm(connection, tenantId));
-  // C4 has held, so this is the rent the calc started from; check it anyway.
-  const current = simulate(context, waivedStep(placedRow.base, reviewId)).row;
-  if (!current || current.pending || current.annual !== calc.currentAnnual) throw staleSchedule(input.from === "awaiting_approval");
-
-  const written = representStep({
-    base: placedRow.base,
-    context,
-    cpi: calc.cpi ? { current: calc.cpi.current, previous: calc.cpi.previous } : null,
-    currentAnnual: calc.currentAnnual,
-    departs: calc.override !== undefined || departuresOf(calc, review, tenancy, steps, scheduledFor).length > 0,
-    method: calc.method,
-    naturalRate: calc.method === "fixed" ? (calc.fixedPercent ?? 0) : calc.appliedPercent,
-    reviewId,
-    target: input.chosenNewAnnual,
-  });
-  if (!written.ok) {
-    throw new RentReviewError(
-      "not_representable",
-      "The schedule can't hold that rent on this lease (its ratchet or bounds would change it), so it wasn't applied.",
-    );
+  // C4 has held, so the rent the calc started from is still the schedule's; check it anyway.
+  if (result.kind === "stale") throw staleSchedule(input.from === "awaiting_approval");
+  if (result.kind === "unrepresentable") {
+    const why = unrepresentableRent(input.chosenNewAnnual, calc.currentAnnual, isReviewRatchetOn(tenancy));
+    throw new RentReviewError(why.code, why.message);
   }
+  const written = result.written;
   const nextSteps = written.simulation.placed.steps;
   const step = written.step;
   const closed = written.simulation.placed.closed;
@@ -151,7 +151,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
       stepId: change.after.id,
     });
   }
-  const prior = placedRow.existing;
+  const prior = result.existing;
 
   const before = tenancyReviewFields(tenancy);
   const cacheRent = rentPerAnnumIsCache(nextSteps);
@@ -171,6 +171,7 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
   const moved = await markApproved(connection, reviewId, input.from, {
     approvalBasis: input.approvalBasis,
     approver,
+    calcJson: JSON.stringify(calc),
     cpi: calc.cpi
       ? {
           current: calc.cpi.current,

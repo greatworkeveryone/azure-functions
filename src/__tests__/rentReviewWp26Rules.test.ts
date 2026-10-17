@@ -100,7 +100,14 @@ describe("the review's outcome", () => {
     );
     expect(dto.outcome).toEqual({
       appliedPercent: 3.2,
-      arrears: { amount: Math.round(((127670.1 - 123711.34) * 45) / 365 * 100) / 100, billed: false, from: "2026-07-01", months: 1.48, to: "2026-08-15" },
+      arrears: {
+        amount: Math.round(((127670.1 - 123711.34) * 45) / 365 * 100) / 100,
+        billed: false,
+        from: "2026-07-01",
+        lines: [{ amount: Math.round(((127670.1 - 123711.34) * 45) / 365 * 100) / 100, kind: "rent", label: "Rent" }],
+        months: 1.48,
+        to: "2026-08-15",
+      },
       newAnnual: 127670.1,
       oldAnnual: 123711.34,
     });

@@ -10,10 +10,12 @@ import { clearRoleCache } from "../auth";
 import { approveRentReview } from "../functions/approveRentReview";
 import { calculateRentReview } from "../functions/calculateRentReview";
 import { submitRentReview } from "../functions/submitRentReview";
-import { computeScheduleRows, parseSteps } from "../scheduledRateStepLogic";
+import { carparkRunning, miscFeeRunning } from "../rentReview/cascade";
+import { computeScheduleRows, parseGroups, parseMiscFees, parseSteps } from "../scheduledRateStepLogic";
 import { postRequest } from "./fixtures/rentReviewFakes";
 import {
   basis,
+  COMMENCED,
   LAST_YEAR,
   NEXT_ANNIVERSARY,
   PEOPLE,
@@ -293,10 +295,22 @@ describe("submitRentReview: anything else waits for approval, and E3 goes to som
     await calculated();
     const res = await submit({ override: { newAnnual: 126000, reason: "Tenant hardship, agreed by the directors" } });
     expect(res.jsonBody).toMatchObject({ applied: false });
-    expect(reviewBody(res).calc.override).toEqual({ differenceAnnual: -1670.1, newAnnual: 126000, reason: "Tenant hardship, agreed by the directors" });
+    const arrears = Math.round((((126000 - 123711.34) * 20) / 365) * 100) / 100;
+    expect(reviewBody(res).calc.override).toEqual({
+      ancillaryDifferenceAnnual: 0,
+      appliedPercent: 1.85,
+      arrears: { amount: arrears, from: REVIEW_DATE, lines: [{ amount: arrears, kind: "rent", label: "Rent" }], months: 0.66, to: TODAY },
+      cascade: [],
+      differenceAnnual: -1670.1,
+      newAnnual: 126000,
+      perMonth: 10500,
+      perSqm: 315,
+      reason: "Tenant hardship, agreed by the directors",
+    });
     const override = world.ledgerRows().find((row) => row.Action === "rent_review.override");
     expect(override).toMatchObject({ FinancialImpact: 1670.1, IsException: true, Reason: "Tenant hardship, agreed by the directors", RuleApplied: "override" });
-    expect(override?.computed).toEqual({ appliedPercent: 3.2, newAnnual: 127670.1 });
+    expect(override?.computed).toEqual({ ancillaryAnnual: 0, appliedPercent: 3.2, newAnnual: 127670.1 });
+    expect(override?.after).toEqual({ ancillaryAnnual: 0, appliedPercent: 1.85, newAnnual: 126000 });
     expect(world.ledgerRows().find((row) => row.Action === "rent_review.submit")?.RuleApplied).toBe("override");
   });
 
@@ -525,5 +539,119 @@ describe("approveRentReview", () => {
     await calculated();
     as(PEOPLE.cy);
     expect((await approve()).jsonBody).toMatchObject({ code: "invalid_state" });
+  });
+});
+
+// ── H1: the receipt is the schedule after APPLY ───────────────────────────────
+
+describe("H1: what the approver is shown is what the schedule says after APPLY", () => {
+  const GROUP = { baseMonthlyRate: 1000, carparkIds: [], commencedAt: COMMENCED, id: "bbbbbbbb-0000-4000-8000-000000000001", label: "Basement bays", rateSteps: [] };
+  const FEE = { baseAmount: 500, commencedAt: COMMENCED, frequency: "monthly", id: "bbbbbbbb-0000-4000-8000-000000000002", rateSteps: [], title: "Signage" };
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const LEASE = { cpiCapPercent: 5, cpiFloorPercent: 1, reviewRatchet: true };
+
+  /** The tenancy with AHAC on its commencement row, a car park group and a monthly fee, all following the rent. */
+  function withCharges(): Record<string, unknown> {
+    const rows = steps();
+    rows[0] = { ...rows[0], ahacBasePerAnnum: 6000 };
+    return { CarparkScheduleGroups: JSON.stringify([GROUP]), MiscFees: JSON.stringify([FEE]), ScheduledRateSteps: JSON.stringify(rows) };
+  }
+
+  /** The charges on the review row as the schedule computes them now, by the frontend's rules (cascade.ts ports). */
+  function scheduleCharges() {
+    const tenant = world.tenant(7);
+    const rows = computeScheduleRows(parseSteps(String(tenant.ScheduledRateSteps)), 0, 400, LEASE);
+    const at = rows.findIndex((row) => row.step.id === STEP_IDS.review);
+    const through = rows.slice(0, at + 1);
+    return {
+      ahac: rows[at].ahacAnnual,
+      carpark: r2(r2(carparkRunning(through, parseGroups(String(tenant.CarparkScheduleGroups))[0]) as number) * 12),
+      miscFee: r2((miscFeeRunning(through, parseMiscFees(String(tenant.MiscFees))[0]) as number) * 12),
+      rent: rows[at].annual,
+    };
+  }
+
+  const byKind = (cascade: Array<Record<string, any>>) => Object.fromEntries(cascade.map((row) => [row.kind, row]));
+
+  it("an override with a car park group, a misc fee and AHAC: the submitted receipt equals the schedule after APPLY", async () => {
+    await calculated({ tenant: withCharges() });
+    as(PEOPLE.bo);
+    const submitted = reviewBody(await submit({ override: { newAnnual: 125555.55, reason: "Negotiated with the tenant" } }));
+    const computed = byKind(submitted.calc.cascade);
+    const receipt = submitted.calc.override;
+    const chosen = byKind(receipt.cascade);
+    as(PEOPLE.cy);
+    const approved = await approve();
+    expect(approved.status).toBe(200);
+
+    const after = scheduleCharges();
+    expect(after.rent).toBe(125555.55);
+    expect(chosen.ahac.newAnnual).toBe(after.ahac);
+    expect(chosen.carpark.newAnnual).toBe(after.carpark);
+    expect(chosen.misc_fee.newAnnual).toBe(after.miscFee);
+    // ...moved by the override, not by the computed 3.2%.
+    expect(chosen.carpark.newAnnual).toBeLessThan(computed.carpark.newAnnual);
+    expect(chosen.misc_fee.newAnnual).toBeLessThan(computed.misc_fee.newAnnual);
+    expect(chosen.ahac.newAnnual).toBeLessThan(computed.ahac.newAnnual);
+
+    // A4: the arrears cover the rent and every charge, each at its own change.
+    expect(receipt.arrears.lines.map((line: { kind: string }) => line.kind)).toEqual(["rent", "ahac", "carpark", "misc_fee"]);
+    const days = 20;
+    expect(receipt.arrears.lines[2].amount).toBe(r2(((chosen.carpark.newAnnual - chosen.carpark.currentAnnual) * days) / 365));
+    expect(receipt.arrears.amount).toBe(r2(receipt.arrears.lines.reduce((sum: number, line: { amount: number }) => sum + line.amount, 0)));
+    // The applied review's outcome carries the same lines, to the day it was applied.
+    expect(reviewBody(approved).outcome.arrears.lines).toEqual(receipt.arrears.lines);
+
+    // The override's financialImpact is the money forgone on the rent and the charges together.
+    const ancillary = (rows: Record<string, any>) => Object.values(rows).reduce((sum: number, row: any) => sum + row.newAnnual, 0);
+    const forgone = r2(127670.1 + ancillary(computed) - (125555.55 + ancillary(chosen)));
+    expect(receipt.ancillaryDifferenceAnnual).toBe(r2(ancillary(chosen) - ancillary(computed)));
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.override")?.FinancialImpact).toBe(forgone);
+  });
+
+  it("the computed rent applied in one step: its receipt equals the schedule after APPLY too", async () => {
+    await calculated({ tenant: withCharges() });
+    as(PEOPLE.ann);
+    const res = await submit();
+    expect(res.jsonBody).toMatchObject({ applied: true });
+    const cascade = byKind(reviewBody(res).calc.cascade);
+    const after = scheduleCharges();
+    expect(after.rent).toBe(127670.1);
+    expect(cascade.ahac.newAnnual).toBe(after.ahac);
+    expect(cascade.carpark.newAnnual).toBe(after.carpark);
+    expect(cascade.misc_fee.newAnnual).toBe(after.miscFee);
+  });
+});
+
+
+// ── L6: a rent the schedule can't hold never waits for approval ───────────────
+
+describe("L6: a rent the schedule can't hold is refused at calculate and at submit, not first at APPLY", () => {
+  it("refuses a manual rent past double the current one at calculate, storing nothing", async () => {
+    seed(world, { review: { Basis: JSON.stringify({ method: "other", ratchet: true }), Method: "other" } });
+    const res = await calculate({ manual: { explanation: "Keyed with an extra zero", newAnnual: 1237113.4 } });
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "not_representable" });
+    expect(world.review("rev-1").Calc).toBeNull();
+    expect(actions()).toEqual([]);
+  });
+
+  it("refuses at calculate a decrease a departing basis worked out on a ratchet lease", async () => {
+    seed(world, { cpi: [100, 98], review: { Basis: JSON.stringify(basis({ floorPercent: null, ratchet: false })) } });
+    const res = await calculate();
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "ratchet" });
+    expect((res.jsonBody as { error: string }).error).toMatch(/can't override the lease's ratchet here yet/);
+    expect(world.review("rev-1").Calc).toBeNull();
+  });
+
+  it("refuses at submit an override the schedule can't hold, leaving the review in progress with nothing ledgered", async () => {
+    await calculated();
+    const res = await submit({ override: { newAnnual: 300000, reason: "Typo" } });
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "not_representable" });
+    expect(world.review("rev-1").State).toBe("in_progress");
+    expect(actions()).toEqual([]);
+    expect(escalations.raiseApprovalEscalation).not.toHaveBeenCalled();
   });
 });

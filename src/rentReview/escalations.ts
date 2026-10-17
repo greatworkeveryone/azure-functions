@@ -26,7 +26,7 @@ import { sweepMaxActions } from "../escalation/config";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
 import { OPEN_RENT_REVIEW_STATES, type RentReviewState } from "../rentReviewMachine";
-import { parseCalc } from "../rentReviewCalc";
+import { approvalReasonsOf, chosenFigures, parseCalc } from "../rentReviewCalc";
 import { Sentry } from "../sentry";
 import {
   approvalOutcomeCode,
@@ -225,9 +225,8 @@ function headlineFor(action: Extract<EscalationAction, { kind: "raise" }>, today
   }
   if (action.policyKey === REVIEW_POLICIES.overdue) return `Overdue: the review was due ${due}`;
   const calc = action.review.calc;
-  return calc
-    ? approvalHeadline({ appliedPercent: calc.appliedPercent, currentAnnual: calc.currentAnnual, newAnnual: calc.override?.newAnnual ?? calc.newAnnual, reasons: [] })
-    : "Waiting for approval";
+  // The override's own % with the override's rent (L8), and why it waits.
+  return calc ? approvalHeadline({ ...chosenFigures(calc), reasons: approvalReasonsOf(calc) }) : "Waiting for approval";
 }
 
 export interface ReviewEscalationRun {

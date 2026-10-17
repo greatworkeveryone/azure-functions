@@ -115,6 +115,7 @@ describe("computeArrears: from the review date to today, pro rata by day", () =>
     expect(computeArrears("2026-07-01", "2026-10-01", 120000, 123650)).toEqual({
       amount: 920,
       from: "2026-07-01",
+      lines: [{ amount: 920, kind: "rent", label: "Rent" }],
       months: 3.02,
       to: "2026-10-01",
     });
@@ -361,12 +362,8 @@ describe("the cascade", () => {
 describe("arrears on the receipt", () => {
   it("run from the review date to today", () => {
     const calc = calcOf({ today: "2026-10-01" });
-    expect(calc.arrears).toEqual({
-      amount: Math.round((((127670.1 - 123711.34) * 92) / 365) * 100) / 100,
-      from: "2026-07-01",
-      months: 3.02,
-      to: "2026-10-01",
-    });
+    const amount = Math.round((((127670.1 - 123711.34) * 92) / 365) * 100) / 100;
+    expect(calc.arrears).toEqual({ amount, from: "2026-07-01", lines: [{ amount, kind: "rent", label: "Rent" }], months: 3.02, to: "2026-10-01" });
   });
 
   it("are null when the review is worked out ahead of its date", () => {

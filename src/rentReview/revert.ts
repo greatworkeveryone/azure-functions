@@ -28,7 +28,7 @@ import { executeQuery, type SqlRow } from "../db";
 import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { sqlDateToIso } from "../nextReviewDate";
-import { computeArrears } from "../rentReviewCalc";
+import { appliedCascade, arrearsFor, parseCalc, reviewChanges } from "../rentReviewCalc";
 import { insertRentScheduleChangeLog, loadChangeLogEntries } from "../rentScheduleChangeLog";
 import { diffSteps, parseSteps } from "../scheduledRateStepLogic";
 import { RentReviewError } from "./http";
@@ -180,6 +180,8 @@ export async function revertReview(connection: Connection, input: RevertInput): 
 
   const oldAnnual = decimalOf(review.OldRentPerAnnum);
   const newAnnual = decimalOf(review.NewRentPerAnnum);
+  // Read before markReverted clears it: the charges the review changed, for the voided arrears line.
+  const appliedCalc = parseCalc(review.Calc);
   const appliedAt = review.ApprovedAt instanceof Date ? review.ApprovedAt : null;
   if (!(await markReverted(connection, reviewId))) {
     throw new RentReviewError("invalid_state", "This review just moved on, so it wasn't reverted");
@@ -224,7 +226,7 @@ export async function revertReview(connection: Connection, input: RevertInput): 
 
   const arrears =
     oldAnnual !== null && newAnnual !== null && appliedAt
-      ? computeArrears(scheduledFor, todayInDarwin(appliedAt), oldAnnual, newAnnual)
+      ? arrearsFor(scheduledFor, todayInDarwin(appliedAt), reviewChanges(oldAnnual, newAnnual, appliedCascade(appliedCalc)))
       : null;
   await ledger.record(connection, {
     action: "rent_review.revert",

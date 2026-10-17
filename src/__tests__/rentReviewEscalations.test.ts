@@ -280,6 +280,22 @@ describe("runReviewEscalations (the generator's step)", () => {
     expect(engine.concludeForSubject.mock.calls[0][1]).toMatchObject({ code: "returned", policyKeys: ["rent_review.approval"], subjectId: "rev-2" });
   });
 
+  it("re-raises E3 with the override's own % beside the override's rent, and why it waits (L8)", async () => {
+    const calc = {
+      appliedPercent: 3.2,
+      cascade: [],
+      currentAnnual: 123711.34,
+      method: "cpi",
+      newAnnual: 127670.1,
+      override: { differenceAnnual: -2114.55, newAnnual: 125555.55, reason: "Negotiated" },
+      sanity: { inBand: true, maxPercent: 15, minPercent: -5 },
+      scheduleVersion: 4,
+    };
+    serve([openRow({ Calc: JSON.stringify(calc), PreparedById: 7, ScheduledFor: new Date(`${DAY(20)}T00:00:00Z`), State: "awaiting_approval", SubmittedAt: new Date() })]);
+    await runStep();
+    expect(engine.raise.mock.calls[0][1].headline).toBe("Waiting for approval: $123,711.34 → $125,555.55 (+1.49%) — a different rent was chosen");
+  });
+
   it("skips a policy that is switched off without counting it a failure, and collects real failures", async () => {
     serve([openRow()]);
     engine.raise.mockRejectedValueOnce(new EscalationError("policy_inactive", "off")).mockRejectedValueOnce(new Error("boom"));

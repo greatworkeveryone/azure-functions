@@ -5,7 +5,7 @@
 import { todayInDarwin } from "../darwinDate";
 import type { SqlRow } from "../db";
 import { sqlDateToIso } from "../nextReviewDate";
-import { computeArrears, parseCalc, type ArrearsLine, type RentReviewCalc } from "../rentReviewCalc";
+import { appliedCascade, arrearsFor, parseCalc, reviewChanges, type ArrearsLine, type RentReviewCalc } from "../rentReviewCalc";
 import {
   isOverdue,
   RENT_REVIEW_STATES,
@@ -24,8 +24,9 @@ export interface PersonStamp {
 }
 
 /** What an applied review did (approved and completed reviews), from the review's
- *  own columns. The arrears line runs from the review date to the day it was
- *  applied (Darwin), unbilled until a billing run confirms it. */
+ *  own columns and the calc it was applied with. The arrears line runs from the
+ *  review date to the day it was applied (Darwin), for the rent and every charge
+ *  the review changed (A4), unbilled until a billing run confirms it. */
 export interface RentReviewOutcome {
   appliedPercent: number;
   arrears: (ArrearsLine & { billed: boolean }) | null;
@@ -102,7 +103,8 @@ function outcomeOf(row: SqlRow, state: RentReviewState, scheduledFor: string): R
   const newAnnual = decimal(row.NewRentPerAnnum);
   if (oldAnnual === null || newAnnual === null) return null;
   const appliedAt = row.ApprovedAt instanceof Date ? todayInDarwin(row.ApprovedAt) : null;
-  const arrears = appliedAt ? computeArrears(scheduledFor, appliedAt, oldAnnual, newAnnual) : null;
+  const cascade = appliedCascade(parseCalc(row.Calc));
+  const arrears = appliedAt ? arrearsFor(scheduledFor, appliedAt, reviewChanges(oldAnnual, newAnnual, cascade)) : null;
   const billed = row.BillingConfirmedAt !== null && row.BillingConfirmedAt !== undefined;
   return {
     appliedPercent: r4(decimal(row.IncreasePercent) ?? 0),

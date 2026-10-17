@@ -25,9 +25,15 @@
 //               that departs from the lease): awaiting_approval, the preparer
 //               stamped, and after the commit E3 (rent_review.approval) to an
 //               accounts manager who isn't the preparer. applied: false.
-// An override records computed vs chosen and the $ difference in the calc
-// (calc.override) and in its own ledger row, rent_review.override (an exception,
-// reason required); financialImpact is the annual rent forgone (computed − chosen).
+// The receipt is read off the schedule as APPLY will write the rent being
+// submitted (rentReview/written.ts): the cascade to AHAC, car parks and misc
+// fees and the arrears for every charge that changes, so the approver sees the
+// schedule after APPLY (H1). A rent the schedule can't hold is refused here
+// (422 not_representable, or ratchet), not first at APPLY (L6). An override
+// carries its own receipt in calc.override (the top level stays the computed
+// result) and its own ledger row, rent_review.override (an exception, reason
+// required), computed vs chosen; financialImpact is the annual money forgone
+// against the computed result, the rent and every charge that follows it.
 //
 // Ledgered as rent_review.submit (+ rent_review.override, + rent_review.apply on
 // the one-step path), all in the same transaction.
@@ -45,7 +51,15 @@ import * as ledger from "../ledger";
 import { requireMoneyContext } from "../moneyGate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { canTransition, type RentReviewState } from "../rentReviewMachine";
-import { leaseDepartures, parseCalc, sanityBandFromEnv, sanityOf, type RentReviewCalc } from "../rentReviewCalc";
+import {
+  LEASE_RATCHET_MESSAGE,
+  leaseDepartures,
+  parseCalc,
+  sanityBandFromEnv,
+  sanityOf,
+  type RentReviewCalc,
+  unrepresentableRent,
+} from "../rentReviewCalc";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
 import { rowVersionHex } from "../tenancyScheduleWrite";
@@ -67,9 +81,10 @@ import {
   staleReview,
 } from "../rentReview/http";
 import { stepOnDate } from "../rentReview/method";
-import { isReviewRatchetOn, leaseTermsOf, refuseClosedTenancy } from "../rentReview/reviewTenancy";
-import { inTransaction, loadReview, lockTenancyForReview, reviewForUpdate } from "../rentReview/store";
+import { isReviewRatchetOn, leaseTermsOf, refuseClosedTenancy, scheduleOf } from "../rentReview/reviewTenancy";
+import { inTransaction, loadReview, lockTenancyForReview, reviewForUpdate, totalOccupancySqm } from "../rentReview/store";
 import { markSubmitted } from "../rentReview/transitions";
+import { ancillaryAnnual, writtenFromCalc } from "../rentReview/written";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 
 const r2 = (n: number): number => Math.round(n * 100) / 100;
@@ -141,12 +156,7 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
 
       // C9: a decrease where a ratchet forbids one.
       if (chosen < calc.currentAnnual) {
-        if (isReviewRatchetOn(tenancy)) {
-          throw new RentReviewError(
-            "ratchet",
-            "This lease has a ratchet, so its rent can't go down on review. To depart from the lease, a director turns the ratchet off in the lease's terms (a recorded change) and the review is calculated again.",
-          );
-        }
+        if (isReviewRatchetOn(tenancy)) throw new RentReviewError("ratchet", LEASE_RATCHET_MESSAGE);
         if (basis.ratchet === true && !(override && caller.roles.includes(AppRole.DIRECTOR))) {
           throw new RentReviewError("ratchet", "This review's basis has a ratchet, so the rent can't go down unless a director overrides it with a reason.");
         }
@@ -154,6 +164,29 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
 
       const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
       const departures = calc.method === "other" ? [] : leaseDepartures(calc.method, basis, leaseTermsOf(tenancy, stepOnDate(steps, scheduledFor)));
+
+      // H1: the receipt for the rent being submitted is read off the schedule as
+      // APPLY will write it, so the approver sees what the schedule will say.
+      const worked = writtenFromCalc({
+        calc,
+        departs: override !== null || departures.length > 0,
+        newStepId: randomUUID(),
+        reviewId,
+        schedule: scheduleOf(tenancy, steps, await totalOccupancySqm(db, tenantId)),
+        scheduledFor,
+        stepId: typeof review.StepId === "string" ? review.StepId : null,
+        target: chosen,
+        today,
+      });
+      if (worked.kind === "step_settled") {
+        throw new RentReviewError("step_settled", "The schedule row on this review's date is already settled by another review.");
+      }
+      if (worked.kind === "stale") throw new RentReviewError("stale_schedule", "The schedule changed since this was calculated — calculate again");
+      if (worked.kind === "unrepresentable") {
+        const why = unrepresentableRent(chosen, calc.currentAnnual, isReviewRatchetOn(tenancy));
+        throw new RentReviewError(why.code, why.message);
+      }
+      const receipt = worked.written;
       const reasons = [
         ...(override ? ["override"] : []),
         ...(sanity.inBand ? [] : ["out_of_band"]),
@@ -163,9 +196,27 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
       const buildingId = Number(tenancy.BuildingId);
       const scope = { buildingId, correlationId, subject: { id: reviewId, type: "rent_review" as const }, tenantId };
       const differenceAnnual = override ? r2(override.newAnnual - calc.newAnnual) : 0;
+      const ancillaryDifferenceAnnual = r2(ancillaryAnnual(receipt.cascade) - ancillaryAnnual(calc.cascade));
+      const area = receipt.row.areaMissing ? 0 : receipt.row.sqm;
       const submitted: RentReviewCalc = override
-        ? { ...calc, departures, override: { differenceAnnual, newAnnual: override.newAnnual, reason: override.reason }, sanity }
-        : { ...calc, departures, override: undefined, sanity };
+        ? {
+            ...calc,
+            departures,
+            override: {
+              ancillaryDifferenceAnnual,
+              appliedPercent: chosenPercent,
+              arrears: receipt.arrears,
+              cascade: receipt.cascade,
+              differenceAnnual,
+              newAnnual: override.newAnnual,
+              perMonth: r2(override.newAnnual / 12),
+              perSqm: area > 0 ? r2(override.newAnnual / area) : null,
+              reason: override.reason,
+            },
+            sanity,
+          }
+        : // The computed rent's receipt again, its arrears to today.
+          { ...calc, arrears: receipt.arrears, cascade: receipt.cascade, departures, override: undefined, sanity };
       const chosenFigures = { appliedPercent: chosenPercent, currentAnnual: calc.currentAnnual, newAnnual: chosen };
 
       if (reasons.length === 0) {
@@ -211,10 +262,11 @@ export async function submitRentReview(request: HttpRequest, context: Invocation
           ...scope,
           action: "rent_review.override",
           actor: caller.actor,
-          after: { appliedPercent: chosenPercent, newAnnual: override.newAnnual },
-          computed: { appliedPercent: calc.appliedPercent, newAnnual: calc.newAnnual },
-          // Annualised money forgone (positive) or gained (negative) against the calculated rent.
-          financialImpact: r2(calc.newAnnual - override.newAnnual),
+          after: { ancillaryAnnual: ancillaryAnnual(receipt.cascade), appliedPercent: chosenPercent, newAnnual: override.newAnnual },
+          computed: { ancillaryAnnual: ancillaryAnnual(calc.cascade), appliedPercent: calc.appliedPercent, newAnnual: calc.newAnnual },
+          // Annualised money forgone (positive) or gained (negative) against the
+          // calculated result: the rent and every charge that follows it.
+          financialImpact: r2(-(differenceAnnual + ancillaryDifferenceAnnual)),
           reason: override.reason,
           ruleApplied: departures.length > 0 ? "override+basis_departs_from_lease" : "override",
         });
