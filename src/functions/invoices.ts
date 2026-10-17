@@ -1678,27 +1678,29 @@ const DELETE_INVOICE_TARGET: RefusalTarget = {
 
 /** Why this invoice can't be deleted, or null. `payments` are the statuses of
  *  the payments recorded against it. */
+const PAYMENTS_BLOCK_DELETE = "This invoice has payments recorded against it";
+const SQL_FK_VIOLATION = 547;
+
 function deleteInvoiceRefusal(
   invoice: { MyobCreatedAt?: unknown; Status?: unknown },
   payments: readonly unknown[],
-): { code: string; error: string } | null {
+): { code: string; error: string; status: number } | null {
   if (invoice.Status === "approved") {
-    return { code: "approved_invoice_protected", error: "Cannot delete an approved invoice. Reject it first." };
+    return { code: "approved_invoice_protected", error: "Cannot delete an approved invoice. Reject it first.", status: 400 };
   }
   if (invoice.Status === "director_approved") {
     return {
       code: "approved_invoice_protected",
       error: "Cannot delete an invoice a director has approved. Undo the director approval first.",
+      status: 400,
     };
   }
   if (invoice.MyobCreatedAt != null) {
-    return { code: "myob_invoice_protected", error: "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first." };
+    return { code: "myob_invoice_protected", error: "Cannot delete an invoice marked in MYOB. Undo the MYOB mark first.", status: 400 };
   }
-  if (payments.includes("paid")) {
-    return { code: "paid_invoice_protected", error: "Cannot delete an invoice that has been paid." };
-  }
+  // Payments.JobInvoiceID references this row (FK_Payments_JobInvoices, migration 114).
   if (payments.length > 0) {
-    return { code: "paid_invoice_protected", error: "Cannot delete an invoice with a payment recorded against it." };
+    return { code: "paid_invoice_protected", error: PAYMENTS_BLOCK_DELETE, status: 409 };
   }
   return null;
 }
@@ -1763,7 +1765,7 @@ async function deleteJobInvoice(
           },
           invoice.JobID as number,
         );
-        return { status: 400, jsonBody: { error: refusal.error } };
+        return { status: refusal.status, jsonBody: { error: refusal.error } };
       }
 
       await executeQuery(
@@ -1791,6 +1793,10 @@ async function deleteJobInvoice(
 
     return { status: 200, jsonBody: { deleted: true, invoiceId: JobInvoiceID } };
   } catch (error: any) {
+    // A payment landed between the check and the delete: the FK says no.
+    if (error?.number === SQL_FK_VIOLATION || error?.originalError?.number === SQL_FK_VIOLATION) {
+      return { status: 409, jsonBody: { error: PAYMENTS_BLOCK_DELETE } };
+    }
     context.error("deleteJobInvoice failed:", error.message);
     return errorResponse("Delete invoice failed", error.message);
   } finally {
