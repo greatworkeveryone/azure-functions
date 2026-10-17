@@ -16,8 +16,9 @@
 //   4. the review -> in_progress (outcome, approval, submission and calc
 //      cleared; billing confirmation cleared, so the arrears line is unbilled)
 //   5. the steps and LastReviewDate, LastReviewIncreasePercent and RentPerAnnum
-//      (if APPLY wrote it) restored, ScheduleVersion + 1 (sign-off kept),
-//      NextReviewDate re-derived with this review's date open again
+//      (if APPLY wrote it, or the generator wrote a cache APPLY deferred)
+//      restored, ScheduleVersion + 1 (sign-off kept), NextReviewDate re-derived
+//      with this review's date open again
 //   6. rent_review.revert in the ledger: an exception, with the reason and the
 //      annual increase undone as its financialImpact
 
@@ -44,9 +45,16 @@ import { undoChanges } from "./stepPlan";
 import { lockTenancyForReview, otherOpenReview, reviewForUpdate } from "./store";
 import { markCancelled, markReverted } from "./transitions";
 
-const APPLY_ROW_SQL = `SELECT TOP 1 [Before], [After]
+const APPLY_ROW_SQL = `SELECT TOP 1 LedgerId, [Before], [After]
   FROM dbo.DecisionLedger
   WHERE SubjectType = N'rent_review' AND SubjectId = @ReviewId AND Action = N'rent_review.apply'
+  ORDER BY LedgerId DESC`;
+
+// The generator's write of a cache APPLY deferred (rentReview/rentCache.ts, L10).
+const CACHE_ROW_SQL = `SELECT TOP 1 LedgerId, [Before], [After]
+  FROM dbo.DecisionLedger
+  WHERE SubjectType = N'rent_review' AND SubjectId = @ReviewId AND Action = N'rent_review.rent_cache'
+    AND LedgerId > @ApplyLedgerId
   ORDER BY LedgerId DESC`;
 
 interface ApplyRecord {
@@ -66,8 +74,24 @@ async function loadApplyRecord(connection: Connection, reviewId: string): Promis
     const before = objectOf(JSON.parse(String(rows[0].Before ?? "null")));
     const after = objectOf(JSON.parse(String(rows[0].After ?? "null")));
     const changes = Array.isArray(after.scheduleChanges) ? after.scheduleChanges : [];
+    // A deferred cache the generator wrote on the date counts as written, from what it was then.
+    const cached =
+      after.rentPerAnnumCache === "deferred"
+        ? (
+            await executeQuery(connection, CACHE_ROW_SQL, [
+              { name: "ReviewId", type: TYPES.NVarChar, value: reviewId },
+              { name: "ApplyLedgerId", type: TYPES.BigInt, value: Number(rows[0].LedgerId) },
+            ])
+          )[0]
+        : undefined;
+    if (cached) {
+      const cacheBefore = objectOf(JSON.parse(String(cached.Before ?? "null")));
+      const cacheAfter = objectOf(JSON.parse(String(cached.After ?? "null")));
+      before.tenancy = { ...objectOf(before.tenancy), rentPerAnnum: cacheBefore.rentPerAnnum ?? null };
+      after.tenancy = { ...objectOf(after.tenancy), rentPerAnnum: cacheAfter.rentPerAnnum ?? null };
+    }
     return {
-      rentPerAnnumWritten: after.rentPerAnnumCache === "written",
+      rentPerAnnumWritten: after.rentPerAnnumCache === "written" || cached !== undefined,
       scheduleChanges: changes
         .map((change) => objectOf(change))
         .filter((change) => typeof change.changeId === "string" && typeof change.stepId === "string")

@@ -29,6 +29,10 @@ import { runTimer, type TimerCounts } from "../timerRuns";
 // it would raise. ESCALATION_SWEEP_MAX_ACTIONS (default 100) caps them per run,
 // so the first live run's backlog is raised over several days.
 //
+// Each run also writes the RentPerAnnum cache of a review applied ahead of its
+// date once the date has come (WP26 L10, rentReview/rentCache.ts); a dry run
+// logs what it would write.
+//
 // WEBSITE_TIME_ZONE is not set in production, so the schedule runs in UTC; the
 // generator works on the Darwin date (todayInDarwin) itself. runTimer records
 // each run's counts in dbo.TimerRuns; a tenancy that fails fails the run.
@@ -51,6 +55,7 @@ export async function tenancyReviewScheduleTimer(_timer: Timer, context: Invocat
       dryRun: mode === "dry-run",
       log: (message) => context.log(message),
       escalate: true,
+      rentCaches: true,
       onError: (error, tenantId) =>
         Sentry.captureException(error, { extra: { context: `tenancyReviewScheduleTimer TenantId=${tenantId}` } }),
       warn: (message) => context.warn(message),
@@ -60,6 +65,10 @@ export async function tenancyReviewScheduleTimer(_timer: Timer, context: Invocat
       throw new Error(
         `Rent review generator: ${report.errors.length} tenancy(ies) failed; first: ${report.errors[0].message}`,
       );
+    }
+    const cacheErrors = report.rentCaches?.errors ?? [];
+    if (cacheErrors.length > 0) {
+      throw new Error(`Rent review generator: ${cacheErrors.length} rent cache(s) failed; first: ${cacheErrors[0].message}`);
     }
     const escalationErrors = report.escalations?.errors ?? [];
     if (escalationErrors.length > 0) {
@@ -73,6 +82,8 @@ export async function tenancyReviewScheduleTimer(_timer: Timer, context: Invocat
       escalationsEnded: report.escalations?.ended ?? 0,
       escalationsRaised: report.escalations?.raised ?? 0,
       raced: report.raced,
+      rentCachesSkipped: report.rentCaches?.skipped ?? 0,
+      rentCachesWritten: report.rentCaches?.written ?? 0,
       scheduled: report.scheduled,
       tenancies: report.tenancies,
       unchanged: report.unchanged,

@@ -16,6 +16,7 @@ const WP26_CODES = [
   "rent_review.index_available",
   "rent_review.index_pending",
   "rent_review.override",
+  "rent_review.rent_cache",
   "rent_review.return",
   "rent_review.revert",
   "rent_review.submit",
@@ -70,6 +71,11 @@ describe("the rent review action codes", () => {
     expect(LEDGER_ACTIONS["rent_review.director_override"]).toMatchObject({ exception: true, reasonRequired: true });
     expect(() => assertLedgerEntry(entry("rent_review.director_override"))).toThrow(/reason is required/);
     expect(() => assertLedgerEntry(entry("rent_review.director_override", { reason: "Lease checked by hand" }))).not.toThrow();
+  });
+
+  it("WP26: the generator writes a deferred rent cache as the system, not an exception", () => {
+    expect(LEDGER_ACTIONS["rent_review.rent_cache"]).toMatchObject({ exception: false, reasonRequired: false });
+    expect(() => assertLedgerEntry(entry("rent_review.rent_cache", { actor: system }))).not.toThrow();
   });
 
   it("WP26: takes the CPI timer's system actor for index_available", () => {

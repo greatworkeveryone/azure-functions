@@ -119,8 +119,10 @@ export const LEDGER_ACTIONS = {
   // lease's own result beside the rent submitted (the basis edits behind it
   // carried their reasons). A director overriding a check (C3 sign-off, C5 the
   // sanity band; Connor, 17 Oct) writes rent_review.director_override, an
-  // exception with the reason, naming the check and its facts. Waive, cancel
-  // and revert are exceptions with a reason; return needs its note.
+  // exception with the reason, naming the check and its facts. rent_cache is the
+  // generator (system) writing the RentPerAnnum cache of a review applied ahead
+  // of its date, on the date. Waive, cancel and revert are exceptions with a
+  // reason; return needs its note.
   "rent_review.apply": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.approve": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.basis_departure": { exception: true, reasonRequired: false, subjects: ["rent_review"] },
@@ -130,6 +132,7 @@ export const LEDGER_ACTIONS = {
   "rent_review.index_available": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.index_pending": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.override": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+  "rent_review.rent_cache": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.return": { exception: false, reasonRequired: true, subjects: ["rent_review"] },
   "rent_review.revert": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
   "rent_review.submit": { exception: false, reasonRequired: false, subjects: ["rent_review"] },

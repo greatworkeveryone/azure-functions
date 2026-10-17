@@ -16,6 +16,9 @@ import { returnRentReview } from "../functions/returnRentReview";
 import { revertRentReview } from "../functions/revertRentReview";
 import { submitRentReview } from "../functions/submitRentReview";
 import { waiveRentReview } from "../functions/waiveRentReview";
+import { addDaysIso, addMonthsClamped } from "../darwinDate";
+import { previousQuarter, referenceQuarter } from "../rentReview/cpi";
+import { writeDueRentCaches } from "../rentReview/rentCache";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { getRequest, postRequest } from "./fixtures/rentReviewFakes";
 import {
@@ -27,6 +30,7 @@ import {
   seed,
   STEP_IDS,
   steps,
+  TODAY,
   versionOf,
   type Person,
 } from "./fixtures/rentReviewScenario";
@@ -486,5 +490,103 @@ describe("L1-L2: a collision is a 409 try again, never a 500, and changes nothin
       error: "Another review was opened on this tenancy at the same moment, so this one wasn't reverted. Try again.",
     });
     expect(world.review("rev-1").State).toBe("approved");
+  });
+});
+
+// ── L9: LastReviewDate never moves backwards ──────────────────────────────────
+
+describe("L9: an earlier review applied after a later one leaves LastReviewDate and its % alone", () => {
+  it("keeps the later date the tenancy already had", async () => {
+    const later = addDaysIso(REVIEW_DATE, 10);
+    await calculated({ tenant: { LastReviewDate: later, LastReviewIncreasePercent: 2.5 } });
+    expect((await call(submitRentReview)).jsonBody).toMatchObject({ applied: true });
+    expect(world.tenant(7)).toMatchObject({ LastReviewDate: later, LastReviewIncreasePercent: 2.5 });
+    const apply = world.ledgerRows().find((row) => row.Action === "rent_review.apply");
+    expect(apply?.after).toMatchObject({ tenancy: { lastReviewDate: later, lastReviewIncreasePercent: 2.5 } });
+  });
+
+  it("moves it forward as usual", async () => {
+    await calculated();
+    await call(submitRentReview);
+    expect(world.tenant(7)).toMatchObject({ LastReviewDate: REVIEW_DATE, LastReviewIncreasePercent: 3.2 });
+  });
+});
+
+// ── L10: the RentPerAnnum cache waits for the review's date ───────────────────
+
+describe("L10: a review applied ahead of its date leaves the RentPerAnnum cache until the date, when the generator writes it", () => {
+  const FUTURE = addDaysIso(TODAY, 10);
+  const SYSTEM = { kind: "system", name: "tenancyReviewScheduleTimer" } as const;
+
+  /** The scenario moved so the review falls in 10 days, its CPI pair published. */
+  function aheadOfItsDate(): void {
+    const rows = [
+      { baseRentPerAnnum: 120000, effectiveFrom: addMonthsClamped(FUTURE, -24), effectiveTo: addMonthsClamped(FUTURE, -12), id: STEP_IDS.commencement, methodKind: "commencement", ratePercent: 0 },
+      { cpiValue: 100, cpiValuePrev: 97, effectiveFrom: addMonthsClamped(FUTURE, -12), effectiveTo: FUTURE, id: STEP_IDS.lastYear, methodKind: "cpi", ratePercent: 3.0928, resolution: "applied" },
+      { effectiveFrom: FUTURE, id: STEP_IDS.review, methodKind: "cpi", ratePercent: 0 },
+    ];
+    seed(world, {
+      cpi: null,
+      review: { Basis: JSON.stringify(basis({ reviewDate: FUTURE })), ScheduledFor: FUTURE },
+      tenant: { LastReviewDate: addMonthsClamped(FUTURE, -12), NextReviewDate: FUTURE, ScheduledRateSteps: JSON.stringify(rows) },
+    });
+    const reference = referenceQuarter(FUTURE);
+    world.state.cpi.push(
+      { IndexValue: 100, Period: previousQuarter(reference, 12), ReferenceBase: "Sep 2025 = 100.0", Region: "DARWIN" },
+      { IndexValue: 103.2, Period: reference, ReferenceBase: "Sep 2025 = 100.0", Region: "DARWIN" },
+    );
+  }
+
+  const writeCaches = (today: string, dryRun = false) =>
+    writeDueRentCaches({} as never, { actor: SYSTEM, dryRun, log: jest.fn(), today, warn: jest.fn() });
+
+  it("APPLY leaves the cache and marks it deferred to the review's date", async () => {
+    aheadOfItsDate();
+    expect((await call(calculateRentReview)).status).toBe(200);
+    expect((await call(submitRentReview)).jsonBody).toMatchObject({ applied: true, review: { outcome: { newAnnual: 127670.1 } } });
+    expect(world.tenant(7).RentPerAnnum).toBe(123711.34);
+    expect(world.ledgerRows().find((row) => row.Action === "rent_review.apply")?.after).toMatchObject({
+      rentPerAnnumCache: "deferred",
+      rentPerAnnumCacheDue: FUTURE,
+      tenancy: { rentPerAnnum: 123711.34 },
+    });
+  });
+
+  it("the generator writes it on the date, as the system, and not before; a dry run writes nothing", async () => {
+    aheadOfItsDate();
+    await call(calculateRentReview);
+    await call(submitRentReview);
+    expect(await writeCaches(addDaysIso(FUTURE, -1))).toMatchObject({ written: 0 });
+    expect(await writeCaches(FUTURE, true)).toMatchObject({ written: 1 });
+    expect(world.tenant(7).RentPerAnnum).toBe(123711.34);
+    expect(await writeCaches(FUTURE)).toEqual({ current: 0, errors: [], skipped: 0, written: 1 });
+    expect(world.tenant(7)).toMatchObject({ RentPerAnnum: 127670.1, UpdatedByName: "tenancyReviewScheduleTimer" });
+    const row = world.ledgerRows().find((r) => r.Action === "rent_review.rent_cache");
+    expect(row).toMatchObject({ ActorKind: "system", ActorName: "tenancyReviewScheduleTimer", RuleApplied: "review_date_arrived", SubjectId: "rev-1" });
+    expect(row?.before).toEqual({ rentPerAnnum: 123711.34 });
+    expect(row?.after).toEqual({ rentPerAnnum: 127670.1, reviewDate: FUTURE });
+    // Written once: the next run finds nothing to do.
+    expect(await writeCaches(addDaysIso(FUTURE, 1))).toMatchObject({ written: 0 });
+  });
+
+  it("leaves it for a person when the schedule has moved on since", async () => {
+    aheadOfItsDate();
+    await call(calculateRentReview);
+    await call(submitRentReview);
+    const steps = parseSteps(String(world.tenant(7).ScheduledRateSteps)).map((step) => (step.id === STEP_IDS.review ? { ...step, ratePercent: 9 } : step));
+    world.tenant(7).ScheduledRateSteps = JSON.stringify(steps.map((step) => (step.id === STEP_IDS.review ? { ...step, methodKind: "fixed", reviewId: undefined } : step)));
+    expect(await writeCaches(FUTURE)).toMatchObject({ skipped: 1, written: 0 });
+    expect(world.tenant(7).RentPerAnnum).toBe(123711.34);
+  });
+
+  it("REVERT puts back a cache the generator wrote", async () => {
+    aheadOfItsDate();
+    await call(calculateRentReview);
+    await call(submitRentReview);
+    await writeCaches(FUTURE);
+    expect(world.tenant(7).RentPerAnnum).toBe(127670.1);
+    as(PEOPLE.bo);
+    expect((await call(revertRentReview, { reason: "Applied too early" })).status).toBe(200);
+    expect(world.tenant(7).RentPerAnnum).toBe(123711.34);
   });
 });

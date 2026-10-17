@@ -172,11 +172,13 @@ export class ReviewWorld {
       this.state.ledger.push(row);
       return [];
     }
-    if (/^SELECT TOP 1 \[Before\], \[After\]\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
+    if (/^SELECT TOP 1 LedgerId, \[Before\], \[After\]\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
+      const action = (sql.match(/Action = N'([\w.]+)'/) as RegExpMatchArray)[1];
       const found = this.state.ledger
-        .filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId && r.Action === "rent_review.apply")
+        .filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId && r.Action === action)
+        .filter((r) => p.ApplyLedgerId === undefined || Number(r.LedgerId) > Number(p.ApplyLedgerId))
         .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
-      return found ? [{ After: found.After, Before: found.Before }] : [];
+      return found ? [{ After: found.After, Before: found.Before, LedgerId: found.LedgerId }] : [];
     }
     if (/^SELECT DISTINCT l\.ActorUserId\s+FROM dbo\.DecisionLedger l/.test(sql.trim())) {
       const rows = this.state.ledger.filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId);
@@ -266,9 +268,36 @@ export class ReviewWorld {
       if (/t\.Status <> 'vacated' AND t\.ArchivedAt IS NULL/.test(sql) && (tenant.Status === "vacated" || tenant.ArchivedAt)) return [];
       return [this.tenantView(tenant)];
     }
-    if (/UPDATE dbo\.Tenants SET/.test(sql)) {
+    if (/^SELECT r\.ReviewId, r\.TenantId, r\.ScheduledFor, r\.NewRentPerAnnum,/.test(sql.trim())) {
+      // rentCache.ts DUE_CACHES_SQL: the latest APPLY deferred the cache, the date has come, nothing written since.
+      const today = String(p.Today);
+      return this.state.reviews
+        .filter((r) => ["approved", "completed"].includes(String(r.State)) && String(asIso(r.ScheduledFor)) <= today)
+        .filter((r) => {
+          const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === r.ReviewId);
+          const apply = rows.filter((l) => l.Action === "rent_review.apply").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+          if (!apply || (JSON.parse(String(apply.After)) as Row).rentPerAnnumCache !== "deferred") return false;
+          return !rows.some((l) => l.Action === "rent_review.rent_cache" && Number(l.LedgerId) > Number(apply.LedgerId));
+        })
+        .map((r) => {
+          const t = this.tenant(Number(r.TenantId));
+          return {
+            ...r,
+            BuildingId: t.BuildingId,
+            CpiCapPercent: t.CpiCapPercent,
+            CpiFloorPercent: t.CpiFloorPercent,
+            RentPerAnnum: t.RentPerAnnum,
+            ReviewRatchet: t.ReviewRatchet,
+            ScheduledRateSteps: t.ScheduledRateSteps,
+            TenantArchivedAt: t.ArchivedAt ?? null,
+            TenantStatus: t.Status,
+          };
+        });
+    }
+    if (/UPDATE dbo\.Tenants SET/.test(sql) || /^UPDATE dbo\.Tenants\s+SET RentPerAnnum/.test(sql.trim())) {
       const setClause = (sql.match(/SET([\s\S]*?)OUTPUT/) as RegExpMatchArray)[1];
       const tenant = this.tenant(Number(p.TenantId));
+      if (/RentPerAnnum = @Expected/.test(sql) && (tenant.RentPerAnnum ?? null) !== (p.Expected ?? null)) return [];
       this.applySet(tenant, setClause, p);
       return [{ ScheduleVersion: tenant.ScheduleVersion }];
     }

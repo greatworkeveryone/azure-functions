@@ -37,6 +37,11 @@
 // ESCALATION_SWEEP_MAX_ACTIONS of them per run, so a first live run against a
 // backlog is paced over several days.
 //
+// Rent caches (WP26 L10): a run that is asked to (the timer always is) writes
+// the RentPerAnnum cache of every review APPLY applied ahead of its date, once
+// the date has come (rentReview/rentCache.ts), as the system; a dry run logs
+// what it would write.
+//
 // SCHEDULE for one tenancy (scheduleNextReview) is the same plan and the same
 // writes, for one tenancy: APPLY, WAIVE and a superseding CANCEL call it after
 // they commit, so the tenancy's next review exists at once.
@@ -64,6 +69,7 @@ import {
 import { parseSteps } from "../scheduledRateStepLogic";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { runReviewEscalations, type ReviewEscalationReport } from "./escalations";
+import { type RentCacheReport, writeDueRentCaches } from "./rentCache";
 import { hasNoReviewClause, type MethodSource, resolveReviewMethod, stepOnDate } from "./method";
 import { inTransaction, insertScheduledReview, markWindowOpen } from "./store";
 
@@ -416,6 +422,8 @@ export interface GeneratorReport {
   errors: Array<{ message: string; tenantId: number }>;
   /** The escalation step (null when the run wasn't asked to escalate). */
   escalations: ReviewEscalationReport | null;
+  /** The rent caches due today (null when the run wasn't asked to write them). */
+  rentCaches: RentCacheReport | null;
   /** Writes skipped because another run or a person got there first. */
   raced: number;
   scheduled: number;
@@ -432,6 +440,8 @@ export interface GeneratorRun {
   dryRun: boolean;
   /** Raise E1 / E2 (and catch up E3) after the run's own work. The timer sets it. */
   escalate?: boolean;
+  /** Write the RentPerAnnum caches APPLY deferred to a review's date (L10). The timer sets it. */
+  rentCaches?: boolean;
   log: (message: string) => void;
   onError?: (error: unknown, tenantId: number) => void;
   today?: string;
@@ -466,6 +476,7 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
     errors: [],
     escalations: null,
     raced: 0,
+    rentCaches: null,
     scheduled: 0,
     skipped: plan.skipped,
     tenancies: tenancies.length,
@@ -511,6 +522,16 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
         fail(error, action.tenantId);
       }
     }
+  }
+
+  if (run.rentCaches) {
+    report.rentCaches = await writeDueRentCaches(run.connection, {
+      actor: GENERATOR_ACTOR,
+      dryRun: run.dryRun,
+      log: run.log,
+      today,
+      warn: run.warn,
+    });
   }
 
   if (run.escalate) {

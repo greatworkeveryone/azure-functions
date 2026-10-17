@@ -10,10 +10,14 @@
 //      cpiValuePrev, ratePercent, resolution applied, reviewId; or the exact
 //      rate an override needs, rentReview/stepPlan.ts), closing the row before a
 //      new one, and the change-log entries for both
-//   3. ScheduleVersion + 1, sign-off kept (D7); LastReviewDate = the review date;
-//      LastReviewIncreasePercent; the RentPerAnnum cache (only where RentPerAnnum
-//      is a cache: where it is the schedule's starting rent, overwriting it would
-//      apply the review twice, so it stays); NextReviewDate derived
+//   3. ScheduleVersion + 1, sign-off kept (D7); LastReviewDate = the review date
+//      and LastReviewIncreasePercent, unless a later review is already the
+//      tenancy's last (LastReviewDate never moves backwards, L9); the RentPerAnnum
+//      cache, only where RentPerAnnum is a cache (where it is the schedule's
+//      starting rent, overwriting it would apply the review twice, so it stays)
+//      and only once the review's date has come: a review applied ahead of its
+//      date leaves the rent in force today, marked "deferred", and the generator
+//      writes it on the date (rentReview/rentCache.ts, L10); NextReviewDate derived
 //   4. the review -> approved with its outcome (old and new rent, %, the CPI
 //      pair) and who approved it on what basis
 //   5. rent_review.apply in the ledger, with every value before and after and
@@ -169,13 +173,18 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
   const prior = result.existing;
 
   const before = tenancyReviewFields(tenancy);
-  const cacheRent = rentPerAnnumIsCache(nextSteps);
-  const next = derivedNextReview(tenancy, nextSteps, { lastReviewDate: scheduledFor }, input.today);
+  // L9: an earlier review applied after a later one leaves the later one as the last.
+  const movesLast = before.lastReviewDate === null || scheduledFor >= before.lastReviewDate;
+  const lastReviewDate = movesLast ? scheduledFor : before.lastReviewDate;
+  const lastReviewIncreasePercent = movesLast ? input.chosenPercent : before.lastReviewIncreasePercent;
+  // L10: the cache holds the rent in force, so it waits for the review's date.
+  const cacheable = rentPerAnnumIsCache(nextSteps);
+  const cacheRent = cacheable && scheduledFor <= input.today;
+  const next = derivedNextReview(tenancy, nextSteps, { lastReviewDate }, input.today);
   const scheduleVersion = await writeTenancyForReview(connection, {
     actorName: input.actor.name,
     actorOid: input.actorOid,
-    lastReviewDate: scheduledFor,
-    lastReviewIncreasePercent: input.chosenPercent,
+    ...(movesLast ? { lastReviewDate: scheduledFor, lastReviewIncreasePercent: input.chosenPercent } : {}),
     nextReviewDate: next?.after ?? null,
     ...(cacheRent ? { rentPerAnnum: input.chosenNewAnnual } : {}),
     steps: nextSteps,
@@ -225,13 +234,14 @@ export async function applyReview(connection: Connection, input: ApplyInput): Pr
     after: {
       outcome,
       representation: written.representation,
-      rentPerAnnumCache: cacheRent ? "written" : "kept: it is the schedule's starting rent",
+      rentPerAnnumCache: cacheRent ? "written" : cacheable ? "deferred" : "kept: it is the schedule's starting rent",
+      ...(cacheable && !cacheRent ? { rentPerAnnumCacheDue: scheduledFor } : {}),
       scheduleChanges,
       signOff: signOffRecord,
       step,
       tenancy: {
-        lastReviewDate: scheduledFor,
-        lastReviewIncreasePercent: input.chosenPercent,
+        lastReviewDate,
+        lastReviewIncreasePercent,
         nextReviewDate,
         rentPerAnnum: cacheRent ? input.chosenNewAnnual : before.rentPerAnnum,
         scheduleVersion,
