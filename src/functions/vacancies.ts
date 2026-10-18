@@ -249,7 +249,7 @@ async function handleGetVacantTenancies(
               o.OccupancyId, o.Level, o.Area, o.SizeSqm
        FROM dbo.Tenants t
        INNER JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
-       LEFT JOIN dbo.TenantOccupancies o ON o.TenantId = t.TenantId
+       LEFT JOIN dbo.TenantOccupancies o ON o.TenantId = t.TenantId AND o.ArchivedAt IS NULL
        WHERE t.Status = 'vacated'
        ORDER BY b.BuildingName, t.TenantId, o.Level, o.Area`,
       [],
