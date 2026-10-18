@@ -21,3 +21,12 @@ export const NAMEABLE_ROLES: readonly string[] = Object.freeze(["facilities_mana
 export function nameableRoles(roles: readonly string[]): string[] {
   return roles.map((role) => role.trim().toLowerCase()).filter((role) => NAMEABLE_ROLES.includes(role));
 }
+
+/**
+ * For a J4 gate (ACTION_ROLES): keeps its `conditional` roles only while the
+ * switch is on, so with it off they get the 403 they got before 117.
+ */
+export function unlessHeldOff(entry: { conditional?: readonly string[] }, env: NodeJS.ProcessEnv = process.env): (role: string) => boolean {
+  const held = attributedApprovalEnabled(env) ? [] : (entry.conditional ?? []);
+  return (role) => !held.includes(role);
+}

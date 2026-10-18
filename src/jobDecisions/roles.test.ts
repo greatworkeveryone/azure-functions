@@ -1,6 +1,5 @@
 /// <reference types="jest" />
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { ACTION_ROLES } from "../action-roles";
 import { ESCALATION_ROLES } from "../escalation/http";
 import { FLAG_ROLES } from "../jobTransitionGuard";
 import {
@@ -13,29 +12,20 @@ import {
   RESPOND_TO_DECISION_ROLES,
 } from "./roles";
 
-// The two job role lists are copies of the ones in functions/jobs.ts, which that
-// file does not export. They are read from its source so they cannot drift.
-const jobsSource = readFileSync(join(__dirname, "..", "functions", "jobs.ts"), "utf8");
-
-function rolesIn(name: string): string[] {
-  const block = jobsSource.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const;`));
-  if (!block) throw new Error(`${name} not found in jobs.ts`);
-  return [...block[1].matchAll(/AppRole\.([A-Z_]+)/g)].map((m) => m[1]);
-}
+// The two job role lists are copies of the job gates in the who-can-do-what
+// table (action-roles.ts: editJobs, viewJobs), which functions/jobs.ts reads.
 
 const names = (roles: readonly string[]): string[] => [...roles].sort();
 
 describe("who may ask for a decision, and who may read one", () => {
-  it("asking is whoever may create and edit jobs: EDIT_JOBS_ROLES in jobs.ts", () => {
-    expect(rolesIn("EDIT_JOBS_ROLES")).toHaveLength(6);
-    const AppRole = require("../auth").AppRole as Record<string, string>;
-    expect(names(ASK_FOR_DECISION_ROLES)).toEqual(names(rolesIn("EDIT_JOBS_ROLES").map((key) => AppRole[key])));
+  it("asking is whoever may create and edit jobs: editJobs in action-roles.ts", () => {
+    expect(ACTION_ROLES.editJobs.gate).toHaveLength(6);
+    expect(names(ASK_FOR_DECISION_ROLES)).toEqual(names(ACTION_ROLES.editJobs.gate));
   });
 
-  it("reading is whoever may read jobs: VIEW_JOBS_ROLES in jobs.ts", () => {
-    expect(rolesIn("VIEW_JOBS_ROLES")).toHaveLength(6);
-    const AppRole = require("../auth").AppRole as Record<string, string>;
-    expect(names(READ_DECISION_REQUEST_ROLES)).toEqual(names(rolesIn("VIEW_JOBS_ROLES").map((key) => AppRole[key])));
+  it("reading is whoever may read jobs: viewJobs in action-roles.ts", () => {
+    expect(ACTION_ROLES.viewJobs.gate).toHaveLength(6);
+    expect(names(READ_DECISION_REQUEST_ROLES)).toEqual(names(ACTION_ROLES.viewJobs.gate));
   });
 
   it("the baseline user role may do neither", () => {
