@@ -2,6 +2,10 @@
 // for and again when a director ratifies it (the schedule may have moved in
 // between). Pure: the endpoint loads the tenancy and its other requests.
 //
+//   outside_lease       422  it runs past the lease's last day (Expiry) or starts
+//                            before its first (Commencement). A tenancy holding
+//                            over past its expiry is refused too, for now: whether
+//                            holdover can carry a relief is Connor's call
 //   relief_overlap      409  it shares a day and a charge with a ratified relief
 //                            or with another request awaiting a director
 //   nothing_to_relieve  422  the schedule charges nothing on its first day (not
@@ -16,6 +20,7 @@
 
 import type { SqlRow } from "../db";
 import { formatDisplayDate } from "../digest/format";
+import { sqlDateToIso } from "../nextReviewDate";
 import { ancillariesByRow } from "../rentReview/cascade";
 import {
   type ChargeInput,
@@ -35,6 +40,8 @@ import { type ReliefPayload, reliefDates, reliefTerms } from "./types";
 
 export interface TenancySchedule {
   input: ChargeInput;
+  /** Tenants.Commencement and Expiry (the lease's first and last days); null when not recorded. */
+  lease: { commencement: string | null; expiry: string | null };
   /** The reliefs already ratified (Tenants.RentReliefs). */
   ratified: RentRelief[];
   rows: ScheduleRow[];
@@ -57,12 +64,13 @@ export function tenancySchedule(row: SqlRow, totalSqm: number): TenancySchedule 
       fallbackAnnual,
       reliefs: ratified,
     },
+    lease: { commencement: sqlDateToIso(row.Commencement), expiry: sqlDateToIso(row.Expiry) },
     ratified,
     rows,
   };
 }
 
-export type ReliefRefusalCode = "not_a_reduction" | "nothing_to_relieve" | "relief_overlap" | "relief_too_large";
+export type ReliefRefusalCode = "not_a_reduction" | "nothing_to_relieve" | "outside_lease" | "relief_overlap" | "relief_too_large";
 
 export interface ReliefRefusal {
   code: ReliefRefusalCode;
@@ -88,9 +96,20 @@ export interface OtherRequest {
 
 /** The checks in the header, for `relief` (with the id it has or will have) on `schedule`. */
 export function checkRelief(relief: ReliefPayload & { id: string }, schedule: TenancySchedule, pending: readonly OtherRequest[]): ReliefCheck {
+  const { commencement, expiry } = schedule.lease;
+  if (expiry !== null && relief.to > expiry) {
+    return refuse("outside_lease", `This relief runs to ${formatDisplayDate(relief.to)}, after the lease ends on ${formatDisplayDate(expiry)}. A relief has to end by the lease's last day.`, {
+      leaseExpiry: expiry,
+    });
+  }
+  if (commencement !== null && relief.from < commencement) {
+    return refuse("outside_lease", `This relief starts on ${formatDisplayDate(relief.from)}, before the lease starts on ${formatDisplayDate(commencement)}. A relief has to start on or after the lease's first day.`, {
+      leaseCommencement: commencement,
+    });
+  }
   const ratified = schedule.ratified.find((other) => other.id !== relief.id && reliefsOverlap(relief, other));
   if (ratified) {
-    return refuse("relief_overlap", `This overlaps the rent relief already ratified for ${reliefDates(ratified)} (${reliefTerms(ratified)}). Choose dates or charges that don't overlap it.`, {
+    return refuse("relief_overlap", `This overlaps the rent relief already approved for ${reliefDates(ratified)} (${reliefTerms(ratified)}). Choose dates or charges that don't overlap it.`, {
       overlaps: { from: ratified.from, requestId: ratified.id, state: "ratified", to: ratified.to },
     });
   }

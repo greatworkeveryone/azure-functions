@@ -32,6 +32,7 @@ import {
   ScheduleChangeError,
   scheduleChangeErrorResponse,
   staleChange,
+  stateWords,
 } from "../scheduleChange/http";
 import { changeForUpdate, loadChange, markDecided } from "../scheduleChange/store";
 import { CHANGE_DECISION_CODES, SCHEDULE_CHANGE_SUBJECT } from "../scheduleChange/types";
@@ -72,7 +73,7 @@ export async function withdrawScheduleChange(request: HttpRequest, context: Invo
         }
         if (rowVersionHex(row.Version) !== rowVersion) throw staleChange(row);
         if (row.State !== "pending") {
-          throw new ScheduleChangeError("invalid_state", `This change has been ${String(row.State)}, so it can't be withdrawn`, { state: row.State });
+          throw new ScheduleChangeError("invalid_state", `This change has been ${stateWords(row.State)}, so it can't be withdrawn`, { state: row.State });
         }
         if (!(await markDecided(db, requestId, { by: { name: caller.actor.name, userId }, note: reason, state: "withdrawn" }))) {
           throw new ScheduleChangeError("invalid_state", "This change just moved on, so it wasn't withdrawn");
