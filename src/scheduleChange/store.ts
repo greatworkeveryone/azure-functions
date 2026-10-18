@@ -39,6 +39,8 @@ export async function changeForUpdate(connection: Connection, requestId: string)
 }
 
 export interface ChangeFilters {
+  /** One request (the director's page): read by its key, not out of the whole list. */
+  requestId?: string;
   states?: readonly ScheduleChangeState[];
   tenantId?: number;
 }
@@ -47,6 +49,10 @@ export interface ChangeFilters {
 export async function loadChanges(connection: Connection, filters: ChangeFilters): Promise<SqlRow[]> {
   const where: string[] = [];
   const params: SqlParam[] = [{ name: "Limit", type: TYPES.Int, value: CHANGE_LIST_LIMIT }];
+  if (filters.requestId !== undefined) {
+    where.push("c.RequestId = @FilterRequestId");
+    params.push({ name: "FilterRequestId", type: TYPES.NVarChar, value: filters.requestId });
+  }
   if (filters.tenantId !== undefined) {
     where.push("c.TenantId = @TenantId");
     params.push({ name: "TenantId", type: TYPES.Int, value: filters.tenantId });
@@ -130,7 +136,7 @@ export async function markDecided(connection: Connection, requestId: string, dec
 
 const TENANCY_FOR_CHANGE = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt,
     t.ScheduleVersion, t.RentPerAnnum, t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs,
-    t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.UpdatedAt, t.UpdatedByName,
+    t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet, t.UpdatedAt, t.UpdatedByName, t.Commencement, t.Expiry,
     ${SIGN_OFF_COLUMNS}
   FROM dbo.Tenants t WITH (UPDLOCK, ROWLOCK)
   WHERE t.TenantId = @TenantId`;
@@ -138,6 +144,37 @@ const TENANCY_FOR_CHANGE = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.Trad
 /** The tenancy a change is about, locked for the rest of the transaction. */
 export async function lockTenancyForChange(connection: Connection, tenantId: number): Promise<SqlRow | null> {
   return (await executeQuery(connection, TENANCY_FOR_CHANGE, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]))[0] ?? null;
+}
+
+export type AppendedReliefs = { before: unknown[]; json: string; ok: true } | { duplicate: boolean; ok: false };
+
+/**
+ * Tenants.RentReliefs with one relief added at the end. Every entry already in
+ * the column is kept byte for byte (WP26c review; database-safety rule 7): an
+ * entry a later rule would reject, or a field this code doesn't know (an
+ * end-early marker, say), is never dropped or rebuilt. `before` is the whole
+ * array as stored, for the ledger. Not ok when the column holds something that
+ * isn't a JSON array, so nothing is written over it, or when it already holds a
+ * relief with this id (`duplicate`).
+ */
+export function appendRelief(raw: unknown, entry: { id: string } & Record<string, unknown>): AppendedReliefs {
+  const text = raw === null || raw === undefined ? "" : typeof raw === "string" ? raw : null;
+  if (text === null) return { duplicate: false, ok: false };
+  const entryJson = JSON.stringify(entry);
+  if (text.trim() === "") return { before: [], json: `[${entryJson}]`, ok: true };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { duplicate: false, ok: false };
+  }
+  if (!Array.isArray(parsed)) return { duplicate: false, ok: false };
+  if (parsed.some((other: unknown) => typeof other === "object" && other !== null && (other as { id?: unknown }).id === entry.id)) {
+    return { duplicate: true, ok: false };
+  }
+  // Only whitespace may follow a JSON array's closing bracket.
+  const close = text.lastIndexOf("]");
+  return { before: parsed, json: `${text.slice(0, close)}${parsed.length > 0 ? "," : ""}${entryJson}${text.slice(close)}`, ok: true };
 }
 
 /** The ratified reliefs written onto the schedule: ScheduleVersion + 1 (a review

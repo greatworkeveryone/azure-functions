@@ -63,6 +63,7 @@ import {
   parseGroups,
   parseMiscFees,
   parseSteps,
+  type RatchetExemption,
   resolveScheduleAnnual,
   ScheduledRateStep,
   StepDiff,
@@ -95,9 +96,11 @@ import {
   rollbackQuietly,
   rowVersionHex,
   runScheduleWrite,
+  type ScheduleMutation,
   scheduleWriteResponse,
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
+import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -2498,10 +2501,41 @@ function changeLogRowToApi(row: SqlRow) {
 
 const STEP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
-/** The row keeps the exemption it had, exactly (key order aside). */
-function ratchetExemptionKept(before: ScheduledRateStep["ratchetExempt"], after: ScheduledRateStep["ratchetExempt"]): boolean {
-  return !!before && !!after && before.at === after.at && before.byName === after.byName && before.reason === after.reason;
+/** A refused change to a row's ratchet exemption, as the schedule write returns it: a 403 is ledgered as denied. */
+function refuseExemptionEdit(
+  refusal: { message: string; rule: string; status: number },
+  stepId: string,
+  attempted: string,
+  stored: ScheduledRateStep | null,
+): Extract<ScheduleMutation<unknown>, { kind: "reject" }> {
+  const denied: LedgerDraft = {
+    action: "denied",
+    before: { attempted, ratchetExempt: stored?.ratchetExempt ?? null },
+    reason: refusal.message,
+    ruleApplied: refusal.rule,
+    subject: { id: stepId, type: "rate_step" },
+  };
+  return {
+    ...(refusal.status === 403 ? { denied } : {}),
+    error: refusal.message,
+    kind: "reject",
+    status: refusal.status,
+  };
 }
+
+/** The ledger row for a director taking a ratchet exemption off (WP26c review, finding 1). */
+function exemptionRemovedEntry(stored: ScheduledRateStep, removed: RatchetExemption, reason: string, deleted: boolean): LedgerDraft {
+  return {
+    action: "schedule.ratchet_exemption_removed",
+    after: { ratchetExempt: null, rowDeleted: deleted },
+    before: { effectiveFrom: stored.effectiveFrom, ratchetExempt: removed, reviewId: stored.reviewId ?? null },
+    reason,
+    ruleApplied: "director_removed",
+    subject: { id: stored.id, type: "rate_step" },
+  };
+}
+
+const isDirectorActor = (actor: { kind: string; role?: string }): boolean => actor.kind === "user" && actor.role === AppRole.DIRECTOR;
 
 async function upsertScheduledRateStep(
   request: HttpRequest,
@@ -2530,6 +2564,7 @@ async function upsertScheduledRateStep(
     const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
     if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, step } = parsed;
+    const removalReason = readExemptionRemovalReason(body);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -2541,24 +2576,23 @@ async function upsertScheduledRateStep(
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
-        // A ratchet exemption is a director's override (C9, D23), written only by
-        // a rent review approved with the lease's ratchet overridden. An edit may
-        // keep one as it is or take it off (the ratchet then holds the row again),
-        // never add or change one.
-        if (step.ratchetExempt && !ratchetExemptionKept(oldStep?.ratchetExempt, step.ratchetExempt)) {
-          return {
-            error: "A ratchet exemption is a director's override: it is written when a director approves a rent review with the lease's ratchet overridden, not by editing the row",
-            kind: "reject",
-            status: 403,
-          };
+        // A ratchet exemption is a director's override (C9, D23): an edit keeps it
+        // as stored even when the step leaves it off, never adds or changes one, and
+        // only a director takes it off, with a reason (ratchetExemptionEdit.ts).
+        const exemption = exemptionEdit(oldStep, step, removalReason, isDirectorActor(actor));
+        if (exemption.kind === "refuse") {
+          const attempted = removalReason !== null || exemption.rule === "not_director" ? "schedule.ratchet_exemption_removed" : "schedule.manual_edit";
+          return refuseExemptionEdit(exemption, step.id, attempted, oldStep);
         }
+        const edited = exemption.step;
         // Adding a row closes the open-ended row before it (effectiveTo is exclusive).
-        const { closed, steps: withClosed } = closeOpenPredecessor(existing, step);
-        const next = normaliseLegacyEnds(upsertStep(withClosed, step));
-        const saved = next.find((s) => s.id === step.id) ?? step;
+        const { closed, steps: withClosed } = closeOpenPredecessor(existing, edited);
+        const next = normaliseLegacyEnds(upsertStep(withClosed, edited));
+        const saved = next.find((s) => s.id === step.id) ?? edited;
         const ledgerEntries: LedgerDraft[] = [
           { action: "schedule.manual_edit", after: saved, before: oldStep, subject: { id: step.id, type: "rate_step" } },
         ];
+        if (exemption.kind === "remove" && oldStep) ledgerEntries.push(exemptionRemovedEntry(oldStep, exemption.removed, exemption.reason, false));
         if (closed) {
           ledgerEntries.push({
             action: "schedule.manual_edit",
@@ -2641,6 +2675,7 @@ async function deleteScheduledRateStep(
     const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
     if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, stepId } = parsed;
+    const removalReason = readExemptionRemovalReason(body);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -2654,6 +2689,13 @@ async function deleteScheduledRateStep(
         const deletedStep = existing.find((s) => s.id === stepId);
         const next = deleteStep(existing, stepId);
         if (next === STEP_NOT_FOUND || !deletedStep) return { error: "Step not found", kind: "reject", status: 404 };
+        // Deleting a row a director exempted from the ratchet takes the exemption off too.
+        const exemption = exemptionDelete(deletedStep, removalReason, isDirectorActor(actor));
+        if (exemption.kind === "refuse") return refuseExemptionEdit(exemption, stepId, "schedule.ratchet_exemption_removed", deletedStep);
+        const ledgerEntries: LedgerDraft[] = [
+          { action: "schedule.manual_edit", after: null, before: deletedStep, subject: { id: stepId, type: "rate_step" } },
+        ];
+        if (exemption.kind === "remove") ledgerEntries.push(exemptionRemovedEntry(deletedStep, exemption.removed, exemption.reason, true));
         return {
           afterUpdate: async (conn) => {
             changeId = await insertRentScheduleChangeLog(conn, {
@@ -2669,9 +2711,7 @@ async function deleteScheduledRateStep(
           },
           column: "ScheduledRateSteps",
           kind: "write",
-          ledgerEntries: [
-            { action: "schedule.manual_edit", after: null, before: deletedStep, subject: { id: stepId, type: "rate_step" } },
-          ],
+          ledgerEntries,
           result: next,
           value: next,
         };

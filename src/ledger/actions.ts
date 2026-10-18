@@ -120,6 +120,11 @@ export const LEDGER_ACTIONS = {
   "schedule.change_rejected": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
   "schedule.change_requested": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
   "schedule.change_withdrawn": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
+  // A director taking a ratchet exemption off a review row, by editing or
+  // deleting the row (WP26c review): the lease's ratchet holds that row and the
+  // ones after it again, so the rent can go up. `before` holds the exemption as
+  // it was. Anyone else's attempt is a `denied` row on the rate step.
+  "schedule.ratchet_exemption_removed": { exception: true, reasonRequired: true, subjects: ["rate_step"] },
 
   // Schedule sign-off (WP24)
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },

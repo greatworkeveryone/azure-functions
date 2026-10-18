@@ -25,8 +25,9 @@
 // for a schedule that opens with a review row, the stored base rent
 // (RentPerAnnum) until its first settled row. A review dated inside a relief
 // still changes the lease figure, and the relief applies on top of whatever the
-// lease figure is. The timeline is cut wherever the row in force or the set of
-// reliefs changes, and each period carries both figures for every charge:
+// lease figure is. The timeline is cut wherever the row in force, the set of
+// reliefs, or a car park group or misc fee changes, and each period carries both
+// figures for every charge:
 //
 //   { from, to, stepId, reliefIds, lease, charged }
 //     from      null: since before the schedule's first row (the base rent)
@@ -36,9 +37,17 @@
 //               cent; null where the tenancy has no such charge (no AHAC), or
 //               where the caller gave no car park and misc fee figures
 //
-// A relief never takes a charge below $0. If two ratified reliefs ever covered
-// one charge on one day (a request that would is refused), the one starting
-// first, then the lower id, applies.
+// Car parks and misc fees are charged only on their own days (WP26c review): a
+// car park group from its commencedAt, a misc fee from its commencedAt to its
+// endsAt (inclusive). Each row's figures come with those dates
+// (RowAncillaries.dated, from cascade.ts ancillariesByRow), and a period charges
+// the groups and fees whose dates cover its first day (null when none do).
+//
+// A relief never takes a charge below $0, and a fixed rent never charges more
+// than the lease asks: the rent charged is the lower of the two (a review or an
+// edit may take the lease rent below a fixed rent ratified earlier). If two
+// ratified reliefs ever covered one charge on one day (a request that would is
+// refused), the one starting first, then the lower id, applies.
 //
 // Changes still awaiting a director (relief requests, reviews waiting for
 // approval) are markers, never figures: each row lists the markers whose dates
@@ -104,10 +113,24 @@ export interface PendingChangeMarker {
   to: string | null;
 }
 
+/** One car park group's or misc fee's figure a year on a row, on its own days. */
+export interface DatedCharge {
+  /** A year's worth on the row, to the cent. */
+  annual: number;
+  /** Its first day: the group's or fee's commencedAt. */
+  from: string;
+  /** Exclusive: the day after a fee's endsAt; null: no end. */
+  to: string | null;
+}
+
 /** Car park and misc fee totals a year for one row (cascade.ts ancillariesByRow; the frontend's own schedules). */
 export interface RowAncillaries {
   carparks: number | null;
   miscFees: number | null;
+  /** Each group and fee on the row with its own dates. Given, a period charges
+   *  only those whose dates cover its first day (null when none do); left out,
+   *  the totals above apply to the whole row. */
+  dated?: { carparks: DatedCharge[]; miscFees: DatedCharge[] };
 }
 
 export interface ChargedRow {
@@ -149,10 +172,11 @@ export function relieve(amount: number | null, relief: RentRelief, scope: Charge
   if (amount === null) return null;
   if (relief.kind === "percent") return r2((amount * (100 - relief.value)) / 100);
   if (scope !== "rent") return amount;
-  return relief.kind === "amount" ? r2(Math.max(0, amount - relief.value)) : r2(relief.value);
+  return relief.kind === "amount" ? r2(Math.max(0, amount - relief.value)) : r2(Math.min(amount, relief.value));
 }
 
 interface Span {
+  dated: RowAncillaries["dated"] | null;
   from: string | null;
   lease: Charges;
   stepId: string | null;
@@ -164,11 +188,11 @@ const baseCharges = (fallbackAnnual: number): Charges => ({ ahac: null, carparks
 /** Where each row (or the base rent) is the one in force, as resolveCurrentRent reads it. */
 function leaseSpans(rows: readonly ScheduleRow[], input: ChargeInput): Span[] {
   const first = rows[0];
-  if (!first) return [{ from: null, lease: baseCharges(input.fallbackAnnual), stepId: null, to: null }];
+  if (!first) return [{ dated: null, from: null, lease: baseCharges(input.fallbackAnnual), stepId: null, to: null }];
   const settled = rows.map((row, index) => ({ index, row })).filter(({ row }) => !row.pending);
   const spans: Span[] = [];
   if (first.step.methodKind !== "commencement" && input.fallbackAnnual > 0) {
-    spans.push({ from: null, lease: baseCharges(input.fallbackAnnual), stepId: null, to: settled[0]?.row.step.effectiveFrom ?? null });
+    spans.push({ dated: null, from: null, lease: baseCharges(input.fallbackAnnual), stepId: null, to: settled[0]?.row.step.effectiveFrom ?? null });
   }
   settled.forEach(({ index, row }, k) => {
     const to = settled[k + 1]?.row.step.effectiveFrom ?? null;
@@ -176,6 +200,7 @@ function leaseSpans(rows: readonly ScheduleRow[], input: ChargeInput): Span[] {
     if (to !== null && to <= row.step.effectiveFrom) return;
     const ancillaries = input.ancillaries?.[index] ?? null;
     spans.push({
+      dated: ancillaries?.dated ?? null,
       from: row.step.effectiveFrom,
       lease: { ahac: row.ahacAnnual, carparks: ancillaries?.carparks ?? null, miscFees: ancillaries?.miscFees ?? null, rent: row.annual },
       stepId: row.step.id,
@@ -185,19 +210,39 @@ function leaseSpans(rows: readonly ScheduleRow[], input: ChargeInput): Span[] {
   return spans;
 }
 
+/** The groups' or fees' figures whose own dates cover `day`, summed; null when none do. */
+function datedOn(charges: readonly DatedCharge[], day: string): number | null {
+  let total: number | null = null;
+  for (const charge of charges) {
+    if (charge.from <= day && (charge.to === null || day < charge.to)) total = r2((total ?? 0) + charge.annual);
+  }
+  return total;
+}
+
+/** The lease figures on a period's first day: the row's, with car parks and misc fees on their own days. */
+function leaseOn(span: Span, from: string | null): Charges {
+  if (!span.dated || from === null) return { ...span.lease };
+  return { ...span.lease, carparks: datedOn(span.dated.carparks, from), miscFees: datedOn(span.dated.miscFees, from) };
+}
+
+/** Where a row's car parks and misc fees start or stop. */
+const datedCuts = (span: Span): string[] =>
+  span.dated ? [...span.dated.carparks, ...span.dated.miscFees].flatMap((charge) => (charge.to === null ? [charge.from] : [charge.from, charge.to])) : [];
+
 /** One period: the reliefs in force from its first day, each charge relieved by the first that covers it. */
 function periodOf(span: Span, from: string | null, to: string | null, reliefs: readonly RentRelief[]): ChargePeriod {
   const active = from === null ? [] : reliefs.filter((relief) => relief.from <= from && from < reliefEnd(relief));
-  const charged: Charges = { ...span.lease };
+  const lease = leaseOn(span, from);
+  const charged: Charges = { ...lease };
   const applied: string[] = [];
   for (const scope of CHARGE_SCOPES) {
     const relief = active.find((candidate) => candidate.scope.includes(scope));
     if (!relief) continue;
     const key = SCOPE_KEY[scope];
-    charged[key] = relieve(span.lease[key], relief, scope);
+    charged[key] = relieve(lease[key], relief, scope);
     if (!applied.includes(relief.id)) applied.push(relief.id);
   }
-  return { charged, from, lease: { ...span.lease }, reliefIds: active.filter((relief) => applied.includes(relief.id)).map((relief) => relief.id), stepId: span.stepId, to };
+  return { charged, from, lease, reliefIds: active.filter((relief) => applied.includes(relief.id)).map((relief) => relief.id), stepId: span.stepId, to };
 }
 
 /** Whether a marker's dates touch [from, to). */
@@ -214,9 +259,10 @@ function touches(marker: PendingChangeMarker, from: string, to: string | null): 
  */
 export function computeCharges(rows: readonly ScheduleRow[], input: ChargeInput): ChargeSchedule {
   const reliefs = [...(input.reliefs ?? [])].sort(byStart);
-  const cuts = [...new Set(reliefs.flatMap((relief) => [relief.from, reliefEnd(relief)]))].sort();
+  const reliefCuts = reliefs.flatMap((relief) => [relief.from, reliefEnd(relief)]);
   const periods: ChargePeriod[] = [];
   for (const span of leaseSpans(rows, input)) {
+    const cuts = [...new Set([...reliefCuts, ...datedCuts(span)])].sort();
     const inside = cuts.filter((cut) => (span.from === null || cut > span.from) && (span.to === null || cut < span.to));
     const bounds: Array<string | null> = [span.from, ...inside, span.to];
     for (let k = 0; k < bounds.length - 1; k++) periods.push(periodOf(span, bounds[k], bounds[k + 1], reliefs));
