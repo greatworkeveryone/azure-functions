@@ -416,6 +416,18 @@ describe("getApprovalLimits", () => {
     expect(res.jsonBody).toMatchObject({ directorThreshold: null, effectiveDirectorThreshold: 20000 });
   });
 
+  it("says whether attributed quote approval is switched on (ATTRIBUTED_APPROVAL_ENABLED, off unless \"true\")", async () => {
+    rules(PROD_TODAY);
+    as("facilities");
+    expect((await getApprovalLimits(makeRequest(undefined), ctx)).jsonBody).toMatchObject({ attributedApprovalEnabled: false });
+    process.env.ATTRIBUTED_APPROVAL_ENABLED = "true";
+    try {
+      expect((await getApprovalLimits(makeRequest(undefined), ctx)).jsonBody).toMatchObject({ attributedApprovalEnabled: true });
+    } finally {
+      delete process.env.ATTRIBUTED_APPROVAL_ENABLED;
+    }
+  });
+
   it("sends the R13 variance margin and cap beside the limits, the defaults when the facts can't be read", async () => {
     rules(PROD_TODAY);
     as("accounts");

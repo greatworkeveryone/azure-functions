@@ -20,6 +20,7 @@ import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { DEFAULT_VARIANCE_FACTS } from "../moneyRules";
 import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance, type VarianceBody } from "../moneyVariance-db";
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
+import { attributedApprovalEnabled } from "../attributedApproval";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
@@ -1503,7 +1504,12 @@ async function getApprovalLimits(
     // R13: the variance margin and cap beside the limits. Shown only, so a
     // database that hasn't had migration 117 yet shows the defaults.
     const varianceMargin = await loadVarianceFacts(connection).catch(() => DEFAULT_VARIANCE_FACTS);
-    return { status: 200, jsonBody: { approvalLimits, directorThreshold, effectiveDirectorThreshold, varianceMargin } };
+    // R2: whether attributed quote approval is switched on (ATTRIBUTED_APPROVAL_ENABLED),
+    // so the frontend offers it only when the backend will accept it.
+    return {
+      status: 200,
+      jsonBody: { approvalLimits, attributedApprovalEnabled: attributedApprovalEnabled(), directorThreshold, effectiveDirectorThreshold, varianceMargin },
+    };
   } catch (error: any) {
     context.error("getApprovalLimits failed:", error.message);
     return errorResponse("Failed to fetch approval limits", error.message);
