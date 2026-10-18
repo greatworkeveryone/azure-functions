@@ -25,3 +25,5 @@ describe("quoteAttributionColumnExists", () => {
     expect(await quoteAttributionColumnExists({} as never)).toBe(true);
   });
 });
+
+export {};
