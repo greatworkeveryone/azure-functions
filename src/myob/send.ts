@@ -2,7 +2,8 @@
 // runs inside a database transaction and nothing is marked sent before MYOB
 // has said so:
 //   1. approve (transaction): the CFO, not the proposer when review is on; the
-//      demonstration file only (no production writes this sprint); the record
+//      demonstration file only (no production writes this sprint), never
+//      RP's own file, and nothing while MYOB_RP_COMPANY_FILE_ID is unset; the record
 //      still what was proposed; the preview hash equal to the payload rebuilt
 //      now with her as approver; then state pushed, the final payload stored,
 //      ledgered myob.approve. "pushed" is set here, before any MYOB call, so a
@@ -27,6 +28,7 @@ import { proposalDrift } from "./payloads";
 import { pushInFlight } from "./pushState";
 import { getProposal, latestVerifiedForUid, updateProposal, type ProposalRow } from "./proposalsStore";
 import { outcomeAction, outcomeFields, outcomeMessage } from "./sendOutcome";
+import { rpCompanyFileId } from "./rpCompanyFile";
 import { pushApproved, type MyobPurchases, type PushResult } from "./sendSteps";
 import type { ProposalSubjectType } from "./subjects";
 import { installFloorplanRecordLookup } from "./floorplanRecords";
@@ -65,13 +67,23 @@ async function reviewRequired(tx: Connection, proposal: ProposalRow): Promise<bo
   return rows[0] ? Boolean(rows[0].RequireReview) : true;
 }
 
-/** Decision 7: until D9's test-data check and S11's money gate are wired into this path, only the demonstration file. */
+/**
+ * Decision 7: until D9's test-data check and S11's money gate are wired into this path, only the demonstration file,
+ * never RP's own (rpCompanyFile.ts), and nothing at all while RP's file isn't named (M5 review: fail closed).
+ */
 async function refuseUnlessDemonstration(tx: Connection, companyFileId: string): Promise<void> {
+  const rp = rpCompanyFileId();
+  if (!rp) {
+    throw new ProposalError(409, "Floorplan sends nothing to MYOB until MYOB_RP_COMPANY_FILE_ID names RP's own company file, so it can never be mistaken for the demonstration file. Ask Connor.");
+  }
   const rows = await executeQuery(tx, `SELECT Name, IsDemonstration FROM dbo.MyobCompanyFiles WHERE CompanyFileId = @CompanyFileId`, [
     { name: "CompanyFileId", type: TYPES.NVarChar, value: companyFileId },
   ]);
-  if (rows[0]?.IsDemonstration === true) return;
   const name = typeof rows[0]?.Name === "string" && rows[0].Name ? rows[0].Name : "This company file";
+  if (companyFileId.toLowerCase() === rp) {
+    throw new ProposalError(409, `${name} is RP's own company file. Floorplan sends only to the demonstration file until the test-data check and the money gate cover MYOB.`);
+  }
+  if (rows[0]?.IsDemonstration === true) return;
   throw new ProposalError(
     409,
     `${name} isn't flagged as the demonstration file. Floorplan sends only to the demonstration file until the test-data check and the money gate cover MYOB.`,

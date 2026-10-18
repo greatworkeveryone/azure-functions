@@ -73,9 +73,15 @@ export interface GuardedRequest {
   companyFileId: string | null;
 }
 
+/**
+ * `deps.testRecords` lets a guard-only caller answer D9's test-record question itself, without a database read: the
+ * lab's probes (myob/lab/probes.ts), which never send. myobRequest passes none, so everything that can reach MYOB is
+ * checked with D9's lookup (pinned in myob-request-guard.lookup.test.ts).
+ */
 export async function guardMyobRequest(
   input: { body?: unknown; correlationId?: string; method: MyobMethod; record?: MyobRecordRef; url: string },
   now: Date = new Date(),
+  deps: { testRecords?: MyobTestRecordLookup } = {},
 ): Promise<GuardedRequest> {
   const classified = classifyMyobRequest(input.method, input.url);
   if (classified.kind === "refused") {
@@ -84,7 +90,7 @@ export async function guardMyobRequest(
   if (classified.kind === "oauth") return { companyFileId: null, operation: "oauth.token" };
 
   const { companyFileId, rule, uid } = classified;
-  const verdict = await testRecordLookup({ correlationId: input.correlationId ?? null, record: input.record ?? null });
+  const verdict = await (deps.testRecords ?? testRecordLookup)({ correlationId: input.correlationId ?? null, record: input.record ?? null });
   if (verdict.isTest) throw new TestDataEgressError("myob");
   if (rule.method !== "GET" && !verdict.named) {
     throw new MyobRequestRefusedError("no_record", "A MYOB write must name the Floorplan record it is for");
