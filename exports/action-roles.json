@@ -289,6 +289,9 @@
     "facilities",
     "facilities_manager"
   ],
+  "ratifyScheduleChange": [
+    "director"
+  ],
   "recordEmailOnJob": [
     "accounts_manager",
     "admin",
@@ -307,11 +310,21 @@
     "cfo",
     "director"
   ],
+  "rejectScheduleChange": [
+    "director"
+  ],
   "reopenJob": [
     "accounts_manager",
     "cfo",
     "director",
     "facilities_manager"
+  ],
+  "requestScheduleChange": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
   ],
   "resendDirectorEmail": [
     "accounts",

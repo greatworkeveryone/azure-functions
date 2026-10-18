@@ -320,6 +320,12 @@ export const ACTION_ROLES = {
     routes: ["raiseEscalation", "previewEscalationTarget"],
     why: "Escalate something to the right superior (ESCALATION_ROLES).",
   },
+  ratifyScheduleChange: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["ratifyScheduleChange"],
+    why: "Ratify a pending schedule change, which confers it on the tenancy's schedule (WP26c, D24; CHANGE_DECIDE_ROLES). The handler asks isDirector: admin is never a decider (D20), 403 and ledgered as denied.",
+  },
   recordEmailOnJob: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES_APPROVAL],
     routes: ["promoteEmailToJobUpdate", "recordEmailQuoteDecision"],
@@ -336,11 +342,22 @@ export const ACTION_ROLES = {
     routes: ["rejectJobInvoice"],
     why: "Reject an invoice.",
   },
+  rejectScheduleChange: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["rejectScheduleChange"],
+    why: "Reject a pending schedule change, with a note (CHANGE_DECIDE_ROLES). As ratifying: admin is never a decider (D20).",
+  },
   reopenJob: {
     gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR],
     refused: [A.ADMIN],
     routes: ["reopenJob"],
     why: "Reopen a done job with a reason (REOPEN_ROLES, J2): not admin, since reopening touches money records.",
+  },
+  requestScheduleChange: {
+    gate: TENANCY_DESK,
+    routes: ["requestScheduleChange", "withdrawScheduleChange"],
+    why: "Ask for a change to a tenancy's schedule, such as rent relief for a period, and withdraw it (CHANGE_REQUEST_ROLES, the tenancy edit roles). Withdrawing is the requester's alone on top of this list: anyone else gets 403, ledgered as denied.",
   },
   resendDirectorEmail: {
     gate: [A.ACCOUNTS, A.DIRECTOR, A.FACILITIES],
@@ -509,8 +526,8 @@ export const ACTION_ROLES = {
   },
   viewTenancy: {
     gate: TENANCY_DESK,
-    routes: ["getRegisterTenants", "getRegisterTenant"],
-    why: "The tenancy register and a tenant's detail.",
+    routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges"],
+    why: "The tenancy register, a tenant's detail and its schedule changes (TENANCY_VIEW_ROLES, CHANGE_VIEW_ROLES).",
   },
   viewTenancyDecisionHistory: {
     gate: TENANCY_DESK,
