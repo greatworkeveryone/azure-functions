@@ -148,6 +148,10 @@
     "facilities",
     "facilities_manager"
   ],
+  "createTestData": [
+    "admin",
+    "director"
+  ],
   "deleteAnyInspection": [
     "admin",
     "director",
@@ -248,6 +252,9 @@
     "admin",
     "director",
     "facilities_manager"
+  ],
+  "manageTestData": [
+    "admin"
   ],
   "markInvoiceInMyob": [
     "accounts_manager",
