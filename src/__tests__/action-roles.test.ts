@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "db72eca1ab028f3fb9c7b07ff37291b1f5224e81758195a77140d0dfc8a2eb37";
+const PINNED_SHA256 = "a20db71e4c4f074d9dfcb509b6b7de3b2d7456a4e696ea1ddba69e50bcc4338a";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -95,6 +95,13 @@ describe("the table", () => {
     ]);
     expect([...ACTION_ROLES.requestScheduleChange.routes]).toEqual(["requestScheduleChange", "withdrawScheduleChange"]);
     expect(ACTION_ROLES.requestScheduleChange.why).toContain("requester's alone");
+  });
+
+  it("lets admin manage test data, and admin and directors create it (D9, J4c)", () => {
+    expect(rolesFor(ACTION_ROLES.manageTestData)).toEqual([AppRole.ADMIN]);
+    expect([...ACTION_ROLES.manageTestData.routes]).toEqual(["setTestFlag"]);
+    expect(rolesFor(ACTION_ROLES.createTestData)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR]);
+    expect(ACTION_ROLES.createTestData.match).toBe("exact");
   });
 
   it("archives any job without the cfo until Connor's decision 11 says otherwise", () => {
