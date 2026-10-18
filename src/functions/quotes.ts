@@ -29,6 +29,7 @@ import type { Attribution } from "../approvalAuthority";
 import { approvalOutcome, refusalStatus, type ApprovalRefusalReason } from "../approvalOutcome";
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { attributedApprovalEnabled, nameableRoles, unlessHeldOff } from "../attributedApproval";
+import { quoteAttributionColumnExists } from "../quoteAttributionColumn";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
 import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse, samePerson } from "../moneyRules";
@@ -407,6 +408,7 @@ export async function upsertQuote(
       // approved paying this amount to this contractor). N2 (J2): the job's
       // status is never changed here; only the approval is cleared.
       if (effects.clearApproval) {
+        const CLEARS = await clearAttributionSql(connection);
         await executeQuery(
           connection,
           `UPDATE Quotes
@@ -414,7 +416,7 @@ export async function upsertQuote(
                   ApprovedAt = NULL, ApprovedBy = NULL,
                   DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
                   DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
-                  DirectorEmailSentBy = NULL, ${CLEAR_ATTRIBUTION}
+                  DirectorEmailSentBy = NULL${CLEARS}
             WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: QuoteID }],
         );
@@ -557,7 +559,12 @@ function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): App
 }
 
 /** Clears an attribution that no longer applies; the ledger keeps the history. */
-const CLEAR_ATTRIBUTION = "ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL";
+const CLEAR_ATTRIBUTION = ", ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL";
+
+/** CLEAR_ATTRIBUTION once migration 117's columns exist; nothing while 117 is pending, so quote writes keep working. */
+async function clearAttributionSql(connection: Connection): Promise<string> {
+  return (await quoteAttributionColumnExists(connection)) ? CLEAR_ATTRIBUTION : "";
+}
 
 async function approveQuoteInTransaction(
   connection: Connection,
@@ -667,6 +674,7 @@ async function approveQuoteInTransaction(
     const userCanApprove = outcome.kind === "approved";
     const directorNeeded = outcome.kind === "awaiting_director";
     const newStatus: string = outcome.kind;
+    const CLEARS = attributedTo ? "" : await clearAttributionSql(connection);
 
     await executeQuery(
       connection,
@@ -677,7 +685,7 @@ async function approveQuoteInTransaction(
                  AttributionAnsweredAt = NULL
            WHERE QuoteID = @Id`
         : `UPDATE Quotes
-             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy, ${CLEAR_ATTRIBUTION}
+             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy${CLEARS}
            WHERE QuoteID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: quoteId },
@@ -1089,10 +1097,11 @@ async function unapproveQuote(
         return { status: 400, jsonBody: { error } };
       }
 
+      const CLEARS = await clearAttributionSql(connection);
       await executeQuery(
         connection,
         `UPDATE Quotes
-           SET Status = 'pending', ApprovedAt = NULL, ApprovedBy = NULL, ${CLEAR_ATTRIBUTION}
+           SET Status = 'pending', ApprovedAt = NULL, ApprovedBy = NULL${CLEARS}
          WHERE QuoteID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: QuoteID }],
       );

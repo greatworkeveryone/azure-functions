@@ -121,7 +121,8 @@ export async function loadAttribution(
       buildingId: (row.BuildingID as number | null) ?? null,
       byName: (row.ApprovedBy as string | null) ?? null,
       contractorId: (row.ContractorID as number | null) ?? null,
-      current: row.Status === "approved",
+      // Completing the work doesn't end the question (review 117, N7).
+      current: row.Status === "approved" || row.Status === "completed",
       contractorName: (row.ContractorName as string | null) ?? null,
       disputed: false,
       jobId,
@@ -191,7 +192,7 @@ export async function listUnansweredAttributions(connection: Connection): Promis
   const rows = await executeQuery(
     connection,
     `SELECT N'quote' AS Kind, QuoteID AS Id, JobID, ApprovalAttributedToUserID AS UserId
-       FROM Quotes WHERE ApprovalAttributedToUserID IS NOT NULL AND AttributionAnsweredAt IS NULL AND Status = N'approved'
+       FROM Quotes WHERE ApprovalAttributedToUserID IS NOT NULL AND AttributionAnsweredAt IS NULL AND Status IN (N'approved', N'completed')
      UNION ALL
      SELECT N'variance', VarianceID, JobID, AttributedToUserID
        FROM dbo.MoneyVariances WHERE AttributedToUserID IS NOT NULL AND AnsweredAt IS NULL AND DirectorOverride = 0`,

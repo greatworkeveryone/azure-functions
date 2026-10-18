@@ -117,6 +117,11 @@ IF OBJECT_ID('dbo.MoneyVariances', 'U') IS NULL
   );
 GO
 
+-- A database that ran an earlier draft of 117 has the table without QuoteID.
+IF COL_LENGTH('dbo.MoneyVariances', 'QuoteID') IS NULL
+  ALTER TABLE dbo.MoneyVariances ADD QuoteID INT NULL;
+GO
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_MoneyVariances_Subject' AND object_id = OBJECT_ID('dbo.MoneyVariances'))
   CREATE INDEX IX_MoneyVariances_Subject ON dbo.MoneyVariances (SubjectType, SubjectID) INCLUDE (NewAmount, Disputed, QuoteID);
 GO

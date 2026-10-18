@@ -132,15 +132,25 @@ describe("getApprovalCandidates", () => {
     mockSql([USERS]);
   });
 
-  it("lists only people who could approve the amount themselves, never the caller or admin", async () => {
+  it("for a quote, lists only managers approveQuote accepts: never the caller, admin, or an accounts clerk (D1)", async () => {
     const res = await getApprovalCandidates(get({ amount: "4500", subject: "quote" }), ctx);
     expect(res.jsonBody).toEqual({
       candidates: [
-        { name: "Al Accounts", role: "accounts", userId: 34 },
         { name: "Dee Director", role: "director", userId: 33 },
         { name: "Mo Manager", role: "facilities_manager", userId: 30 },
       ],
     });
+  });
+
+  it("for a quote, never whoever added it (D1)", async () => {
+    mockSql([USERS, { match: /SELECT CreatedBy FROM Quotes WHERE QuoteID = @Id/, rows: [{ CreatedBy: "Mo Manager" }] }]);
+    const res = await getApprovalCandidates(get({ amount: "4500", quoteId: "7", subject: "quote" }), ctx);
+    expect((res.jsonBody as { candidates: { userId: number }[] }).candidates.map((c) => c.userId)).toEqual([33]);
+  });
+
+  it("for an invoice rise an accounts clerk still counts (Connor's decision 21 is open)", async () => {
+    const res = await getApprovalCandidates(get({ amount: "4500", subject: "invoice" }), ctx);
+    expect((res.jsonBody as { candidates: { userId: number }[] }).candidates.map((c) => c.userId)).toContain(34);
   });
 
   it("narrows as the amount rises", async () => {

@@ -17,6 +17,8 @@ interface QuoteRow { ApprovalAttributedToUserID: number | null; AttributionAnswe
 let variances: VarianceRow[] = [];
 let quotes: QuoteRow[] = [];
 let approvedQuote: { Amount: number; QuoteID: number } | null = null;
+/** Every quote on the job, for a JOIN that isn't on Jobs.ApprovedQuoteID (B6a). */
+let jobQuotes: { Amount: number; QuoteID: number }[] = [];
 
 const variance = (over: Partial<VarianceRow>): VarianceRow => ({
   AnsweredAt: null, AttributedToUserID: 30, DirectorOverride: false, Disputed: null, JobID: 9, NewAmount: 10600, QuoteID: 70,
@@ -27,13 +29,21 @@ beforeEach(() => {
   variances = [];
   quotes = [];
   approvedQuote = { Amount: 10000, QuoteID: 70 };
+  jobQuotes = [];
   limitsDb.getCachedApprovalLimits.mockResolvedValue([
     { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
     { MaxApprovalAmount: null, RoleName: "director" },
   ]);
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params: { name: string; value: unknown }[] = []) => {
     const p = Object.fromEntries(params.map((x) => [x.name, x.value]));
-    if (/FROM Jobs j INNER JOIN Quotes q/.test(sql)) return approvedQuote ? [approvedQuote] : [];
+    if (/FROM Jobs j INNER JOIN Quotes q/.test(sql)) {
+      if (!/ON q\.QuoteID = j\.ApprovedQuoteID/.test(sql)) return [...jobQuotes, ...(approvedQuote ? [approvedQuote] : [])];
+      return approvedQuote ? [approvedQuote] : [];
+    }
+    if (/FROM Quotes q\s/.test(sql)) {
+      const quote = quotes.find((r) => r.QuoteID === p.Id);
+      return quote ? [{ ...quote, Amount: 4500, ApprovedBy: "Fi", BuildingID: 5, QuoteNumber: "QT-1" }] : [];
+    }
     if (/FROM dbo\.ApprovalFacts/.test(sql)) return [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }];
     if (/MAX\(NewAmount\)/.test(sql)) {
       const hits = variances.filter(
@@ -47,7 +57,12 @@ beforeEach(() => {
     }
     if (/UNION ALL/.test(sql)) {
       const q = quotes
-        .filter((r) => r.ApprovalAttributedToUserID !== null && r.AttributionAnsweredAt === null && (!/Status = N'approved'/.test(sql) || r.Status === "approved"))
+        .filter(
+          (r) =>
+            r.ApprovalAttributedToUserID !== null &&
+            r.AttributionAnsweredAt === null &&
+            (!/Status IN \(N'approved', N'completed'\)/.test(sql) || ["approved", "completed"].includes(r.Status)),
+        )
         .map((r) => ({ Id: r.QuoteID, JobID: r.JobID, Kind: "quote", UserId: r.ApprovalAttributedToUserID }));
       const v = variances
         .filter((r) => r.AttributedToUserID !== null && r.AnsweredAt === null && (!/DirectorOverride = 0/.test(sql) || !r.DirectorOverride))
@@ -99,6 +114,28 @@ describe("checkVariance", () => {
       accepted: { purchaseOrderId: 99 }, body: null, buildingId: 5, editor, jobId: 9, newAmount: 10600, subject: "purchase_order",
     });
     expect(result).toEqual({ decision: { kind: "no_variance" }, originalAmount: 10000, quoteId: 70 });
+  });
+});
+
+describe("checkVariance: which quote it measures against", () => {
+  it("B6a: the job's APPROVED quote, never another quote on the job", async () => {
+    jobQuotes = [{ Amount: 30000, QuoteID: 69 }];
+    approvedQuote = { Amount: 15000, QuoteID: 71 };
+    const result = await checkVariance({} as never, {
+      accepted: { purchaseOrderId: 99 }, body: null, buildingId: 5, editor: { roles: ["facilities_manager"], userId: 3 }, jobId: 9, newAmount: 20000, subject: "purchase_order",
+    });
+    expect(result).toMatchObject({ decision: { kind: "refused" }, originalAmount: 15000, quoteId: 71 });
+  });
+});
+
+describe("N7: completing the work doesn't end the named manager's question", () => {
+  const { approvalAttributionAdapter } = require("../escalation/adapters/approvalAttribution") as typeof import("../escalation/adapters/approvalAttribution");
+  const ref = { policyKey: "quote.attribution_notice", subjectId: "quote:7@9", subjectType: "approval_attribution" };
+
+  it.each([["approved", true], ["completed", true], ["pending", false], ["rejected", false]])("a quote that is %s: notice live = %p", async (status, live) => {
+    quotes = [{ ApprovalAttributedToUserID: 30, AttributionAnsweredAt: null, JobID: 9, QuoteID: 7, Status: status }];
+    expect(await approvalAttributionAdapter.isConditionActive({} as never, ref, new Date())).toBe(live);
+    expect((await listUnansweredAttributions({} as never)).length).toBe(live ? 1 : 0);
   });
 });
 

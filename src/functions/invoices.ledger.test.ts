@@ -314,6 +314,9 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
       ["invoice.approve", "invoice", "5"],
       ["po.variance_within_tolerance", "invoice", "5"],
     ]);
+    // B6d: the rise is tied to the quote it was measured against.
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO dbo\.MoneyVariances/.test(String(c[1])));
+    expect((insert?.[2] as { name: string; value: unknown }[]).find((p) => p.name === "QuoteID")?.value).toBe(70);
   });
 
   it("routed up to someone senior, the rise isn't recorded yet: their approval, and their check, counts", async () => {

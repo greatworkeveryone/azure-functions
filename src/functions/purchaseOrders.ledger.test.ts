@@ -1368,7 +1368,7 @@ describe("R13: a purchase order above its approved quote, within the margin", ()
     expect(res.status).toBe(200);
     const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO dbo\.MoneyVariances/.test(String(c[1])));
     expect(Object.fromEntries((insert?.[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]))).toMatchObject({
-      AttributedToUserID: 30, DeltaAmount: 600, DeltaPercent: 6, JobID: 42, NewAmount: 10600, OriginalAmount: 10000, PreviousAmount: 10000, SubjectID: 99,
+      AttributedToUserID: 30, DeltaAmount: 600, DeltaPercent: 6, JobID: 42, NewAmount: 10600, OriginalAmount: 10000, PreviousAmount: 10000, QuoteID: 70, SubjectID: 99,
     });
     expect(rows()).toEqual([
       expect.objectContaining({

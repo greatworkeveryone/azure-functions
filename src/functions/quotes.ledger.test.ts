@@ -47,6 +47,7 @@ jest.mock("../escalation/engine", () => ({
   resolveWithin: jest.fn().mockResolvedValue({}),
 }));
 jest.mock("../escalation/store", () => ({ ...jest.requireActual("../escalation/store"), findLiveEscalation: jest.fn().mockResolvedValue(null) }));
+jest.mock("../quoteAttributionColumn", () => ({ quoteAttributionColumnExists: jest.fn().mockResolvedValue(true) }));
 jest.mock("../approvalAttributionNotice", () => ({ raiseAttributionNotice: jest.fn().mockResolvedValue(undefined) }));
 
 const auth = require("../auth") as {
@@ -68,6 +69,7 @@ const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest
 const planner = require("../planner") as { resolveActivePlannerTasks: jest.Mock };
 const plannerSync = require("../jobPlannerSync") as { syncJobActionTriggersStandalone: jest.Mock };
 const directorEmails = require("../email/director-emails") as { sendDirectorApprovalEmail: jest.Mock };
+const columnProbe = require("../quoteAttributionColumn") as { quoteAttributionColumnExists: jest.Mock };
 const notices = require("../approvalAttributionNotice") as { raiseAttributionNotice: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
@@ -1633,6 +1635,23 @@ describe("resendDirectorQuoteEmail", () => {
       }),
     ]);
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("migration 117 still pending (review 117 R2)", () => {
+  const quoteRow: Route = {
+    match: /SELECT JobID, QuoteNumber, ContractorName, Amount/,
+    rows: [{ Amount: 500, ContractorID: 3, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
+  };
+  afterEach(() => columnProbe.quoteAttributionColumnExists.mockResolvedValue(true));
+
+  it("approves without naming the attribution columns, so the write doesn't fail", async () => {
+    columnProbe.quoteAttributionColumnExists.mockResolvedValue(false);
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] }]);
+    expect((await approveQuote(makeRequest({ QuoteID: 7 }), ctx)).status).toBe(200);
+    const writes = db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1])).filter((sql: string) => /UPDATE Quotes/.test(sql));
+    expect(writes.length).toBeGreaterThan(0);
+    for (const sql of writes) expect(sql).not.toMatch(/ApprovalAttributedToUserID|AttributionAnsweredAt/);
   });
 });
 
