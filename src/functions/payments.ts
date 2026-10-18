@@ -8,6 +8,7 @@ import { beginTransaction, buildUpdateSet, closeConnection, commitTransaction, c
 import { decideAuthority, type AuthorityFacts } from "../approvalAuthority";
 import { loadApprovalFacts } from "../approvalAuthority-db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { adminRefusal, holdsAdmin } from "../moneyRules";
 import { isTestJob } from "../testRecords";
@@ -33,7 +34,7 @@ async function getPayments(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+  const denied = await requireRole(request, ACTION_ROLES.viewPayments.gate);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -282,7 +283,7 @@ async function upsertPayment(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.recordPayment.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, PAYMENT_TARGETS);
     return denied;
@@ -634,7 +635,7 @@ async function markPaymentPaid(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.recordPayment.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, MARK_PAID_TARGET);
     return denied;

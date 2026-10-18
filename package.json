@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "check:routes": "node scripts/check-routes.cjs",
+    "export-roles": "tsc && node scripts/export-roles.cjs",
     "migrate": "tsc && node scripts/migrate.cjs"
   },
   "dependencies": {

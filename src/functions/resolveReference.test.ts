@@ -1,6 +1,4 @@
 /// <reference types="jest" />
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { HttpRequest, InvocationContext } from "@azure/functions";
 
 jest.mock("@azure/functions", () => {
@@ -91,9 +89,9 @@ describe("resolveReference — access and input", () => {
     await resolveReference(makeRequest("66Sm261013"), ctx);
     const allowed = [...auth.requireRole.mock.calls[0][1]].sort();
 
-    const jobsSource = readFileSync(join(__dirname, "jobs.ts"), "utf8");
-    const block = jobsSource.match(/const VIEW_JOBS_ROLES = \[([\s\S]*?)\] as const;/)![1];
-    const jobRoles = [...block.matchAll(/AppRole\.(\w+)/g)].map((m) => auth.AppRole[m[1]]).sort();
+    // getJobs reads its gate from the who-can-do-what table (viewJobs).
+    const { ACTION_ROLES } = require("../action-roles") as typeof import("../action-roles");
+    const jobRoles = [...ACTION_ROLES.viewJobs.gate].sort();
 
     expect(jobRoles.length).toBeGreaterThan(0);
     expect(allowed).toEqual(jobRoles);

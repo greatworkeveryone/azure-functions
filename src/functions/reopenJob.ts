@@ -9,6 +9,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { AppRole, errorResponse, extractToken, requireRole, rolesForRequest, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { guardTransition } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
@@ -19,13 +20,13 @@ import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/
 const REOPEN_TARGET: RefusalTarget = { attempted: "job.reopen", idField: "JobID", subjectType: "job" };
 const REASON_MAX = 1000;
 
-/** The gate; the guard (REOPEN_ROLES) has the last word, and refuses admin. */
-const REOPEN_GATE = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] as const;
+// The gate is the who-can-do-what table's reopenJob entry; the guard
+// (REOPEN_ROLES) has the last word, and refuses admin.
 
 export async function reopenJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, REOPEN_GATE);
+  const denied = await requireRole(request, ACTION_ROLES.reopenJob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, REOPEN_TARGET);
     return denied;
