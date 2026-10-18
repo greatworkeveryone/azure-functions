@@ -35,23 +35,29 @@ describe("who may ask for a decision, and who may read one", () => {
 });
 
 describe("who can be asked", () => {
-  it("is whoever can open the escalation inbox, the CFO included, and never the baseline user", () => {
-    expect(names(DECISION_MAKER_ROLES)).toEqual(names(ESCALATION_ROLES));
+  it("is whoever can open the escalation inbox except admin, the CFO included, and never the baseline user", () => {
+    expect(names(DECISION_MAKER_ROLES)).toEqual(names(ESCALATION_ROLES.filter((role) => role !== "admin")));
     expect(DECISION_MAKER_ROLES).toContain("cfo");
     expect(DECISION_MAKER_ROLES).not.toContain("user");
+  });
+
+  it("never admin: IT oversight approves nothing real (decision 4, D20), whatever the inbox lets it open", () => {
+    expect(ESCALATION_ROLES).toContain("admin");
+    expect(DECISION_MAKER_ROLES).not.toContain("admin");
   });
 });
 
 describe("who may answer a decision request, and who may finish a next step (A2)", () => {
-  it("the gate is whoever can be asked: the roles that can open the escalation inbox, never the baseline user", () => {
-    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(DECISION_MAKER_ROLES));
+  it("the gate is whoever can open the escalation inbox, never the baseline user: whoever can be asked, and admin, who is stopped at the request (standing.ts) unless the job is a test job", () => {
     expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names([...DECISION_MAKER_ROLES, "admin"]));
     expect(RESPOND_TO_DECISION_ROLES).not.toContain("user");
     expect(names(COMPLETE_NEXT_STEP_ROLES)).toEqual(names(RESPOND_TO_DECISION_ROLES));
   });
 
-  it("a next step may be handed to whoever can open the escalation inbox, where it lands", () => {
+  it("a next step may be handed to whoever can open the escalation inbox, where it lands, admin included: doing a step approves nothing", () => {
     expect(names(NEXT_STEP_OWNER_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(NEXT_STEP_OWNER_ROLES).toContain("admin");
     expect(NEXT_STEP_OWNER_ROLES).not.toContain("user");
   });
 

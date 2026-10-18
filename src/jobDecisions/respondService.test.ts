@@ -11,6 +11,7 @@ import { findLiveEscalation, listActiveUsers } from "../escalation/store";
 import type { DirectoryUser, EscalationPolicy, EscalationRow } from "../escalation/types";
 import { record } from "../ledger";
 import { recordRefusal } from "../ledger/refusals";
+import { isTestJob } from "../testRecords";
 import * as decisions from "./decisionsStore";
 import type { DecisionRow } from "./decisionsStore";
 import { RequestError } from "./request";
@@ -28,6 +29,7 @@ jest.mock("../db", () => ({
 }));
 jest.mock("../ledger", () => ({ ...jest.requireActual("../ledger"), record: jest.fn() }));
 jest.mock("../ledger/refusals", () => ({ recordRefusal: jest.fn() }));
+jest.mock("../testRecords", () => ({ isTestJob: jest.fn() }));
 jest.mock("../escalation/engine", () => ({ SWEEP_ACTOR: { kind: "system", name: "escalationSweepTimer" }, raiseWithin: jest.fn(), resolveWithin: jest.fn(), withdrawWithin: jest.fn() }));
 jest.mock("../escalation/policies", () => ({ getPolicy: jest.fn() }));
 jest.mock("../escalation/store", () => ({ ...jest.requireActual("../escalation/store"), findLiveEscalation: jest.fn(), listActiveUsers: jest.fn() }));
@@ -48,6 +50,7 @@ jest.mock("./decisionsStore", () => ({
 const db = require("../db") as { beginTransaction: jest.Mock; commitTransaction: jest.Mock; rollbackTransaction: jest.Mock };
 const ledger = jest.mocked(record);
 const refusal = jest.mocked(recordRefusal);
+const testJobOf = jest.mocked(isTestJob);
 const raise = jest.mocked(raiseWithin);
 const resolveEscalation = jest.mocked(resolveWithin);
 const policyOf = jest.mocked(getPolicy);
@@ -174,6 +177,7 @@ beforeEach(() => {
     request: request(),
   };
   usersOf.mockResolvedValue(USERS);
+  testJobOf.mockResolvedValue(false);
   policyOf.mockResolvedValue(POLICY);
   store.lockJob.mockImplementation(async () => world.job);
   store.getRequestRow.mockImplementation(async () => (world.request ? { ...world.request } : null));
@@ -719,6 +723,81 @@ describe("who may answer", () => {
   it("is checked before the request's state, so a stranger learns nothing from a 409", async () => {
     world.request = request({ state: "answered" });
     expect((await refused(() => respondDecision(conn, as(ELI), input()))).code).toBe("not_a_decision_maker");
+  });
+});
+
+// ── Admin approves nothing real (decision 4) ─────────────────────────────────
+
+describe("admin answering", () => {
+  // Admin can no longer be asked (roles.ts), so these are requests that name one all
+  // the same: written before that, or by hand.
+  const ADA = user(7, "Ada", "admin");
+  const asksAdmin = () => {
+    usersOf.mockResolvedValue([...USERS, ADA]);
+    world.request = request({ decisionMakers: { role: null, userIds: [CAM.userId, ADA.userId] } });
+  };
+
+  it("on a real job is refused: 403 in plain words, ledgered as denied once the transaction has rolled back, nothing written", async () => {
+    asksAdmin();
+
+    const error = await refused(() => respondDecision(conn, as(ADA), input()));
+
+    expect(error).toMatchObject({ code: "not_a_decision_maker", status: 403, details: { reason: "admin_test_jobs_only" } });
+    expect(error.message).toBe("Admin answers questions on test jobs only. This is a real job, so someone else has to answer it.");
+    expect(world.events).toEqual(["begin", "rollback"]);
+    nothingWritten();
+    expect(refusal).toHaveBeenCalledTimes(1);
+    expect(refusal).toHaveBeenCalledWith(
+      conn,
+      actorOf(ADA),
+      { id: 12, type: "job" },
+      { attempted: "decision.approve", code: "not_a_decision_maker", message: error.message, state: { assignmentMode: "named", requestId: 7, state: "pending", tier: "soon" } },
+      12,
+    );
+    expect(db.rollbackTransaction.mock.invocationCallOrder[0]).toBeLessThan(refusal.mock.invocationCallOrder[0]);
+    expect(testJobOf).toHaveBeenCalledWith(conn, 12);
+  });
+
+  it("on a real job is refused whatever the outcome", async () => {
+    asksAdmin();
+    for (const outcome of ["approve", "deny", "revise"]) {
+      const error = await refused(() => respondDecision(conn, as(ADA), input({ outcome, rationale: "Fine" })));
+      expect(error).toMatchObject({ code: "not_a_decision_maker", details: { reason: "admin_test_jobs_only" } });
+    }
+    nothingWritten();
+  });
+
+  it("put to the admin role, on a real job, is refused the same", async () => {
+    usersOf.mockResolvedValue([...USERS, ADA]);
+    world.request = request({ assignmentMode: "role", decisionMakers: { role: "admin", userIds: [ADA.userId] } });
+
+    expect(await refused(() => respondDecision(conn, as(ADA), input()))).toMatchObject({ code: "not_a_decision_maker", details: { reason: "admin_test_jobs_only" } });
+    nothingWritten();
+  });
+
+  it("on a test job may answer, and the ledger says it was as one of those named", async () => {
+    asksAdmin();
+    testJobOf.mockResolvedValue(true);
+
+    await respondDecision(conn, as(ADA), input());
+
+    expect(testJobOf).toHaveBeenCalledWith(conn, 12);
+    expect(ledger.mock.calls[0][1]).toMatchObject({ action: "decision.approve", actor: actorOf(ADA), ruleApplied: "responder.named" });
+    expect(world.events).toContain("commit");
+    expect(refusal).not.toHaveBeenCalled();
+  });
+
+  it("on a test job is still only answering what was put to them", async () => {
+    usersOf.mockResolvedValue([...USERS, ADA]);
+    testJobOf.mockResolvedValue(true);
+
+    expect(await refused(() => respondDecision(conn, as(ADA), input()))).toMatchObject({ details: { reason: "not_named" } });
+    nothingWritten();
+  });
+
+  it("is the only answer that looks the job up: everyone else's costs no extra query", async () => {
+    await respondDecision(conn, as(CAM), input());
+    expect(testJobOf).not.toHaveBeenCalled();
   });
 });
 

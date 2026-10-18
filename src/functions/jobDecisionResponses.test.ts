@@ -56,6 +56,8 @@ interface JobRec {
   createdById: string;
   isArchived: boolean;
   isInternal: boolean;
+  /** Jobs.IsTest: the job is test data (decision 4). */
+  isTest?: boolean;
   jobId: number;
   kind: string;
   status: string;
@@ -418,6 +420,11 @@ function installDatabase(): void {
       const person = PEOPLE[String(p.Oid).replace("oid-", "")];
       return person ? [{ UserID: person.id }] : [];
     }
+    if (/SELECT COL_LENGTH\('dbo\.Jobs', 'IsTest'\) AS Len/.test(text)) return [{ Len: 1 }];
+    if (/SELECT IsTest FROM Jobs WHERE JobID = @JobID/.test(text)) {
+      const job = mockWorld.jobs.get(p.JobID as number);
+      return job ? [{ IsTest: job.isTest ? 1 : 0 }] : [];
+    }
     if (/SELECT BuildingID FROM Jobs WHERE JobID = @JobID/.test(text)) {
       const job = mockWorld.jobs.get(p.JobID as number);
       return job ? [{ BuildingID: job.buildingId }] : [];
@@ -734,6 +741,59 @@ describe("who may answer a request", () => {
   it("an admin who was not named may not either", async () => {
     await ask();
     expect((await respond({}, "ada")).status).toBe(403);
+  });
+
+  describe("an admin a request names all the same (it can't be asked now, but an old one may)", () => {
+    const namesAda = async () => {
+      await ask();
+      mockWorld.requests[0].decisionMakers = { role: null, userIds: [PEOPLE.cam.id, PEOPLE.ada.id] };
+      mockWorld.ledger = [];
+      mockWorld.mail = [];
+    };
+
+    it("may not answer on a real job: 403 in plain words, ledgered as denied, and nothing changes", async () => {
+      await namesAda();
+      const before = await pending();
+
+      const res = await respond({}, "ada");
+
+      expect(res.status).toBe(403);
+      expect(json(res)).toMatchObject({
+        code: "not_a_decision_maker",
+        error: "Admin answers questions on test jobs only. This is a real job, so someone else has to answer it.",
+        reason: "admin_test_jobs_only",
+      });
+      expect(mockWorld.ledger).toHaveLength(1);
+      expect(mockWorld.ledger[0]).toMatchObject({
+        action: "denied",
+        actor: { kind: "user", name: "Ada", role: "admin", userId: 7 },
+        before: { attempted: "decision.approve", requestId: 7, state: "pending" },
+        jobId: 12,
+        ruleApplied: "not_a_decision_maker",
+      });
+      expect(mockWorld.decisions).toHaveLength(0);
+      expect(mockWorld.mail).toHaveLength(0);
+      expect(await pending()).toEqual(before);
+      expect(byPolicy("job.next_step")).toHaveLength(0);
+    });
+
+    it("may answer on a test job, as one of the people named", async () => {
+      await namesAda();
+      theJob().isTest = true;
+
+      const res = await respond({}, "ada");
+
+      expect(res.status).toBe(200);
+      expect(mockWorld.ledger.find((e) => e.action === "decision.approve")).toMatchObject({ actor: { name: "Ada", role: "admin" }, ruleApplied: "responder.named" });
+      expect(mockWorld.decisions).toHaveLength(1);
+    });
+
+    it("on a test job, the others named still may, and the one not named still may not", async () => {
+      await namesAda();
+      theJob().isTest = true;
+      expect((await respond({}, "eli")).status).toBe(403);
+      expect((await respond({}, "cam")).status).toBe(200);
+    });
   });
 
   it("a request put to a role is answered by whoever holds the role now, including someone who joined it since", async () => {
@@ -1356,6 +1416,27 @@ describe("completing the next step", () => {
     ]);
     expect(theJob().status).toBe("Done");
     expect(byPolicy("job.next_step")[0]).toMatchObject({ resolutionCode: "next_step_done", resolutionNote: "Paid on the 14th", resolvedByName: "Alana", status: "resolved" });
+  });
+
+  it("when the transition guard refuses to close the job, the step is still done and the job stays open with the guard's sentence, and nothing is written to the job", async () => {
+    await approved();
+    // Not internal, so the machine has no direct close for it: the guard says so.
+    theJob().isInternal = false;
+
+    const res = await complete({ decisionId: 4, note: "Paid on the 14th" }, "alana");
+
+    expect(res.status).toBe(200);
+    expect(json(res)).toMatchObject({
+      job: { jobId: 12, status: "New" },
+      jobClosed: false,
+      jobStaysOpen: "refused",
+      jobStaysOpenReason: "A job can't move there from where it is now.",
+    });
+    expect(json(res).decision.nextStep).toMatchObject({ closed: { kind: "done" }, state: "done" });
+    expect(theJob().status).toBe("New");
+    expect(mockWorld.events).not.toContain("close job");
+    expect(mockWorld.jobEvents.filter((e) => e.eventType === "status_change")).toEqual([]);
+    expect(mockWorld.ledger.find((e) => e.action === "decision.next_step_done")?.after).toMatchObject({ jobClosed: false, jobStaysOpen: "refused" });
   });
 
   it("ledgers decision.next_step_done on the job with the note as the reason, under the chase's correlation id", async () => {

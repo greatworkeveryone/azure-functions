@@ -13,8 +13,16 @@
 // it was put to: the ask refuses to name them (people.ts), and a role request leaves
 // them out of the people it goes to. Directors and admin are not decision-makers by
 // virtue of their role; they are only if asked.
+//
+// Admin approves nothing real (beta sprint decision 4): it can no longer be asked
+// (roles.ts DECISION_MAKER_ROLES), and a request that names it all the same, from
+// before that or written by hand, is answered by admin on a test job only. This is
+// the same bar the money handlers apply (moneyRules adminRefusal), and it comes after
+// the question of whether admin was asked at all, so an admin who was not asked is
+// told so, not told about test jobs.
 
 import { normaliseRole, roleLabel } from "../escalation/roles";
+import { adminRefusal } from "../moneyRules";
 import type { DecisionRow } from "./decisionsStore";
 import { MANAGER_AND_ABOVE_ROLES } from "./roles";
 import type { DecisionRequestRow } from "./store";
@@ -22,16 +30,29 @@ import type { DecisionRequestRow } from "./store";
 export interface Responder {
   /** Their roles now, as the request was made (AppUsers.Role, or the dev override). */
   roles: readonly string[];
+  /** The request's job is test data (testRecords isTestJob). Only admin's standing depends on it, so
+   *  the caller need not look it up for anyone else. Absent means a real job. */
+  testJob?: boolean;
   userId: number | null;
 }
 
 export type Standing =
   | { allowed: true; via: "named" | "role" }
-  | { allowed: false; code: "asker" | "not_named" | "not_in_role"; message: string };
+  | { allowed: false; code: "admin_test_jobs_only" | "asker" | "not_named" | "not_in_role"; message: string };
+
+const ADMIN_TEST_JOBS_ONLY = "Admin answers questions on test jobs only. This is a real job, so someone else has to answer it.";
 
 type StandingRequest = Pick<DecisionRequestRow, "assignmentMode" | "decisionMakers" | "requestedByUserId">;
 
 export function responderStanding(request: StandingRequest, who: Responder, askedNames: readonly string[] = []): Standing {
+  const standing = standingOnRequest(request, who, askedNames);
+  if (standing.allowed && adminRefusal(who.roles, who.testJob === true)) {
+    return { allowed: false, code: "admin_test_jobs_only", message: ADMIN_TEST_JOBS_ONLY };
+  }
+  return standing;
+}
+
+function standingOnRequest(request: StandingRequest, who: Responder, askedNames: readonly string[]): Standing {
   if (who.userId !== null && request.requestedByUserId === who.userId) {
     return { allowed: false, code: "asker", message: "You asked this question, so someone else has to answer it." };
   }

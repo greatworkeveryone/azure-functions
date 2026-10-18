@@ -758,8 +758,24 @@ describe("requestJobDecision", () => {
       [{ userIds: [PEOPLE.cam.id, PEOPLE.alana.id] }, "decision_maker_is_requester"],
       [{ userIds: [PEOPLE.cam.id, 999] }, "decision_maker_unknown"],
       [{ userIds: [PEOPLE.cam.id, PEOPLE.una.id] }, "decision_maker_role_not_allowed"],
+      [{ userIds: [PEOPLE.cam.id, PEOPLE.ada.id] }, "decision_maker_role_not_allowed"],
     ])("refuses %j with 422 %s", async (decisionMakers, code) => {
       expect(await ask({ decisionMakers })).toMatchObject({ jsonBody: { code }, status: 422 });
+      nothingWritten();
+    });
+
+    it("never asks admin, by name or as a role: admin approves nothing real (decision 4), and says so in plain words", async () => {
+      expect(await ask({ decisionMakers: { userIds: [PEOPLE.ada.id] } })).toMatchObject({
+        jsonBody: { code: "decision_maker_role_not_allowed", error: "Admin looks after Floorplan and doesn't decide on jobs, so Ada can't be asked. Ask someone else." },
+        status: 422,
+      });
+      expect(await ask({ assignmentMode: "role", decisionMakers: { role: "admin" } })).toMatchObject({
+        jsonBody: {
+          code: "decision_maker_role_not_allowed",
+          error: "Admin looks after Floorplan and doesn't decide on jobs, so a question can't be put to the Admin role. Ask a director, the CFO or a manager.",
+        },
+        status: 422,
+      });
       nothingWritten();
     });
 
