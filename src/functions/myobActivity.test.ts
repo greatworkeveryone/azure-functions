@@ -25,11 +25,12 @@ jest.mock("../myob/activity/activityStore", () => ({
   CALL_ROWS: 2000, PROPOSAL_ROWS: 500, loadCallRows: jest.fn().mockResolvedValue([]), loadProposalRows: jest.fn().mockResolvedValue([]),
   loadRegisteredFiles: jest.fn().mockResolvedValue(new Map([["cf", "Demo Pty Ltd"]])),
 }));
-jest.mock("../myob/activity/reconcile", () => ({ RECONCILE_LIMIT: 100, reconcile: jest.fn().mockResolvedValue({ rows: [] }) }));
+jest.mock("../myob/activity/reconcile", () => ({ RECONCILE_LIMIT: 25, reconcile: jest.fn().mockResolvedValue({ rows: [], total: 0 }) }));
 jest.mock("../myob/activity/acceptBaseline", () => ({ acceptBaseline: jest.fn().mockResolvedValue({ proposalId: 5 }), readForAcceptance: jest.fn().mockResolvedValue({ RowVersion: "9" }) }));
 jest.mock("../myob/proposalsStore", () => ({ getProposal: jest.fn().mockResolvedValue({ proposalId: 5 }) }));
 
 import type { HttpRequest, InvocationContext } from "@azure/functions";
+import { AppRole } from "../auth";
 import { acceptMyobBaseline } from "./acceptMyobBaseline";
 import { getMyobActivity } from "./getMyobActivity";
 import { reconcileMyob } from "./reconcileMyob";
@@ -57,6 +58,12 @@ describe("getMyobActivity", () => {
     expect(store.loadProposalRows).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ state: "verified" }));
   });
 
+  it("says when the calls were cut at 2,000 before the company-file filter", async () => {
+    store.loadCallRows.mockResolvedValueOnce(Array.from({ length: 2000 }, (_, i) => ({ LogId: i, Method: "GET", Path: "/accountright/", Phase: "response" })));
+    const res = await getMyobActivity(get({ file: "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766", kind: "calls" }), ctx);
+    expect(res.jsonBody).toMatchObject({ truncated: true, truncatedBeforeFileFilter: true });
+  });
+
   it("exports the calls as CSV, and 400s a bad filter", async () => {
     expect((await getMyobActivity(get({ format: "csv", kind: "calls" }), ctx)).jsonBody).toMatchObject({ filename: expect.stringMatching(/^floorplan-myob-calls-/) });
     expect((await getMyobActivity(get({ kind: "ledger" }), ctx)).status).toBe(400);
@@ -72,7 +79,7 @@ describe("reconcileMyob", () => {
   it("checks against MYOB as the signed-in person, rate-limited per person, and says whether she may accept", async () => {
     const res = await reconcileMyob(post({ companyFileId: "0F9E8D7C-6B5A-4F3E-9D2C-1B0A99887766" }), ctx);
     expect(res).toMatchObject({ jsonBody: { canAccept: true, rows: [] }, status: 200 });
-    expect(reconcile).toHaveBeenCalledWith(expect.anything(), { kind: "user", name: "Johanne", oid: "cfo-oid" }, { companyFileId: "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766", limit: 100 }, expect.anything());
+    expect(reconcile).toHaveBeenCalledWith(expect.anything(), { kind: "user", name: "Johanne", oid: "cfo-oid" }, { companyFileId: "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766", limit: 25 }, expect.anything());
     expect(checkRateLimit).toHaveBeenCalledWith("reconcileMyob:cfo-oid", { limit: 3, windowMs: 60_000 });
     auth.rolesForRequest.mockResolvedValue(["director"]);
     expect((await reconcileMyob(post({}), ctx)).jsonBody).toMatchObject({ canAccept: false });
@@ -82,6 +89,43 @@ describe("reconcileMyob", () => {
     checkRateLimit.mockReturnValueOnce({ allowed: false, retryAfterMs: 30_000 });
     expect((await reconcileMyob(post({}), ctx)).status).toBe(429);
     expect((await reconcileMyob(post({ companyFileId: "rp" }), ctx)).status).toBe(400);
+  });
+});
+
+describe("the read gates (cfo, director, admin through requireRole)", () => {
+  const realAuth = jest.requireActual("../auth") as typeof import("../auth");
+  const names = ["DEV_ROLE_OVERRIDE_ENABLED", "AZURE_FUNCTIONS_ENVIRONMENT", "WEBSITE_INSTANCE_ID"] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const asRole = (role: string, body: unknown = {}) =>
+    ({ headers: { get: (key: string) => (key.toLowerCase() === "x-dev-roles" ? role : null) }, json: async () => body, query: new URLSearchParams() }) as unknown as HttpRequest;
+
+  beforeEach(() => {
+    // The X-Dev-Roles header counts only on a local Development host (src/jwt.ts): the real role check, with the role named.
+    process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+    delete process.env.WEBSITE_INSTANCE_ID;
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    auth.requireRole.mockImplementation((request: HttpRequest, allowed: readonly AppRole[]) => realAuth.requireRole(request, allowed));
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    auth.requireRole.mockResolvedValue(null);
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  it.each([["getMyobActivity"], ["reconcileMyob"]])("403s a facilities caller on %s before any work", async (name) => {
+    const handler = name === "getMyobActivity" ? getMyobActivity : reconcileMyob;
+    expect((await handler(asRole("facilities"), ctx)).status).toBe(403);
+    expect(store.loadProposalRows).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(auth.requireRole).toHaveBeenCalledWith(expect.anything(), [AppRole.CFO]);
+  });
+
+  it.each([["director"], ["cfo"]])("lets %s read the activity", async (role) => {
+    expect((await getMyobActivity(asRole(role), ctx)).status).toBe(200);
   });
 });
 

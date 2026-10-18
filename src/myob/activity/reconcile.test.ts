@@ -33,7 +33,9 @@ const row = (id: number, over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
-  executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("FROM dbo.DecisionLedger") ? [] : [row(1), row(2), row(3), row(4)]));
+  executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+    sql.includes("FROM dbo.DecisionLedger") ? [] : sql.includes("COUNT(*)") ? [{ Total: 40 }] : [row(1), row(2), row(3), row(4)],
+  );
 });
 
 describe("reconcile", () => {
@@ -57,6 +59,16 @@ describe("reconcile", () => {
     for (const [, sql] of executeQuery.mock.calls as [unknown, string][]) expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE)\b/);
   });
 
+  it("says how many records there are in all, and which differences the CFO may accept", async () => {
+    const get = jest.fn()
+      .mockResolvedValueOnce({ ...SENT, JournalMemo: "Johanne: hold", RowVersion: "9", Status: "Open" })
+      .mockResolvedValueOnce({ ...SENT, Lines: [{ ...SENT.Lines[0], Total: 4900 }], RowVersion: "9", Status: "Open" })
+      .mockResolvedValue({ ...SENT, RowVersion: "7", Status: "Open" });
+    const result = await reconcile({} as never, JOHANNE, { companyFileId: null, limit: 25 }, { now: NOW, reader: { get } });
+    expect(result.total).toBe(40);
+    expect(result.rows.map((r) => [r.status, r.acceptable])).toEqual([["differs", true], ["differs", false], ["matched", false], ["matched", false]]);
+  });
+
   it("calls a record missing at the first 404: the CFO is looking now", async () => {
     const get = jest.fn().mockRejectedValue(new MyobPurchaseError(404, "not found"));
     const result = await reconcile({} as never, JOHANNE, { companyFileId: null, limit: 100 }, { now: NOW, reader: { get } });
@@ -65,8 +77,8 @@ describe("reconcile", () => {
 
   it("selects positively: the latest verified proposal per MYOB record, optionally for one file, capped", async () => {
     const get = jest.fn().mockResolvedValue({ ...SENT, RowVersion: "7", Status: "Open" });
-    await reconcile({} as never, JOHANNE, { companyFileId: CF, limit: 25 }, { now: NOW, reader: { get } });
-    const [, sql, params] = executeQuery.mock.calls[0] as [unknown, string, { name: string; value: unknown }[]];
+    await reconcile({} as never, JOHANNE, { companyFileId: CF, limit: 500 }, { now: NOW, reader: { get } });
+    const [, sql, params] = executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("TOP (@Limit)")) as [unknown, string, { name: string; value: unknown }[]];
     expect(sql.replace(/\s+/g, " ")).toMatch(/p\.State = N'verified' AND p\.MyobUid IS NOT NULL/);
     expect(sql).toMatch(/p\.ProposalId = \(SELECT MAX\(q\.ProposalId\)/);
     expect(sql).toMatch(/@File IS NULL OR p\.CompanyFileId = @File/);

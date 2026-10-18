@@ -5,9 +5,12 @@
 // from MYOB's record. CFO only (the M9 controller gate), with her note, ledgered
 // as myob.control_change.
 //
-// It changes only Floorplan's mirror of the record (dbo.MyobProposals): never
-// MYOB (the read is GET-only), never a Floorplan record, and never an invoice's
-// mirror, whose amounts are fixed once approved or paid.
+// It covers only what isn't Floorplan's money or identity (memo, comment, line
+// descriptions, other dates, freight: acceptedBaseline.ts); a difference in
+// amount, supplier, account, tax, number or date is refused, since taking
+// MYOB's value into Floorplan isn't built. It changes only Floorplan's mirror
+// of the record (dbo.MyobProposals): never MYOB (the read is GET-only), never a
+// Floorplan record, and never an invoice's mirror.
 
 import type { Connection } from "tedious";
 import { record as ledgerRecord, type LedgerActor } from "../../ledger";
@@ -18,6 +21,7 @@ import type { ProposalRow } from "../proposalRow";
 import { getProposal, latestVerifiedForUid, updateProposal } from "../proposalsStore";
 import { MyobPurchaseError, type MyobReader } from "../readbackClient";
 import { compareReadback } from "../readbackCompare";
+import { acceptanceProblems } from "./acceptedBaseline";
 
 export interface AcceptInput {
   expectedRowVersion: string;
@@ -58,6 +62,13 @@ export async function acceptBaseline(tx: Connection, actor: LedgerActor, input: 
     floorplanLastTouch: null, kind: KIND_OF[proposal.operation], lastSeen: proposal.readBack, myob: mine, now,
     previousStatus: proposal.myobStatus, sent: proposal.readBack ?? proposal.payload, sentLabels: { supplier: proposal.rendered?.supplier ?? "the supplier" },
   });
+  const blocked = acceptanceProblems(verdict.discrepancy?.fields ?? []);
+  if (blocked.length > 0) {
+    throw refuse(
+      409,
+      `MYOB differs in ${blocked.join(", ")}: taking MYOB's value into Floorplan isn't built yet, and accepting it here would leave Floorplan's record and MYOB's disagreeing. Put it right in MYOB or in Floorplan.`,
+    );
+  }
   const updated = await updateProposal(tx, proposal.proposalId, proposal.rowVersion, {
     Discrepancy: null,
     LastReadBackAt: now,

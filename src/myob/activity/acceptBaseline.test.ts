@@ -67,6 +67,20 @@ describe("acceptBaseline", () => {
     expect(record).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["the amount", { Lines: [{ Account: { UID: "a" }, Total: 4900, Type: "Transaction" }] }, "Amount"],
+    ["the supplier", { Supplier: { UID: "s2" } }, "Supplier"],
+    ["tax-inclusive", { IsTaxInclusive: false }, "Tax inclusive"],
+    ["the record's date", { Date: "2026-10-15T00:00:00" }, "Date"],
+  ])("refuses to accept a difference in %s: accepting MYOB's value into Floorplan isn't built", async (_label, edit, label) => {
+    await expect(acceptBaseline({} as never, JOHANNE, input({ myobRecord: { ...EDITED, ...edit } }), NOW)).rejects.toMatchObject({
+      message: expect.stringMatching(new RegExp(`${label}.*isn't built`)),
+      status: 409,
+    });
+    expect(store.updateProposal).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
   it("409s when someone else changed the proposal between the lock and the write", async () => {
     store.updateProposal.mockResolvedValue(null);
     await expect(acceptBaseline({} as never, JOHANNE, input(), NOW)).rejects.toMatchObject({ status: 409 });

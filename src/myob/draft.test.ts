@@ -3,6 +3,7 @@
 jest.mock("./subjects", () => ({ loadSubject: jest.fn() }));
 jest.mock("./mappings", () => ({ resolveMapping: jest.fn() }));
 jest.mock("./proposalsStore", () => ({ latestVerifiedForUid: jest.fn(), proposalsForSubject: jest.fn() }));
+jest.mock("./activity/acceptedBaseline", () => ({ baselineAccepted: jest.fn().mockResolvedValue(false) }));
 
 import { buildDraft } from "./draft";
 import { payloadHash } from "./hash";

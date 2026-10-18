@@ -30,7 +30,9 @@ export async function getMyobActivity(request: HttpRequest, context: InvocationC
     const view = kind === "proposals" ? proposalView(raw) : callView(raw, files, myobApiBase(), filters.companyFileId);
     if (format === "csv") return { jsonBody: activityCsv(view, kind), status: 200 };
     const truncated = raw.length >= (kind === "proposals" ? PROPOSAL_ROWS : CALL_ROWS);
-    return { jsonBody: { ...view, files: [...files].map(([id, name]) => ({ id, name })), kind, truncated }, status: 200 };
+    // Calls are read newest first up to CALL_ROWS, then kept to the chosen file: say so when the cap was hit first.
+    const truncatedBeforeFileFilter = truncated && kind === "calls" && filters.companyFileId !== null;
+    return { jsonBody: { ...view, files: [...files].map(([id, name]) => ({ id, name })), kind, truncated, truncatedBeforeFileFilter }, status: 200 };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     context.error("getMyobActivity failed:", message);

@@ -9,6 +9,7 @@
 //           of it to compare with
 
 import type { Connection } from "tedious";
+import { baselineAccepted } from "./activity/acceptedBaseline";
 import { journalMemo, orderComment, updateMemo } from "./attribution";
 import { darwinDisplayDate, myobDocumentDate } from "./darwinClock";
 import { payloadHash, sha256Hex } from "./hash";
@@ -77,6 +78,12 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
     );
     if (!created?.myobUid) return refuse(409, "Floorplan hasn't created this record in MYOB, so it can't update it");
     const seen = await latestVerifiedForUid(connection, created.companyFileId, created.myobUid);
+    if (seen && (await baselineAccepted(connection, seen.correlationId))) {
+      return refuse(
+        409,
+        "Johanne accepted MYOB's record as the baseline for this one, so Floorplan won't update it: an update would overwrite what she accepted. Change it in MYOB by hand.",
+      );
+    }
     target = { myobRowVersion: seen?.myobRowVersion ?? null, uid: created.myobUid };
     lastSeen = seen?.readBack ?? created.readBack ?? created.payload;
     date = String(lastSeen.Date ?? created.payload.Date);

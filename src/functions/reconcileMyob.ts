@@ -6,14 +6,21 @@ import { reconcile, RECONCILE_LIMIT } from "../myob/activity/reconcile";
 import { LIVE_READER } from "../myob/readbackClient";
 import { checkRateLimit } from "../rateLimit";
 
-// POST /api/reconcileMyob — { companyFileId? }: for each record Floorplan sent
-// to MYOB (the latest verified proposal per record, at most 100), Floorplan's
-// record against MYOB's, read now through the GET-only reader (SPR-M4).
-// Matched, differs field by field, missing in MYOB, or not read and why. It
-// writes nothing to Floorplan's records; each GET is logged in MyobApiLog as
+// POST /api/reconcileMyob — { companyFileId? }: for the newest 25 records
+// Floorplan sent to MYOB (the latest verified proposal per record), what
+// Floorplan sent against MYOB's record, read now through the GET-only reader
+// (SPR-M4); `total` says how many there are, the read-back timer checks the
+// rest. Matches, differs field by field, missing in MYOB, or not read and why.
+// It writes nothing to Floorplan's records; each GET is logged in MyobApiLog as
 // every MYOB call is. POST because each check calls MYOB. Readable by cfo (and
 // director and admin, as the other MYOB views); 3 checks a minute per person.
 // `canAccept` is true only for the CFO (acceptMyobBaseline).
+//
+// Not behind MYOB_READBACK_ENABLED (decision 19): that switch gates reads
+// nobody asked for at that moment (the timer, and refreshMyobRecord, which
+// runs whenever a record is opened). This one runs only on a person's
+// deliberate click, as testMyobConnection does; the file's mode and the CFO's
+// purchases.read switch still apply to every GET.
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
