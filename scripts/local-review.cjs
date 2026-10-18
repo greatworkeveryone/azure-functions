@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Isolated developer review. Never reads cloud SQL or external-service credentials.
-// prepare [--email reviewer@example.com] [--skip-build] | api | storage
+// prepare [--email reviewer@example.com] [--role admin] [--skip-build] | api | storage
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -116,11 +116,15 @@ async function prepare() {
     ]);
     const position = process.argv.indexOf("--email");
     const emails = position >= 0 ? [process.argv[position + 1]] : [];
+    const rolePosition = process.argv.indexOf("--role");
+    const reviewerRole = rolePosition >= 0 ? process.argv[rolePosition + 1] : "admin";
+    if (!roles.includes(reviewerRole)) throw new Error("Pass a valid --role for the local reviewer.");
     for (const email of emails) {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Pass a valid --email for the local reviewer.");
       await db.executeQuery(connection, `IF NOT EXISTS (SELECT 1 FROM dbo.AppUsers WHERE Email=@Email AND IsActive=1)
-        INSERT INTO dbo.AppUsers (DisplayName, Email, Role, InvitedAt) VALUES ('Local reviewer',@Email,'director',SYSUTCDATETIME());`, [
+        INSERT INTO dbo.AppUsers (DisplayName, Email, Role, InvitedAt) VALUES ('Local reviewer',@Email,@Role,SYSUTCDATETIME());`, [
         { name: "Email", type: TYPES.NVarChar, value: email.toLowerCase() },
+        { name: "Role", type: TYPES.NVarChar, value: reviewerRole },
       ]);
     }
     console.log("Enabled all module flags in the local database; role permissions still apply.");
