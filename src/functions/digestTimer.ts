@@ -21,8 +21,16 @@ import { Sentry } from "../sentry";
 //   DIGEST_DRY_RUN=true   reads and logs, with counts, who it would email and the
 //                         lines it would show, and sends nothing (wins over ENABLED)
 //   neither               it does nothing and does not touch the database
-// Apply migration 132 (AppUsers.DigestOptOut) before turning either on. Turn the
-// dry run on first and read the log. Set DEV_EMAIL_OVERRIDE on staging.
+// Apply migrations 132 (AppUsers.DigestOptOut) and 143 (AppUsers.DigestLastSentOn)
+// before turning either on. Turn the dry run on first and read the log. Set
+// DEV_EMAIL_OVERRIDE on staging.
+//
+// One digest per person per Darwin day: each person is stamped (143) as soon as
+// their email has gone, and a run skips anyone stamped today, so a restart inside
+// the morning window, or a run that died part-way and is replayed, tells nobody
+// twice. A dry run writes nothing; with DEV_EMAIL_OVERRIDE set the guard stands
+// aside so staging can send the same morning again. To resend one person today, set
+// their DigestLastSentOn to NULL by hand.
 //
 // digestTimer is a plain exported function so a wrapper (lane D's runTimer /
 // TimerRuns) can take it as its handler unchanged.

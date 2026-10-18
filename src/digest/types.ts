@@ -6,6 +6,8 @@ import type { EscalationRow } from "../escalation/types";
 /** An active AppUsers row with a role, as the digest sees it. */
 export interface DigestUser {
   email: string | null;
+  /** AppUsers.DigestLastSentOn: the Darwin day (YYYY-MM-DD) the last digest went to this person, or null. */
+  lastSentOn: string | null;
   name: string;
   /** AppUsers.DigestOptOut: true means the person switched the digest off. */
   optedOut: boolean;

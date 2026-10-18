@@ -29,7 +29,7 @@ const run = (registration?.[1] as { handler: (t: Timer, c: InvocationContext) =>
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const report = (over: Record<string, unknown> = {}) => ({
-  configMissing: [], considered: 5, dryRun: false, errors: [], noAddress: 0, nothingToSend: 2, optedOut: 1, sent: 2, wouldSend: 0, ...over,
+  alreadySent: 0, configMissing: [], considered: 5, dryRun: false, errors: [], noAddress: 0, nothingToSend: 2, optedOut: 1, sent: 2, wouldSend: 0, ...over,
 });
 
 const KEYS = ["DIGEST_ENABLED", "DIGEST_DRY_RUN", "ESCALATION_HOLIDAYS"] as const;
@@ -145,7 +145,7 @@ describe("logging and failure", () => {
 
   it("logs one summary line with the counts", async () => {
     await run({} as Timer, ctx);
-    expect(ctx.log).toHaveBeenCalledWith("digest 2026-10-14 live: sent=2 skipped=3 errors=0 (nothingToSend=2 optedOut=1 noAddress=0)");
+    expect(ctx.log).toHaveBeenCalledWith("digest 2026-10-14 live: sent=2 skipped=3 errors=0 (nothingToSend=2 optedOut=1 noAddress=0 alreadySent=0)");
   });
 
   it("tells Sentry about failed sends but keeps the run when some went out", async () => {
