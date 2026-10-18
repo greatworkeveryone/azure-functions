@@ -3,7 +3,8 @@
 // preview a person sees and the payload that is checked again at the click,
 // so a record that changed in between is caught by the hash (decision 12).
 //
-//   create  a new Service Quote / Order, dated today in Darwin
+//   create  a new Service Quote / Order, dated today in Darwin; refused once
+//           Floorplan's create of it reached MYOB (use update)
 //   update  the Floorplan-created record, keeping its MYOB date and its
 //           creator's attribution; only when Floorplan holds a verified copy
 //           of it to compare with
@@ -72,10 +73,18 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
   let lastSeen: Record<string, unknown> | null = null;
   let creatorMemo: string | null = null;
   let date = myobDocumentDate(input.approver?.at ?? input.proposer.at);
-  if (isUpdate) {
-    const created = (await proposalsForSubject(connection, input.subjectType, input.subjectId)).find(
-      (row) => row.operation === kinds.create && row.state === "verified" && row.myobUid,
+  const history = await proposalsForSubject(connection, input.subjectType, input.subjectId);
+  if (!isUpdate) {
+    // A second create would carry a new correlation id, so it would slip past an accepted baseline (m4c review).
+    const inMyob = history.find(
+      (row) => row.operation === kinds.create && (input.proposalId == null || row.proposalId !== input.proposalId) && (row.state === "verified" || row.myobUid),
     );
+    if (inMyob) {
+      return refuse(409, `Floorplan already created this ${kinds.kind} in MYOB (${inMyob.myobNumber ?? facts.reference ?? "its number"}). Use Update in MYOB to change it.`);
+    }
+  }
+  if (isUpdate) {
+    const created = history.find((row) => row.operation === kinds.create && row.state === "verified" && row.myobUid);
     if (!created?.myobUid) return refuse(409, "Floorplan hasn't created this record in MYOB, so it can't update it");
     const seen = await latestVerifiedForUid(connection, created.companyFileId, created.myobUid);
     if (seen && (await baselineAccepted(connection, seen.correlationId))) {

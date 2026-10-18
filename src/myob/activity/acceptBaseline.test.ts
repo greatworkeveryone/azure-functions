@@ -18,7 +18,7 @@ const store = require("../proposalsStore") as Record<string, jest.Mock>;
 const CF = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
 const NOW = new Date("2026-10-17T00:00:00Z");
 const JOHANNE = { kind: "user" as const, name: "Johanne", role: "cfo", userId: 12 };
-const SENT = { Date: "2026-10-14T00:00:00", IsTaxInclusive: true, JournalMemo: "FP 66Sm261014 · proposed Ray", Lines: [{ Account: { UID: "a" }, Total: 4840, Type: "Transaction" }], Number: "66Sm261014", Supplier: { UID: "s" } };
+const SENT = { Date: "2026-10-14T00:00:00", FreightTaxCode: { UID: "t" }, IsTaxInclusive: true, JournalMemo: "FP 66Sm261014 · proposed Ray", Lines: [{ Account: { UID: "a" }, Total: 4840, Type: "Transaction" }], Number: "66Sm261014", Supplier: { UID: "s" } };
 const EDITED = { ...SENT, JournalMemo: "Johanne: hold", RowVersion: "9", Status: "Open", UID: "uid-1" };
 const proposal = (over: Partial<ProposalRow> = {}) =>
   ({
@@ -72,6 +72,9 @@ describe("acceptBaseline", () => {
     ["the supplier", { Supplier: { UID: "s2" } }, "Supplier"],
     ["tax-inclusive", { IsTaxInclusive: false }, "Tax inclusive"],
     ["the record's date", { Date: "2026-10-15T00:00:00" }, "Date"],
+    // The headline amount compares line totals only: a hand-added freight charge would otherwise make MYOB's order total $200 more than the PO.
+    ["freight", { Freight: 200 }, "Freight"],
+    ["the freight tax code", { FreightTaxCode: { UID: "t-other" } }, "Freight tax code"],
   ])("refuses to accept a difference in %s: accepting MYOB's value into Floorplan isn't built", async (_label, edit, label) => {
     await expect(acceptBaseline({} as never, JOHANNE, input({ myobRecord: { ...EDITED, ...edit } }), NOW)).rejects.toMatchObject({
       message: expect.stringMatching(new RegExp(`${label}.*isn't built`)),
