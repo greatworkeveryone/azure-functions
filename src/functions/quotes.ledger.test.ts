@@ -434,7 +434,7 @@ describe("rejectQuote", () => {
       reason: "Too dear for a like-for-like swap",
     });
     const event = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO JobEvents/.test(String(c[1])));
-    expect(event?.[2]).toEqual(expect.arrayContaining([{ name: "Text", type: expect.anything(), value: "Rejected quote QT-9-1 — Too dear for a like-for-like swap" }]));
+    expect(event?.[2]).toEqual(expect.arrayContaining([{ name: "Text", type: expect.anything(), value: "Director declined quote QT-9-1 — Too dear for a like-for-like swap" }]));
   });
 
   it.each([{}, { Reason: "" }, { Reason: "   " }, { Reason: 42 }])("declining a quote that waits on a director without a reason (%p) is refused, ledgered, and changes nothing (J6)", async (extra) => {
@@ -469,6 +469,16 @@ describe("rejectQuote", () => {
     await decline();
 
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "quote.reject", before: { status: "awaiting_director" }, reason: "Too dear for a like-for-like swap" });
+  });
+
+  it("someone other than a director turning it down reads as a rejection on the job, not a director's decline (J6b)", async () => {
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    mockSql(routes("awaiting_director"));
+
+    await decline();
+
+    const event = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO JobEvents/.test(String(c[1])));
+    expect(event?.[2]).toEqual(expect.arrayContaining([{ name: "Text", type: expect.anything(), value: "Rejected quote QT-9-1 — Too dear for a like-for-like swap" }]));
   });
 
   it("a rejection from pending may carry a reason, and records it", async () => {

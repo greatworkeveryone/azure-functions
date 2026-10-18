@@ -1,9 +1,10 @@
 // Where a link into a job lands (beta sprint J6). Every director packet, Planner
 // task, digest line and escalation email that points at a job names the step its
 // reader acts on, so the job opens there and not on Detail. The app has no
-// /jobs/:id path: ?jobId= opens the job, &step= the tab, and a record id lets the
-// step pick out the record. The frontend reads the same names (FE
-// helpers/jobDeepLink.ts); change them in both repos.
+// /jobs/:id path: ?jobId= opens the job and &step= the tab. The record's id rides
+// along (quoteId, invoiceId…) so the link says which record it is about; the
+// frontend opens the step and does not yet select the record. The frontend
+// reads the same names (FE helpers/jobDeepLink.ts); change them in both repos.
 //
 // Leave this module import-free: plannerHelpers, the digest and the escalation
 // adapters all load it.
