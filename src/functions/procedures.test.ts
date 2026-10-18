@@ -19,6 +19,7 @@ jest.mock("../auth", () => ({
   errorResponse: jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
   extractToken: jest.fn().mockReturnValue("mock-token"),
   requireRole: jest.fn().mockResolvedValue(null),
+  rolesForRequest: jest.fn().mockResolvedValue(["director"]),
   unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
   userInfoFromToken: jest.fn().mockReturnValue({ email: "connor@rp.com.au", name: "Connor" }),
 }));
@@ -26,15 +27,20 @@ jest.mock("../auth", () => ({
 jest.mock("../db", () => ({
   closeConnection: jest.fn(),
   createRequestConnection: jest.fn().mockResolvedValue({}),
+  createServiceRequestConnection: jest.fn().mockResolvedValue({}),
   executeQuery: jest.fn().mockResolvedValue([]),
 }));
+
+jest.mock("../escalation/store", () => ({ listActiveUsers: jest.fn().mockResolvedValue([]) }));
 
 const auth = require("../auth") as {
   extractToken: jest.Mock;
   requireRole: jest.Mock;
+  rolesForRequest: jest.Mock;
   userInfoFromToken: jest.Mock;
 };
 const db = require("../db") as { executeQuery: jest.Mock };
+const store = require("../escalation/store") as { listActiveUsers: jest.Mock };
 
 import { getProcedures, publishProcedure, saveProcedureDraft } from "./procedures";
 
@@ -58,8 +64,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   auth.extractToken.mockReturnValue("mock-token");
   auth.requireRole.mockResolvedValue(null);
+  auth.rolesForRequest.mockResolvedValue(["director"]);
   auth.userInfoFromToken.mockReturnValue({ email: "connor@rp.com.au", name: "Connor" });
   db.executeQuery.mockResolvedValue([]);
+  store.listActiveUsers.mockResolvedValue([]);
 });
 
 describe("getProcedures", () => {
@@ -95,6 +103,94 @@ describe("getProcedures", () => {
     expect(record.versions.map((v: any) => v.status)).toEqual(["published"]);
     // The record itself still comes back — only the draft is withheld.
     expect(record.slug).toBe("keys");
+  });
+});
+
+describe("getProcedures: who reads which procedure (U4)", () => {
+  const row = (slug: string, audience: string, status = "published") => ({
+    Audience: audience, Category: "Field work", Owner: null, Slug: slug, SortOrder: 1,
+    ApprovedAt: null, ApprovedBy: null, BlocksJson: "[]", CreatedAt: new Date("2026-08-01"),
+    CreatedBy: "Connor", PublishedAt: null, ReviewDue: null, Status: status,
+    Summary: "", Title: slug, VersionId: `v-${slug}-${status}`, VersionNo: 1,
+  });
+  const NOT_EDITOR = (_req: unknown, allowed: string[]) => Promise.resolve(allowed.includes("user") ? null : FORBIDDEN);
+  const slugs = (response: { jsonBody?: unknown }) => (response.jsonBody as any).procedures.map((p: any) => p.slug);
+
+  beforeEach(() => {
+    db.executeQuery.mockResolvedValue([row("for-all", "all"), row("for-officers", "facilities"), row("for-accounts", "accounts,cfo"), row("for-directors", "director")]);
+  });
+
+  it.each([
+    [["facilities"], ["for-all", "for-officers"]],
+    [["accounts"], ["for-all", "for-accounts"]],
+    [["user"], ["for-all"]],
+  ])("withholds what is not written for a reader holding %j", async (roles, expected) => {
+    auth.requireRole.mockImplementation(NOT_EDITOR);
+    auth.rolesForRequest.mockResolvedValue(roles);
+    expect(slugs(await getProcedures(emptyRequest, context))).toEqual(expected);
+  });
+
+  it("shows an editor every procedure, whatever its audience: they have to be able to edit it", async () => {
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    expect(slugs(await getProcedures(emptyRequest, context))).toEqual(["for-all", "for-officers", "for-accounts", "for-directors"]);
+  });
+
+  it("shows only what is for everyone when the caller's roles cannot be read", async () => {
+    auth.requireRole.mockImplementation(NOT_EDITOR);
+    auth.rolesForRequest.mockRejectedValue(new Error("lookup failed"));
+    expect(slugs(await getProcedures(emptyRequest, context))).toEqual(["for-all"]);
+  });
+});
+
+describe("getProcedures: asking for approval (U4)", () => {
+  const draft = (over: Record<string, unknown> = {}) => ({
+    Audience: "all", Category: "Field work", Owner: null, Slug: "keys", SortOrder: 1,
+    ApprovedAt: null, ApprovedBy: null, BlocksJson: "[]", CreatedAt: new Date("2026-08-01"),
+    CreatedBy: "Connor", PublishedAt: null, ReviewDue: null, Status: "draft",
+    Summary: "", Title: "Keys", VersionId: "v-draft", VersionNo: 2,
+    ApprovalRequestedAt: new Date("2026-10-18T01:00:00Z"), ApprovalRequestedBy: "Fay Manager",
+    ApprovalRequestedFromName: "Dee Director", ApprovalRequestedFromUserId: 7, ...over,
+  });
+  const NOT_EDITOR = (_req: unknown, allowed: string[]) => Promise.resolve(allowed.includes("user") ? null : FORBIDDEN);
+
+  it("says on a draft who was asked to approve it, who asked and when", async () => {
+    db.executeQuery.mockResolvedValue([draft()]);
+    const version = (await getProcedures(emptyRequest, context)).jsonBody as any;
+    expect(version.procedures[0].versions[0].approvalRequest).toEqual({
+      at: "2026-10-18T01:00:00.000Z",
+      by: "Fay Manager",
+      from: { name: "Dee Director", userId: 7 },
+    });
+  });
+
+  it("says nothing when no one has been asked", async () => {
+    db.executeQuery.mockResolvedValue([draft({ ApprovalRequestedAt: null, ApprovalRequestedBy: null, ApprovalRequestedFromName: null, ApprovalRequestedFromUserId: null })]);
+    const body = (await getProcedures(emptyRequest, context)).jsonBody as any;
+    expect(body.procedures[0].versions[0]).not.toHaveProperty("approvalRequest");
+  });
+
+  it("offers editors the active directors to ask, by name", async () => {
+    store.listActiveUsers.mockResolvedValue([
+      { email: "z@rp.com", name: "Zed Director", role: "director", userId: 9 },
+      { email: "d@rp.com", name: "Dee Director", role: "director", userId: 7 },
+      { email: "a@rp.com", name: "Ann Accounts", role: "accounts_manager", userId: 3 },
+    ]);
+    const body = (await getProcedures(emptyRequest, context)).jsonBody as any;
+    expect(body.approvers).toEqual([{ name: "Dee Director", userId: 7 }, { name: "Zed Director", userId: 9 }]);
+  });
+
+  it("offers nobody else the list, and never reads the users for them", async () => {
+    auth.requireRole.mockImplementation(NOT_EDITOR);
+    const body = (await getProcedures(emptyRequest, context)).jsonBody as any;
+    expect(body.approvers).toEqual([]);
+    expect(store.listActiveUsers).not.toHaveBeenCalled();
+  });
+
+  it("still serves the library when the directors cannot be listed", async () => {
+    store.listActiveUsers.mockRejectedValue(new Error("down"));
+    const response = await getProcedures(emptyRequest, context);
+    expect(response.status).toBe(200);
+    expect((response.jsonBody as any).approvers).toEqual([]);
   });
 });
 
@@ -135,6 +231,16 @@ describe("saveProcedureDraft", () => {
     expect(byName.Author).toBe("Connor");
     // No audience supplied → safe default, never an empty string.
     expect(byName.Audience).toBe("all");
+  });
+
+  it("withdraws a request for approval when the draft is edited: an approval must not survive an edit", async () => {
+    await saveProcedureDraft(requestWithBody(validDraft), context);
+    const [, sql] = db.executeQuery.mock.calls[0];
+    const update = sql.slice(sql.indexOf("UPDATE dbo.ProcedureVersions"), sql.indexOf("IF @@ROWCOUNT = 0"));
+    for (const column of ["ApprovalRequestedAt", "ApprovalRequestedBy", "ApprovalRequestedFromUserId", "ApprovalRequestedFromName"]) {
+      expect(update).toContain(`${column} = NULL`);
+    }
+    expect(update).toContain("Status = 'draft'");
   });
 
   it("ignores audience values that are not known roles", async () => {

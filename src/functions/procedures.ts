@@ -2,9 +2,10 @@
 //
 // The SOP library: controlled documents with immutable versions.
 //
-// Three endpoints. getProcedures serves the whole library (drafts only to
-// editor-tier callers — the frontend hides them too, but presentation is not
-// security). saveProcedureDraft never touches a published row: it updates the
+// Three endpoints. getProcedures serves the library (drafts, and procedures
+// written for another team, only to editor-tier callers — the frontend hides
+// them too, but presentation is not security; who reads what is
+// procedureAudience.ts). saveProcedureDraft never touches a published row: it updates the
 // single draft or creates one at the next version number, creating the parent
 // dbo.Procedures row on first save of a new slug. publishProcedure promotes a
 // draft, stamping the approver FROM THE TOKEN — never from the body, because
@@ -16,20 +17,24 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, createServiceRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
   errorResponse,
   extractToken,
   requireRole,
+  rolesForRequest,
   unauthorizedResponse,
   userInfoFromToken,
 } from "../auth";
+import { listActiveUsers } from "../escalation/store";
+import { canReadProcedure } from "../procedureAudience";
+import { PROCEDURE_APPROVER_ROLE, PROCEDURE_EDITOR_GATE } from "../procedureRoles";
 
 // requireRole's hierarchy admits admin + director through any non-admin gate,
 // so this gate resolves to: managers, director, admin. Mirrors the frontend's
 // editProcedures capability.
-const EDITOR_GATE = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
+const EDITOR_GATE = PROCEDURE_EDITOR_GATE;
 
 const BLOCK_KINDS = ["heading", "image", "list", "paragraph", "table"];
 const KNOWN_AUDIENCES = ["all", ...Object.values(AppRole)];
@@ -63,6 +68,40 @@ function parseBlocks(json: unknown, slug: string, context: InvocationContext): u
   }
 }
 
+/** The request for approval on a draft, when there is one. Only a draft carries a live request. */
+function approvalRequestOf(row: Record<string, unknown>): { approvalRequest?: unknown } {
+  if (String(row.Status) !== "draft" || !row.ApprovalRequestedAt) return {};
+  return {
+    approvalRequest: {
+      at: toIsoDateTime(row.ApprovalRequestedAt),
+      by: String(row.ApprovalRequestedBy ?? ""),
+      from: { name: String(row.ApprovalRequestedFromName ?? ""), userId: Number(row.ApprovalRequestedFromUserId) },
+    },
+  };
+}
+
+/**
+ * The directors an editor can ask to approve a draft, by name. Read on the service
+ * connection (the user table is not the editor's to read) and never fatal: the
+ * library is more use without the picker than not at all.
+ */
+async function listApprovers(context: InvocationContext): Promise<Array<{ name: string; userId: number }>> {
+  let connection;
+  try {
+    connection = await createServiceRequestConnection();
+    const users = await listActiveUsers(connection);
+    return users
+      .filter((user) => user.role === PROCEDURE_APPROVER_ROLE)
+      .map((user) => ({ name: user.name, userId: user.userId }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch (error: any) {
+    context.warn(`procedures: could not list approvers: ${error.message}`);
+    return [];
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
 const toIsoDateTime = (value: unknown): string | undefined =>
   value ? new Date(value as Date).toISOString() : undefined;
 const toIsoDate = (value: unknown): string | undefined =>
@@ -82,6 +121,17 @@ export async function getProcedures(
   // hiding drafts on failure is the safe direction.
   const canSeeDrafts = (await requireRole(request, EDITOR_GATE)) === null;
 
+  // Everyone else reads what is written for them, through the role hierarchy.
+  // If their roles can't be read they get what is for everyone: fail closed.
+  let roles: string[] = [];
+  if (!canSeeDrafts) {
+    try {
+      roles = await rolesForRequest(request);
+    } catch {
+      roles = [];
+    }
+  }
+
   let connection;
   try {
     connection = await createRequestConnection(token);
@@ -89,7 +139,8 @@ export async function getProcedures(
       connection,
       `SELECT p.Slug, p.Category, p.Audience, p.SortOrder, p.Owner,
               v.VersionId, v.VersionNo, v.Title, v.Summary, v.BlocksJson, v.Status,
-              v.CreatedBy, v.CreatedAt, v.ApprovedBy, v.ApprovedAt, v.PublishedAt, v.ReviewDue
+              v.CreatedBy, v.CreatedAt, v.ApprovedBy, v.ApprovedAt, v.PublishedAt, v.ReviewDue,
+              v.ApprovalRequestedAt, v.ApprovalRequestedBy, v.ApprovalRequestedFromUserId, v.ApprovalRequestedFromName
        FROM dbo.Procedures p
        LEFT JOIN dbo.ProcedureVersions v ON v.Slug = p.Slug
        ORDER BY p.SortOrder, p.Slug, v.VersionNo DESC`,
@@ -100,8 +151,10 @@ export async function getProcedures(
       const slug = String(row.Slug);
       let record = bySlug.get(slug);
       if (!record) {
+        const audience = String(row.Audience).split(",").map((entry) => entry.trim()).filter(Boolean);
+        if (!canSeeDrafts && !canReadProcedure(roles, audience)) continue;
         record = {
-          audience: String(row.Audience).split(",").map((entry) => entry.trim()).filter(Boolean),
+          audience,
           category: String(row.Category),
           order: Number(row.SortOrder),
           owner: row.Owner ?? undefined,
@@ -120,6 +173,7 @@ export async function getProcedures(
         createdAt: toIsoDateTime(row.CreatedAt),
         createdBy: String(row.CreatedBy),
         publishedAt: toIsoDateTime(row.PublishedAt),
+        ...approvalRequestOf(row),
         reviewDue: toIsoDate(row.ReviewDue),
         status: String(row.Status),
         summary: String(row.Summary),
@@ -129,7 +183,8 @@ export async function getProcedures(
       });
     }
 
-    return { status: 200, jsonBody: { procedures: [...bySlug.values()] } };
+    const approvers = canSeeDrafts ? await listApprovers(context) : [];
+    return { status: 200, jsonBody: { approvers, procedures: [...bySlug.values()] } };
   } catch (error: any) {
     context.error("getProcedures failed:", error.message);
     return errorResponse("Get procedures failed", error.message);
@@ -190,9 +245,12 @@ export async function saveProcedureDraft(
          SELECT @Slug, @Category, @Audience,
                 ISNULL((SELECT MAX(SortOrder) FROM dbo.Procedures), 0) + 1;
 
+       -- An edit withdraws any request for approval: what was asked about is gone.
        UPDATE dbo.ProcedureVersions
        SET Title = @Title, Summary = @Summary, BlocksJson = @Blocks,
-           CreatedBy = @Author, CreatedAt = SYSUTCDATETIME()
+           CreatedBy = @Author, CreatedAt = SYSUTCDATETIME(),
+           ApprovalRequestedAt = NULL, ApprovalRequestedBy = NULL,
+           ApprovalRequestedFromUserId = NULL, ApprovalRequestedFromName = NULL
        WHERE Slug = @Slug AND Status = 'draft';
 
        IF @@ROWCOUNT = 0

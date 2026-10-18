@@ -252,8 +252,8 @@ export const ACTION_ROLES = {
   },
   editProcedures: {
     gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
-    routes: ["saveProcedureDraft"],
-    why: "Write procedure drafts (EDITOR_GATE, procedures.ts).",
+    routes: ["saveProcedureDraft", "requestProcedureApproval"],
+    why: "Write procedure drafts and ask a director to approve one (PROCEDURE_EDITOR_GATE, procedureRoles.ts).",
   },
   editTenancy: {
     gate: TENANCY_DESK,
