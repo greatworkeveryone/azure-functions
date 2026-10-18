@@ -9,7 +9,7 @@ jest.mock("../floorplanRecords", () => ({ installFloorplanRecordLookup: jest.fn(
 jest.mock("../../db", () => ({ closeConnection: jest.fn(), createServiceRequestConnection: jest.fn(), executeQuery: jest.fn() }));
 
 import { MyobRequestRefusedError } from "../../myob-errors";
-import { LAB_PROBE_RECORD, LAB_PROBES, OFF_FILE_PROBE_ID, runLabProbe } from "./probes";
+import { LAB_PROBE_RECORD, LAB_PROBES, labProbeRecords, OFF_FILE_PROBE_ID, runLabProbe } from "./probes";
 
 const { assertMyobControlsAllow } = require("../../myob-controls") as { assertMyobControlsAllow: jest.Mock };
 const DEMO = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
@@ -57,6 +57,13 @@ describe("runLabProbe", () => {
     for (const probe of ["prior_period", "update_existing"] as const) expect((await runLabProbe(probe, DEMO, NOW)).code).not.toBe("no_record");
     expect(createServiceRequestConnection).not.toHaveBeenCalled();
     expect(LAB_PROBE_RECORD).toEqual({ id: 0, kind: "purchase_order" });
+  });
+
+  it("names only the probe's own record object, never a look-alike, and never calls it a test record (M5 follow-up K02a)", async () => {
+    await expect(labProbeRecords({ correlationId: null, record: LAB_PROBE_RECORD })).resolves.toEqual({ isTest: false, named: true });
+    await expect(labProbeRecords({ correlationId: null, record: { id: 0, kind: "purchase_order" } })).resolves.toEqual({ isTest: false, named: false });
+    await expect(labProbeRecords({ correlationId: "9b1f2c34-5d6e-4f70-8a91-0b2c3d4e5f60", record: null })).resolves.toEqual({ isTest: false, named: false });
+    expect(Object.isFrozen(LAB_PROBE_RECORD)).toBe(true);
   });
 
   it("dates the prior-period probe the day before the period starts", async () => {
