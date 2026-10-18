@@ -23,6 +23,7 @@ jest.mock("../myob/lab/results", () => ({ loadLabResults: jest.fn().mockResolved
 jest.mock("../myob/lab/probes", () => ({ ...jest.requireActual("../myob/lab/probes"), runLabProbe: jest.fn().mockResolvedValue({ code: "not_allowed", refused: true }) }));
 
 import type { HttpRequest, InvocationContext } from "@azure/functions";
+import { AppRole } from "../auth";
 import { getMyobLab, recordMyobLabResult, runMyobLabProbe } from "./myobLab";
 
 const auth = require("../auth") as Record<string, jest.Mock>;
@@ -93,5 +94,39 @@ describe("recordMyobLabResult", () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
     expect((await recordMyobLabResult(post(RESULT), ctx)).status).toBe(403);
     expect(results.recordLabResult).not.toHaveBeenCalled();
+  });
+});
+
+describe("the read gate (cfo, director, admin through requireRole)", () => {
+  const realAuth = jest.requireActual("../auth") as typeof import("../auth");
+  const names = ["DEV_ROLE_OVERRIDE_ENABLED", "AZURE_FUNCTIONS_ENVIRONMENT", "WEBSITE_INSTANCE_ID"] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const asRole = (role: string) => ({ headers: { get: (key: string) => (key.toLowerCase() === "x-dev-roles" ? role : null) } }) as unknown as HttpRequest;
+
+  beforeEach(() => {
+    // The X-Dev-Roles header counts only on a local Development host (src/jwt.ts): the real role check, with the role named.
+    process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+    delete process.env.WEBSITE_INSTANCE_ID;
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    auth.requireRole.mockImplementation((request: HttpRequest, allowed: readonly AppRole[]) => realAuth.requireRole(request, allowed));
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    auth.requireRole.mockResolvedValue(null);
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  it("403s a facilities caller before reading anything", async () => {
+    expect((await getMyobLab(asRole("facilities"), ctx)).status).toBe(403);
+    expect(loadLabStatus).not.toHaveBeenCalled();
+    expect(auth.requireRole).toHaveBeenCalledWith(expect.anything(), [AppRole.CFO]);
+  });
+
+  it.each([["director"], ["cfo"]])("lets %s read the lab", async (role) => {
+    expect((await getMyobLab(asRole(role), ctx)).status).toBe(200);
   });
 });
