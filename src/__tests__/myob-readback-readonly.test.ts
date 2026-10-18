@@ -6,7 +6,8 @@ import { LIVE_READER } from "../myob/readbackClient";
 // Plan M10 review, R2: the read-back reads. It holds a GET-only client, so no
 // setting of the master switch, the update control or a verified record can
 // turn a read-back into a PUT or a POST. Every source file with "readback" in
-// its name, plus the on-demand refresh and the diff, must not:
+// its name, plus the on-demand refresh, the diff, and SPR-M4's reconciliation
+// and baseline acceptance (which read MYOB the same way), must not:
 //   - import myobRequest / myob-api-log or myob-client / myobFetch as values
 //     (type imports are fine), or require / import() anything at run time;
 //   - import myob-purchase-order, except readbackClient.ts, and that only for
@@ -16,7 +17,10 @@ import { LIVE_READER } from "../myob/readbackClient";
 // Comments are ignored: a name in a comment is not a call.
 
 const SRC = join(__dirname, "..");
-const ALSO = ["functions/refreshMyobRecord.ts", "myob/kinds.ts", "myob/recordDiff.ts"];
+const ALSO = [
+  "functions/acceptMyobBaseline.ts", "functions/reconcileMyob.ts", "functions/refreshMyobRecord.ts", "myob/activity/acceptBaseline.ts", "myob/activity/reconcile.ts",
+  "myob/kinds.ts", "myob/recordDiff.ts",
+];
 const CLIENT = "myob/readbackClient.ts";
 
 function walk(dir: string): string[] {
@@ -90,7 +94,8 @@ describe("the MYOB read-back is read-only", () => {
   it("scans every file with readback in its name, the refresh endpoint, the diff and the kinds", () => {
     expect(readBackFiles()).toEqual(
       expect.arrayContaining([
-        "functions/myobReadbackTimer.ts", "functions/refreshMyobRecord.ts", "myob/kinds.ts", "myob/readback.ts", CLIENT,
+        "functions/acceptMyobBaseline.ts", "functions/myobReadbackTimer.ts", "functions/reconcileMyob.ts", "functions/refreshMyobRecord.ts",
+        "myob/activity/acceptBaseline.ts", "myob/activity/reconcile.ts", "myob/kinds.ts", "myob/readback.ts", CLIENT,
         "myob/readbackCompare.ts", "myob/readbackRun.ts", "myob/recordDiff.ts",
       ]),
     );

@@ -91,6 +91,20 @@ export const LEDGER_ACTIONS = {
   // Raised later by the manager who was named (WP20).
   "quote.attribution_disputed": { exception: true, reasonRequired: true, subjects: ["quote"] },
   "user.role_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  // R13 variance margin and the Admin facts beside the limits (WP43a-2). A rise
+  // within the margin rests on a named manager and needs the editor's rationale;
+  // the manager's dispute and a director's override of the check (decision 17)
+  // are exceptions with their reason. The subject is the purchase order, or the
+  // incoming invoice when one is approved above the approved quote.
+  "approval_fact.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },
+  "po.variance_director_override": { exception: true, reasonRequired: true, subjects: ["purchase_order", "invoice"] },
+  "po.variance_disputed": { exception: true, reasonRequired: true, subjects: ["purchase_order", "invoice"] },
+  "po.variance_within_tolerance": {
+    attributionRequired: true,
+    exception: false,
+    reasonRequired: true,
+    subjects: ["purchase_order", "invoice"],
+  },
 
   // Register and schedule writes (WP23a, WP23b)
   "occupancy.reassign": { exception: true, reasonRequired: true, subjects: ["occupancy"] },

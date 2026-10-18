@@ -151,3 +151,13 @@ describe("a hand edit in MYOB, read back twice (the baseline is the read-back af
   });
 });
 
+
+describe("after the CFO accepted MYOB's record as the baseline", () => {
+  it("compares MYOB with the accepted record, not with what Floorplan first sent, so the accepted change no longer shows", async () => {
+    const accepted = { ...SENT, Lines: [{ ...SENT.Lines[0], Total: 4900 }], RowVersion: "9", Status: "Open" };
+    const row = proposal({ myobRowVersion: "9", payload: SENT, readBack: accepted });
+    executeQuery.mockResolvedValue([]);
+    const outcome = await readBackProposal({} as never, row, SYSTEM, NOW, fakeMyob(jest.fn().mockResolvedValue({ ...accepted, RowVersion: "9" })));
+    expect(outcome.verdict).toMatchObject({ advanceVersion: true, discrepancy: null });
+  });
+});

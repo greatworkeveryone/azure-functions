@@ -1555,3 +1555,34 @@ describe("a next step is chased on its own clock (jobs plan A2)", () => {
     expect(world.calls.notify).toEqual([{ event: "reminder", id: 1 }]);
   });
 });
+
+describe("attribution notices (R2, R13)", () => {
+  it("raises a missing notice for an unanswered attribution, to the named manager, once", async () => {
+    const world = makeWorld();
+    world.deps.listUnansweredAttributions = async () => [{ attributedToUserId: 30, ref: { id: 7, jobId: 9, kind: "quote" } }];
+
+    await sweep(world);
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([
+      expect.objectContaining({ policyKey: "quote.attribution_notice", subjectId: "quote:7@9", subjectType: "approval_attribution", userTargets: [30] }),
+    ]);
+  });
+
+  it("leaves alone one that already had a notice, even if a person closed it", async () => {
+    const world = makeWorld();
+    world.rows.push(esc({ policyKey: "po.variance_notice", status: "resolved", subjectId: "variance:4@9", subjectType: "approval_attribution" }));
+    world.deps.listUnansweredAttributions = async () => [{ attributedToUserId: 30, ref: { id: 4, jobId: 9, kind: "variance" } }];
+
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("only says what it would do on a dry run", async () => {
+    const world = makeWorld();
+    world.deps.listUnansweredAttributions = async () => [{ attributedToUserId: 30, ref: { id: 7, jobId: 9, kind: "quote" } }];
+    expect((await sweep(world, { dryRun: true })).raised).toBe(1);
+    expect(world.calls.raise).toEqual([]);
+  });
+});

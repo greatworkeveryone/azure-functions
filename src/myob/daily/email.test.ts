@@ -137,12 +137,14 @@ describe("buildMyobDailyEmail", () => {
           control({ after: { pausedAll: true }, before: { pausedAll: false }, ruleApplied: "pause", scope: "*" }),
           control({ action: "myob.link", actorName: "Will", after: { myobUsername: "floorplan@rp", scope: "sme-company-file sme-purchases" }, reason: null, ruleApplied: "relink", scope: null }),
           control({ actorName: "Mallory", companyFileId: "11111111-2222-4333-8444-555555555555", ruleApplied: "set" }),
+          control({ after: { accepted: [{ label: "Memo" }, { label: "Amount" }], record: "Order 66Sm261014" }, reason: "Her hold is right", ruleApplied: "accept_baseline", scope: "baseline" }),
           control({ after: { added: 3, changed: 1, kind: "suppliers" }, reason: "Supplier export 17 Oct", ruleApplied: "import.suppliers", scope: "mappings" }),
         ],
       }),
       OPTIONS,
     )!;
-    expect(email.body).toContain("What Floorplan may do in MYOB (5 changes)");
+    expect(email.body).toContain("What Floorplan may do in MYOB (6 changes)");
+    expect(email.body).toContain("- 14/10 08:00 · Johanne · accepted MYOB's record as the baseline for Order 66Sm261014 (Memo, Amount) (Her hold is right) · Demo Pty Ltd");
     expect(email.body).toContain("- 14/10 08:00 · Johanne · imported supplier mappings: 3 added, 1 changed (Supplier export 17 Oct) · Demo Pty Ltd");
     expect(email.body).toContain("- 14/10 08:00 · Johanne · orders.create: dry run on → off, enabled off → on (Lab day) · Demo Pty Ltd");
     expect(email.body).toContain("- 14/10 08:00 · Johanne · mode read → write (Lab day) · Demo Pty Ltd");

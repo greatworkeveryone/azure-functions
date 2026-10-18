@@ -62,7 +62,14 @@ export const PLAIN_MONEY_CODES: readonly string[] = [
   "po.create",
   "po.myob_created",
   "po.send",
+  // R13: a rise accepted within the margin also carries the CHANGE_KEYS (it is
+  // checked by its suite), but it is not an exception: the margin is the rule.
+  "po.variance_director_override",
+  "po.variance_disputed",
+  "po.variance_within_tolerance",
   "quote.approve",
+  "quote.approve_attributed",
+  "quote.attribution_disputed",
   "quote.complete",
   "quote.director_approve",
   "quote.director_reject",
@@ -77,8 +84,6 @@ export const PLAIN_MONEY_CODES: readonly string[] = [
 export const UNWRITTEN_MONEY_CODES: readonly string[] = [
   // Retired by J3: payments no longer call MYOB, so nothing writes it; old rows keep it.
   "payment.myob_applied",
-  "quote.approve_attributed",
-  "quote.attribution_disputed",
 ];
 
 /** The keys an adjustment adds to `after`. */
