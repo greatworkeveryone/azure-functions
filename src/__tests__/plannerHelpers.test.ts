@@ -282,6 +282,18 @@ describe("Planner job links (PL1)", () => {
     assert.ok(!desc.includes(`${BASE}/jobs/${jobId}`), desc);
   });
 
+  test.each([
+    ["stalled", buildStalledJobTaskDescription(STALLED_JOB, BASE), `${BASE}/jobs?jobId=7`],
+    ["awaiting accounts", buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=invoices`],
+    ["quote approval", buildAwaitingFacilitiesApprovalTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=quotes`],
+    ["director approval (quote)", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=quotes`],
+    ["director approval (invoice)", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE, "invoices"), `${BASE}/jobs?jobId=8&step=invoices`],
+    ["on-charge", buildOnchargeTaskDescription(ONCHARGE_JOB, BASE), `${BASE}/jobs?jobId=9&step=invoices`],
+    ["update due", buildJobTaskDescription({ buildingName: "Jones Building", expectedProgressUpdate: null, jobId: 6, title: "Fix" }, BASE), `${BASE}/jobs?jobId=6`],
+  ])("%s task ends on the step it is about (J6)", (_label, desc, link) => {
+    assert.ok(desc.endsWith(link), desc);
+  });
+
   test("jobLink builds the query-param deep link", () => {
     assert.strictEqual(jobLink(BASE, 4821), "https://app.example.com/jobs?jobId=4821");
   });
@@ -296,7 +308,7 @@ describe("Planner job links (PL1)", () => {
     assert.ok(desc.includes("Jones Building"));
     assert.ok(desc.includes("On-charge to tenant: $1,250"));
     assert.ok(desc.includes("Notes: Tenant damage"));
-    assert.ok(desc.endsWith(`${BASE}/jobs?jobId=9`));
+    assert.ok(desc.endsWith(`${BASE}/jobs?jobId=9&step=invoices`));
   });
 });
 
@@ -446,11 +458,11 @@ describe("buildJobTaskDescription", () => {
     expectedProgressUpdate: "2026-06-01T00:00:00.000Z",
   };
 
-  test("includes building name, formatted due date, and jobs link", () => {
+  test("includes building name, formatted due date, and a link to the job itself (J6), not the board", () => {
     const desc = buildJobTaskDescription(JOB, BASE_URL);
     assert.ok(desc.includes("Smith Tower"));
     assert.ok(desc.includes("01/06/2026"));
-    assert.ok(desc.includes(`${BASE_URL}/jobs`));
+    assert.ok(desc.endsWith(`${BASE_URL}/jobs?jobId=42`), desc);
   });
 
   test("shows — for missing expectedProgressUpdate", () => {

@@ -10,6 +10,8 @@ import type { Connection } from "tedious";
 import { loadApprovalFacts } from "../approvalAuthority-db";
 import type { AuthorityFacts } from "../approvalAuthority";
 import { resolveRecipient } from "../email-recipient";
+// Registers the escalation adapters, whose links the escalation lines use.
+import "../escalation/adapters";
 import { appBaseUrl, missingNotificationConfig } from "../escalation/config";
 import { darwinDateKey } from "../escalation/businessTime";
 import { graphSendMail } from "../graph";

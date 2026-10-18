@@ -530,13 +530,13 @@ export async function resolve(connection: Connection, input: ResolveInput): Prom
     // end the chase with the step still open and nobody looking at it.
     if (isNextStepRow(row)) {
       throw new EscalationError("authority_resolve", "This is a next step, so it can't be resolved from here. Open the job and mark the step done.", {
-        deepLink: adapter.deepLink(row.subjectId),
+        deepLink: adapter.deepLink(row.subjectId, row),
         subjectId: row.subjectId,
         subjectType: row.subjectType,
       });
     }
     if (row.kind === "authority") {
-      const path = adapter.deepLink(row.subjectId);
+      const path = adapter.deepLink(row.subjectId, row);
       throw new EscalationError(
         "authority_resolve",
         "This is waiting on a decision, so it can't be resolved from here. Open it and approve or reject it there.",

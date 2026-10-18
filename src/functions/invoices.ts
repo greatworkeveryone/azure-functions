@@ -11,10 +11,12 @@ import {
   amountRefusal,
   approvableRefusal,
   creatorRefusal,
+  declineReasonRefusal,
   holdsAdmin,
   jobMoneyRefusal,
   type MoneyRefusal,
   refusalResponse,
+  rejectReason,
 } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { DEFAULT_VARIANCE_FACTS } from "../moneyRules";
@@ -109,6 +111,8 @@ interface DirectorApproveJobInvoiceBody {
 interface UndoDirectorApproveJobInvoiceBody { JobInvoiceID: number }
 interface RejectJobInvoiceBody {
   JobInvoiceID: number;
+  /** Why it is turned down; required when declining an invoice that waits on a director (J6). */
+  Reason?: unknown;
   /** @deprecated ignored — identity comes from the token */
   RejectedBy?: string;
 }
@@ -1552,6 +1556,7 @@ async function rejectJobInvoice(
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
+    const reason = rejectReason(body.Reason);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -1603,6 +1608,38 @@ async function rejectJobInvoice(
         return refusalResponse(refusal);
       }
 
+      // J6: a stage-1 invoice whose amount needs a director is waiting on one;
+      // turning it down then is a decline, and needs its reason.
+      let waitsOnDirector = false;
+      if (current === "approved") {
+        const { buildingId } = await jobScope(connection, jobId);
+        const { result: authority } = await resolveApprovalAuthority(connection, {
+          amount: invoice.Amount == null ? NaN : Number(invoice.Amount),
+          buildingId: buildingId ?? 0,
+          jobId,
+          subject: "invoice",
+        });
+        waitsOnDirector = authority.directorRequired;
+      }
+      const asDirector = waitsOnDirector && actor.kind === "user" && actor.role === AppRole.DIRECTOR;
+      const reasonMissing = declineReasonRefusal(waitsOnDirector, reason, "invoice");
+      if (reasonMissing) {
+        await rollbackTransaction(connection).catch(() => {});
+        await recordRefusal(
+          connection,
+          actor,
+          { id: JobInvoiceID, type: "invoice" },
+          {
+            attempted: asDirector ? "invoice.director_reject" : "invoice.reject",
+            code: reasonMissing.code,
+            message: reasonMissing.message,
+            state: { status: current },
+          },
+          jobId,
+        );
+        return refusalResponse(reasonMissing);
+      }
+
       await executeQuery(
         connection,
         "UPDATE JobInvoices SET Status = 'rejected' WHERE JobInvoiceID = @Id",
@@ -1615,7 +1652,7 @@ async function rejectJobInvoice(
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
           { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-          { name: "Text", type: TYPES.NVarChar, value: `Rejected invoice ${invoiceNumber}` },
+          { name: "Text", type: TYPES.NVarChar, value: `${asDirector ? "Director declined" : "Rejected"} invoice ${invoiceNumber}${reason ? ` — ${reason}` : ""}` },
           { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
         ],
       );
@@ -1628,12 +1665,13 @@ async function rejectJobInvoice(
       const scope = await jobScope(connection, jobId);
       const known = await withContractorId(connection, invoice);
       await record(connection, {
-        action: "invoice.reject",
+        action: asDirector ? "invoice.director_reject" : "invoice.reject",
         actor,
         after: { status: "rejected", ...invoiceFacts(known) },
         before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
         jobId: scope.jobId,
+        reason,
         subject: { id: JobInvoiceID, type: "invoice" },
       });
       await commitTransaction(connection);

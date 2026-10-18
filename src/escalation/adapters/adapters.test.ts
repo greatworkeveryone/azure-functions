@@ -83,6 +83,36 @@ describe("the job adapter", () => {
     expect(jobAdapter.deepLink("1&x=2")).toBe("/jobs?jobId=1%26x%3D2");
   });
 
+  describe("links open the step the escalation is about (J6)", () => {
+    const ref = (policyKey: string, context: Record<string, unknown> | null = null) => ({ context, policyKey });
+
+    it.each([
+      ["job.invoice_waiting", "/jobs?jobId=12&step=invoices"],
+      ["job.quote_not_back", "/jobs?jobId=12&step=quotes"],
+      ["job.stalled_unacknowledged", "/jobs?jobId=12"],
+      ["job.unassigned", "/jobs?jobId=12"],
+      ["job.past_due", "/jobs?jobId=12"],
+      ["job.critical", "/jobs?jobId=12"],
+      ["job.manual", "/jobs?jobId=12"],
+    ])("%s → %s", (policyKey, path) => {
+      expect(jobAdapter.deepLink("12", ref(policyKey))).toBe(path);
+    });
+
+    it("a decision request opens the decision, naming the request", () => {
+      const context = { decision: { assignmentMode: "role", question: "Replace or repair?", requestId: 77, tier: "routine" } };
+      expect(jobAdapter.deepLink("12", ref("job.decision_pending", context))).toBe("/jobs?jobId=12&step=decision&decisionRequestId=77#decision");
+    });
+
+    it("a next step opens the decision that handed it on", () => {
+      const context = { nextStep: { decisionId: 5, nextStep: "Book the plumber", requestId: 77 } };
+      expect(jobAdapter.deepLink("12", ref("job.next_step", context))).toBe("/jobs?jobId=12&step=decision&decisionRequestId=77#decision");
+    });
+
+    it("still opens the decision step when the context is not what a request writes", () => {
+      expect(jobAdapter.deepLink("12", ref("job.decision_pending"))).toBe("/jobs?jobId=12&step=decision#decision");
+    });
+  });
+
   it("scopes ledger rows to the job", () => {
     expect(jobAdapter.ledgerScope?.({ context: null, subjectId: "12" })).toEqual({ jobId: 12 });
     expect(jobAdapter.ledgerScope?.({ context: null, subjectId: "abc" })).toEqual({ jobId: null });
@@ -196,7 +226,7 @@ describe("the job adapter", () => {
       expect(sql).toContain("UPDATE dbo.Jobs");
       expect(sql).toContain("WHEN EXISTS (SELECT 1 FROM dbo.Escalations e");
       expect(sql).toContain("e.Status = 'open'");
-      expect(sql).toContain("THEN COALESCE(EscalatedAt, SYSUTCDATETIME())");
+      expect(sql).toContain("THEN COALESCE(EscalatedAt,");
       expect(sql).toContain("ELSE NULL");
       expect(params).toEqual([
         { name: "JobID", type: TYPES.Int, value: 12 },
@@ -204,6 +234,19 @@ describe("the job adapter", () => {
         { name: "DecisionPolicy", type: TYPES.NVarChar, value: "job.decision_pending" },
         { name: "NextStepPolicy", type: TYPES.NVarChar, value: "job.next_step" },
       ]);
+    });
+
+    it("stamps only with a delivery on record (J6): the time the first email about an open escalation went, never 'now'", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+
+      await jobAdapter.onChange?.(conn, { subjectId: "12" } as never);
+
+      const sql = lastCall()[1] as string;
+      expect(sql).toContain("SELECT MIN(d.LastNotifiedAt) FROM dbo.Escalations d");
+      expect(sql).toContain("d.LastNotifiedAt IS NOT NULL");
+      expect(sql).toContain("d.Status = 'open'");
+      expect(sql).toContain("(d.PolicyKey NOT IN (@DecisionPolicy, @NextStepPolicy) OR d.ParentEscalationId IS NOT NULL)");
+      expect(sql).not.toContain("SYSUTCDATETIME()");
     });
 
     it("does not count a decision request that has only been asked, nor a next step that has only been handed on: either flags the job once it has moved up", async () => {

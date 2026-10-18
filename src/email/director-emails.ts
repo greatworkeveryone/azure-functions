@@ -11,6 +11,7 @@ import { buildJobPacket, nonMergeableAttachments, type PacketInput } from "../pd
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
 import { assertMayLeave, readIsTest } from "../test-data";
 import type { Connection } from "tedious";
+import { jobUrl, type JobLinkTarget } from "../jobLinks";
 import { resolveRoleRecipients } from "./role-recipients";
 
 /** The fallback list; recipients normally come from AppUsers (resolveRoleRecipients). */
@@ -22,18 +23,26 @@ export function getDirectorEmails(): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** Deep-link to the job modal in the web app. Returns null when APP_BASE_URL
- *  isn't configured so the email still sends (link line is just omitted). */
-export function buildJobUrl(jobId: number): string | null {
-  const base = (process.env.APP_BASE_URL ?? "").trim().replace(/\/+$/, "");
+/** Deep-link to the job in the web app, at the step the director acts on (J6).
+ *  Null when APP_BASE_URL isn't configured, so the email still sends (the link
+ *  line is just omitted). */
+export function buildJobUrl(jobId: number, target: JobLinkTarget = {}): string | null {
+  const base = (process.env.APP_BASE_URL ?? "").trim();
   if (!base) return null;
-  return `${base}/jobs?jobId=${jobId}`;
+  return jobUrl(base, jobId, target);
+}
+
+/** The approval step for the quote or invoice the packet is about. */
+export function directorPacketTarget(stage: "invoice" | "quote", subjectId?: number): JobLinkTarget {
+  return stage === "quote" ? { quoteId: subjectId, step: "quotes" } : { invoiceId: subjectId, step: "invoices" };
 }
 
 export interface SendDirectorApprovalArgs {
   connection: Connection;
   jobId: number;
   stage: "quote" | "invoice";
+  /** The QuoteID or JobInvoiceID, so the link opens on that record. */
+  subjectId?: number;
   /** Used for the subject line and email body. */
   amount: number;
   currency: string;
@@ -97,11 +106,11 @@ export async function sendDirectorApprovalEmail(
   const extrasLine = extras.length
     ? `\n${extras.length} additional file${extras.length === 1 ? "" : "s"} attached separately: ${extras.map((e) => e.fileName).join(", ")}.`
     : "";
-  const jobUrl = buildJobUrl(args.jobId);
+  const link = buildJobUrl(args.jobId, directorPacketTarget(args.stage, args.subjectId));
   // Replies are filed on the job but never count as a decision (SEC-07).
-  const linkLine = jobUrl
-    ? `Approve or reject in Floorplan: ${jobUrl}\nA reply to this email is filed on the job but does not count as a decision.`
-    : "Open the job in Floorplan to approve or reject. A reply to this email does not count as a decision.";
+  const linkLine = link
+    ? `Approve or decline in Floorplan: ${link}\nA reply to this email is filed on the job but does not count as a decision.`
+    : "Open the job in Floorplan to approve or decline. A reply to this email does not count as a decision.";
   const body =
 `Hi,
 

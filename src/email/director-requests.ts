@@ -108,7 +108,7 @@ export async function sendDirectorRequest(request: DirectorRequest): Promise<Sen
 
   let result: SendDirectorApprovalResult;
   try {
-    result = await sendDirectorApprovalEmail({ amount, connection, currency, jobId, stage, triggeredBy });
+    result = await sendDirectorApprovalEmail({ amount, connection, currency, jobId, stage, subjectId, triggeredBy });
   } catch (err) {
     if (underRowLimit(actor, `failed ${stage} director request`)) {
       await recordApart(

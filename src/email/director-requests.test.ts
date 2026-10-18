@@ -91,7 +91,7 @@ afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 afterEach(() => jest.restoreAllMocks());
 
 describe("sendDirectorRequest: when the mail goes", () => {
-  it("asks for the mail with exactly what the callers always asked for", async () => {
+  it("asks for the mail with what the callers always asked for, plus the record so the link names it (J6)", async () => {
     await sendDirectorRequest(request({ stage: "invoice", subjectId: 5 }));
 
     expect(mail.sendDirectorApprovalEmail).toHaveBeenCalledWith({
@@ -100,6 +100,7 @@ describe("sendDirectorRequest: when the mail goes", () => {
       currency: "AUD",
       jobId: 9,
       stage: "invoice",
+      subjectId: 5,
       triggeredBy: "Casey Controller",
     });
   });

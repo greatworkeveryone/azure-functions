@@ -133,6 +133,32 @@ export function holdsAdmin(roles: readonly string[]): boolean {
   return roles.some((role) => role.trim().toLowerCase() === "admin");
 }
 
+/** Longest decline reason kept; the ledger's reason column takes more, the job's event text less. */
+export const REJECT_REASON_MAX = 500;
+
+/** A reason from a request body: trimmed and cut to length, or null when there is none. */
+export function rejectReason(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed.slice(0, REJECT_REASON_MAX);
+}
+
+/**
+ * Declining a quote or invoice that waits on a director needs a reason (beta
+ * sprint J6, jobs-flow L8/L19): it is the director's answer to whoever raised
+ * it, so it goes on the job and into the ledger. A rejection before that stage
+ * may carry one; it doesn't have to. The frontend mirrors this to ask for the
+ * reason before it calls (FE helpers/declineRules.ts).
+ */
+export function declineReasonRefusal(waitsOnDirector: boolean, reason: string | null, subject: "invoice" | "quote"): MoneyRefusal | null {
+  if (!waitsOnDirector || reason !== null) return null;
+  return refuse(
+    "reason_required",
+    `Say why you're declining this ${WORDS[subject]}. The reason is recorded on the job for whoever raised it.`,
+    422,
+  );
+}
+
 /** A refusal as the HTTP answer: the code the ledger records and the sentence people see. */
 export function refusalResponse(refusal: MoneyRefusal): { jsonBody: { code: string; error: string }; status: number } {
   return { jsonBody: { ...refusal.details, code: refusal.code, error: refusal.message }, status: refusal.status };

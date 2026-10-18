@@ -23,10 +23,13 @@
 // A job that is escalated, awaiting approval and due is one line, the best of them.
 
 import { canApprove, decideAuthority, type AuthorityFacts } from "../approvalAuthority";
+import { getAdapter } from "../escalation/adapters/registry";
 import { darwinDateKey } from "../escalation/businessTime";
+import { jobEscalationPath } from "../escalation/jobEscalationLink";
 import { targetUsers } from "../escalation/notifier";
 import type { DirectoryUser } from "../escalation/types";
 import { runsContractorFlow } from "../jobKinds";
+import { jobPath, stepForSubject } from "../jobLinks";
 import { DIGEST_MAX_LINES } from "./config";
 import { clip, formatDisplayDate } from "./format";
 import type { DigestFacts, DigestItem, DigestItemKind, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
@@ -47,14 +50,19 @@ const URGENT_FIRST = 1e14;
 // update date has come.
 const KIND_RANK: Record<DigestItemKind, number> = { approval: 1, due: 3, escalation: 0, key: 2 };
 
-const jobPath = (jobId: number | string): string => `/jobs?jobId=${encodeURIComponent(String(jobId))}`;
-
 function jobLabel(jobId: number, title: string, buildingName: string | null): string {
   const building = buildingName ? ` · ${clip(buildingName, BUILDING_MAX)}` : "";
   return `Job #${jobId} · ${clip(title, TITLE_MAX)}${building}`;
 }
 
 // ── Escalations ──────────────────────────────────────────────────────────────
+
+/** The escalation's own link (J6): the job at its step, the defects period, the
+ *  schedule or schedule change by id; the inbox only when nothing else is known. */
+function escalationPath(row: DigestFacts["escalations"][number]): string {
+  if (row.subjectType === "job") return jobEscalationPath(row.subjectId, row);
+  return getAdapter(row.subjectType)?.deepLink(row.subjectId, row) ?? "/escalations";
+}
 
 function escalationItems(user: DigestUser, facts: DigestFacts): DigestItem[] {
   const directory: DirectoryUser[] = facts.users.map((u) => ({ email: u.email, name: u.name, role: u.role, userId: u.userId }));
@@ -69,7 +77,7 @@ function escalationItems(user: DigestUser, facts: DigestFacts): DigestItem[] {
       kind: "escalation",
       line: clip(`${row.urgent ? "Urgent: " : ""}${row.summary}`, LINE_MAX),
       order: (row.urgent ? 0 : URGENT_FIRST) + row.createdAt.getTime(),
-      path: isJob ? jobPath(row.subjectId) : "/escalations",
+      path: escalationPath(row),
     });
   }
   return items;
@@ -110,7 +118,11 @@ function approvalItems(user: DigestUser, facts: DigestFacts, ctx: DeriveContext)
       kind: "approval" as const,
       line: `Approve ${approval.subject}: ${jobLabel(approval.jobId, approval.jobTitle, approval.buildingName)}`,
       order: approval.createdAt.getTime(),
-      path: jobPath(approval.jobId),
+      path: jobPath(approval.jobId, {
+        invoiceId: approval.subject === "invoice" ? approval.id : null,
+        quoteId: approval.subject === "quote" ? approval.id : null,
+        step: stepForSubject(approval.subject),
+      }),
     }));
 }
 
