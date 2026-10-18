@@ -32,6 +32,7 @@ import { attributedApprovalEnabled, nameableRoles, unlessHeldOff } from "../attr
 import { quoteAttributionColumnExists } from "../quoteAttributionColumn";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
+import { requireMoneyContext } from "../moneyGate";
 import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse, rejectReason, samePerson } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
@@ -968,6 +969,7 @@ export async function rejectQuote(
     let outcome;
     try {
       outcome = await rejectQuoteWrite(connection, {
+        byDirector: actor.kind === "user" && actor.role === AppRole.DIRECTOR,
         expectedStatuses: IN_APP_REJECTABLE_STATUSES,
         note: reason,
         quoteId: QuoteID,
@@ -1632,6 +1634,9 @@ export async function directorApproveQuote(
     });
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();

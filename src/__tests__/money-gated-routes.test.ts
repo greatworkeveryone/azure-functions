@@ -78,13 +78,14 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe("money-gated routes", () => {
-  it("lists the fifteen money endpoints that exist today, WP26's four rent review decisions, WP26c's two schedule change decisions and R13's variance margin included", () => {
+  it("lists the sixteen money endpoints that exist today, WP26's four rent review decisions, WP26c's two schedule change decisions, R13's variance margin and J6b's director quote approval included", () => {
     expect(MONEY_GATED_ROUTES.map((r) => r.route)).toEqual([
       "setApprovalLimit",
       "setApprovalFact",
       "upsertPayment",
       "markPaymentPaid",
       "directorApproveJobInvoice",
+      "directorApproveQuote",
       "markJobInvoiceMyobCreated",
       "unmarkJobInvoiceMyobCreated",
       "markPurchaseOrderMyobCreated",

@@ -206,3 +206,22 @@ describe("the nightly timer's job-update tasks", () => {
     expect(sqlText().find((sql) => DUE.test(sql))).toMatch(/j\.Kind/);
   });
 });
+
+// J6b: the director's task opens the step the director acts on: the quote while
+// one waits on them, otherwise the invoice.
+describe("the director's Planner task links to the step it is about", () => {
+  const description = () => (planner.graphCreatePlannerTask.mock.calls[0][0] as { description: string }).description;
+
+  it("opens the quotes step while a quote waits on the director", async () => {
+    routeSql([[/FROM dbo\.Jobs j/, [jobSqlRow("facilities", { QuotesAwaitingDirector: 1 })]]]);
+    await syncJobDirectorApproval(7, accountsDeps);
+    expect(description().endsWith("https://floorplan.example/jobs?jobId=7&step=quotes")).toBe(true);
+  });
+
+  it("opens the invoices step when only an invoice does", async () => {
+    // No quote count read: the row's own DirectorNeededCount (1) is an invoice's.
+    routeSql([[/FROM dbo\.Jobs j/, [jobSqlRow("facilities")]]]);
+    await syncJobDirectorApproval(7, accountsDeps);
+    expect(description().endsWith("https://floorplan.example/jobs?jobId=7&step=invoices")).toBe(true);
+  });
+});

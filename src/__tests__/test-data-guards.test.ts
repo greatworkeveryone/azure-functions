@@ -19,6 +19,8 @@ type Read = { anchor: string; file: string; mode: "hard" | "toggle"; passes?: st
 const READS: Read[] = [
   // Lists, counts and figures people see: the admin toggle can show test records.
   { anchor: "async function getJobs(", file: "functions/jobs.ts", mode: "toggle" },
+  // The job by id, which J6 opens Done and archived jobs from links with (J6b).
+  { anchor: "async function getJob(", file: "functions/jobs.ts", mode: "toggle" },
   { anchor: "const REGISTER_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
   { anchor: "const REGISTER_WITH_ARCHIVED_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
   { anchor: "async function getReviewsDue(", file: "functions/tenancy.ts", mode: "toggle" },

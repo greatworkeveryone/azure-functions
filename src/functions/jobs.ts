@@ -491,13 +491,16 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
   let connection;
   try {
     connection = await createRequestConnection(token);
+    // D9, as getJobs: a test job opens only with the admin's Show test data on.
+    // J6 opens Done and archived jobs from links by this read, so it must not
+    // open a test job for someone who can't see it (J6b).
     const rows = await executeQuery(
       connection,
-      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID AND (IsTest = 0 OR @ShowTest = 1)`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }, await showTestParam(request)],
     );
     if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Job not found" } };
+      return { status: 404, jsonBody: { error: "That job wasn't found, or isn't one you can open." } };
     }
     const events = await executeQuery(
       connection,

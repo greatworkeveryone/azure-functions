@@ -113,6 +113,7 @@ describe("rejectQuote (in-app)", () => {
 
     expect(res.status).toBe(200);
     expect(decisions.rejectQuote).toHaveBeenCalledWith({}, {
+      byDirector: true,
       expectedStatuses: ["pending", "awaiting_director"],
       note: null,
       quoteId: 7,
