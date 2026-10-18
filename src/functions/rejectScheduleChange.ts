@@ -36,6 +36,7 @@ import {
   ScheduleChangeError,
   scheduleChangeErrorResponse,
   staleChange,
+  stateWords,
 } from "../scheduleChange/http";
 import { changeForUpdate, loadChange, markDecided } from "../scheduleChange/store";
 import { CHANGE_DECISION_CODES, SCHEDULE_CHANGE_SUBJECT } from "../scheduleChange/types";
@@ -73,7 +74,7 @@ export async function rejectScheduleChange(request: HttpRequest, context: Invoca
         }
         if (rowVersionHex(row.Version) !== rowVersion) throw staleChange(row);
         if (row.State !== "pending") {
-          throw new ScheduleChangeError("invalid_state", `This change has been ${String(row.State)}, so it can't be rejected`, { state: row.State });
+          throw new ScheduleChangeError("invalid_state", `This change has been ${stateWords(row.State)}, so it can't be rejected`, { state: row.State });
         }
         if (!(await markDecided(db, requestId, { by: { name: caller.actor.name, userId: caller.actor.userId }, note, state: "rejected" }))) {
           throw new ScheduleChangeError("invalid_state", "This change just moved on, so it wasn't rejected");
