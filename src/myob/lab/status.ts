@@ -1,19 +1,23 @@
 // Whether the lab may run (plan M5; the M9 review's carry): exactly one
 // registered company file is flagged as the demonstration file; it isn't RP's
-// own file (MYOB_RP_COMPANY_FILE_ID, which the lab needs so it can always tell
-// the two apart); it is set to read and create, and no other file is; and
-// Floorplan is linked with exactly the agreed scopes. Every problem is said in
+// own file (MYOB_RP_COMPANY_FILE_ID, rpCompanyFile.ts, which the lab needs so
+// it can always tell the two apart; send.ts refuses RP's file too); it is set
+// to read and create, and no other file is; and Floorplan is linked to the
+// demonstration file with exactly the agreed scopes. Every problem is said in
 // plain words; the lab records nothing until there are none.
 
 import type { Connection } from "tedious";
 import { executeQuery } from "../../db";
 import { MYOB_SCOPE_STRING } from "../../myob-endpoints";
+import { rpCompanyFileId } from "../rpCompanyFile";
 
 export interface LabStatus {
   demoFile: { id: string; mode: string; name: string } | null;
   link: { businessId: string | null; scope: string | null; username: string | null } | null;
   problems: string[];
   ready: boolean;
+  /** RP's own file, which the lab never touches, with its registered name (null when not registered). */
+  rpFile: { id: string; name: string | null } | null;
 }
 
 const text = (value: unknown) => (typeof value === "string" && value ? value : null);
@@ -21,7 +25,7 @@ const text = (value: unknown) => (typeof value === "string" && value ? value : n
 export async function loadLabStatus(connection: Connection, env: NodeJS.ProcessEnv = process.env): Promise<LabStatus> {
   const files = await executeQuery(connection, `SELECT CompanyFileId, Name, Mode, IsDemonstration FROM dbo.MyobCompanyFiles`);
   const auth = await executeQuery(connection, `SELECT BusinessId, MyobUsername, Scope FROM dbo.MyobAuth WHERE Id = 1`);
-  const rp = env.MYOB_RP_COMPANY_FILE_ID?.trim().toLowerCase() || null;
+  const rp = rpCompanyFileId(env);
   const problems: string[] = [];
   if (!rp) problems.push("Set MYOB_RP_COMPANY_FILE_ID to RP's own company file id, so the lab can never touch it");
 
@@ -37,6 +41,11 @@ export async function loadLabStatus(connection: Connection, env: NodeJS.ProcessE
   const link = auth[0] ? { businessId: text(auth[0].BusinessId)?.toLowerCase() ?? null, scope: text(auth[0].Scope), username: text(auth[0].MyobUsername) } : null;
   if (!link?.businessId) problems.push("Floorplan is not linked to MYOB yet (Admin → MYOB → Connection)");
   else if (link.scope !== MYOB_SCOPE_STRING) problems.push(`The MYOB link's scope is "${link.scope ?? "none"}", not exactly ${MYOB_SCOPE_STRING}`);
+  if (link?.businessId && demo && link.businessId !== demo.id) {
+    const linked = all.find((file) => file.id === link.businessId)?.name ?? link.businessId;
+    problems.push(`Floorplan's MYOB link is to ${linked}, not ${demo.name}: link it to the demonstration file as your restricted MYOB user (Admin → MYOB → Connection)`);
+  }
 
-  return { demoFile: demo ? { id: demo.id, mode: demo.mode, name: demo.name } : null, link, problems, ready: problems.length === 0 };
+  const rpFile = rp ? { id: rp, name: all.find((file) => file.id === rp)?.name ?? null } : null;
+  return { demoFile: demo ? { id: demo.id, mode: demo.mode, name: demo.name } : null, link, problems, ready: problems.length === 0, rpFile };
 }

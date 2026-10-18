@@ -56,8 +56,18 @@ describe("runLabProbe", () => {
     expect(JSON.parse(String(result.request.body)).Date).toBe("2026-09-30T00:00:00");
   });
 
-  it("names every probe the plan lists", () => {
+  it("names every probe the plan lists, each with the refusal code its case checks", () => {
     expect(Object.keys(LAB_PROBES).sort()).toEqual(["card_file", "chart_of_accounts", "delete_order", "file_off", "prior_period", "update_existing"]);
+    expect(Object.fromEntries(Object.entries(LAB_PROBES).map(([name, probe]) => [name, probe.expect]))).toEqual({
+      card_file: "not_allowed", chart_of_accounts: "not_allowed", delete_order: "not_allowed", file_off: "controls", prior_period: "outside_period", update_existing: "not_floorplan_record",
+    });
+  });
+
+  it("doesn't count a refusal by another rule as the case passing", async () => {
+    assertMyobControlsAllow.mockRejectedValue(new MyobRequestRefusedError("controls", "orders.update is switched off"));
+    const result = await runLabProbe("update_existing", DEMO, NOW);
+    expect(result).toMatchObject({ code: "controls", expected: "not_floorplan_record", refused: false });
+    expect(result.message).toBe("Refused, but not by the rule this case checks (controls: orders.update is switched off). Nothing was sent.");
   });
 });
 
