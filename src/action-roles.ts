@@ -30,7 +30,7 @@ import {
   VIEW_ASSETS_ROLES,
 } from "./assetRegister";
 import { MANAGE_DEFECTS_PERIODS_ROLES, MANAGE_SERVICE_SCHEDULES_ROLES, VIEW_FACILITIES_ROLES } from "./facilitiesRoles";
-import { ASK_FOR_DECISION_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
+import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
 
@@ -163,6 +163,17 @@ export const ACTION_ROLES = {
     gate: TENANCY_DESK,
     routes: ["commenceRentReview", "updateRentReviewBasis", "calculateRentReview"],
     why: "Commence, re-base and calculate a rent review (TENANCY_EDIT_ROLES).",
+  },
+  completeAnyNextStep: {
+    gate: roles(MANAGER_AND_ABOVE_ROLES),
+    match: "exact",
+    routes: [],
+    why: "Mark any job's next step done, not only your own (MANAGER_AND_ABOVE_ROLES, checked literally in completeJobNextStep's standing rule).",
+  },
+  completeNextStep: {
+    gate: COMPLETE_NEXT_STEP_ROLES,
+    routes: ["completeJobNextStep"],
+    why: "Mark a decision's next step done: the roles that can be asked; the step's owner, or a manager and above (completeAnyNextStep), then decide.",
   },
   completePurchaseOrder: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES],
@@ -338,8 +349,8 @@ export const ACTION_ROLES = {
   },
   respondToDecision: {
     gate: RESPOND_TO_DECISION_ROLES,
-    routes: ["respondToJobDecision", "completeJobNextStep"],
-    why: "Answer a decision you were asked for, or complete its next step (the request names who).",
+    routes: ["respondToJobDecision"],
+    why: "Answer a decision you were asked for (the request names who).",
   },
   revertAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
