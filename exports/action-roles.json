@@ -98,6 +98,22 @@
     "cfo",
     "director"
   ],
+  "completeAnyNextStep": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "completeNextStep": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "completePurchaseOrder": [
     "accounts_manager",
     "admin",

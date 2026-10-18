@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "fa9576a31508aa9c586366b7db87d657d3ea1aa23829b6064acae477520dc583";
+const PINNED_SHA256 = "bae5e11ac9f356ee109e353b769b655f0164148ea0c91b6cf1d69ae84994537e";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -73,6 +73,13 @@ describe("the table", () => {
     expect(rolesFor(ACTION_ROLES.hardDeleteTenancyRows)).toEqual([AppRole.ADMIN]);
     expect([...ACTION_ROLES.hardDeleteTenancyRows.routes].sort()).toEqual(["deleteCarpark", "deleteOccupancy"]);
     expect([...ACTION_ROLES.deleteTenancyRegisterRows.routes].sort()).toEqual(["deleteRegisterTenant", "deleteTenant"]);
+  });
+
+  it("splits completing a next step from answering a decision (A2): anyone who can be asked completes their own, managers and above any", () => {
+    expect([...ACTION_ROLES.completeNextStep.routes]).toEqual(["completeJobNextStep"]);
+    expect([...ACTION_ROLES.respondToDecision.routes]).toEqual(["respondToJobDecision"]);
+    expect(ACTION_ROLES.completeAnyNextStep.match).toBe("exact");
+    expect(rolesFor(ACTION_ROLES.completeAnyNextStep)).not.toContain(AppRole.FACILITIES);
   });
 
   it("archives any job without the cfo until Connor's decision 11 says otherwise", () => {
