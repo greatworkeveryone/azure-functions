@@ -165,10 +165,13 @@ refuses a published version without one; a director re-approving them in the app
 replaces that with a real approval. Changed wording in `content/procedures` after
 the first load is not picked up: edit the document in the app (a new draft). Who
 sees what: a manager sees what is written for their officers, the CFO what is
-written for accounts, admin and director see all; everyone else sees the
-procedures written for them, and editors (managers, director, admin) see every
-procedure and every draft. A manager asks a director to approve a draft from the
-editor; the director gets an email (a link to the editor, nothing about the
+written for accounts, admin and director see all. That holds for editors too
+(managers, the CFO): they read, edit and ask about only the procedures written for
+their own team, and a draft or a save outside it is refused (403). Only a director
+publishes: admin alone is refused, as for schedule sign-off. The starting documents
+stay out of the deployed package (`.funcignore`); they are loaded from a checkout.
+A manager asks a director to approve a draft from the
+editor (the same director again only after ten minutes); the director gets an email (a link to the editor, nothing about the
 procedure in the subject) and the library reads "Awaiting approval by {name}".
 
 ## Escalations

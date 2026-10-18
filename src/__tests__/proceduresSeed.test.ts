@@ -20,7 +20,9 @@ jest.mock("../auth", () => ({
   },
   errorResponse: jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
   extractToken: jest.fn().mockReturnValue("mock-token"),
+  forbiddenResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Forbidden" }, status: 403 }),
   requireRole: jest.fn().mockResolvedValue(null),
+  serviceUnavailableResponse: jest.fn().mockReturnValue({ jsonBody: { error: "Unavailable" }, status: 503 }),
   rolesForRequest: jest.fn().mockResolvedValue(["director"]),
   unauthorizedResponse: jest.fn(),
   userInfoFromToken: jest.fn().mockReturnValue({ email: "connor@rp.com.au", name: "Connor" }),
@@ -34,7 +36,7 @@ jest.mock("../db", () => ({
 jest.mock("../escalation/store", () => ({ listActiveUsers: jest.fn().mockResolvedValue([]) }));
 
 import { Connection } from "tedious";
-import { saveProcedureDraft } from "../functions/procedures";
+import { saveProcedureDraft } from "../functions/saveProcedureDraft";
 import { loadSeedEntries, planSeed, runSeed, SEED_FILE, type LibraryState, type SeedEntry } from "../proceduresSeed";
 
 // Loading content/procedures into the library on deploy (beta sprint U4). The

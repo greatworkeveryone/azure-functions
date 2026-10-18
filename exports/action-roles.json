@@ -21,7 +21,6 @@
     "director"
   ],
   "approveProcedures": [
-    "admin",
     "director"
   ],
   "approveQuote": [

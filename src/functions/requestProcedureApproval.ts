@@ -9,19 +9,27 @@
 //   200 { ok, notified, approver: { userId, name }, requestedAt }
 //   409 when the version is not a draft any more, or has nothing in it
 //
-// Asking again replaces the request (another director, or a reminder). Editing
-// the draft withdraws it (saveProcedureDraft). The email is best effort: a
-// failure keeps the request and says notified: false.
+// Asking again replaces the request (another director, or a reminder), but not
+// the same director twice inside ten minutes (429): one email each time is a way
+// to nag. Editing the draft withdraws the request (saveProcedureDraft). An editor
+// asks about the procedures written for their own team (403 otherwise). The email
+// is best effort: a failure keeps the request and says notified: false.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { errorResponse, extractToken, requireRole, unauthorizedResponse, userInfoFromToken } from "../auth";
+import { errorResponse, extractToken, requireRole, serviceUnavailableResponse, unauthorizedResponse, userInfoFromToken } from "../auth";
 import { closeConnection, createRequestConnection, createServiceRequestConnection, executeQuery } from "../db";
 import { resolveRecipient } from "../email-recipient";
 import { listActiveUsers } from "../escalation/store";
 import { graphSendMail } from "../graph";
+import { outsideAudienceResponse, readCallerRoles } from "../procedureAccess";
+import { canReadProcedure } from "../procedureAudience";
+import { splitAudience } from "../procedureLibrary";
 import { PROCEDURE_APPROVER_ROLE, PROCEDURE_EDITOR_GATE } from "../procedureRoles";
 import { NOT_A_RECORD } from "../test-data";
+
+/** The same director is not asked again within this long. */
+const ASK_AGAIN_AFTER_MS = 10 * 60_000;
 
 interface Approver {
   email: string | null;
@@ -40,6 +48,19 @@ async function findApprover(userId: number): Promise<Approver | null> {
   } finally {
     if (connection) closeConnection(connection);
   }
+}
+
+/** A 429 naming how long to wait when this director was asked about this draft a moment ago; null otherwise. */
+function waitBeforeAskingAgain(draft: Record<string, unknown>, approver: Approver): HttpResponseInit | null {
+  if (!draft.ApprovalRequestedAt || Number(draft.ApprovalRequestedFromUserId) !== approver.userId) return null;
+  const waitMs = ASK_AGAIN_AFTER_MS - (Date.now() - new Date(draft.ApprovalRequestedAt as Date).getTime());
+  if (waitMs <= 0) return null;
+  const minutes = Math.ceil(waitMs / 60_000);
+  return {
+    headers: { "Retry-After": String(Math.ceil(waitMs / 1000)) },
+    jsonBody: { error: `You asked ${approver.name} a moment ago. Give them time, or try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.` },
+    status: 429,
+  };
 }
 
 function hasContent(blocksJson: unknown): boolean {
@@ -96,8 +117,10 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     connection = await createRequestConnection(token);
     const drafts = await executeQuery(
       connection,
-      `SELECT Title, VersionNo, BlocksJson FROM dbo.ProcedureVersions
-       WHERE Slug = @Slug AND VersionId = @VersionId AND Status = 'draft'`,
+      `SELECT v.Title, v.VersionNo, v.BlocksJson, v.ApprovalRequestedAt, v.ApprovalRequestedFromUserId, p.Audience
+       FROM dbo.ProcedureVersions v
+       INNER JOIN dbo.Procedures p ON p.Slug = v.Slug
+       WHERE v.Slug = @Slug AND v.VersionId = @VersionId AND v.Status = 'draft'`,
       [
         { name: "Slug", type: TYPES.NVarChar, value: slug },
         { name: "VersionId", type: TYPES.UniqueIdentifier, value: versionId },
@@ -105,7 +128,13 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     );
     const draft = drafts[0];
     if (!draft) return { status: 409, jsonBody: { error: "That draft is not there any more: it was published or replaced." } };
+    const roles = await readCallerRoles(request);
+    if (roles === null) return serviceUnavailableResponse();
+    if (!canReadProcedure(roles, splitAudience(draft.Audience))) return outsideAudienceResponse();
     if (!hasContent(draft.BlocksJson)) return { status: 409, jsonBody: { error: "Add some content before asking for approval." } };
+
+    const wait = waitBeforeAskingAgain(draft, approver);
+    if (wait !== null) return wait;
 
     const updated = await executeQuery(
       connection,

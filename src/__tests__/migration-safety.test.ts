@@ -24,6 +24,7 @@ const MIGRATIONS = [
   "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
   "140_archive_occupancy_carpark.sql",
+  "142_procedure_approval_request.sql",
   "136_building_category_owner.sql",
   "139_keys_rowversion.sql",
   "137_job_decision_requests.sql",
