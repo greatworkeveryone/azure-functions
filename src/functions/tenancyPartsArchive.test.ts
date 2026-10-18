@@ -43,6 +43,7 @@ jest.mock("../ledger/actor", () => ({
 }));
 
 import { AppRole } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 
 const auth = jest.requireMock("../auth") as { requireRole: jest.Mock };
 const db = jest.requireMock("../db") as Record<"beginTransaction" | "commitTransaction" | "executeQuery" | "rollbackTransaction", jest.Mock>;
@@ -73,11 +74,12 @@ const KINDS = [
 ] as const;
 
 describe.each(KINDS)("$kind: archive and restore", ({ archive, body, id, kind, restore, table, where }) => {
-  it("are for the roles that held the delete (accounts, accounts_manager, director, admin; cfo through the hierarchy)", async () => {
+  it("are gated by the roles table's archiveTenancyParts: the tenancy desk (accounts, accounts_manager, director, admin; cfo through the hierarchy)", async () => {
     await handlers[archive](post({ ...body, Reason: "Area merged into Suite 5" }), ctx);
     await handlers[restore](post({ ...body, Reason: "Archived by mistake" }), ctx);
-    const roles = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
-    expect(auth.requireRole.mock.calls.map((c: unknown[]) => c[1])).toEqual([roles, roles]);
+    const gates = auth.requireRole.mock.calls.map((c: unknown[]) => c[1]);
+    expect(gates).toEqual([ACTION_ROLES.archiveTenancyParts.gate, ACTION_ROLES.archiveTenancyParts.gate]);
+    expect(gates[0]).toEqual([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
     auth.requireRole.mockResolvedValue({ jsonBody: { error: "Forbidden" }, status: 403 });
     expect((await handlers[archive](post({ ...body, Reason: "x" }), ctx)).status).toBe(403);
   });
@@ -133,6 +135,60 @@ describe.each(KINDS)("$kind: archive and restore", ({ archive, body, id, kind, r
     expect(db.rollbackTransaction).toHaveBeenCalled();
     expect(db.commitTransaction).not.toHaveBeenCalled();
   });
+});
+
+describe("several areas or bays at once: the Edit tenancy modal's removals, all or none (D10 review)", () => {
+  const idsOf = (pattern: RegExp) =>
+    db.executeQuery.mock.calls
+      .filter((c: unknown[]) => pattern.test(String(c[1])))
+      .map((c: unknown[]) => (c[2] as { name: string; value: unknown }[]).find((p) => p.name === "Id")?.value);
+  const lockedRead = /WITH \(UPDLOCK, HOLDLOCK\)/;
+
+  it.each([
+    ["archiveOccupancy", "OccupancyIds", "TenantOccupancies", "occupancy"],
+    ["archiveCarpark", "CarparkIds", "Carparks", "carpark"],
+  ])("%s takes %s and archives them in one transaction, each ledgered with the one reason", async (route, field, table, kind) => {
+    const res = await handlers[route](post({ [field]: ["a-1", "a-2"], Reason: "Merged into Suite 5" }), ctx);
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toEqual({ archived: true, ids: ["a-1", "a-2"], kind });
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(idsOf(new RegExp(`UPDATE dbo\\.${table} SET ArchivedAt = SYSUTCDATETIME`))).toEqual(["a-1", "a-2"]);
+    expect(ledger.record.mock.calls.map((c: unknown[]) => (c[1] as { reason: string; subject: { id: string } }).subject.id)).toEqual(["a-1", "a-2"]);
+    expect(ledger.record.mock.calls.every((c: unknown[]) => (c[1] as { reason: string }).reason === "Merged into Suite 5")).toBe(true);
+  });
+
+  it("reads every one under lock before it writes any, and writes none when one is already archived", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params: { name: string; value: unknown }[] = []) => {
+      if (!lockedRead.test(sql)) return [];
+      return [{ ...part, ArchivedAt: params[0]?.value === "a-2" ? new Date() : null }];
+    });
+    const res = await handlers.archiveOccupancy(post({ OccupancyIds: ["a-1", "a-2"], Reason: "x" }), ctx);
+    expect(res.status).toBe(409);
+    expect(res.jsonBody.error).toMatch(/already archived/);
+    expect(idsOf(lockedRead)).toEqual(["a-1", "a-2"]);
+    expect(ran(/UPDATE dbo\./)).toBe(false);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("writes none when one is missing", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params: { name: string; value: unknown }[] = []) =>
+      lockedRead.test(sql) && params[0]?.value !== "a-2" ? [part] : [],
+    );
+    expect((await handlers.archiveOccupancy(post({ OccupancyIds: ["a-1", "a-2"], Reason: "x" }), ctx)).status).toBe(404);
+    expect(ran(/UPDATE dbo\./)).toBe(false);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it.each([[[]], [["a-1", "a-1"]], [["a-1", 4]], [Array.from({ length: 51 }, (_v, i) => `a-${i}`)]])(
+    "refuses %p (400) before touching the database",
+    async (ids) => {
+      expect((await handlers.archiveOccupancy(post({ OccupancyIds: ids, Reason: "x" }), ctx)).status).toBe(400);
+      expect(db.executeQuery).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("the hard deletes are gone", () => {

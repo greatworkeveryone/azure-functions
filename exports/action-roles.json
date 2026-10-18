@@ -65,6 +65,13 @@
     "cfo",
     "director"
   ],
+  "archiveTenancyParts": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
   "askForDecision": [
     "accounts",
     "accounts_manager",
@@ -212,9 +219,6 @@
     "admin",
     "cfo",
     "director"
-  ],
-  "hardDeleteTenancyRows": [
-    "admin"
   ],
   "manageAccessProfiles": [
     "admin"

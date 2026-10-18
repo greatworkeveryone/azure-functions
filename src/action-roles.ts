@@ -139,6 +139,11 @@ export const ACTION_ROLES = {
     routes: ["archiveTenant", "unarchiveTenant"],
     why: "Archive or restore a tenancy (TENANCY_ARCHIVE_ROLES).",
   },
+  archiveTenancyParts: {
+    gate: TENANCY_DESK,
+    routes: ["archiveOccupancy", "unarchiveOccupancy", "archiveCarpark", "unarchiveCarpark"],
+    why: "Archive or restore an area or a car park bay, with a reason (D10, replacing the hard deletes). Archive is reversible and ledgered, and the Edit tenancy modal archives the areas it removes, so it is the tenancy desk's.",
+  },
   askForDecision: {
     gate: ASK_FOR_DECISION_ROLES,
     routes: ["requestJobDecision", "withdrawJobDecisionRequest"],
@@ -245,11 +250,6 @@ export const ACTION_ROLES = {
     gate: TENANCY_DESK,
     routes: ["upsertRegisterTenant", "upsertOccupancy", "upsertCarpark", "upsertMiscFee", "upsertTenantIncentive", "upsertLeaseAdministration"],
     why: "Edit the tenancy register and a tenant's detail.",
-  },
-  hardDeleteTenancyRows: {
-    gate: [A.ADMIN],
-    routes: ["deleteOccupancy", "deleteCarpark"],
-    why: "Delete an occupancy or carpark row outright: admin only, as before J4. A hard delete with no archive, ledger or relied-on check; becomes an archive in lane D.",
   },
   manageAccessProfiles: {
     gate: [A.ADMIN],

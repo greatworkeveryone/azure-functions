@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "db72eca1ab028f3fb9c7b07ff37291b1f5224e81758195a77140d0dfc8a2eb37";
+const PINNED_SHA256 = "ee9ac98630829d74230fac8cca02ebedf8ff1ab45cd53f2adc8e3927d05661b8";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -69,9 +69,13 @@ describe("the table", () => {
     expect(rolesFor(ACTION_ROLES.approveQuote)).not.toContain(AppRole.FACILITIES);
   });
 
-  it("keeps hard deletes of tenancy rows to admin, apart from the draft-only register deletes (J4 review)", () => {
-    expect(rolesFor(ACTION_ROLES.hardDeleteTenancyRows)).toEqual([AppRole.ADMIN]);
-    expect([...ACTION_ROLES.hardDeleteTenancyRows.routes].sort()).toEqual(["deleteCarpark", "deleteOccupancy"]);
+  it("archives areas and bays at the tenancy desk, and hard-deletes none of them (D10, J4 review)", () => {
+    // Archive is reversible, reasoned and ledgered, the normal path under rule 1, and the
+    // Edit tenancy modal archives the areas it removes: whoever edits a tenancy archives.
+    expect(Object.keys(ACTION_ROLES)).not.toContain("hardDeleteTenancyRows");
+    expect(ACTION_ROLES.archiveTenancyParts.gate).toBe(ACTION_ROLES.editTenancy.gate);
+    expect(rolesFor(ACTION_ROLES.archiveTenancyParts)).toEqual([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.CFO, AppRole.DIRECTOR].sort());
+    expect([...ACTION_ROLES.archiveTenancyParts.routes].sort()).toEqual(["archiveCarpark", "archiveOccupancy", "unarchiveCarpark", "unarchiveOccupancy"]);
     expect([...ACTION_ROLES.deleteTenancyRegisterRows.routes].sort()).toEqual(["deleteRegisterTenant", "deleteTenant"]);
   });
 

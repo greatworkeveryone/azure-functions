@@ -500,8 +500,10 @@ function tenantRowToApi(
   noteCountByAnchor: Record<string, number>,
   pending?: PendingChanges,
 ): RegisterTenantApi {
+  // Live areas only (D10): the Show archived view lists archived areas, but they
+  // are no longer let, so they never count toward size, m² or rent per m².
   const totalSizeSqm = occupancies.reduce(
-    (sum, o) => sum + (o.sizeSqm || 0),
+    (sum, o) => (o.archivedAt === null ? sum + (o.sizeSqm || 0) : sum),
     0,
   );
   const rentPerAnnum = asNum(row.RentPerAnnum);

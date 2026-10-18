@@ -1,6 +1,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { extractToken, requireRole, unauthorizedResponse } from "../auth";
-import { setTenancyPartArchived, TENANCY_PART_ARCHIVE_ROLES } from "../tenancy-parts-archive";
+import { ACTION_ROLES } from "../action-roles";
+import { setTenancyPartArchived } from "../tenancy-parts-archive";
+
+// The tenancy desk (the roles table's archiveTenancyParts, J4): accounts,
+// accounts_manager, director and admin, cfo through requireRole's hierarchy.
+const GATE = ACTION_ROLES.archiveTenancyParts.gate;
 
 // ── POST /api/archiveOccupancy, unarchiveOccupancy, archiveCarpark, unarchiveCarpark
 // Body { OccupancyId | CarparkId, Reason }. Replace the hard deleteOccupancy and
@@ -10,7 +15,7 @@ import { setTenancyPartArchived, TENANCY_PART_ARCHIVE_ROLES } from "../tenancy-p
 export async function archiveOccupancy(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, TENANCY_PART_ARCHIVE_ROLES);
+  const denied = await requireRole(request, GATE);
   if (denied) return denied;
   return setTenancyPartArchived(request, context, token, "occupancy", true);
 }
@@ -18,7 +23,7 @@ export async function archiveOccupancy(request: HttpRequest, context: Invocation
 export async function unarchiveOccupancy(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, TENANCY_PART_ARCHIVE_ROLES);
+  const denied = await requireRole(request, GATE);
   if (denied) return denied;
   return setTenancyPartArchived(request, context, token, "occupancy", false);
 }
@@ -26,7 +31,7 @@ export async function unarchiveOccupancy(request: HttpRequest, context: Invocati
 export async function archiveCarpark(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, TENANCY_PART_ARCHIVE_ROLES);
+  const denied = await requireRole(request, GATE);
   if (denied) return denied;
   return setTenancyPartArchived(request, context, token, "carpark", true);
 }
@@ -34,7 +39,7 @@ export async function archiveCarpark(request: HttpRequest, context: InvocationCo
 export async function unarchiveCarpark(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, TENANCY_PART_ARCHIVE_ROLES);
+  const denied = await requireRole(request, GATE);
   if (denied) return denied;
   return setTenancyPartArchived(request, context, token, "carpark", false);
 }
