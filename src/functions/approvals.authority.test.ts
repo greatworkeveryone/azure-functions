@@ -154,14 +154,14 @@ describe("approveQuote", () => {
   const approve = () => approveQuote(makeRequest({ QuoteID: 7 }), ctx);
   const landed = (): unknown => param(/UPDATE Quotes\s+SET Status = @Status/, "Status");
 
-  it("lets every role that may approve a quote through the gate, plain facilities included (they approve only by naming a manager, R2)", async () => {
+  it("lets every role that may approve a quote through the gate, and plain facilities not (attributed approval is held off, decisions 1 and 9)", async () => {
     as("facilities_manager");
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, quote(4000), STORED]);
 
     await approve();
 
     const allowed = auth.requireRole.mock.calls[0][1] as string[];
-    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director", "facilities", "facilities_manager"]);
+    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director", "facilities_manager"]);
   });
 
   it("a facilities manager approves a $4,000 quote", async () => {

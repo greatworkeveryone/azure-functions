@@ -28,6 +28,10 @@ describe("migration 117: quote approval attribution and the R13 variance margin"
     expect(statements).toMatch(/IF OBJECT_ID\('dbo\.MoneyVariances', 'U'\) IS NULL\s+CREATE TABLE dbo\.MoneyVariances/);
   });
 
+  it("ties each accepted rise to the quote it was measured against (MoneyVariances.QuoteID, nullable)", () => {
+    expect(statements).toMatch(/QuoteID\s+INT\s+NULL,/);
+  });
+
   it("seeds the default margin and cap, and the four policies, without overwriting an admin's values", () => {
     expect(statements).toContain("(N'po_variance_margin_percent', CAST(10 AS DECIMAL(18, 4)))");
     expect(statements).toContain("(N'po_variance_cap', CAST(1000 AS DECIMAL(18, 4)))");

@@ -23,12 +23,15 @@
 --                        Seeded with MERGE ... WHEN NOT MATCHED only, so a value
 --                        an admin has changed is never overwritten.
 --   dbo.MoneyVariances   one row per amount accepted within the margin: who,
---                        whom they named, the original approved amount, before
+--                        whom they named, the approved quote it was measured
+--                        against (QuoteID), the original approved amount, before
 --                        and after, $ and %, the rationale, and the named
 --                        manager's answer. A later check reads the highest
---                        undisputed amount accepted for a record, so a send or
---                        an invoice approval after an accepted edit isn't asked
---                        again. Rows are never removed.
+--                        undisputed amount accepted for a record against the
+--                        job's CURRENT approved quote, so a send or an invoice
+--                        approval after an accepted edit isn't asked again, and a
+--                        rise accepted on a quote since deselected covers
+--                        nothing. Rows are never removed.
 --
 -- The four escalation policies of PLAN §3.7 that 098 left to this package:
 -- quote.attribution_notice and po.variance_notice (attention, the named manager,
@@ -40,8 +43,12 @@
 -- check in a batch of its own; the seeds insert only missing rows. Nothing is
 -- dropped, narrowed or rewritten.
 --
--- RUNBOOK: apply 117 before the build that selects the new Quotes columns, or
--- the quote list fails on an unknown column name.
+-- RUNBOOK: apply 117 before the build. The quote list does not select the new
+-- columns, but without them these fail with a 500: approving, deselecting or
+-- resetting a quote (each writes or clears the attribution columns), any PO
+-- edit, PO send or invoice approval above the approved quote
+-- (dbo.MoneyVariances, dbo.ApprovalFacts), setApprovalFact, and the escalation
+-- sweep's attribution step (which then raises system.health).
 
 IF COL_LENGTH('dbo.Quotes', 'ApprovalAttributedToUserID') IS NULL
   ALTER TABLE dbo.Quotes ADD ApprovalAttributedToUserID INT NULL;
@@ -101,6 +108,7 @@ IF OBJECT_ID('dbo.MoneyVariances', 'U') IS NULL
     AttributedToUserID   INT            NULL,
     AttributedToName     NVARCHAR(200)  NOT NULL,
     DirectorOverride     BIT            NOT NULL CONSTRAINT DF_MoneyVariances_DirectorOverride DEFAULT 0,
+    QuoteID              INT            NULL,
     CreatedAt            DATETIME2(3)   NOT NULL CONSTRAINT DF_MoneyVariances_CreatedAt DEFAULT SYSUTCDATETIME(),
     AnsweredAt           DATETIME2(3)   NULL,
     Disputed             BIT            NULL,
@@ -110,11 +118,11 @@ IF OBJECT_ID('dbo.MoneyVariances', 'U') IS NULL
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_MoneyVariances_Subject' AND object_id = OBJECT_ID('dbo.MoneyVariances'))
-  CREATE INDEX IX_MoneyVariances_Subject ON dbo.MoneyVariances (SubjectType, SubjectID) INCLUDE (NewAmount, Disputed);
+  CREATE INDEX IX_MoneyVariances_Subject ON dbo.MoneyVariances (SubjectType, SubjectID) INCLUDE (NewAmount, Disputed, QuoteID);
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_MoneyVariances_Job' AND object_id = OBJECT_ID('dbo.MoneyVariances'))
-  CREATE INDEX IX_MoneyVariances_Job ON dbo.MoneyVariances (JobID) INCLUDE (NewAmount, Disputed);
+  CREATE INDEX IX_MoneyVariances_Job ON dbo.MoneyVariances (JobID) INCLUDE (NewAmount, Disputed, QuoteID);
 GO
 
 IF OBJECT_ID('dbo.EscalationPolicies', 'U') IS NOT NULL

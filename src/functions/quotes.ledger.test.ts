@@ -712,6 +712,12 @@ describe("quote reversals and deletions", () => {
       });
     });
 
+    it("clears an attribution that belonged to the approval being undone", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+      await call(unapproveQuote);
+      expect(calledWith(/UPDATE Quotes/)?.sql).toMatch(/ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/);
+    });
+
     it("says the amount did not move, and what the approval being undone covered", async () => {
       mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
 
@@ -1090,6 +1096,11 @@ describe("upsertQuote: an amount edit that tears down an approval", () => {
   beforeEach(() => {
     db.buildUpdateSet.mockReturnValue({ params: [], setClause: "Amount = @Amount" });
     mockSql([APP_USER, JOB_BUILDING, quote(), stored]);
+  });
+
+  it("clears an attribution with the approval it belonged to", async () => {
+    await edit();
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => /SET Status = 'pending'/.test(String(c[1])) && /ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/.test(String(c[1])))).toBe(true);
   });
 
   it("writes one quote.approval_reset exception: the old amount, status and approval stamps before, the new amount after", async () => {
@@ -1640,6 +1651,7 @@ describe("approveQuote: attributed approval by plain facilities (R2, Connor 13 O
   const updates = () => sqlCalls().filter((c) => /UPDATE Quotes/.test(c.sql));
 
   beforeEach(() => {
+    process.env.ATTRIBUTED_APPROVAL_ENABLED = "true";
     auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "fi@example.com", name: "Fi Facilities", oid: "fi-oid" });
     auth.rolesForRequest.mockResolvedValue(["facilities"]);
     limitsDb.getCachedApprovalLimits.mockResolvedValue([
@@ -1647,6 +1659,56 @@ describe("approveQuote: attributed approval by plain facilities (R2, Connor 13 O
       { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
       { MaxApprovalAmount: null, RoleName: "director" },
     ]);
+  });
+
+  afterEach(() => {
+    delete process.env.ATTRIBUTED_APPROVAL_ENABLED;
+  });
+
+  it("is held off unless ATTRIBUTED_APPROVAL_ENABLED is \"true\": facilities isn't let through, and a manager named is ignored", async () => {
+    for (const value of [undefined, "1", "TRUE"]) {
+      if (value === undefined) delete process.env.ATTRIBUTED_APPROVAL_ENABLED;
+      else process.env.ATTRIBUTED_APPROVAL_ENABLED = value;
+      auth.requireRole.mockClear();
+      mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored, QUOTE_SCOPE]);
+      const res = await approve({ attributedToUserId: 30, declared: true });
+      expect(auth.requireRole.mock.calls[0][1]).not.toContain("facilities");
+      expect(res.jsonBody).toMatchObject({ code: "attribution_required" });
+      expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["an admin (decision 4)", { Role: "admin", UserID: 40 }, 40],
+    ["an accounts clerk, whose own $5,000 row would cover it", { Role: "accounts", UserID: 41 }, 41],
+  ])("refuses %s as the manager who agreed (422), approving nothing", async (_label, over, id) => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(over), stored, QUOTE_SCOPE]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 5000, RoleName: "facilities" },
+      { MaxApprovalAmount: 5000, RoleName: "accounts" },
+      { MaxApprovalAmount: 50000, RoleName: "admin" },
+      { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+
+    const res = await approve({ attributedToUserId: id, declared: true });
+
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "attribution_invalid" });
+    expect(updates()).toEqual([]);
+  });
+
+  it("refuses the manager who added the quote as the one who agreed to it (J3, no self-approval by proxy)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, { ...quoteRow, rows: [{ ...quoteRow.rows![0], CreatedBy: "Mo Manager" }] }, named(), stored, QUOTE_SCOPE]);
+
+    const res = await approve({ attributedToUserId: 30, declared: true });
+
+    expect(res).toEqual({
+      jsonBody: { code: "attribution_invalid", error: "Mo Manager added this quote, so they can't be the manager who agreed to it. Name someone else." },
+      status: 422,
+    });
+    expect(updates()).toEqual([]);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "attribution_invalid" })]);
   });
 
   it("lets plain facilities through the role gate", async () => {
@@ -1734,7 +1796,7 @@ describe("approveQuote: attributed approval by plain facilities (R2, Connor 13 O
     const res = await approve({ attributedToUserId: 30, declared: true });
 
     expect(res.status).toBe(200);
-    expect(calledWith(/UPDATE Quotes/)?.sql).not.toMatch(/ApprovalAttributedToUserID/);
+    expect(calledWith(/UPDATE Quotes/)?.sql).not.toMatch(/ApprovalAttributedToUserID = @AttributedTo/);
     expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "quote.approve", ruleApplied: "over_limit" })]);
     expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
   });
@@ -1746,6 +1808,8 @@ describe("approveQuote: attributed approval by plain facilities (R2, Connor 13 O
     await approve({ attributedToUserId: 30, declared: true });
 
     expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "quote.approve", ruleApplied: "own_authority" })]);
+    // An earlier attribution on this quote no longer applies.
+    expect(calledWith(/UPDATE Quotes/)?.sql).toMatch(/ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/);
     expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
   });
   it("the named manager's \"I didn't agree to this\" is ledgered against the quote with its money facts", async () => {

@@ -981,8 +981,10 @@ async function approveInvoiceInTransaction(
       subject: { id: invoiceId, type: "invoice" },
     });
 
+    // Recorded only once the invoice is approved (stage 1 included): routed up
+    // to someone senior, it is their approval, and their check, that counts.
     const accepted =
-      variance && (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override")
+      newStatus === "approved" && variance && (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override")
         ? await recordVariance(connection, {
             actor,
             after: ledgerFacts,
@@ -991,6 +993,7 @@ async function approveInvoiceInTransaction(
             decision: variance.decision,
             jobId,
             previousAmount: variance.originalAmount,
+            quoteId: variance.quoteId,
             scope,
             subject: { id: invoiceId, type: "invoice" },
           })

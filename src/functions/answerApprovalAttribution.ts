@@ -28,6 +28,7 @@ import {
   ATTRIBUTION_SUBJECT_TYPE,
   attributionSubjectId,
   disputedPolicy,
+  disputeSummary,
   loadAttribution,
   noticePolicy,
   type AttributionKind,
@@ -137,7 +138,7 @@ async function writeAnswer(connection: Connection, actor: LedgerActor, found: At
   });
   return raiseWithin(connection, {
     actor,
-    headline: `${actor.name} didn't agree to it`,
+    summary: disputeSummary(found, actor.name),
     note: answer.reason,
     policyKey: disputedPolicy(found.ref.kind),
     subjectId,

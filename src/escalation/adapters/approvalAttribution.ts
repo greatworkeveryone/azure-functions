@@ -18,6 +18,7 @@
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "../../db";
+import { formatDollars } from "../../moneyRules";
 import type { EscalationAdapter } from "./registry";
 
 export const ATTRIBUTION_SUBJECT_TYPE = "approval_attribution";
@@ -63,6 +64,8 @@ export interface AttributionRecord {
   buildingId: number | null;
   /** Who approved (a quote) or edited (a variance). */
   byName: string | null;
+  /** The attribution still stands: the quote is approved (a variance always is). */
+  current: boolean;
   contractorId: number | null;
   contractorName: string | null;
   disputed: boolean;
@@ -76,7 +79,7 @@ export interface AttributionRecord {
   subjectType: "invoice" | "purchase_order" | "quote";
 }
 
-const QUOTE_SELECT = `SELECT q.QuoteID, q.JobID, q.QuoteNumber, q.ContractorID, q.ContractorName, q.Amount, q.ApprovedBy,
+const QUOTE_SELECT = `SELECT q.QuoteID, q.JobID, q.QuoteNumber, q.ContractorID, q.ContractorName, q.Amount, q.ApprovedBy, q.Status,
          q.ApprovalAttributedToUserID, q.AttributionAnsweredAt, u.DisplayName AS AttributedToName, j.BuildingID
     FROM Quotes q /*LOCK*/
     INNER JOIN Jobs j ON j.JobID = q.JobID
@@ -118,6 +121,7 @@ export async function loadAttribution(
       buildingId: (row.BuildingID as number | null) ?? null,
       byName: (row.ApprovedBy as string | null) ?? null,
       contractorId: (row.ContractorID as number | null) ?? null,
+      current: row.Status === "approved",
       contractorName: (row.ContractorName as string | null) ?? null,
       disputed: false,
       jobId,
@@ -141,6 +145,7 @@ export async function loadAttribution(
     buildingId: (row.BuildingID as number | null) ?? null,
     byName: (row.EditorName as string | null) ?? null,
     contractorId: (row.ContractorID as number | null) ?? null,
+    current: true,
     contractorName: (row.ContractorName as string | null) ?? null,
     disputed: row.Disputed === true || row.Disputed === 1,
     jobId,
@@ -153,12 +158,32 @@ export async function loadAttribution(
   };
 }
 
-/** "Job #12 · Quote Q-7 · approved by Fi, agreed with Mo". */
+const dollars = (amount: number | null): string => (amount === null ? "amount not recorded" : formatDollars(amount));
+
+/**
+ * What the manager is asked about, with the money in it (review 117):
+ * "Job #12 · Quote QT-9-1 · $4,500 · approved by Fi, agreed with Mo", or for a
+ * rise "Job #12 · Purchase order #99 · $10,600, up from the approved $10,000 ·
+ * raised within the margin by Fi, agreed with Mo · Extra valve found".
+ */
 export function attributionSummary(record: AttributionRecord): string {
-  const verb = record.ref.kind === "quote" ? "approved" : "raised within the margin";
   const by = record.byName ? ` by ${record.byName}` : "";
   const agreed = record.attributedToName ? `, agreed with ${record.attributedToName}` : "";
-  return `Job #${record.jobId} · ${record.label} · ${verb}${by}${agreed}`;
+  if (record.ref.kind === "quote") {
+    return `Job #${record.jobId} · ${record.label} · ${dollars(record.amount)} · approved${by}${agreed}`;
+  }
+  const money = `${dollars(record.amount)}, up from the approved ${dollars(record.originalAmount)}`;
+  const why = record.rationale ? ` · ${record.rationale.length > 120 ? `${record.rationale.slice(0, 119)}…` : record.rationale}` : "";
+  return `Job #${record.jobId} · ${record.label} · ${money} · raised within the margin${by}${agreed}${why}`;
+}
+
+/** The dispute's one line: what is still in force, and what to do about it. */
+export function disputeSummary(record: AttributionRecord, disputer: string): string {
+  const next =
+    record.ref.kind === "quote"
+      ? "The quote is still approved: deselect it or confirm it."
+      : "The rise no longer counts for the next send or invoice: confirm it, or have the quote re-approved.";
+  return `${attributionSummary(record)} — ${disputer} didn't agree to it. ${next}`;
 }
 
 /** Unanswered attributions, for the sweep that makes sure each has its notice. A few rows. */
@@ -166,7 +191,7 @@ export async function listUnansweredAttributions(connection: Connection): Promis
   const rows = await executeQuery(
     connection,
     `SELECT N'quote' AS Kind, QuoteID AS Id, JobID, ApprovalAttributedToUserID AS UserId
-       FROM Quotes WHERE ApprovalAttributedToUserID IS NOT NULL AND AttributionAnsweredAt IS NULL
+       FROM Quotes WHERE ApprovalAttributedToUserID IS NOT NULL AND AttributionAnsweredAt IS NULL AND Status = N'approved'
      UNION ALL
      SELECT N'variance', VarianceID, JobID, AttributedToUserID
        FROM dbo.MoneyVariances WHERE AttributedToUserID IS NOT NULL AND AnsweredAt IS NULL AND DirectorOverride = 0`,
@@ -191,7 +216,7 @@ export const approvalAttributionAdapter: EscalationAdapter = {
     // A dispute stays until a person resolves it; a notice ends with the answer.
     if (ref.policyKey === disputedPolicy(parsed.kind)) return true;
     const record = await loadAttribution(connection, parsed);
-    return record !== null && record.answeredAt === null;
+    return record !== null && record.current && record.answeredAt === null;
   },
 
   ledgerScope: (escalation) => ({ jobId: parseAttributionSubjectId(escalation.subjectId)?.jobId ?? null }),

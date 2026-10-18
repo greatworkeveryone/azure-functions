@@ -281,7 +281,7 @@ function decideVariance(input: VarianceInput, original: number, facts: VarianceF
   if (deltaCents > allowanceCents) {
     return refused(
       "variance_over_margin",
-      `${above} — the allowed margin is ${formatPercent(facts.marginPercent)} up to ${formatDollars(facts.capDollars)}. Get it re-approved.`,
+      `${above} — the allowed margin is ${formatPercent(facts.marginPercent)} up to ${formatDollars(facts.capDollars)}. A director can let it through with a reason, or have the quote re-approved at the new amount.`,
     );
   }
   const crossed = crossedThreshold(original, next, authority);
@@ -289,7 +289,7 @@ function decideVariance(input: VarianceInput, original: number, facts: VarianceF
     return refused("variance_crosses_director", `${above} and takes it past the director approval threshold of ${formatDollars(crossed.amount)}. A director has to approve it.`);
   }
   if (crossed) {
-    return refused("variance_crosses_limit", `${above} and takes it past the ${formatDollars(crossed.amount)} approval limit. Get it re-approved.`);
+    return refused("variance_crosses_limit", `${above} and takes it past the ${formatDollars(crossed.amount)} approval limit. A director can let it through with a reason, or have the quote re-approved at the new amount.`);
   }
 
   const rationale = input.request.rationale?.trim() ?? "";

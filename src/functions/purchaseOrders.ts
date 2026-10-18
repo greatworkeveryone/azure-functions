@@ -604,6 +604,7 @@ export async function upsertPurchaseOrder(
           decision: variance.decision,
           jobId,
           previousAmount,
+          quoteId: variance.quoteId,
           scope: await jobScope(connection, jobId),
           subject: { id: PurchaseOrderID, type: "purchase_order" },
         });
@@ -911,6 +912,32 @@ async function sendPurchaseOrder(
       });
     }
 
+    // R13: the accepted rise is recorded (row and ledger, one transaction)
+    // BEFORE the email leaves, so a PO above its quote never goes out without
+    // one. If the send then fails, the rise stays accepted for the retry.
+    let recordedVariance: RecordedVariance | null = null;
+    if (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override") {
+      const accepted = variance.decision;
+      await beginTransaction(connection);
+      try {
+        recordedVariance = await recordVariance(connection, {
+          actor,
+          after: purchaseOrderFacts(contractorRows[0]),
+          before: contractorFacts(contractorRows[0]),
+          decision: accepted,
+          jobId: sendJobId,
+          previousAmount: variance.originalAmount,
+          quoteId: variance.quoteId,
+          scope,
+          subject: { id: PurchaseOrderID, type: "purchase_order" },
+        });
+        await commitTransaction(connection);
+      } catch (err) {
+        await rollbackTransaction(connection).catch(() => {});
+        throw err;
+      }
+    }
+
     context.log(
       `[sendPurchaseOrder] PO#${PurchaseOrderID} → ${recipient.address}${
         recipient.overridden ? ` (overridden from ${recipient.original ?? "(none)"})` : ""
@@ -935,7 +962,6 @@ async function sendPurchaseOrder(
       ccAddresses,
     );
 
-    let recordedVariance: RecordedVariance | null = null;
     await beginTransaction(connection);
     try {
       await executeQuery(
@@ -969,18 +995,6 @@ async function sendPurchaseOrder(
         jobId: scope.jobId,
         subject: { id: PurchaseOrderID, type: "purchase_order" },
       });
-      if (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override") {
-        recordedVariance = await recordVariance(connection, {
-          actor,
-          after: purchaseOrderFacts(contractorRows[0]),
-          before: contractorFacts(contractorRows[0]),
-          decision: variance.decision,
-          jobId: sendJobId,
-          previousAmount: variance.originalAmount,
-          scope,
-          subject: { id: PurchaseOrderID, type: "purchase_order" },
-        });
-      }
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});

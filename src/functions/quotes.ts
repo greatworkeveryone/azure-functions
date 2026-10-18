@@ -27,9 +27,10 @@ import { loadApprovalFacts, loadNamedUser } from "../approvalAuthority-db";
 import { ATTRIBUTED_APPROVAL_ROLES, SUBJECT_ELIGIBLE_ROLES, type Attribution } from "../approvalAuthority";
 import { approvalOutcome, refusalStatus, type ApprovalRefusalReason } from "../approvalOutcome";
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
+import { attributedApprovalEnabled, nameableRoles } from "../attributedApproval";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
-import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse } from "../moneyRules";
+import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse, samePerson } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
@@ -412,7 +413,7 @@ export async function upsertQuote(
                   ApprovedAt = NULL, ApprovedBy = NULL,
                   DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
                   DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
-                  DirectorEmailSentBy = NULL
+                  DirectorEmailSentBy = NULL, ${CLEAR_ATTRIBUTION}
             WHERE QuoteID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: QuoteID }],
         );
@@ -555,9 +556,18 @@ function approvalRefusal(refusal: MoneyRefusal, quoteStatus: string | null): App
 }
 
 /** Who may press Approve on a quote: every role the authority core lets approve
- *  one (J1), plus plain facilities, who approve within their own row only by
- *  naming the manager they discussed it with (R2). The core decides the rest. */
-const APPROVE_QUOTE_ROLES = [...new Set([...SUBJECT_ELIGIBLE_ROLES.quote, ...ATTRIBUTED_APPROVAL_ROLES.quote])] as readonly AppRole[];
+ *  one (J1). With ATTRIBUTED_APPROVAL_ENABLED="true" (held off, decisions 1 and
+ *  9), plain facilities too, who approve within their own row only by naming
+ *  the manager they discussed it with (R2). The core decides the rest. */
+function approveQuoteRoles(): readonly AppRole[] {
+  const roles = attributedApprovalEnabled()
+    ? [...new Set([...SUBJECT_ELIGIBLE_ROLES.quote, ...ATTRIBUTED_APPROVAL_ROLES.quote])]
+    : SUBJECT_ELIGIBLE_ROLES.quote;
+  return roles as readonly AppRole[];
+}
+
+/** Clears an attribution that no longer applies; the ledger keeps the history. */
+const CLEAR_ATTRIBUTION = "ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL";
 
 async function approveQuoteInTransaction(
   connection: Connection,
@@ -619,15 +629,32 @@ async function approveQuoteInTransaction(
     const scope = await jobScope(connection, jobId);
     const facts = await loadApprovalFacts(connection, scope.buildingId);
     const isTest = userRoles.some((role) => role.trim().toLowerCase() === AppRole.ADMIN) && (await isTestJob(connection, jobId));
-    // R2: the named manager's roles come from AppUsers. Someone who isn't an
-    // active user is named with no roles, so the core finds them invalid; an
-    // attribution that wasn't declared isn't one (attribution_required).
+    // R2: the named manager's roles come from AppUsers, and only the manager
+    // roles count (never admin, decision 4; never an accounts clerk's own row).
+    // Someone who isn't an active user is named with no roles, so the core
+    // finds them invalid; an attribution that wasn't declared isn't one
+    // (attribution_required). Whoever added the quote can't be the one who
+    // agreed to it (J3: no self-approval by proxy).
     let attribution: Attribution | undefined;
     if (input.attribution.declared && input.attribution.userId !== null) {
       const named = await loadNamedUser(connection, input.attribution.userId);
+      if (named && samePerson(quote.CreatedBy, named.displayName)) {
+        await rollbackTransaction(connection).catch(() => {});
+        return {
+          jobId,
+          ok: false,
+          refusal: {
+            action: "denied",
+            code: "attribution_invalid",
+            httpStatus: 422,
+            message: `${named.displayName} added this quote, so they can't be the manager who agreed to it. Name someone else.`,
+            status: quoteStatus,
+          },
+        };
+      }
       attribution = {
         attributedTo: named
-          ? { displayName: named.displayName, email: named.email, roles: named.roles, userId: named.userId }
+          ? { displayName: named.displayName, email: named.email, roles: nameableRoles(named.roles), userId: named.userId }
           : { roles: [], userId: input.attribution.userId },
       };
     }
@@ -660,7 +687,7 @@ async function approveQuoteInTransaction(
                  AttributionAnsweredAt = NULL
            WHERE QuoteID = @Id`
         : `UPDATE Quotes
-             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
+             SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy, ${CLEAR_ATTRIBUTION}
            WHERE QuoteID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: quoteId },
@@ -770,7 +797,7 @@ async function approveQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, APPROVE_QUOTE_ROLES);
+  const denied = await requireRole(request, approveQuoteRoles());
   if (denied) {
     await recordRoleRefusal(request, token, denied, APPROVE_QUOTE_TARGET);
     return denied;
@@ -804,7 +831,8 @@ async function approveQuote(
     const outcome = await approveQuoteInTransaction(connection, {
       actor,
       approvedBy,
-      attribution: { declared: declared === true, userId: namedId },
+      // Held off (decisions 1, 9): with the switch unset an attribution is ignored.
+      attribution: attributedApprovalEnabled() ? { declared: declared === true, userId: namedId } : { declared: false, userId: null },
       correlationId,
       email: identity.email,
       quoteId: QuoteID,
@@ -1071,7 +1099,7 @@ async function unapproveQuote(
       await executeQuery(
         connection,
         `UPDATE Quotes
-           SET Status = 'pending', ApprovedAt = NULL, ApprovedBy = NULL
+           SET Status = 'pending', ApprovedAt = NULL, ApprovedBy = NULL, ${CLEAR_ATTRIBUTION}
          WHERE QuoteID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: QuoteID }],
       );

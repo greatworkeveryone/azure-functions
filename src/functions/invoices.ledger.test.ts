@@ -297,7 +297,7 @@ describe("approveJobInvoice", () => {
 });
 
 describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
-  const QUOTE: Route = { match: /SELECT q\.Amount FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 500 }] };
+  const QUOTE: Route = { match: /SELECT q\.Amount(, q\.QuoteID)? FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 500, QuoteID: 70 }] };
   const FACT_ROWS: Route = { match: /FROM dbo\.ApprovalFacts/, rows: [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }] };
   const MANAGER: Route = { match: /FROM dbo\.AppUsers WHERE UserID = @UserID/, rows: [{ DisplayName: "Mo Manager", Role: "accounts_manager", UserID: 30 }] };
   const INSERTED: Route = { match: /INSERT INTO dbo\.MoneyVariances/, rows: [{ VarianceID: 8 }] };
@@ -316,13 +316,29 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
     ]);
   });
 
+  it("routed up to someone senior, the rise isn't recorded yet: their approval, and their check, counts", async () => {
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 100, RoleName: "accounts" },
+      { MaxApprovalAmount: 1000, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+    mockSql(routes({ Amount: 540 }));
+
+    const res = await approve({ variance: { attributedToUserId: 30, rationale: "Call-out fee" } });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery).map((r) => r.action)).toEqual(["invoice.approve"]);
+    expect(ran(/INSERT INTO dbo\.MoneyVariances/)).toBe(false);
+  });
+
   it("above the margin it is refused, naming the margin, and nothing is approved", async () => {
     mockSql(routes({ Amount: 600 }));
 
     const res = await approve({ variance: { attributedToUserId: 30, rationale: "More work" } });
 
     expect(res).toEqual({
-      jsonBody: { amount: 600, code: "variance_over_margin", originalApprovedAmount: 500, error: "This is $100 (20%) above the approved $500 — the allowed margin is 10% up to $1,000. Get it re-approved." },
+      jsonBody: { amount: 600, code: "variance_over_margin", originalApprovedAmount: 500, error: "This is $100 (20%) above the approved $500 — the allowed margin is 10% up to $1,000. A director can let it through with a reason, or have the quote re-approved at the new amount." },
       status: 422,
     });
     expect(ran(/UPDATE JobInvoices/)).toBe(false);

@@ -15,7 +15,7 @@ import { TYPES } from "tedious";
 import { loadApprovalFacts, loadNamedUser, loadVarianceFacts } from "./approvalAuthority-db";
 import { executeQuery } from "./db";
 import { record } from "./ledger";
-import { approvedQuoteAmount, type LedgerScope } from "./ledger/moneyDecisions";
+import type { LedgerScope } from "./ledger/moneyDecisions";
 import type { LedgerActor } from "./ledger/types";
 import { type MoneyRefusal, type VarianceDecision, type VarianceRequest, varianceDecision } from "./moneyRules";
 
@@ -48,19 +48,26 @@ export function readVarianceBody(raw: unknown): { ok: true; value: VarianceBody 
   return { ok: true, value: body };
 }
 
+// An accepted rise counts only against the quote it was measured from (review
+// 117, B6): once that quote is deselected and another approved, it covers
+// nothing. A disputed rise never counts (B7).
 const ACCEPTED_FOR_PO_SQL = `SELECT MAX(NewAmount) AS Accepted FROM dbo.MoneyVariances
-  WHERE SubjectType = N'purchase_order' AND SubjectID = @Id AND ISNULL(Disputed, 0) = 0`;
+  WHERE SubjectType = N'purchase_order' AND SubjectID = @Id AND QuoteID = @QuoteID AND ISNULL(Disputed, 0) = 0`;
 const ACCEPTED_FOR_JOB_SQL = `SELECT MAX(NewAmount) AS Accepted FROM dbo.MoneyVariances
-  WHERE JobID = @Id AND ISNULL(Disputed, 0) = 0`;
+  WHERE JobID = @Id AND QuoteID = @QuoteID AND ISNULL(Disputed, 0) = 0`;
+const APPROVED_QUOTE_SQL = `SELECT q.Amount, q.QuoteID FROM Jobs j INNER JOIN Quotes q ON q.QuoteID = j.ApprovedQuoteID WHERE j.JobID = @JobID`;
 
 /** The highest undisputed amount accepted within the margin: for one purchase order, or anywhere on the job. */
 export async function acceptedVarianceAmount(
   connection: Connection,
   where: { jobId: number } | { purchaseOrderId: number },
+  quoteId: number | null,
 ): Promise<number | null> {
+  if (quoteId === null) return null;
   const byPo = "purchaseOrderId" in where;
   const rows = await executeQuery(connection, byPo ? ACCEPTED_FOR_PO_SQL : ACCEPTED_FOR_JOB_SQL, [
     { name: "Id", type: TYPES.Int, value: byPo ? where.purchaseOrderId : where.jobId },
+    { name: "QuoteID", type: TYPES.Int, value: quoteId },
   ]);
   const value = rows[0]?.Accepted;
   return value === null || value === undefined ? null : Number(value);
@@ -80,18 +87,30 @@ export interface VarianceCheckInput {
 export interface VarianceCheck {
   decision: VarianceDecision;
   originalAmount: number | null;
+  /** The job's approved quote the rise was measured against (MoneyVariances.QuoteID). */
+  quoteId: number | null;
+}
+
+/** The job's approved quote: its amount (null when unknown) and id. */
+export async function approvedQuoteOf(connection: Connection, jobId: number): Promise<{ amount: number | null; quoteId: number | null }> {
+  const row = (await executeQuery(connection, APPROVED_QUOTE_SQL, [{ name: "JobID", type: TYPES.Int, value: jobId }]))[0];
+  if (!row) return { amount: null, quoteId: null };
+  return {
+    amount: row.Amount === null || row.Amount === undefined ? null : Number(row.Amount),
+    quoteId: typeof row.QuoteID === "number" ? row.QuoteID : null,
+  };
 }
 
 /** Loads the facts and decides. Reads the margin and the named manager only when the amount has risen past what was approved. */
 export async function checkVariance(connection: Connection, input: VarianceCheckInput): Promise<VarianceCheck> {
-  const originalAmount = await approvedQuoteAmount(connection, input.jobId);
-  if (originalAmount === null) return { decision: { kind: "no_variance" }, originalAmount };
+  const { amount: originalAmount, quoteId } = await approvedQuoteOf(connection, input.jobId);
+  if (originalAmount === null) return { decision: { kind: "no_variance" }, originalAmount, quoteId };
   const next = input.newAmount;
   if (typeof next === "number" && Number.isFinite(next) && Math.round(next * 100) <= Math.round(originalAmount * 100)) {
-    return { decision: { kind: "no_variance" }, originalAmount };
+    return { decision: { kind: "no_variance" }, originalAmount, quoteId };
   }
 
-  const acceptedAmount = await acceptedVarianceAmount(connection, input.accepted);
+  const acceptedAmount = await acceptedVarianceAmount(connection, input.accepted, quoteId);
   const request: VarianceRequest = {
     directorOverride: typeof input.body?.directorOverrideReason === "string" ? { reason: input.body.directorOverrideReason } : null,
     rationale: typeof input.body?.rationale === "string" ? input.body.rationale : null,
@@ -110,7 +129,7 @@ export async function checkVariance(connection: Connection, input: VarianceCheck
     facts,
     authority,
   );
-  return { decision, originalAmount };
+  return { decision, originalAmount, quoteId };
 }
 
 export interface RecordVarianceInput {
@@ -122,6 +141,8 @@ export interface RecordVarianceInput {
   decision: Extract<VarianceDecision, { kind: "director_override" | "within_tolerance" }>;
   jobId: number;
   previousAmount: number | null;
+  /** The approved quote the rise was measured against (VarianceCheck.quoteId). */
+  quoteId: number | null;
   scope: LedgerScope;
   subject: { id: number; type: VarianceSubject };
 }
@@ -155,10 +176,10 @@ export async function recordVariance(connection: Connection, input: RecordVarian
     connection,
     `INSERT INTO dbo.MoneyVariances
        (SubjectType, SubjectID, JobID, OriginalAmount, PreviousAmount, NewAmount, DeltaAmount, DeltaPercent,
-        Rationale, EditorUserID, EditorName, AttributedToUserID, AttributedToName, DirectorOverride)
+        Rationale, EditorUserID, EditorName, AttributedToUserID, AttributedToName, DirectorOverride, QuoteID)
      OUTPUT INSERTED.VarianceID
      VALUES (@SubjectType, @SubjectID, @JobID, @OriginalAmount, @PreviousAmount, @NewAmount, @DeltaAmount, @DeltaPercent,
-        @Rationale, @EditorUserID, @EditorName, @AttributedToUserID, @AttributedToName, @DirectorOverride);`,
+        @Rationale, @EditorUserID, @EditorName, @AttributedToUserID, @AttributedToName, @DirectorOverride, @QuoteID);`,
     [
       { name: "SubjectType", type: TYPES.NVarChar, value: input.subject.type },
       { name: "SubjectID", type: TYPES.Int, value: input.subject.id },
@@ -174,6 +195,7 @@ export async function recordVariance(connection: Connection, input: RecordVarian
       { name: "AttributedToUserID", type: TYPES.Int, value: attributedUserId },
       { name: "AttributedToName", type: TYPES.NVarChar, value: attributedName },
       { name: "DirectorOverride", type: TYPES.Bit, value: !within },
+      { name: "QuoteID", type: TYPES.Int, value: input.quoteId },
     ],
   );
   const varianceId = Number(inserted[0]?.VarianceID);
@@ -186,6 +208,7 @@ export async function recordVariance(connection: Connection, input: RecordVarian
     newAmount: figures.newAmount,
     originalApprovedAmount: figures.originalAmount,
     previousAmount: input.previousAmount,
+    quoteId: input.quoteId,
     varianceId,
   };
   await record(connection, {

@@ -1319,7 +1319,7 @@ describe("purchase order transitions", () => {
 });
 
 describe("R13: a purchase order above its approved quote, within the margin", () => {
-  const APPROVED_QUOTE: Route = { match: /SELECT q\.Amount FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 10000 }] };
+  const APPROVED_QUOTE: Route = { match: /SELECT q\.Amount(, q\.QuoteID)? FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 10000, QuoteID: 70 }] };
   const FACTS: Route = { match: /FROM dbo\.ApprovalFacts/, rows: [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }] };
   const MANAGER: Route = { match: /FROM dbo\.AppUsers WHERE UserID = @UserID/, rows: [{ DisplayName: "Mo Manager", Email: "mo@example.com", Role: "facilities_manager", UserID: 30 }] };
   const VARIANCE_INSERT: Route = { match: /INSERT INTO dbo\.MoneyVariances/, rows: [{ VarianceID: 4 }] };
@@ -1393,7 +1393,7 @@ describe("R13: a purchase order above its approved quote, within the margin", ()
     const res = await edit({ CostNotToExceed: 11240, variance: VARIANCE });
 
     expect(res).toEqual({
-      jsonBody: { amount: 11240, code: "variance_over_margin", originalApprovedAmount: 10000, error: "This is $1,240 (12.4%) above the approved $10,000 — the allowed margin is 10% up to $1,000. Get it re-approved." },
+      jsonBody: { amount: 11240, code: "variance_over_margin", originalApprovedAmount: 10000, error: "This is $1,240 (12.4%) above the approved $10,000 — the allowed margin is 10% up to $1,000. A director can let it through with a reason, or have the quote re-approved at the new amount." },
       status: 422,
     });
     expect(ran(/UPDATE PurchaseOrders SET/)).toBe(false);
@@ -1443,7 +1443,9 @@ describe("R13: a purchase order above its approved quote, within the margin", ()
 
     expect(res.status).toBe(200);
     expect(graph.graphSendMail).toHaveBeenCalledTimes(1);
-    expect(rows().map((r) => r.action)).toEqual(["po.send", "po.variance_within_tolerance"]);
+    // The rise is recorded, in a commit of its own, before the email leaves.
+    expect(rows().map((r) => r.action)).toEqual(["po.variance_within_tolerance", "po.send"]);
+    expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeLessThan(graph.graphSendMail.mock.invocationCallOrder[0]);
   });
 
   it("send: an amount already accepted on this PO goes out without asking again", async () => {
