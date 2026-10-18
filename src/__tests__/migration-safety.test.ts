@@ -23,6 +23,7 @@ const MIGRATIONS = [
   "133_email_archive_columns.sql",
   "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
+  "140_archive_occupancy_carpark.sql",
   "136_building_category_owner.sql",
   "139_keys_rowversion.sql",
   "137_job_decision_requests.sql",
@@ -260,6 +261,21 @@ describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) 
     expect(code).toMatch(/BEGIN TRY\s+BEGIN TRANSACTION;/);
     expect(code).toMatch(/COMMIT TRANSACTION;\s*END TRY/);
     expect(code).toMatch(/BEGIN CATCH\s+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;\s*END CATCH;/);
+  });
+});
+
+describe("migration 140 matches the code that uses it", () => {
+  it("adds ArchivedAt, ArchivedBy and ArchiveReason, nullable and guarded, to TenantOccupancies and Carparks", () => {
+    const code = stripComments(read("140_archive_occupancy_carpark.sql"));
+    for (const table of ["TenantOccupancies", "Carparks"]) {
+      expect(code).toContain(`IF COL_LENGTH(N'dbo.${table}', N'ArchivedAt') IS NULL`);
+      expect(code).toContain(`ALTER TABLE dbo.${table} ADD ArchivedAt DATETIME2 NULL;`);
+      expect(code).toContain(`IF COL_LENGTH(N'dbo.${table}', N'ArchivedBy') IS NULL`);
+      expect(code).toContain(`ALTER TABLE dbo.${table} ADD ArchivedBy NVARCHAR(255) NULL;`);
+      expect(code).toContain(`IF COL_LENGTH(N'dbo.${table}', N'ArchiveReason') IS NULL`);
+      expect(code).toContain(`ALTER TABLE dbo.${table} ADD ArchiveReason NVARCHAR(2000) NULL;`);
+    }
+    expect(code.match(/ALTER TABLE/g)).toHaveLength(6);
   });
 });
 

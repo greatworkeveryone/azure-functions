@@ -108,6 +108,11 @@ export const LEDGER_ACTIONS = {
 
   // Register and schedule writes (WP23a, WP23b)
   "occupancy.reassign": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  // Areas and car parks are archived, never deleted (D10). Each needs a reason.
+  "occupancy.archive": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  "occupancy.unarchive": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  "carpark.archive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
+  "carpark.unarchive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
   "schedule.manual_edit": {
     exception: false,
     reasonRequired: false,

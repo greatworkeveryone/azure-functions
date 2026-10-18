@@ -82,7 +82,7 @@ async function getTenants(
          t.BuildingId          AS BuildingID,
          (
            SELECT '[' + STRING_AGG('"' + STRING_ESCAPE(o.Level, 'json') + '"', ',') + ']'
-           FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId) o
+           FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId AND ArchivedAt IS NULL) o
          ) AS Levels,
          t.CreatedAt,
          t.UpdatedAt
@@ -215,7 +215,7 @@ async function loadLegacyTenant(connection: any, id: number) {
        t.BuildingId          AS BuildingID,
        (
          SELECT '[' + STRING_AGG('"' + STRING_ESCAPE(o.Level, 'json') + '"', ',') + ']'
-         FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId) o
+         FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId AND ArchivedAt IS NULL) o
        ) AS Levels,
        t.CreatedAt,
        t.UpdatedAt

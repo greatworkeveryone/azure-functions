@@ -356,6 +356,10 @@ interface RegisterTenantApi {
 
 interface TenantOccupancyApi {
   area: string;
+  /** Set when the area is archived (D10); only the Show archived view returns those. */
+  archivedAt: string | null;
+  archivedBy: string | null;
+  archiveReason: string | null;
   buildingId: number;
   createdAt: string;
   level: string;
@@ -496,8 +500,10 @@ function tenantRowToApi(
   noteCountByAnchor: Record<string, number>,
   pending?: PendingChanges,
 ): RegisterTenantApi {
+  // Live areas only (D10): the Show archived view lists archived areas, but they
+  // are no longer let, so they never count toward size, m² or rent per m².
   const totalSizeSqm = occupancies.reduce(
-    (sum, o) => sum + (o.sizeSqm || 0),
+    (sum, o) => (o.archivedAt === null ? sum + (o.sizeSqm || 0) : sum),
     0,
   );
   const rentPerAnnum = asNum(row.RentPerAnnum);
@@ -633,6 +639,9 @@ function tenantRowToApi(
 
 function occupancyRowToApi(row: SqlRow): TenantOccupancyApi {
   return {
+    archivedAt: row.ArchivedAt ? toIso(row.ArchivedAt) : null,
+    archiveReason: asStr(row.ArchiveReason) ?? null,
+    archivedBy: asStr(row.ArchivedBy) ?? null,
     area: row.Area as string,
     buildingId: row.BuildingId as number,
     createdAt: toIso(row.CreatedAt),
@@ -736,8 +745,23 @@ const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t 
 
 const OCCUPANCY_COLUMNS = `
   OccupancyId, TenantId, BuildingId, Level, Area, SizeSqm,
-  Notes, CreatedAt, UpdatedAt
+  Notes, CreatedAt, UpdatedAt, ArchivedAt, ArchivedBy, ArchiveReason
 `;
+
+// D10: archived areas leave the register and the figures (ArchivedAt IS NULL);
+// the "with archived" read is for the register's Show archived view only.
+const REGISTER_OCCUPANCIES_SQL = `SELECT ${OCCUPANCY_COLUMNS}
+  FROM dbo.TenantOccupancies
+ WHERE BuildingId = @BuildingId AND ArchivedAt IS NULL
+ ORDER BY Level, Area`;
+const REGISTER_OCCUPANCIES_WITH_ARCHIVED_SQL = `SELECT ${OCCUPANCY_COLUMNS}
+  FROM dbo.TenantOccupancies
+ WHERE BuildingId = @BuildingId
+ ORDER BY Level, Area`;
+const TENANT_OCCUPANCIES_SQL = `SELECT ${OCCUPANCY_COLUMNS}
+  FROM dbo.TenantOccupancies
+ WHERE TenantId = @TenantId AND ArchivedAt IS NULL
+ ORDER BY Level, Area`;
 
 /** Group an array by a key function. */
 function groupBy<T>(rows: T[], keyFn: (row: T) => string): Map<string, T[]> {
@@ -798,10 +822,7 @@ async function getRegisterTenants(
     // Pull occupancies for all tenants in one shot.
     const occupancyRows = await executeQuery(
       connection,
-      `SELECT ${OCCUPANCY_COLUMNS}
-       FROM dbo.TenantOccupancies
-       WHERE BuildingId = @BuildingId
-       ORDER BY Level, Area`,
+      includeArchived ? REGISTER_OCCUPANCIES_WITH_ARCHIVED_SQL : REGISTER_OCCUPANCIES_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
     const occupanciesByTenant = groupBy(
@@ -909,14 +930,7 @@ async function getRegisterTenant(
     const tenantIdParam = [
       { name: "TenantId", type: TYPES.Int, value: tenantId },
     ];
-    const occupancyRows = await executeQuery(
-      connection,
-      `SELECT ${OCCUPANCY_COLUMNS}
-       FROM dbo.TenantOccupancies
-       WHERE TenantId = @TenantId
-       ORDER BY Level, Area`,
-      tenantIdParam,
-    );
+    const occupancyRows = await executeQuery(connection, TENANT_OCCUPANCIES_SQL, tenantIdParam);
     const noteRows = await executeQuery(
       connection,
       `SELECT NoteId, TenantId, AnchorKind, OccupancyId, FieldKey, Body,
@@ -1646,6 +1660,17 @@ function tenantDisplayName(row: SqlRow): string {
 }
 
 /** 409 naming the tenancy that holds a cell (PLAN WP23a, F22d). */
+function occupancyArchivedResponse(holder: SqlRow, level: string, area: string): HttpResponseInit {
+  return {
+    status: 409,
+    jsonBody: {
+      code: "OCCUPANCY_ARCHIVED",
+      error: `${level} · ${area} was archived from ${tenantDisplayName(holder)}. Restore it from Show archived instead.`,
+      occupancyId: holder.OccupancyId as string,
+    },
+  };
+}
+
 function occupancyHeldResponse(holder: SqlRow, level: string, area: string): HttpResponseInit {
   const name = tenantDisplayName(holder);
   return {
@@ -1752,7 +1777,7 @@ async function upsertOccupancy(
       // than fail with a duplicate-key error.
       const existing = await executeQuery(
         connection,
-        `SELECT o.OccupancyId, o.TenantId, t.LegalName, t.TradingName
+        `SELECT o.OccupancyId, o.TenantId, o.ArchivedAt, t.LegalName, t.TradingName
          FROM dbo.TenantOccupancies o WITH (UPDLOCK, ROWLOCK)
          LEFT JOIN dbo.Tenants t ON t.TenantId = o.TenantId
          WHERE o.OccupancyId = @Id
@@ -1766,6 +1791,12 @@ async function upsertOccupancy(
       );
       const byId = existing.find((r) => r.OccupancyId === OccupancyId) ?? null;
       const atCell = existing.find((r) => r.OccupancyId !== OccupancyId) ?? null;
+      // D10: an archived area is restored, never quietly edited or reused.
+      const archivedRow = [byId, atCell].find((r) => r?.ArchivedAt) ?? null;
+      if (archivedRow) {
+        await rollbackQuietly(connection);
+        return occupancyArchivedResponse(archivedRow, Level, Area);
+      }
       // Moving this area onto a cell another row already holds.
       if (byId && atCell) {
         await rollbackQuietly(connection);
@@ -1930,49 +1961,7 @@ async function upsertOccupancy(
   }
 }
 
-// ── POST /api/deleteOccupancy ────────────────────────────────────────────────
-
-async function deleteOccupancy(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  // A hard delete: admin only until lane D makes it an archive (J4 review).
-  const roleCheck = await requireRole(request, ACTION_ROLES.hardDeleteTenancyRows.gate);
-  if (roleCheck) return roleCheck;
-
-  let connection;
-  try {
-    const body = (await request.json()) as { OccupancyId?: string };
-    if (typeof body.OccupancyId !== "string") {
-      return { status: 400, jsonBody: { error: "OccupancyId required" } };
-    }
-    connection = await createRequestConnection(token);
-    const occRows = await executeQuery(
-      connection,
-      `SELECT TenantId, BuildingId FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: body.OccupancyId }],
-    );
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.TenantOccupancies WHERE OccupancyId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: body.OccupancyId }],
-    );
-    if (occRows.length > 0) {
-      invalidateTenantAndBuilding(occRows[0].TenantId as number, occRows[0].BuildingId as number);
-    }
-    return {
-      status: 200,
-      jsonBody: { deleted: true, occupancyId: body.OccupancyId },
-    };
-  } catch (error: any) {
-    context.error("deleteOccupancy failed:", error.message);
-    return errorResponse("Delete occupancy failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
-}
+// Areas are archived, not deleted (D10): see tenancyPartsArchive.ts.
 
 // ── POST /api/createTenantNote ───────────────────────────────────────────────
 
@@ -2253,6 +2242,7 @@ async function getPortfolioOccupancy(
        INNER JOIN (
          SELECT TenantId, SUM(SizeSqm) AS TenantSqm
          FROM dbo.TenantOccupancies
+         WHERE ArchivedAt IS NULL
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
        WHERE t.ArchivedAt IS NULL
@@ -2319,12 +2309,9 @@ async function reloadFullTenant(
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
-  const occupancyRows = await executeQuery(
-    connection,
-    `SELECT ${OCCUPANCY_COLUMNS} FROM dbo.TenantOccupancies WHERE TenantId = @TenantId
-     ORDER BY Level, Area`,
-    [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
-  );
+  const occupancyRows = await executeQuery(connection, TENANT_OCCUPANCIES_SQL, [
+    { name: "TenantId", type: TYPES.Int, value: tenantId },
+  ]);
   const occupancies = occupancyRows.map(occupancyRowToApi);
   return tenantRowToApi(tenantRows[0], occupancies, {});
 }
@@ -2757,6 +2744,10 @@ type CarparkAllocationKind = "tenant" | "vacant" | "notAvailable" | "randazzo";
 
 interface CarparkApi {
   allocationKind: CarparkAllocationKind;
+  /** Set when the bay is archived (D10); only the Show archived view returns those. */
+  archivedAt: string | null;
+  archivedBy: string | null;
+  archiveReason: string | null;
   buildingId: number;
   carparkId: string;
   comments?: string;
@@ -2771,8 +2762,27 @@ interface CarparkApi {
 const CARPARK_COLUMNS = `
   CarparkId, BuildingId, Type, Identifier,
   AllocationKind, TenantId, RentPerAnnum, Comments,
-  CreatedAt, UpdatedAt
+  CreatedAt, UpdatedAt, ArchivedAt, ArchivedBy, ArchiveReason
 `;
+
+// D10: archived bays leave the list and the summary unless asked for.
+const CARPARKS_SQL = `SELECT ${CARPARK_COLUMNS}
+  FROM dbo.Carparks
+ WHERE BuildingId = @BuildingId AND ArchivedAt IS NULL
+ ORDER BY Identifier`;
+const CARPARKS_WITH_ARCHIVED_SQL = `SELECT ${CARPARK_COLUMNS}
+  FROM dbo.Carparks
+ WHERE BuildingId = @BuildingId
+ ORDER BY Identifier`;
+
+/** Thrown by upsertCarparkRow for a bay that is archived (D10): restore it instead. */
+class CarparkArchivedError extends Error {
+  readonly identifier: string;
+  constructor(identifier: string) {
+    super(`Bay ${identifier} is archived. Restore it from Show archived instead.`);
+    this.identifier = identifier;
+  }
+}
 
 const ALLOCATION_KINDS: ReadonlySet<CarparkAllocationKind> = new Set([
   "tenant",
@@ -2784,6 +2794,9 @@ const ALLOCATION_KINDS: ReadonlySet<CarparkAllocationKind> = new Set([
 function carparkRowToApi(row: SqlRow): CarparkApi {
   return {
     allocationKind: row.AllocationKind as CarparkAllocationKind,
+    archivedAt: row.ArchivedAt ? toIso(row.ArchivedAt) : null,
+    archiveReason: asStr(row.ArchiveReason) ?? null,
+    archivedBy: asStr(row.ArchivedBy) ?? null,
     buildingId: row.BuildingId as number,
     carparkId: row.CarparkId as string,
     comments: asStr(row.Comments),
@@ -2879,7 +2892,7 @@ async function upsertCarparkRow(
   // fresh client UUID find the existing bay rather than collide on the index.
   const existing = await executeQuery(
     connection,
-    `SELECT TOP 1 CarparkId
+    `SELECT TOP 1 CarparkId, ArchivedAt
      FROM dbo.Carparks
      WHERE CarparkId = @Id
         OR (BuildingId = @BuildingId AND Identifier = @Identifier)
@@ -2890,6 +2903,7 @@ async function upsertCarparkRow(
       { name: "Identifier", type: TYPES.NVarChar, value: v.Identifier },
     ],
   );
+  if (existing[0]?.ArchivedAt) throw new CarparkArchivedError(v.Identifier);
   const effectiveId =
     existing.length > 0 ? (existing[0].CarparkId as string) : v.CarparkId;
 
@@ -2983,12 +2997,10 @@ async function getCarparks(
     }
 
     connection = await createRequestConnection(token);
+    const includeArchived = request.query.get("includeArchived") === "true";
     const rows = await executeQuery(
       connection,
-      `SELECT ${CARPARK_COLUMNS}
-       FROM dbo.Carparks
-       WHERE BuildingId = @BuildingId
-       ORDER BY Identifier`,
+      includeArchived ? CARPARKS_WITH_ARCHIVED_SQL : CARPARKS_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
     return {
@@ -3027,6 +3039,9 @@ async function upsertCarpark(
     const carpark = await upsertCarparkRow(connection, parsed.value);
     return { status: 200, jsonBody: { carpark } };
   } catch (error: any) {
+    if (error instanceof CarparkArchivedError) {
+      return { status: 409, jsonBody: { code: "CARPARK_ARCHIVED", error: error.message } };
+    }
     const formatted = formatSqlError(error);
     context.error("upsertCarpark failed", {
       error: formatted,
@@ -3088,7 +3103,7 @@ async function upsertCarparksBulk(
       } catch (err: any) {
         results.push({
           ok: false,
-          error: formatSqlError(err),
+          error: err instanceof CarparkArchivedError ? err.message : formatSqlError(err),
           identifier: parsed.value.Identifier,
         });
       }
@@ -3115,41 +3130,7 @@ async function upsertCarparksBulk(
   }
 }
 
-// ── POST /api/deleteCarpark ──────────────────────────────────────────────────
-
-async function deleteCarpark(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  // A hard delete: admin only until lane D makes it an archive (J4 review).
-  const roleCheck = await requireRole(request, ACTION_ROLES.hardDeleteTenancyRows.gate);
-  if (roleCheck) return roleCheck;
-
-  let connection;
-  try {
-    const body = (await request.json()) as { CarparkId?: string };
-    if (typeof body.CarparkId !== "string" || !body.CarparkId) {
-      return { status: 400, jsonBody: { error: "CarparkId required" } };
-    }
-    connection = await createRequestConnection(token);
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.Carparks WHERE CarparkId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: body.CarparkId }],
-    );
-    return {
-      status: 200,
-      jsonBody: { deleted: true, carparkId: body.CarparkId },
-    };
-  } catch (error: any) {
-    context.error("deleteCarpark failed:", error.message);
-    return errorResponse("Delete carpark failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
-}
+// Bays are archived, not deleted (D10): see tenancyPartsArchive.ts.
 
 // ── POST /api/upsertCarparkScheduleGroup ─────────────────────────────────────
 
@@ -3802,11 +3783,6 @@ app.http("upsertOccupancy", {
   authLevel: "anonymous",
   handler: upsertOccupancy,
 });
-app.http("deleteOccupancy", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: deleteOccupancy,
-});
 app.http("createTenantNote", {
   methods: ["POST"],
   authLevel: "anonymous",
@@ -3856,11 +3832,6 @@ app.http("upsertCarparksBulk", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: upsertCarparksBulk,
-});
-app.http("deleteCarpark", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: deleteCarpark,
 });
 app.http("upsertScheduledRateStep", {
   methods: ["POST"],

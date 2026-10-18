@@ -383,66 +383,7 @@ describe("upsertOccupancy", () => {
 
 // ── deleteOccupancy ─────────────────────────────────────────────────────────
 
-describe("deleteOccupancy", () => {
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: "occ-1" }), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: "occ-1" }), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 400 when OccupancyId is missing", async () => {
-    const res = await handlers.deleteOccupancy(makeRequest({}), ctx);
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/OccupancyId/);
-  });
-
-  it("returns 400 when OccupancyId is not a string", async () => {
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: 1 }), ctx);
-    expect(res.status).toBe(400);
-  });
-
-  it("deletes an occupancy and invalidates the tenant+building cache on the happy path", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ TenantId: 1, BuildingId: 5 }])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: "occ-1" }), ctx);
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { deleted: boolean; occupancyId: string };
-    expect(body.deleted).toBe(true);
-    expect(body.occupancyId).toBe("occ-1");
-    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
-
-    const deleteCall = db.executeQuery.mock.calls.find(
-      ([, sql]: [unknown, string]) => sql.includes("DELETE FROM dbo.TenantOccupancies"),
-    );
-    expect(deleteCall).toBeDefined();
-  });
-
-  it("still returns 200 (and skips cache invalidation) when the occupancy did not exist", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: "missing-occ" }), ctx);
-    expect(res.status).toBe(200);
-    expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
-  });
-
-  it("returns 500 when DELETE throws", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ TenantId: 1, BuildingId: 5 }])
-      .mockRejectedValueOnce(new Error("locked"));
-    const res = await handlers.deleteOccupancy(makeRequest({ OccupancyId: "occ-1" }), ctx);
-    expect(res.status).toBe(500);
-  });
-});
+// deleteOccupancy is gone: areas and car parks are archived, never deleted (D10, tenancyPartsArchive.test.ts).
 
 // ── createTenantNote ────────────────────────────────────────────────────────
 
