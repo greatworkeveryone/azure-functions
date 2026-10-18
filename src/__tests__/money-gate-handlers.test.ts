@@ -6,6 +6,7 @@
 import { HttpRequest, InvocationContext } from "@azure/functions";
 import { clearRoleCache } from "../auth";
 import { setApprovalLimit } from "../functions/approval-limits";
+import { directorApproveQuote } from "../functions/quotes";
 
 jest.mock("@azure/functions", () => ({ ...jest.requireActual("@azure/functions"), app: { http: jest.fn() } }));
 jest.mock("../db", () => ({
@@ -26,9 +27,9 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "none" })}.${encode(payload)}.sig`;
 }
 
-function makeRequest(claims: Record<string, unknown>, forwardedFor: string) {
+function makeRequest(claims: Record<string, unknown>, forwardedFor: string, roles = "admin") {
   const token = makeJwt({ name: "Ada Admin", oid: "oid-ada", preferred_username: "ada@example.com", ...claims });
-  const headers: Record<string, string> = { authorization: `Bearer ${token}`, "x-dev-roles": "admin", "x-forwarded-for": forwardedFor };
+  const headers: Record<string, string> = { authorization: `Bearer ${token}`, "x-dev-roles": roles, "x-forwarded-for": forwardedFor };
   const json = jest.fn().mockResolvedValue({ MaxApprovalAmount: 5000, RoleName: "accounts_manager" });
   const request = {
     headers: { get: (key: string) => headers[key.toLowerCase()] ?? null },
@@ -84,5 +85,24 @@ describe("setApprovalLimit behind the money gate", () => {
     const res = await setApprovalLimit(request, ctx);
     expect(res.status).toBe(200);
     expect(db.createRequestConnection).toHaveBeenCalled();
+  });
+});
+
+// J6b: a director's approval of a quote is a money decision, as an invoice's is.
+describe("directorApproveQuote behind the money gate", () => {
+  it("asks a director for a fresh sign-in before approving, without touching the database", async () => {
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW - 3600 }, "203.0.113.5", "director");
+    const res = await directorApproveQuote(request, ctx);
+    expect(res.status).toBe(428);
+    expect(res.jsonBody).toMatchObject({ code: "step_up_required", reason: "stale_sign_in" });
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("refuses a director outside the office", async () => {
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW }, "198.51.100.20", "director");
+    const res = await directorApproveQuote(request, ctx);
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toMatchObject({ code: "money_network_required" });
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 });

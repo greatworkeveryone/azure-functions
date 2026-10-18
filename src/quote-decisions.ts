@@ -40,6 +40,9 @@ export interface QuoteRejectionInput {
   /** J6: from these statuses the note is the decline's reason and is required
    *  (moneyRules.declineReasonRefusal). The in-app reject passes awaiting_director. */
   reasonRequiredFrom?: readonly string[];
+  /** J6b: the actor is a director, so turning down a quote that waits on them
+   *  reads "Director declined", as an invoice's decline does. */
+  byDirector?: boolean;
   sourceEmailId?: number;
   sourceEmailAddress?: string | null;
 }
@@ -165,7 +168,7 @@ export async function rejectQuote(
   connection: Connection,
   input: QuoteRejectionInput,
 ): Promise<QuoteDecisionOutcome> {
-  const { quoteId, rejectedBy, expectedStatuses, note, reasonRequiredFrom = [], sourceEmailId, sourceEmailAddress } = input;
+  const { byDirector = false, quoteId, rejectedBy, expectedStatuses, note, reasonRequiredFrom = [], sourceEmailId, sourceEmailAddress } = input;
   const rows = await executeQuery(
     connection,
     "SELECT JobID, QuoteNumber, Status FROM Quotes WHERE QuoteID = @Id",
@@ -213,7 +216,7 @@ export async function rejectQuote(
     [
       { name: "JobID", type: TYPES.Int, value: jobId },
       { name: "CreatedBy", type: TYPES.NVarChar, value: rejectedBy },
-      { name: "Text", type: TYPES.NVarChar, value: `Rejected quote ${quoteNumber}${via}${reason}` },
+      { name: "Text", type: TYPES.NVarChar, value: `${byDirector && status === "awaiting_director" ? "Director declined" : "Rejected"} quote ${quoteNumber}${via}${reason}` },
       { name: "QuoteID", type: TYPES.Int, value: quoteId },
       { name: "SourceEmailID", type: TYPES.Int, value: sourceEmailId ?? null },
     ],
