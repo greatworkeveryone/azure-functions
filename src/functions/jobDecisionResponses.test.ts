@@ -863,6 +863,8 @@ describe("approving", () => {
       "ledger:escalation.raise",
       "commit",
       "send",
+      // J6: once the email is on record the job's flag is brought in step again.
+      "job flag",
     ]);
     expect(db.rollbackTransaction).not.toHaveBeenCalled();
   });

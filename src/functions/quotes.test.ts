@@ -114,7 +114,10 @@ describe("rejectQuote (in-app)", () => {
     expect(res.status).toBe(200);
     expect(decisions.rejectQuote).toHaveBeenCalledWith({}, {
       expectedStatuses: ["pending", "awaiting_director"],
+      note: null,
       quoteId: 7,
+      // J6: declining a quote that waits on a director needs a reason.
+      reasonRequiredFrom: ["awaiting_director"],
       rejectedBy: "Carlo Randazzo",
     });
   });

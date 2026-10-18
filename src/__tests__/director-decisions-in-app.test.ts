@@ -111,7 +111,7 @@ describe("a director's emailed reply, with reply-to-approve off (the default)", 
     expect(res.jsonBody).toMatchObject({
       code: "EMAIL_REPLY_DECISIONS_DISABLED",
       jobId: 9,
-      jobUrl: "https://floorplan.example/jobs?jobId=9",
+      jobUrl: "https://floorplan.example/jobs?jobId=9&step=quotes",
       linked: true,
     });
     const event = calls().find((c: { sql: string }) => /INSERT INTO JobEvents/.test(c.sql))!;
