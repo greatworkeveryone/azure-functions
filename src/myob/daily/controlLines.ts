@@ -1,7 +1,7 @@
 // The "What Floorplan may do in MYOB" lines of the daily email (plan M4
 // review): the CFO's switches, a file's mode, pause and resume, registering a
-// file, the MYOB link, and the CFO accepting MYOB's record as a baseline
-// (SPR-M4). Each says who, what changed and their note.
+// file, the MYOB link, mapping imports (plan M2) and the CFO accepting MYOB's
+// record as a baseline (SPR-M4). Each says who, what changed and their note.
 
 import { darwinStamp } from "../darwinClock";
 import type { ControlEvent } from "./types";
@@ -25,6 +25,10 @@ function what(event: ControlEvent): string {
   if (event.ruleApplied === "accept_baseline") {
     const fields = Array.isArray(after.accepted) ? (after.accepted as Record<string, unknown>[]).map((field) => String(field.label)) : [];
     return `accepted MYOB's record as the baseline for ${typeof after.record === "string" ? after.record : "a record"}${fields.length ? ` (${fields.join(", ")})` : ""}`;
+  }
+  if (event.ruleApplied?.startsWith("import.")) {
+    const kind = event.ruleApplied.slice("import.".length).replace(/s$/, "");
+    return `imported ${kind} mappings: ${Number(after.added ?? 0)} added, ${Number(after.changed ?? 0)} changed`;
   }
   switch (event.ruleApplied) {
     case "pause":
