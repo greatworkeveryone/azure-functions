@@ -62,8 +62,7 @@ jest.mock("../sentry", () => ({ ...jest.requireActual("../sentry"), Sentry: { ca
 type Handler = (request: HttpRequest, context: InvocationContext) => Promise<{ status?: number } | undefined>;
 
 const auth = require("../auth") as { __state: { roles: string[] } };
-const { ACTION_ROLES, ALL_ROLES, rolesFor } = require("../action-roles") as typeof import("../action-roles");
-const { rolesPassGate } = jest.requireActual("../auth") as typeof import("../auth");
+const { ACTION_ROLES, ALL_ROLES, admittedBy, rolesFor } = require("../action-roles") as typeof import("../action-roles");
 
 // Load every handler module so app.http has seen every route.
 const FUNCTIONS = join(__dirname, "..", "functions");
@@ -77,10 +76,24 @@ for (const call of app.http.mock.calls) {
   if (typeof call[0] === "string" && options?.handler) ROUTES.set(call[0], options.handler);
 }
 
+// A route whose gate is the outer requireRole of another entry and whose own
+// list is checked further in (a literal check on a record) is swept with a
+// record that makes the inner check decide: here, a job someone else created,
+// so only archiveAnyJob's roles may archive it.
+type Probe = { body: Record<string, unknown>; rows: (sql: string) => Record<string, unknown>[] };
+const PROBES: Record<string, Probe> = {
+  "archiveAnyJob:archiveJob": {
+    body: { JobID: 41 },
+    rows: (sql) => (/SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/.test(sql) ? [{ CreatedBy: "Someone Else", CreatedById: "someone-else-oid", IsArchived: false }] : []),
+  },
+};
+const db = require("../db") as { executeQuery: jest.Mock };
+let body: Record<string, unknown> = {};
+
 function request(): HttpRequest {
   return {
     headers: { get: (name: string) => (name.toLowerCase() === "authorization" ? "Bearer token" : null) },
-    json: async () => ({}),
+    json: async () => body,
     method: "POST",
     params: {},
     query: new URLSearchParams(),
@@ -112,10 +125,6 @@ async function passing(handler: Handler): Promise<string[]> {
   return out;
 }
 
-const admitted = (entry: (typeof ACTION_ROLES)[keyof typeof ACTION_ROLES]): string[] =>
-  "match" in entry && entry.match === "exact"
-    ? ALL_ROLES.filter((role) => (entry.gate as readonly string[]).includes(role))
-    : ALL_ROLES.filter((role) => rolesPassGate([role], entry.gate));
 
 const CASES = (Object.keys(ACTION_ROLES) as (keyof typeof ACTION_ROLES)[]).flatMap((capability) =>
   (ACTION_ROLES[capability].routes as readonly string[]).map((route) => [capability, route] as const),
@@ -128,14 +137,30 @@ beforeAll(() => {
 });
 
 describe("every route in the table lets through exactly what it says", () => {
+  it("probes only routes the table lists", () => {
+    const listed = new Set(CASES.map(([capability, route]) => `${capability}:${route}`));
+    expect(Object.keys(PROBES).filter((key) => !listed.has(key))).toEqual([]);
+  });
+
   it.each(CASES)("%s: %s", async (capability, route) => {
     const handler = ROUTES.get(route);
     expect({ registered: Boolean(handler), route }).toEqual({ registered: true, route });
-    const passed = await passing(handler!);
+    const probe = PROBES[`${capability}:${route}`];
+    body = probe?.body ?? {};
+    if (probe) db.executeQuery.mockImplementation(async (_connection: unknown, sql: string) => probe.rows(sql));
+    let passed: string[];
+    try {
+      passed = await passing(handler!);
+    } finally {
+      body = {};
+      db.executeQuery.mockReset().mockResolvedValue([]);
+    }
     const entry = ACTION_ROLES[capability];
-    // Everyone the frontend offers the action to gets past the gate...
+    // Everyone the frontend offers the action to gets past the gate (refused and
+    // conditional roles aren't offered it)...
     expect({ missing: rolesFor(entry).filter((role) => !passed.includes(role)), route }).toEqual({ missing: [], route });
-    // ...and nobody outside the gate does.
-    expect({ extra: passed.filter((role) => !admitted(entry).includes(role)), route }).toEqual({ extra: [], route });
+    // ...and nobody outside the gate does (a conditional role may).
+    const admitted: readonly string[] = admittedBy(entry);
+    expect({ extra: passed.filter((role) => !admitted.includes(role)), route }).toEqual({ extra: [], route });
   }, 60_000);
 });

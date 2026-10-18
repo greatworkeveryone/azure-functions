@@ -14,10 +14,14 @@
 // any accounts gate, the managers their team's). `match: "exact"` marks a list
 // a handler checks literally instead. `refused` are roles the gate admits but
 // the handler then turns away, with the reason: the frontend never offers them
-// the action.
+// the action. `conditional` are roles the gate admits that the handler lets
+// through only when its own condition holds (an attributed approval, package
+// 117): like `refused` they are left out of the export and the parity sweep's
+// "must pass" list, but the sweep accepts them past the gate. Such an action is
+// offered to them through a capability of its own (approveQuoteAttributed).
 
 import { AppRole, rolesPassGate } from "./auth";
-import { SUBJECT_ELIGIBLE_ROLES } from "./approvalAuthority";
+import { ATTRIBUTED_APPROVAL_ROLES, SUBJECT_ELIGIBLE_ROLES } from "./approvalAuthority";
 import {
   ARCHIVE_ASSETS_ROLES,
   EDIT_ASSETS_ROLES,
@@ -37,6 +41,8 @@ export interface ActionRoles {
   match?: "exact" | "hierarchy";
   /** Roles the gate admits that the handler then refuses. */
   refused?: readonly AppRole[];
+  /** Roles the gate admits that the handler lets through only on its own condition: not exported. */
+  conditional?: readonly AppRole[];
   /** The routes whose role gate is exactly this entry (swept by the parity test). */
   routes: readonly string[];
   /** Why, in a sentence: what the action is and any refusal. */
@@ -82,11 +88,20 @@ export const ACTION_ROLES = {
     routes: ["publishProcedure"],
     why: "Publish a procedure, which stamps the approval onto that version.",
   },
+  // Package 117 (attributed approval) adds the attributed roles to this gate and
+  // lists them as `conditional`, so they pass the gate without being offered the
+  // plain approval; approveQuoteAttributed is what offers it to them.
   approveQuote: {
     gate: roles(SUBJECT_ELIGIBLE_ROLES.quote),
     refused: [A.ADMIN],
     routes: ["approveQuote"],
     why: `Approve (or send up for approval) a selected quote: the approval-authority core's eligible roles (J1); ${ADMIN_TEST_ONLY}.`,
+  },
+  approveQuoteAttributed: {
+    gate: roles(ATTRIBUTED_APPROVAL_ROLES.quote),
+    match: "exact",
+    routes: [],
+    why: "Approve a quote within your own limit by naming the person whose authority it rests on (ATTRIBUTED_APPROVAL_ROLES). Package 117 gives it its route.",
   },
   approveQuoteAsDirector: {
     gate: [A.DIRECTOR],
@@ -109,7 +124,9 @@ export const ACTION_ROLES = {
   archiveAnyJob: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     match: "exact",
-    routes: [],
+    // Swept with a job someone else created (action-roles.parity.test PROBES):
+    // the gate is editJobs, this list decides who archives a job that isn't theirs.
+    routes: ["archiveJob"],
     why: "Archive any job (ARCHIVE_ANY_JOB_ROLES, a literal check in archiveJob). Plain facilities archive only their own.",
   },
   archiveAssets: {
@@ -180,8 +197,8 @@ export const ACTION_ROLES = {
   },
   deleteTenancyRegisterRows: {
     gate: TENANCY_DESK,
-    routes: ["deleteRegisterTenant"],
-    why: "Delete a tenancy register row (TENANCY_DELETE_ROLES).",
+    routes: ["deleteRegisterTenant", "deleteTenant"],
+    why: "Delete a tenancy register row that is still an empty draft: locked, checked and ledgered (TENANCY_DELETE_ROLES, deleteTenancyDraft).",
   },
   editAnyRentReview: {
     gate: [A.ACCOUNTS_APPROVAL, A.ADMIN, A.DIRECTOR],
@@ -217,6 +234,11 @@ export const ACTION_ROLES = {
     gate: TENANCY_DESK,
     routes: ["upsertRegisterTenant", "upsertOccupancy", "upsertCarpark", "upsertMiscFee", "upsertTenantIncentive", "upsertLeaseAdministration"],
     why: "Edit the tenancy register and a tenant's detail.",
+  },
+  hardDeleteTenancyRows: {
+    gate: [A.ADMIN],
+    routes: ["deleteOccupancy", "deleteCarpark"],
+    why: "Delete an occupancy or carpark row outright: admin only, as before J4. A hard delete with no archive, ledger or relied-on check; becomes an archive in lane D.",
   },
   manageAccessProfiles: {
     gate: [A.ADMIN],
@@ -523,14 +545,17 @@ export type Capability = keyof typeof ACTION_ROLES;
 /** Every role, in a fixed order, for the export and the parity sweep. */
 export const ALL_ROLES: readonly AppRole[] = Object.values(AppRole).slice().sort();
 
-/** The roles an entry lets act: who passes its gate (by requireRole's hierarchy, or literally), less those refused. */
+/** The roles an entry lets act: who passes its gate (by requireRole's hierarchy, or literally), less those refused or conditional. */
 export function rolesFor(entry: ActionRoles): AppRole[] {
-  const admitted =
-    entry.match === "exact"
-      ? ALL_ROLES.filter((role) => entry.gate.includes(role))
-      : ALL_ROLES.filter((role) => rolesPassGate([role], entry.gate));
-  const refused = entry.refused ?? [];
-  return admitted.filter((role) => !refused.includes(role));
+  const left = [...(entry.refused ?? []), ...(entry.conditional ?? [])];
+  return admittedBy(entry).filter((role) => !left.includes(role));
+}
+
+/** Everyone an entry's gate lets past, refused and conditional roles included. */
+export function admittedBy(entry: ActionRoles): AppRole[] {
+  return entry.match === "exact"
+    ? ALL_ROLES.filter((role) => entry.gate.includes(role))
+    : ALL_ROLES.filter((role) => rolesPassGate([role], entry.gate));
 }
 
 /** The table as the frontend reads it: capability → the roles that may, sorted. */

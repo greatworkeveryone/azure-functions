@@ -104,6 +104,7 @@ import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../sch
 import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
+import { ACTION_ROLES } from "../action-roles";
 import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import {
   CLEAR_SIGN_OFF_SQL,
@@ -1921,7 +1922,8 @@ async function deleteOccupancy(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  // A hard delete: admin only until lane D makes it an archive (J4 review).
+  const roleCheck = await requireRole(request, ACTION_ROLES.hardDeleteTenancyRows.gate);
   if (roleCheck) return roleCheck;
 
   let connection;
@@ -3071,7 +3073,8 @@ async function deleteCarpark(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  // A hard delete: admin only until lane D makes it an archive (J4 review).
+  const roleCheck = await requireRole(request, ACTION_ROLES.hardDeleteTenancyRows.gate);
   if (roleCheck) return roleCheck;
 
   let connection;
