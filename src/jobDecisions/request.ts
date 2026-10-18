@@ -22,9 +22,9 @@
 //   fixedDate           YYYY-MM-DD, a working day in Darwin, fixed only
 //   sourceAttachmentId  optional: the file on this job the decision is about
 
-import { normaliseRole } from "../escalation/roles";
+import { normaliseRole, ROLES } from "../escalation/roles";
 import { parseTierRequest, type TierRequest } from "./tiers";
-import { DECISION_MAKER_ROLES } from "./roles";
+import { ADMIN_DOES_NOT_DECIDE, DECISION_MAKER_ROLES } from "./roles";
 
 export const QUESTION_MAX_CHARS = 2000;
 export const WITHDRAW_REASON_MAX_CHARS = 1000;
@@ -131,6 +131,14 @@ function readDecisionMakers(mode: unknown, value: unknown): DecisionMakersInput 
   }
   if (typeof makers.role !== "string" || normaliseRole(makers.role) === "") throw bad("decisionMakers.role must name a role");
   const role = normaliseRole(makers.role);
+  if (role === ROLES.admin) {
+    throw new RequestError(
+      "decision_maker_role_not_allowed",
+      `${ADMIN_DOES_NOT_DECIDE}, so a question can't be put to the Admin role. Ask a director, the CFO or a manager.`,
+      422,
+      { role },
+    );
+  }
   if (!DECISION_MAKER_ROLES.includes(role)) {
     throw bad(`decisionMakers.role must be one of ${DECISION_MAKER_ROLES.join(", ")}`);
   }

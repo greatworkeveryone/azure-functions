@@ -49,12 +49,18 @@ export type PendingDetail = "dates_only" | "full";
 
 const money = (value: number): string => new Intl.NumberFormat("en-AU", { currency: "AUD", style: "currency" }).format(value);
 
-function scopeSql(scope: PendingScope, alias: string): { params: SqlParam[]; sql: string } {
+// A list across tenancies leaves out test tenancies too (D9), unless the reader
+// is an admin with Show test data on.
+function scopeSql(scope: PendingScope, alias: string, showTest: boolean): { params: SqlParam[]; sql: string } {
   if ("tenantId" in scope) return { params: [{ name: "TenantId", type: TYPES.Int, value: scope.tenantId }], sql: ` AND ${alias}.TenantId = @TenantId` };
+  const showTestParam: SqlParam = { name: "ShowTest", type: TYPES.Bit, value: showTest };
   if ("buildingId" in scope) {
-    return { params: [{ name: "BuildingId", type: TYPES.Int, value: scope.buildingId }], sql: " AND t.BuildingId = @BuildingId AND t.ArchivedAt IS NULL" };
+    return {
+      params: [{ name: "BuildingId", type: TYPES.Int, value: scope.buildingId }, showTestParam],
+      sql: " AND t.BuildingId = @BuildingId AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1)",
+    };
   }
-  return { params: [], sql: " AND t.ArchivedAt IS NULL" };
+  return { params: [showTestParam], sql: " AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1)" };
 }
 
 const RELIEF_SQL = `SELECT c.RequestId, c.TenantId, c.Kind, c.Payload, c.Reason, c.State, c.RequestedByName, c.RequestedAt,
@@ -117,10 +123,15 @@ const byDate = (a: PendingChangeItem, b: PendingChangeItem): number =>
   String(a.from).localeCompare(String(b.from)) || a.requestId.localeCompare(b.requestId);
 
 /** Every change awaiting a decision in `scope`, oldest date first. */
-export async function loadPendingChanges(connection: Connection, scope: PendingScope, detail: PendingDetail): Promise<PendingChangeItem[]> {
+export async function loadPendingChanges(
+  connection: Connection,
+  scope: PendingScope,
+  detail: PendingDetail,
+  showTest = false,
+): Promise<PendingChangeItem[]> {
   // Scope fragments are literal "AND col = @param" text; the values ride in params.
-  const { params: reliefParams, sql: whereSqlA } = scopeSql(scope, "c");
-  const { params: reviewParams, sql: whereSqlB } = scopeSql(scope, "r");
+  const { params: reliefParams, sql: whereSqlA } = scopeSql(scope, "c", showTest);
+  const { params: reviewParams, sql: whereSqlB } = scopeSql(scope, "r", showTest);
   const reliefRows = await executeQuery(connection, `${RELIEF_SQL}${whereSqlA}`, reliefParams);
   const reviewRows = await executeQuery(connection, `${REVIEW_SQL}${whereSqlB}`, reviewParams);
   return [

@@ -170,8 +170,27 @@ describe("sendPurchaseOrder", () => {
 
     expect(res.status).toBe(200);
     expect(callMatching(/SET SentAt = SYSUTCDATETIME\(\), SentBy = @SentBy/)?.params.SentBy).toBe("Johanne CFO");
-    expect(graph.graphSendMail.mock.calls[0][4]).toEqual(["johanne@randazzo.properties"]);
+    expect(graph.graphSendMail.mock.calls[0][0]).toEqual({ isTest: false });
+    expect(graph.graphSendMail.mock.calls[0][5]).toEqual(["johanne@randazzo.properties"]);
     expectNoForgedName();
+  });
+
+  it("refuses a test PO (or a PO on a test job) with 'Not sent: test record' and marks nothing sent (D9)", async () => {
+    routeSql([[poRow[0], [{ ...(poRow[1] as Record<string, unknown>[])[0], IsTest: true }]], storedPo]);
+
+    const res = await sendPurchaseOrder(makeRequest({ PurchaseOrderID: 3 }), ctx);
+
+    expect(res).toEqual({ jsonBody: { code: "TEST_RECORD", error: "Not sent: test record" }, status: 409 });
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+    expect(callMatching(/SET SentAt = SYSUTCDATETIME\(\)/)).toBeUndefined();
+  });
+
+  it("reads the PO's own flag and its job's", async () => {
+    routeSql([poRow, storedPo]);
+    await sendPurchaseOrder(makeRequest({ PurchaseOrderID: 3 }), ctx);
+    const select = callMatching(/SELECT c\.EmailAddress, po\.PDFBlobName/)?.sql ?? "";
+    expect(select).toMatch(/po\.IsTest = 1 OR j\.IsTest = 1/);
+    expect(select).toMatch(/LEFT JOIN Jobs j ON j\.JobID = po\.JobID/);
   });
 
   it("401s without sending when the token has no verified identity", async () => {

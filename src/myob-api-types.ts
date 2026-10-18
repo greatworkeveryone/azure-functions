@@ -2,6 +2,7 @@
 // Re-exported from myob-api-log.ts, which is where callers import them from.
 
 import type { MyobMethod } from "./myob-endpoints";
+import type { MyobRecordRef } from "./myob-test-records";
 
 /**
  * Who is behind a call. Kept structurally compatible with the decision
@@ -43,6 +44,12 @@ export interface MyobRequestInput {
   correlationId?: string;
   /** 1 unless a caller retries; stored as MyobApiLog.Attempt. */
   attempt?: number;
+  /**
+   * The Floorplan record the call is about (D9). A test record's call is
+   * refused; a company-file write must name its record here or through the
+   * proposal its correlationId belongs to.
+   */
+  record?: MyobRecordRef;
 }
 
 export interface MyobResponse {

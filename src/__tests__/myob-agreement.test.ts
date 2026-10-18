@@ -23,7 +23,7 @@ import {
 import { todayInDarwin } from "../darwinDate";
 import { myobRequest } from "../myob-api-log";
 import { checkMyobPeriod } from "../myob-period";
-import { guardMyobRequest, setFloorplanRecordLookup } from "../myob-request-guard";
+import { guardMyobRequest, setFloorplanRecordLookup, setMyobTestRecordLookup } from "../myob-request-guard";
 
 // Johanne's MYOB agreement of 13 Oct 2026 (sprint plan, decision 11), pinned
 // against the code that enforces it. If one of these fails, the change in
@@ -43,6 +43,12 @@ afterAll(() => {
   process.env = savedEnv;
   setFloorplanRecordLookup(null);
 });
+
+
+// D9's test-record check has its own suite (myob-test-records.test.ts); here
+// every call is about a real record.
+beforeAll(() => setMyobTestRecordLookup(async () => ({ isTest: false, named: true })));
+afterAll(() => setMyobTestRecordLookup(null));
 
 describe("the endpoint allowlist is exactly the agreed list", () => {
   it("has not changed (method, operation, path pattern)", () => {

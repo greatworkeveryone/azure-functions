@@ -256,6 +256,16 @@ describe("getEscalations", () => {
     expect(st.listEscalations).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ subjectId: "12", subjectType: "job", view: "visible" }), expect.anything());
   });
 
+  it.each([
+    ["admin", "1", true],
+    ["admin", null, false],
+    ["director", "1", false],
+  ])("lists and counts test records only for an admin with Show test data on (%s, header %s, D9 review)", async (roles, header, showTest) => {
+    const headers = { ...headersFor(roles), ...(header ? { "x-show-test-data": header } : {}) };
+    await getEscalations(makeRequest({ headers, query: {} }), context());
+    expect(st.listEscalations).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ showTest }), expect.anything());
+  });
+
   it("accepts status=open for a count of the ones nobody has picked up", async () => {
     await list({ status: "open" });
     expect(st.listEscalations).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "open" }), expect.anything());

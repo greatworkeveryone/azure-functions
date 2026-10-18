@@ -42,6 +42,7 @@ import {
   type LeaseEventReview,
   type LeaseEventTenancy,
 } from "../rentReview/leaseEvents";
+import { showTestParam } from "../test-data";
 
 const INT_MAX = 2_147_483_647;
 const METHODS: readonly string[] = ["cpi", "fixed", "market", "other"];
@@ -51,14 +52,15 @@ const OPEN_STATE_LIST = OPEN_RENT_REVIEW_STATES.map((state) => `'${state}'`).joi
 const TENANCIES_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Expiry,
     t.OptionPeriods, t.OptionNoticeMonths, t.ScheduleSignedOffAt
   FROM dbo.Tenants t
-  WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.Expiry IS NOT NULL`;
+  WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.Expiry IS NOT NULL AND (t.IsTest = 0 OR @ShowTest = 1)`;
 
 const REVIEWS_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.Method, r.OwnerUserId,
     t.BuildingId, t.LegalName, t.TradingName, t.ScheduleSignedOffAt, u.DisplayName AS OwnerName
   FROM dbo.RentReviews r
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
-  WHERE r.State IN (${OPEN_STATE_LIST}) AND r.ScheduledFor <= @Until AND t.Status <> 'vacated' AND t.ArchivedAt IS NULL`;
+  WHERE r.State IN (${OPEN_STATE_LIST}) AND r.ScheduledFor <= @Until AND t.Status <> 'vacated' AND t.ArchivedAt IS NULL
+    AND (t.IsTest = 0 OR @ShowTest = 1)`;
 
 const BUILDING_FILTER = " AND t.BuildingId = @BuildingId";
 
@@ -92,8 +94,10 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
     const buildingId = readBuildingId(request.query);
     const today = todayInDarwin();
 
-    const tenancyParams: SqlParam[] = [];
-    const reviewParams: SqlParam[] = [{ name: "Until", type: TYPES.Date, value: addDaysIso(today, days) }];
+    // D9: test tenancies, their reviews and their pending changes only with an admin's Show test data on.
+    const showTest = await showTestParam(request);
+    const tenancyParams: SqlParam[] = [showTest];
+    const reviewParams: SqlParam[] = [{ name: "Until", type: TYPES.Date, value: addDaysIso(today, days) }, showTest];
     if (buildingId !== null) {
       tenancyParams.push({ name: "BuildingId", type: TYPES.Int, value: buildingId });
       reviewParams.push({ name: "BuildingId", type: TYPES.Int, value: buildingId });
@@ -133,7 +137,7 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       tenantName: tenantDisplayName(row),
     }));
 
-    const pending = await loadPendingChanges(connection, buildingId === null ? { all: true } : { buildingId }, "dates_only");
+    const pending = await loadPendingChanges(connection, buildingId === null ? { all: true } : { buildingId }, "dates_only", showTest.value);
     return {
       jsonBody: { asOf: today, days, events: buildLeaseEvents({ days, reviews, tenancies, today }), pendingChanges: pendingChangesOf(pending) },
       status: 200,

@@ -11,6 +11,7 @@ import {
   latestTimesBySubject,
   listActiveUsers,
   listEscalations,
+  NOT_TEST_SUBJECT_SQL,
   recordNotification,
   rowVersionToBuffer,
   rowVersionToText,
@@ -20,6 +21,7 @@ import {
   type NewEscalation,
 } from "./store";
 import type { Viewer } from "./types";
+import { IS_TEST_SQL } from "../test-data";
 
 jest.mock("../db", () => {
   const actual = jest.requireActual("../db");
@@ -333,7 +335,7 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     for (const role of ["director", "admin"]) {
       for (const view of ["team", "all", "visible"] as const) {
         const { whereSql } = where({ view, viewer: viewer([role]) });
-        expect(whereSql).toBe("WHERE e.Status IN ('open', 'acknowledged')");
+        expect(whereSql).toBe(`WHERE e.Status IN ('open', 'acknowledged') AND ${NOT_TEST_SUBJECT_SQL}`);
       }
     }
   });
@@ -397,7 +399,7 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     it("a prefix is an escaped LIKE on a bound pattern", () => {
       const { params, whereSql } = filterBy({ policyKeyPrefix: "finance." });
 
-      expect(whereSql).toBe("WHERE e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'");
+      expect(whereSql).toBe(`WHERE ${NOT_TEST_SUBJECT_SQL} AND e.PolicyKey LIKE @PolicyKeyPrefix ESCAPE '\\'`);
       expect(params.find((p) => p.name === "PolicyKeyPrefix")).toEqual({ name: "PolicyKeyPrefix", type: TYPES.NVarChar, value: "finance.%" });
       expect(params.some((p) => p.name === "PolicyKey")).toBe(false);
     });
@@ -436,7 +438,7 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
       const { params, whereSql } = where({ view: "team", viewer: cfo });
 
       expect(whereSql).toMatch(
-        /^WHERE \(e\.TargetRole IN \(@TeamRole0.*\) OR e\.RaisedByUserId IN \(SELECT .*\) OR e\.PolicyKey LIKE @SeenPolicy0 ESCAPE '\\'\) AND e\.Status IN \('open', 'acknowledged'\)$/,
+        /^WHERE \(e\.TargetRole IN \(@TeamRole0.*\) OR e\.RaisedByUserId IN \(SELECT .*\) OR e\.PolicyKey LIKE @SeenPolicy0 ESCAPE '\\'\) AND e\.Status IN \('open', 'acknowledged'\) AND \(e\.SubjectType NOT IN /,
       );
       expect(seenParams(params)).toEqual([{ name: "SeenPolicy0", type: TYPES.NVarChar, value: "finance.%" }]);
     });
@@ -499,8 +501,8 @@ describe("buildListWhere: who sees what in the inbox (PLAN §3.7)", () => {
     expect(where({ status: "open", view: "mine", viewer: viewer(["facilities_manager"]) }).whereSql).toContain("e.Status = 'open'");
   });
 
-  it("status=all adds no status filter", () => {
-    expect(where({ status: "all", view: "all", viewer: viewer(["director"]) }).whereSql).toBe("");
+  it("status=all adds no status filter (only the test-record one)", () => {
+    expect(where({ status: "all", view: "all", viewer: viewer(["director"]) }).whereSql).toBe(`WHERE ${NOT_TEST_SUBJECT_SQL}`);
   });
 
   it("never puts a value in the SQL text", () => {
@@ -525,6 +527,52 @@ describe("listChain", () => {
     expect(chain.map((c) => c.escalationId)).toEqual([42, 43]);
     expect(lastCall()[1]).toContain("SELECT TOP 200");
     expect(lastCall()[1]).toContain("ORDER BY EscalationId DESC");
+  });
+});
+
+describe("test records stay out of the inbox and its counts (D9 review)", () => {
+  const director: Viewer = { name: "D", roles: ["director"], userId: 5 };
+
+  it("leaves out escalations about a test record unless an admin has Show test data on", () => {
+    const hidden = buildListWhere({ status: "active", view: "all", viewer: director });
+    expect(hidden.whereSql).toContain(NOT_TEST_SUBJECT_SQL);
+    expect(hidden.params).toContainEqual(expect.objectContaining({ name: "ShowTest", type: TYPES.Bit, value: false }));
+
+    const shown = buildListWhere({ showTest: true, status: "active", view: "all", viewer: director });
+    expect(shown.whereSql).toContain(NOT_TEST_SUBJECT_SQL);
+    expect(shown.params).toContainEqual(expect.objectContaining({ name: "ShowTest", value: true }));
+  });
+
+  it("asks positively about every kind of record a subject can be, and lets non-records through", () => {
+    const [notRecords] = /e\.SubjectType NOT IN \(([^)]*)\)/.exec(NOT_TEST_SUBJECT_SQL) ?? [""];
+    for (const kind of Object.keys(IS_TEST_SQL)) {
+      expect(notRecords).toContain(`N'${kind}'`);
+      expect(NOT_TEST_SUBJECT_SQL).toContain(`(e.SubjectType = N'${kind}' AND `);
+    }
+    expect(NOT_TEST_SUBJECT_SQL).not.toMatch(/NOT\s+EXISTS|IsTest = 1/);
+    expect(NOT_TEST_SUBJECT_SQL).toMatch(/IsTest = 0\)+\s*OR @ShowTest = 1\)$/);
+  });
+
+  it("checks a money record and its job, and a review or change through its tenancy", () => {
+    expect(NOT_TEST_SUBJECT_SQL).toContain(
+      "FROM dbo.Quotes s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.QuoteID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0 AND sj.IsTest = 0",
+    );
+    expect(NOT_TEST_SUBJECT_SQL).toContain("FROM dbo.RentReviews s JOIN dbo.Tenants st ON st.TenantId = s.TenantId WHERE s.ReviewId = e.SubjectId AND st.IsTest = 0");
+  });
+
+  it("reads a defects period's tenancy from the escalation's context, so the inbox never names a table that may not exist yet", () => {
+    expect(NOT_TEST_SUBJECT_SQL).not.toContain("DefectsPeriods");
+    expect(NOT_TEST_SUBJECT_SQL).toContain(
+      "(e.SubjectType = N'defects_period' AND (JSON_VALUE(e.Context, N'$.tenantId') IS NULL OR EXISTS (SELECT 1 FROM dbo.Tenants st WHERE st.TenantId = TRY_CONVERT(INT, JSON_VALUE(e.Context, N'$.tenantId')) AND st.IsTest = 0)))",
+    );
+  });
+
+  it("counts with the same rule as it lists (the top-bar badge)", async () => {
+    db.executeQuery.mockResolvedValueOnce([]).mockResolvedValueOnce([{ Total: 0 }]);
+    await listEscalations(conn, { status: "active", view: "mine", viewer: director }, parsePagination(new URLSearchParams("page=1&pageSize=1")));
+    expect(db.executeQuery.mock.calls[0][1]).toContain(NOT_TEST_SUBJECT_SQL);
+    expect(db.executeQuery.mock.calls[1][1]).toContain(NOT_TEST_SUBJECT_SQL);
+    expect(db.executeQuery.mock.calls[1][2]).toContainEqual(expect.objectContaining({ name: "ShowTest", value: false }));
   });
 });
 

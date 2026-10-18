@@ -64,6 +64,7 @@ import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import type { LedgerActor } from "../ledger/types";
+import { testRecordResponse } from "../test-data";
 
 /** A PO's amount for the approval rules (PLAN §3.8): the cap, else the estimate; null when neither is known. */
 function poAmount(row: { CostNotToExceed?: unknown; EstimatedCost?: unknown }): number | null {
@@ -850,9 +851,11 @@ async function sendPurchaseOrder(
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
-              po.EstimatedCost, po.CostNotToExceed, po.SentAt
+              po.EstimatedCost, po.CostNotToExceed, po.SentAt,
+              CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
+         LEFT JOIN Jobs j ON j.JobID = po.JobID
         WHERE po.PurchaseOrderID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
@@ -865,6 +868,9 @@ async function sendPurchaseOrder(
         jsonBody: { error: "Preview the PO (generate a PDF) before sending." },
       };
     }
+    // A test PO (or a PO on a test job) never reaches a contractor (D9).
+    const egress = { isTest: Boolean(contractorRows[0].IsTest) };
+    if (egress.isTest) return testRecordResponse();
     const recipient = resolveRecipient(contractorRows[0]?.EmailAddress);
     if (!recipient.address) {
       return { status: 400, jsonBody: { error: "Contractor has no email address." } };
@@ -950,6 +956,7 @@ async function sendPurchaseOrder(
     // arbitrary outside address.
     const ccAddresses = [identity.email];
     await graphSendMail(
+      egress,
       recipient.address,
       emailSubject,
       emailBody,

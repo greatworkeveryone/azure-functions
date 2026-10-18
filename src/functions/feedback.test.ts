@@ -114,7 +114,7 @@ describe("handleSendFeedback", () => {
 
     expect(response.status).toBe(200);
     expect(graph.graphSendMail).toHaveBeenCalledTimes(1);
-    const [recipients, subject, body] = graph.graphSendMail.mock.calls[0];
+    const [, recipients, subject, body] = graph.graphSendMail.mock.calls[0];
     expect(recipients).toEqual(["connor@example.com"]);
     expect(subject).toContain("Data looks wrong");
     expect(body).toContain("The rent review date is a year out.");
@@ -123,7 +123,7 @@ describe("handleSendFeedback", () => {
   it("forwards the diagnostic context fields to the email builder", async () => {
     await handleSendFeedback(requestWith(validForm()), context);
 
-    const [, , body] = graph.graphSendMail.mock.calls[0];
+    const [, , , body] = graph.graphSendMail.mock.calls[0];
     expect(body).toContain("Page:     https://app.example.com/tenancy");
     expect(body).toContain("Browser:  Mozilla/5.0");
     expect(body).toContain("Viewport: 390 × 844");
@@ -136,7 +136,7 @@ describe("handleSendFeedback", () => {
 
     await handleSendFeedback(requestWith(form), context);
 
-    const [, subject, body] = graph.graphSendMail.mock.calls[0];
+    const [, , subject, body] = graph.graphSendMail.mock.calls[0];
     expect(subject).toContain("Test User");
     expect(body).toContain("test@co.com");
     expect(body).not.toContain("spoofed@evil.com");
@@ -231,7 +231,7 @@ describe("handleSendFeedback", () => {
     const response = await handleSendFeedback(requestWith(form), context);
 
     expect(response.status).toBe(200);
-    const attachments = graph.graphSendMail.mock.calls[0][3];
+    const attachments = graph.graphSendMail.mock.calls[0][4];
     expect(attachments).toHaveLength(3);
     expect(attachments[0]).toEqual({
       contentBase64: expect.any(String),
@@ -249,7 +249,7 @@ describe("handleSendFeedback", () => {
     const response = await handleSendFeedback(requestWith(form), context);
 
     expect(response.status).toBe(200);
-    const attachments = graph.graphSendMail.mock.calls[0][3];
+    const attachments = graph.graphSendMail.mock.calls[0][4];
     expect(attachments[0].fileName).toBe("photo-1.jpg");
     expect(attachments[1].fileName).toBe("photo-2.png");
   });
@@ -273,7 +273,7 @@ describe("handleSendFeedback", () => {
     const response = await handleSendFeedback(requestWith(form), context);
 
     expect(response.status).toBe(200);
-    expect(graph.graphSendMail.mock.calls[0][3]).toHaveLength(0);
+    expect(graph.graphSendMail.mock.calls[0][4]).toHaveLength(0);
   });
 
   it("rejects a fourth photo", async () => {
@@ -309,7 +309,7 @@ describe("handleSendFeedback", () => {
     const response = await handleSendFeedback(requestWith(form), context);
 
     expect(response.status).toBe(200);
-    const attachments = graph.graphSendMail.mock.calls[0][3];
+    const attachments = graph.graphSendMail.mock.calls[0][4];
     expect(attachments).toHaveLength(1);
     expect(attachments[0].fileName).toBe("photo-1.jpg");
   });

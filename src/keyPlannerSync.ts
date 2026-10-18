@@ -35,6 +35,7 @@ export interface KeysSyncDeps {
 
 interface KeyRow {
   Id: number;
+  IsTest?: boolean | number;
   KeyNumber: string;
   BuildingName: string;
   Status: string;
@@ -56,7 +57,7 @@ export async function syncKeyLostReported(
   //   k.BuildingId → b.BuildingID, k.TenancyId → t.TenantID (LegalName AS TenancyName).
   const rows = (await executeQuery(
     connection,
-    `SELECT k.Id, k.KeyNumber, b.BuildingName,
+    `SELECT k.Id, k.KeyNumber, k.IsTest, b.BuildingName,
             t.LegalName AS TenancyName,
             k.Status, k.IsDeleted,
             k.LostAt, k.LostByName, k.LostComment
@@ -93,6 +94,7 @@ export async function syncKeyLostReported(
     connection,
     entityType: "key",
     entityId: keyId,
+    isTest: row.IsTest === true || row.IsTest === 1,
     triggerType: "lost_key_reported",
     shouldHaveTask,
     planType: "facilities",

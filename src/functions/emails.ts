@@ -40,6 +40,7 @@ import { parseMoneyField } from "../money";
 import { amountRefusal, jobMoneyRefusal, refusalResponse } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { linkDirectorReply } from "../email/director-reply-link";
+import { showTestParam } from "../test-data";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -140,6 +141,9 @@ export async function getEmails(
     );
   }
 
+  // Test emails (D9) only with the admin's Show test data on.
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
   const where = `WHERE ${whereParts.join(" AND ")}`;
 
   let connection;

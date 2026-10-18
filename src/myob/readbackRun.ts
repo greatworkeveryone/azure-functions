@@ -11,6 +11,7 @@ import type { Connection } from "tedious";
 import { beginTransaction, commitTransaction, rollbackTransaction } from "../db";
 import type { LedgerActor } from "../ledger";
 import type { MyobActor } from "../myob-api-log";
+import { TestDataEgressError } from "../test-data";
 import { MyobRequestRefusedError, MyobWritesDisabledError } from "../myob-errors";
 import type { ProposalRow } from "./proposalRow";
 import { readBackProposal, recordReadback, selectForReadback } from "./readback";
@@ -90,7 +91,7 @@ export async function readBackRows(
       if (result.discrepancyChanged) counts.discrepanciesChanged += 1;
       if (result.versionAdvanced) counts.versionsAdvanced += 1;
     } catch (error) {
-      if (error instanceof MyobRequestRefusedError || error instanceof MyobWritesDisabledError) {
+      if (error instanceof MyobRequestRefusedError || error instanceof MyobWritesDisabledError || error instanceof TestDataEgressError) {
         counts.refused += 1;
         options.log(`myob read-back: proposal #${row.proposalId} not read: ${error.message}`);
         continue;
