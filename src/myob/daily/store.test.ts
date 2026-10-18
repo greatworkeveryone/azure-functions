@@ -88,12 +88,14 @@ describe("loadCfoRecipients", () => {
 });
 
 describe("test records (D9)", () => {
-  it("leaves out proposal events for a test record or a record on a test job", async () => {
+  it("keeps only proposal events whose record and job are both real (a positive IsTest = 0 selection)", async () => {
     await loadDailyFacts({} as never, SINCE, UNTIL);
     const sql = String((executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("DecisionLedger")) as unknown[])[1]);
-    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.Jobs tj WHERE tj\.JobID = p\.JobId AND tj\.IsTest = 1\)/);
-    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.PurchaseOrders tpo WHERE p\.SubjectType = N'purchase_order' AND tpo\.PurchaseOrderID = p\.SubjectId AND tpo\.IsTest = 1\)/);
-    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.Quotes tq WHERE p\.SubjectType = N'quote' AND tq\.QuoteID = p\.SubjectId AND tq\.IsTest = 1\)/);
+    expect(sql).not.toMatch(/NOT EXISTS|NOT IN/);
+    expect(sql).toMatch(/p\.SubjectType = N'purchase_order' AND EXISTS \(SELECT 1 FROM dbo\.PurchaseOrders s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.PurchaseOrderID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType = N'quote' AND EXISTS \(SELECT 1 FROM dbo\.Quotes s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.QuoteID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType = N'invoice' AND EXISTS \(SELECT 1 FROM dbo\.JobInvoices s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.JobInvoiceID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType, p\.SubjectId/);
   });
 
   it("hands the run the test-record keys", async () => {

@@ -833,7 +833,7 @@ async function getRegisterTenants(
     }
 
     // WP26c: the building's changes awaiting a director, on the list and on each tenancy.
-    const pending = await loadPendingChanges(connection, { buildingId }, "full");
+    const pending = await loadPendingChanges(connection, { buildingId }, "full", showTest.value);
     const tenants = tenantRows.map((row) => {
       const tid = row.TenantId as number;
       return tenantRowToApi(
@@ -2219,6 +2219,7 @@ async function getPortfolioOccupancy(
   const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (roleCheck) return roleCheck;
 
+  const showTest = await showTestParam(request);
   let connection;
   try {
     connection = await createRequestConnection(token);
@@ -2252,12 +2253,12 @@ async function getPortfolioOccupancy(
        WHERE t.ArchivedAt IS NULL
          AND (t.IsTest = 0 OR @ShowTest = 1)
        GROUP BY t.BuildingId`,
-      [await showTestParam(request)],
+      [showTest],
     );
 
     // WP26c: changes awaiting a director across the portfolio, dates and names
     // only: facilities read these figures too.
-    const pending = await loadPendingChanges(connection, { all: true }, "dates_only");
+    const pending = await loadPendingChanges(connection, { all: true }, "dates_only", showTest.value);
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;

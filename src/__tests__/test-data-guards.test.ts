@@ -9,7 +9,10 @@ import { join } from "node:path";
 
 const SRC = join(__dirname, "..");
 const TOGGLE = /IsTest = 0\)*\s*OR @ShowTest = 1/;
-const HARD = /\bIsTest = 0\b|NOT EXISTS \(SELECT 1 FROM dbo\.\w+ \w+ WHERE [^)]*IsTest = 1\)/;
+// Positive only (database-safety rule 2): `NOT EXISTS (… IsTest = 1)` and
+// `NOT IN (… IsTest = 1)` let through whatever the subquery misses.
+const HARD = /\bIsTest = 0\b/;
+const NEGATIVE = /NOT\s+(?:EXISTS|IN)\s*\([^)]*IsTest = 1/;
 
 type Read = { anchor: string; file: string; mode: "hard" | "toggle"; passes?: string; passesIn?: string };
 
@@ -32,6 +35,11 @@ const READS: Read[] = [
   { anchor: "async function getQuotes(", file: "functions/quotes.ts", mode: "toggle" },
   { anchor: "const LINKED_JOBS =", file: "functions/getMaintenanceOverview.ts", mode: "toggle", passes: "async function getMaintenanceOverview(" },
   { anchor: "const NOT_TEST_SCOPE =", file: "functions/getDecisions.ts", mode: "toggle", passes: "async function getDecisions(" },
+  // The inbox and its top-bar count (one where clause), and the Next 90 days feed with its pending changes (D9 review).
+  { anchor: "const NOT_TEST_SUBJECT_SQL =", file: "escalation/store.ts", mode: "toggle", passes: "async function getEscalations(", passesIn: "functions/getEscalations.ts" },
+  { anchor: "const TENANCIES_SQL =", file: "functions/getUpcomingLeaseEvents.ts", mode: "toggle", passes: "async function getUpcomingLeaseEvents(" },
+  { anchor: "const REVIEWS_SQL =", file: "functions/getUpcomingLeaseEvents.ts", mode: "toggle", passes: "async function getUpcomingLeaseEvents(" },
+  { anchor: "function scopeSql(", file: "scheduleChange/pending.ts", mode: "toggle", passes: "async function getUpcomingLeaseEvents(", passesIn: "functions/getUpcomingLeaseEvents.ts" },
   // (Purchase orders and payments are listed only per job, so the job is what is shown or not.)
   // Reads nobody can toggle: timers and emails.
   { anchor: "export async function listWaitingApprovals(", file: "digest/store.ts", mode: "hard" },
@@ -57,6 +65,7 @@ describe("test records stay out of lists, counts, figures and exports (D9)", () 
     const region = regionOf(source, anchor);
     expect(region).not.toBe("");
     expect(region).toMatch(mode === "toggle" ? TOGGLE : HARD);
+    expect(region).not.toMatch(NEGATIVE);
     if (mode === "toggle") {
       const handlerSource = passesIn ? readFileSync(join(SRC, passesIn), "utf8") : source;
       const handler = passes ? regionOf(handlerSource, passes) : region;

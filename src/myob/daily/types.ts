@@ -19,6 +19,9 @@ export interface ProposalEvent {
   rendered: { amount?: string; document?: string; number?: string; supplier?: string };
   reviewedBy: string | null;
   ruleApplied: string | null;
+  /** The proposal's Floorplan record (D9): checked against the test-record keys before sending. */
+  subjectId?: number | null;
+  subjectType?: string | null;
 }
 
 /** One MYOB call's outcome row in MyobApiLog: answered (response) or refused/failed (error). */

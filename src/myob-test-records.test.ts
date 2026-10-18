@@ -125,3 +125,19 @@ describe("lookupMyobTestRecord (the default lookup)", () => {
     await expect(lookupMyobTestRecord({ correlationId: CORRELATION, record: null })).resolves.toEqual({ isTest: false, named: false });
   });
 });
+
+describe("when the test-record check itself fails (D9 review: fail closed)", () => {
+  it("myobRequest refuses the call and never reaches MYOB", async () => {
+    lookup.mockRejectedValue(new Error("database unreachable"));
+    await expect(read()).rejects.toThrow("database unreachable");
+    await expect(write({ record: { id: 5, kind: "purchase_order" } })).rejects.toThrow("database unreachable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("the default lookup lets the failure through instead of answering 'not a test record'", async () => {
+    db.executeQuery.mockRejectedValueOnce(new Error("database unreachable"));
+    await expect(lookupMyobTestRecord({ correlationId: null, record: { id: 5, kind: "purchase_order" } })).rejects.toThrow("database unreachable");
+    db.executeQuery.mockRejectedValueOnce(new Error("database unreachable"));
+    await expect(lookupMyobTestRecord({ correlationId: CORRELATION, record: null })).rejects.toThrow("database unreachable");
+  });
+});

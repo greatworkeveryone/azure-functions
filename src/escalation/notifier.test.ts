@@ -431,6 +431,7 @@ describe("escalation emails about a test job (D9)", () => {
     ["rent_review", "rr-9", "rent_review", "rr-9"],
     ["schedule_change", "sc-1", "schedule_change", "sc-1"],
     ["quote", "33", "quote", 33],
+    ["defects_period", "4", "defects_period", 4],
   ])("asks whether a %s subject is a test record (A0-A2 decisions, WP25/WP26 reviews)", async (subjectType, subjectId, kind, id) => {
     testData.readIsTest.mockResolvedValue(true);
     const sendMail = jest.fn();
@@ -453,5 +454,31 @@ describe("escalation emails about a test job (D9)", () => {
     await notifyPreviousLevel(conn, row({ level: 1 }), row({ escalationId: 43, level: 2 }), { env: ENV, sendMail });
     await notifyRaiserResolved(conn, row({ resolvedByUserId: 5, status: "resolved" }), { env: ENV, sendMail });
     expect(sendMail).not.toHaveBeenCalled();
+  });
+});
+
+describe("escalation emails when the test-record check itself fails (D9 review: fail closed)", () => {
+  beforeEach(() => {
+    store.listActiveUsers.mockResolvedValue(USERS);
+    testData.readIsTest.mockReset().mockRejectedValue(new Error("database unreachable"));
+  });
+
+  it("notifyTargets sends nothing and records the send as failed", async () => {
+    const sendMail = jest.fn();
+    const outcome = await notifyTargets(conn, row(), "raise", { env: ENV, now: () => NOW, sendMail });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ attempts: 0, error: "database unreachable", state: "failed" });
+  });
+
+  it("the previous level and the raiser are not told either", async () => {
+    const sendMail = jest.fn();
+    const log = jest.fn();
+    const previous = row({ escalationId: 41, level: 1, targetRole: "facilities_manager" });
+    const next = row({ escalationId: 42, level: 2, parentEscalationId: 41, targetRole: "director" });
+    await notifyPreviousLevel(conn, previous, next, { env: ENV, log, sendMail, users: USERS });
+    await notifyRaiserResolved(conn, row({ resolvedByUserId: 5, status: "resolved" }), { env: ENV, log, sendMail, users: USERS });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("could not tell the previous level: database unreachable"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("could not tell the raiser: database unreachable"));
   });
 });

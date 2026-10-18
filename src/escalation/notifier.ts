@@ -64,8 +64,9 @@ const OVERSIGHT_ROLES: ReadonlySet<string> = new Set([ROLES.director, ROLES.admi
 const defaultSend: SendMail = (to, subject, body, egress) => graphSendMail(egress, to, subject, body);
 
 /** What an escalation email is about: a job, tenancy, rent review, schedule
- *  change or money record (decisions, reviews, sweeps all come through here),
- *  or no record at all (system health, defects periods, service schedules). */
+ *  change, defects period (through its tenancy) or money record (decisions,
+ *  reviews, sweeps all come through here), or no record at all (system health,
+ *  service schedules). */
 async function egressFor(connection: Connection, row: EscalationRow): Promise<EgressSubject> {
   const kind = testKindOfSubject(row.subjectType);
   if (!kind) return NOT_A_RECORD;

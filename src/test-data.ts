@@ -16,7 +16,7 @@ export const TEST_RECORD_MESSAGE = "Not sent: test record";
 export const TEST_TITLE_PREFIX = "[TEST]";
 export const SHOW_TEST_DATA_HEADER = "x-show-test-data";
 
-export type EgressChannel = "digest" | "email" | "myob" | "planner" | "wordpress";
+export type EgressChannel = "digest" | "email" | "mybuildings" | "myob" | "planner" | "wordpress";
 
 export class TestDataEgressError extends Error {
   readonly channel: EgressChannel;
@@ -44,6 +44,7 @@ export function testRecordResponse(): HttpResponseInit {
 }
 
 export type TestRecordKind =
+  | "defects_period"
   | "inspection"
   | "invoice"
   | "job"
@@ -59,9 +60,11 @@ export type TestRecordKind =
 const TEXT_ID_KINDS: ReadonlySet<TestRecordKind> = new Set(["rent_review", "schedule_change"]);
 
 // One constant statement per kind. A money record is a test record when it is
-// flagged itself or its job is; a rent review or a schedule change when its
-// tenancy is.
+// flagged itself or its job is; a rent review, a schedule change or a defects
+// period when its tenancy is (a building-wide defects period never is).
 export const IS_TEST_SQL: Record<TestRecordKind, string> = {
+  defects_period: `IF OBJECT_ID(N'dbo.DefectsPeriods', N'U') IS NOT NULL
+  SELECT t.IsTest FROM dbo.DefectsPeriods d JOIN dbo.Tenants t ON t.TenantId = d.TenantId WHERE d.DefectsPeriodId = @Id`,
   inspection: `SELECT IsTest FROM dbo.Inspections WHERE Id = @Id`,
   invoice: `SELECT CAST(CASE WHEN r.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
   FROM dbo.JobInvoices r JOIN dbo.Jobs j ON j.JobID = r.JobID WHERE r.JobInvoiceID = @Id`,
@@ -110,6 +113,9 @@ INSERT @Keys (Kind, Id)
 IF OBJECT_ID(N'dbo.ScheduleChangeRequests', N'U') IS NOT NULL
   INSERT @Keys (Kind, Id)
   SELECT N'schedule_change', c.RequestId FROM dbo.ScheduleChangeRequests c JOIN dbo.Tenants t ON t.TenantId = c.TenantId WHERE t.IsTest = 1;
+IF OBJECT_ID(N'dbo.DefectsPeriods', N'U') IS NOT NULL
+  INSERT @Keys (Kind, Id)
+  SELECT N'defects_period', CAST(d.DefectsPeriodId AS NVARCHAR(64)) FROM dbo.DefectsPeriods d JOIN dbo.Tenants t ON t.TenantId = d.TenantId WHERE t.IsTest = 1;
 SELECT Kind, Id FROM @Keys;`;
 
 /** "<kind>:<id>" for every test record (see TEST_SUBJECT_KEYS_SQL). */

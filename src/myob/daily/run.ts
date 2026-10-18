@@ -142,8 +142,16 @@ export async function runMyobDaily(
         options.log(`myob daily dry run: would email user #${recipient.userId} "${email.subject}"\n${email.body}`);
         continue;
       }
-      // The read leaves test records' events out; this is the last check before it leaves.
-      const egress = { isTest: facts.events.some((event) => event.jobId !== null && (facts.testKeys?.has(`job:${event.jobId}`) ?? false)) };
+      // The read keeps only real records' events; this is the last check before it
+      // leaves, against the job and the proposal's own record (quote, PO, invoice).
+      const isTestKey = (key: string) => facts.testKeys?.has(key) ?? false;
+      const egress = {
+        isTest: facts.events.some(
+          (event) =>
+            (event.jobId !== null && isTestKey(`job:${event.jobId}`)) ||
+            (event.subjectType && event.subjectId !== null && event.subjectId !== undefined && isTestKey(`${event.subjectType}:${event.subjectId}`)),
+        ),
+      };
       assertMayLeave("email", egress);
       await deps.send([resolved.address], email.subject, email.body, egress);
       report.sent += 1;

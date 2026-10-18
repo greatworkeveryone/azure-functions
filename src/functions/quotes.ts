@@ -84,7 +84,7 @@ async function getQuotes(
   }
   // D9: test quotes, and quotes on test jobs, only with the admin's Show test data on.
   whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
-  whereParts.push("(JobID NOT IN (SELECT tj.JobID FROM Jobs tj WHERE tj.IsTest = 1) OR @ShowTest = 1)");
+  whereParts.push("(JobID IN (SELECT tj.JobID FROM Jobs tj WHERE tj.IsTest = 0) OR @ShowTest = 1)");
   params.push(await showTestParam(request));
   const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 

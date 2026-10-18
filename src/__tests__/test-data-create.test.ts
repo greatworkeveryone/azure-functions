@@ -9,13 +9,21 @@ import { join } from "node:path";
 
 const SRC = join(__dirname, "..");
 
-const CREATES = [
+const WRITES_THE_FLAG = /name: "IsTest",\s+type: TYPES\.Bit,\s+value: testFlag\.isTest/;
+
+const CREATES: { file: string; handler: string; insert: string; writes?: RegExp }[] = [
   { file: "functions/jobs.ts", handler: "export async function upsertJob(", insert: "INSERT INTO Jobs (" },
   { file: "functions/tenancy.ts", handler: "async function upsertRegisterTenant(", insert: "INSERT INTO dbo.Tenants (" },
   { file: "functions/tenants.ts", handler: "async function upsertTenant(", insert: "INSERT INTO dbo.Tenants (" },
   { file: "functions/inspections.ts", handler: "async function createInspection(", insert: "INSERT INTO dbo.Inspections (" },
   { file: "functions/keys.ts", handler: "async function createKey(", insert: "INSERT INTO dbo.Keys" },
-  { file: "functions/vacancies.ts", handler: "async function handleCreateVacancy(", insert: "INSERT INTO dbo.Vacancies (" },
+  // A vacancy of a test tenancy is a test vacancy too (D9 review).
+  {
+    file: "functions/vacancies.ts",
+    handler: "async function handleCreateVacancy(",
+    insert: "INSERT INTO dbo.Vacancies (",
+    writes: /const isTest = testFlag\.isTest \|\| \(tenancyId !== null && \(await readIsTest\(connection, "tenancy", tenancyId\)\)\);[\s\S]*name: "IsTest",\s+type: TYPES\.Bit,\s+value: isTest/,
+  },
 ];
 
 function handlerRegion(source: string, anchor: string): string {
@@ -26,13 +34,13 @@ function handlerRegion(source: string, anchor: string): string {
 }
 
 describe("records are flagged as test data when they are created (D9)", () => {
-  it.each(CREATES)("$handler asks testFlagForCreate and writes IsTest", ({ file, handler, insert }) => {
+  it.each(CREATES)("$handler asks testFlagForCreate and writes IsTest", ({ file, handler, insert, writes = WRITES_THE_FLAG }) => {
     const region = handlerRegion(readFileSync(join(SRC, file), "utf8"), handler);
     expect(region).not.toBe("");
     expect(region).toMatch(/testFlagForCreate\(request,/);
     expect(region.indexOf(insert)).toBeGreaterThan(-1);
     expect(region).toMatch(/@IsTest/);
-    expect(region).toMatch(/name: "IsTest",\s+type: TYPES\.Bit,\s+value: testFlag\.isTest/);
+    expect(region).toMatch(writes);
   });
 
   it("a job raised from an inspection takes the inspection's flag", () => {

@@ -52,6 +52,8 @@ function toEvent(row: SqlRow): ProposalEvent {
     rendered: (json(row.Rendered) ?? {}) as ProposalEvent["rendered"],
     reviewedBy: text(row.ReviewedBy),
     ruleApplied: text(row.RuleApplied),
+    subjectId: row.SubjectId == null ? null : Number(row.SubjectId),
+    subjectType: text(row.SubjectType),
   };
 }
 
@@ -95,15 +97,19 @@ export async function loadDailyFacts(connection: Connection, since: Date, until:
     connection,
     `SELECT l.Action, l.ActorName, l.OccurredAt, l.RuleApplied, l.Reason, l.[After],
             p.ProposalId, p.Operation, p.CompanyFileId, p.JobId, p.MyobNumber, p.MyobUrl, p.ProposedBy, p.ReviewedBy, p.Rendered,
+            p.SubjectType, p.SubjectId,
             f.Name AS CompanyFileName
        FROM dbo.DecisionLedger l
        INNER JOIN dbo.MyobProposals p ON p.ProposalId = TRY_CAST(l.SubjectId AS INT)
        INNER JOIN dbo.MyobCompanyFiles f ON f.CompanyFileId = p.CompanyFileId
       WHERE l.SubjectType = N'myob_proposal' AND l.Action LIKE N'myob.%'
         AND l.OccurredAt >= @Since AND l.OccurredAt < @Until
-        AND NOT EXISTS (SELECT 1 FROM dbo.Jobs tj WHERE tj.JobID = p.JobId AND tj.IsTest = 1)
-        AND NOT EXISTS (SELECT 1 FROM dbo.PurchaseOrders tpo WHERE p.SubjectType = N'purchase_order' AND tpo.PurchaseOrderID = p.SubjectId AND tpo.IsTest = 1)
-        AND NOT EXISTS (SELECT 1 FROM dbo.Quotes tq WHERE p.SubjectType = N'quote' AND tq.QuoteID = p.SubjectId AND tq.IsTest = 1)
+        -- D9: only events about a real record on a real job (positive selection).
+        AND (
+          (p.SubjectType = N'purchase_order' AND EXISTS (SELECT 1 FROM dbo.PurchaseOrders s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.PurchaseOrderID = p.SubjectId AND s.IsTest = 0 AND sj.IsTest = 0))
+          OR (p.SubjectType = N'quote' AND EXISTS (SELECT 1 FROM dbo.Quotes s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.QuoteID = p.SubjectId AND s.IsTest = 0 AND sj.IsTest = 0))
+          OR (p.SubjectType = N'invoice' AND EXISTS (SELECT 1 FROM dbo.JobInvoices s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.JobInvoiceID = p.SubjectId AND s.IsTest = 0 AND sj.IsTest = 0))
+        )
       ORDER BY l.OccurredAt, l.LedgerId`,
     window,
   );

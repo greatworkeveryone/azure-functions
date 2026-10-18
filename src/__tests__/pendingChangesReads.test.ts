@@ -152,9 +152,20 @@ describe("the pending loader", () => {
     const sqls = db.executeQuery.mock.calls.map((call) => String(call[1]));
     expect(sqls[0]).toMatch(/c\.TenantId = @TenantId$/);
     expect(sqls[1]).toMatch(/r\.TenantId = @TenantId$/);
-    expect(sqls[2]).toMatch(/t\.BuildingId = @BuildingId AND t\.ArchivedAt IS NULL$/);
-    expect(sqls[4]).toMatch(/AND t\.ArchivedAt IS NULL$/);
+    expect(sqls[2]).toMatch(/t\.BuildingId = @BuildingId AND t\.ArchivedAt IS NULL AND \(t\.IsTest = 0 OR @ShowTest = 1\)$/);
+    expect(sqls[4]).toMatch(/AND t\.ArchivedAt IS NULL AND \(t\.IsTest = 0 OR @ShowTest = 1\)$/);
     expect(sqls[4]).not.toMatch(/@BuildingId|@TenantId/);
+  });
+
+  it("leaves test tenancies out of a building's or the portfolio's list unless asked (D9 review); one tenancy still returns its own", async () => {
+    await loadPendingChanges({} as never, { buildingId: 5 }, "full");
+    await loadPendingChanges({} as never, { all: true }, "dates_only", true);
+    await loadPendingChanges({} as never, { tenantId: 7 }, "full");
+    const calls = db.executeQuery.mock.calls.map((call) => ({ params: call[2] as { name: string; value: unknown }[], sql: String(call[1]) }));
+    const showTest = (index: number) => calls[index].params.find((p) => p.name === "ShowTest")?.value;
+    expect([showTest(0), showTest(1), showTest(2), showTest(3)]).toEqual([false, false, true, true]);
+    expect(calls[4].sql).not.toContain("IsTest");
+    expect(calls[4].params.map((p) => p.name)).toEqual(["TenantId"]);
   });
 });
 

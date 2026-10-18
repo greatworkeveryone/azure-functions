@@ -3,7 +3,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
-import { assertMayLeave, showTestParam, TestDataEgressError, testFlagForCreate, testRecordResponse, type EgressSubject } from "../test-data";
+import { assertMayLeave, readIsTest, showTestParam, TestDataEgressError, testFlagForCreate, testRecordResponse, type EgressSubject } from "../test-data";
 import {
   AppRole,
   extractToken,
@@ -331,6 +331,8 @@ async function handleCreateVacancy(
     if ("error" in testFlag) return testFlag.error;
 
     connection = await createRequestConnection(token);
+    // A vacancy of a test tenancy is a test vacancy too (D9 review).
+    const isTest = testFlag.isTest || (tenancyId !== null && (await readIsTest(connection, "tenancy", tenancyId)));
 
     const inserted = await executeQuery(
       connection,
@@ -338,7 +340,7 @@ async function handleCreateVacancy(
        OUTPUT INSERTED.*
        VALUES (@Title, 'draft', '[]', '[]', @TenancyId, @BuildingId, @IsTest)`,
       [
-        { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
+        { name: "IsTest", type: TYPES.Bit, value: isTest },
         { name: "Title", type: TYPES.NVarChar, value: title },
         { name: "TenancyId", type: TYPES.Int, value: tenancyId },
         { name: "BuildingId", type: TYPES.Int, value: buildingId },
@@ -1037,16 +1039,18 @@ async function handlePublishVacancy(
     connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT v.*, b.BuildingName, b.HeroImageUrl
+      `SELECT v.*, b.BuildingName, b.HeroImageUrl, t.IsTest AS TenancyIsTest
        FROM dbo.Vacancies v
        LEFT JOIN dbo.Buildings b ON b.BuildingID = v.BuildingId
+       LEFT JOIN dbo.Tenants t ON t.TenantId = v.TenancyId
        WHERE v.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
-    // A test vacancy never reaches the website (D9).
-    const egress = { isTest: rows[0].IsTest === true || rows[0].IsTest === 1 };
+    // A test vacancy, or a vacancy of a test tenancy, never reaches the website (D9).
+    const flagged = (value: unknown): boolean => value === true || value === 1;
+    const egress = { isTest: flagged(rows[0].IsTest) || flagged(rows[0].TenancyIsTest) };
     assertMayLeave("wordpress", egress);
 
     const v = rowToVacancy(rows[0]);

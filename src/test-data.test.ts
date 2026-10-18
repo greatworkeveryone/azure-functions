@@ -74,6 +74,14 @@ describe("readIsTest", () => {
     expect(IS_TEST_SQL.schedule_change).toMatch(/JOIN dbo\.Tenants t ON t\.TenantId = c\.TenantId WHERE c\.RequestId = @Id/);
   });
 
+  it("reads a defects period through its tenancy (D9 review: a test tenancy's defects reminders stay in)", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ IsTest: true }]);
+    await expect(readIsTest({} as never, "defects_period", 4)).resolves.toBe(true);
+    expect(db.executeQuery.mock.calls[0][2]).toEqual([expect.objectContaining({ name: "Id", value: 4 })]);
+    expect(IS_TEST_SQL.defects_period).toMatch(/IF OBJECT_ID\(N'dbo\.DefectsPeriods', N'U'\) IS NOT NULL/);
+    expect(IS_TEST_SQL.defects_period).toMatch(/FROM dbo\.DefectsPeriods d JOIN dbo\.Tenants t ON t\.TenantId = d\.TenantId WHERE d\.DefectsPeriodId = @Id/);
+  });
+
   it("treats a missing row as not a test record", async () => {
     db.executeQuery.mockResolvedValueOnce([]);
     await expect(readIsTest({} as never, "tenancy", 9)).resolves.toBe(false);
@@ -124,10 +132,10 @@ describe("testFlagForCreate", () => {
 
 describe("testKindOfSubject (an escalation's or a ledger row's subject type)", () => {
   it("maps the record types D9 flags and nothing else", () => {
-    for (const kind of ["job", "tenancy", "rent_review", "schedule_change", "quote", "invoice", "purchase_order", "payment", "inspection", "key", "vacancy"]) {
+    for (const kind of ["job", "tenancy", "rent_review", "schedule_change", "quote", "invoice", "purchase_order", "payment", "inspection", "key", "vacancy", "defects_period"]) {
       expect(testKindOfSubject(kind)).toBe(kind);
     }
-    for (const other of ["system", "defects_period", "service_schedule", "approval_limit", ""]) {
+    for (const other of ["system", "service_schedule", "approval_limit", ""]) {
       expect(testKindOfSubject(other)).toBeNull();
     }
   });
@@ -149,5 +157,8 @@ describe("loadTestSubjectKeys (for summaries that name many records: the digest,
     }
     expect(TEST_SUBJECT_KEYS_SQL).toMatch(/FROM dbo\.RentReviews r JOIN dbo\.Tenants t ON t\.TenantId = r\.TenantId WHERE t\.IsTest = 1/);
     expect(TEST_SUBJECT_KEYS_SQL).toMatch(/IF OBJECT_ID\(N'dbo\.ScheduleChangeRequests', N'U'\) IS NOT NULL/);
+    expect(TEST_SUBJECT_KEYS_SQL).toMatch(
+      /IF OBJECT_ID\(N'dbo\.DefectsPeriods', N'U'\) IS NOT NULL\s+INSERT @Keys \(Kind, Id\)\s+SELECT N'defects_period', CAST\(d\.DefectsPeriodId AS NVARCHAR\(64\)\) FROM dbo\.DefectsPeriods d JOIN dbo\.Tenants t ON t\.TenantId = d\.TenantId WHERE t\.IsTest = 1/,
+    );
   });
 });

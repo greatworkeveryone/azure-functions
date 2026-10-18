@@ -132,11 +132,24 @@ describe("test records (D9)", () => {
   const EVENT = {
     action: "myob.push", actorName: "Johanne", after: null, companyFileId: CF, companyFileName: "Demo Pty Ltd", jobId: 42, myobNumber: "66Sm1",
     myobUrl: null, occurredAt: new Date("2026-10-13T00:05:00Z"), operation: "orders.create", proposalId: 7, proposedBy: "Cam", reason: null,
-    rendered: { number: "66Sm1" }, reviewedBy: "Johanne", ruleApplied: null,
+    rendered: { number: "66Sm1" }, reviewedBy: "Johanne", ruleApplied: null, subjectId: 70, subjectType: "purchase_order",
   };
 
   it("sends nothing that names a test job, and says why", async () => {
     const d = deps({ load: jest.fn().mockResolvedValue(facts({ events: [EVENT], testKeys: new Set(["job:42"]) })) });
+    const report = await run(d);
+    expect(d.send).not.toHaveBeenCalled();
+    expect(report.errors).toEqual(["user #12: Not sent: test record"]);
+  });
+
+  it.each([
+    ["purchase_order", 70],
+    ["quote", 71],
+    ["invoice", 72],
+  ])("also refuses an email naming a test %s on a real job", async (subjectType, subjectId) => {
+    const d = deps({
+      load: jest.fn().mockResolvedValue(facts({ events: [{ ...EVENT, subjectId, subjectType }], testKeys: new Set([`${subjectType}:${subjectId}`]) })),
+    });
     const report = await run(d);
     expect(d.send).not.toHaveBeenCalled();
     expect(report.errors).toEqual(["user #12: Not sent: test record"]);

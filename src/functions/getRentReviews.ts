@@ -78,7 +78,7 @@ export async function getRentReviews(request: HttpRequest, context: InvocationCo
     const rows = await loadReviews(connection, filters);
     const today = todayInDarwin();
     const scope = filters.tenantId !== undefined ? { tenantId: filters.tenantId } : filters.buildingId !== undefined ? { buildingId: filters.buildingId } : { all: true as const };
-    const pending = await loadPendingChanges(connection, scope, "full");
+    const pending = await loadPendingChanges(connection, scope, "full", filters.showTest);
     return {
       jsonBody: {
         asOf: today,
