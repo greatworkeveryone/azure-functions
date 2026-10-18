@@ -96,3 +96,19 @@ it("500 when a read fails", async () => {
   routeQueries(db.executeQuery, [{ match: SCHEDULES, throws: new Error("timeout") }]);
   expect((await getMaintenanceOverview(get({}), context)).status).toBe(500);
 });
+
+it.each([
+  [{}, "off"],
+  [{ SCHEDULER_ENABLED: "true" }, "live"],
+  [{ SCHEDULER_DRY_RUN: "true", SCHEDULER_ENABLED: "true" }, "dry-run"],
+])("says what the scheduler is doing (%j), so the page doesn't promise jobs that won't be made", async (env, mode) => {
+  const saved = { ...process.env };
+  delete process.env.SCHEDULER_ENABLED;
+  delete process.env.SCHEDULER_DRY_RUN;
+  Object.assign(process.env, env);
+  try {
+    expect((await getMaintenanceOverview(get({}), context)).jsonBody).toMatchObject({ schedulerMode: mode });
+  } finally {
+    process.env = saved;
+  }
+});

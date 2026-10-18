@@ -139,6 +139,32 @@ describe("getServiceSchedule", () => {
     expect(result.runs[0]).toMatchObject({ dueDate: "2026-04-28", jobId: 400, jobStatus: "Done", outcome: "job_created" });
   });
 
+  it("says whether each run's job is archived, and what the scheduler is doing (review F2 findings 5, 8)", async () => {
+    routeQueries(
+      db.executeQuery,
+      routes([
+        {
+          match: RUNS,
+          rows: [
+            { DueDate: at("2026-10-28"), JobArchived: true, JobId: 500, JobStatus: "New", Outcome: "job_created", ServiceScheduleId: 21 },
+            { DueDate: at("2026-04-28"), JobArchived: false, JobId: 400, JobStatus: "Done", Outcome: "job_created", ServiceScheduleId: 21 },
+            { DueDate: at("2025-10-28"), JobArchived: null, JobId: null, JobStatus: null, Outcome: "skipped", ServiceScheduleId: 21 },
+          ],
+        },
+      ]),
+    );
+    const saved = { ...process.env };
+    delete process.env.SCHEDULER_DRY_RUN;
+    process.env.SCHEDULER_ENABLED = "true";
+    try {
+      const result = (await getServiceSchedule(get({ id: "21" }), context)).jsonBody as { runs: Array<{ jobArchived: boolean }>; schedulerMode: string };
+      expect(result.runs.map((run) => run.jobArchived)).toEqual([true, false, false]);
+      expect(result.schedulerMode).toBe("live");
+    } finally {
+      process.env = saved;
+    }
+  });
+
   it("404 for an unknown schedule", async () => {
     routeQueries(db.executeQuery, [{ match: BY_ID, rows: [] }]);
     expect((await getServiceSchedule(get({ id: "99" }), context)).status).toBe(404);
@@ -216,6 +242,16 @@ describe("upsertServiceSchedule", () => {
     const response = await upsertServiceSchedule(post(body({ rowVersion: stale, serviceScheduleId: 21 })), context);
     expect(response.status).toBe(409);
     expect(errorOf(response)).toMatch(/Adam changed this schedule/);
+  });
+
+  it("409 with code 'archived' for an archived schedule, so the screen doesn't offer to load their changes (review F2 finding 9)", async () => {
+    routeQueries(db.executeQuery, routes([{ match: BY_ID, rows: [scheduleRow({ ArchivedAt: at("2026-10-01") })] }]));
+    const response = await upsertServiceSchedule(post(body({ rowVersion: ROW_VERSION.toString("base64"), serviceScheduleId: 21 })), context);
+    expect(response.status).toBe(409);
+    expect(response.jsonBody).toEqual({ code: "archived", error: "This schedule is archived. Restore it before editing." });
+    const stale = Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]).toString("base64");
+    routeQueries(db.executeQuery, routes());
+    expect((await upsertServiceSchedule(post(body({ rowVersion: stale, serviceScheduleId: 21 })), context)).jsonBody).not.toHaveProperty("code");
   });
 
   it("403 for someone who may not manage schedules", async () => {

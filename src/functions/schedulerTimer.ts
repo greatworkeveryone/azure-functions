@@ -1,7 +1,8 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
-import { runTimer } from "../timerRuns";
+import { runTimer, type TimerCounts } from "../timerRuns";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { runFacilitiesScheduler, schedulerMaxActions, schedulerMode, type SchedulerReport } from "../facilitiesScheduler";
+import { Sentry } from "../sentry";
 
 /** One flat set of counts, as lane D's runTimer records in TimerRuns. Errors
  *  are counted because a per-record failure doesn't throw: the wrap should
@@ -24,7 +25,6 @@ export function schedulerCounts(report: SchedulerReport, mode: string): Schedule
     wouldSkip: report.schedules.wouldSkip,
   };
 }
-import { Sentry } from "../sentry";
 
 // ── Timer trigger: daily at 22:00 UTC (07:30 in Darwin) ──────────────────────
 // The facilities scheduler (src/facilitiesScheduler.ts, sprint F): defects
@@ -37,17 +37,23 @@ import { Sentry } from "../sentry";
 //                            escalations (through the escalation engine)
 //   SCHEDULER_DRY_RUN=true   logs, with counts, what it would do and writes nothing
 //                            (wins over ENABLED)
-//   neither                  it does nothing and does not touch the database
+//   neither                  it does nothing and does not touch the scheduler's tables
+//                            (runTimer still writes its own dbo.TimerRuns row)
 //   SCHEDULER_MAX_ACTIONS    most writes in one run (default 100)
 // Turn on the dry run first and read the counts in the log.
 //
-// runSchedulerTimer is the plain body so lane D's runTimer (TimerRuns) can wrap
-// it at integration.
+// runSchedulerTimer is the plain body. The registered handler wraps it in
+// runTimer, stores its flat counts in TimerRuns, and fails the run (Outcome
+// 'error', a failed invocation) when the scheduler reported any problem, as the
+// other timers do: a per-record failure doesn't throw, so without this a run
+// with errors was logged as clean.
 
-export async function runSchedulerTimer(
-  context: InvocationContext,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<SchedulerCounts | null> {
+interface SchedulerRun {
+  counts: SchedulerCounts;
+  firstError: string | null;
+}
+
+async function execute(context: InvocationContext, env: NodeJS.ProcessEnv): Promise<SchedulerRun | null> {
   const mode = schedulerMode(env);
   if (mode === "off") {
     context.log("schedulerTimer: off. Set SCHEDULER_DRY_RUN=true to see what it would do, then SCHEDULER_ENABLED=true.");
@@ -70,7 +76,7 @@ export async function runSchedulerTimer(
       for (const error of report.errors) context.warn(`schedulerTimer: ${error}`);
       Sentry.captureMessage(`Facilities scheduler finished with ${report.errors.length} problem(s): ${report.errors[0]}`, "error");
     }
-    return schedulerCounts(report, mode);
+    return { counts: schedulerCounts(report, mode), firstError: report.errors[0] ?? null };
   } catch (error: unknown) {
     context.error("schedulerTimer failed:", error instanceof Error ? error.message : String(error));
     Sentry.captureException(error, { tags: { source: "scheduler_timer" } });
@@ -81,8 +87,19 @@ export async function runSchedulerTimer(
   }
 }
 
-export async function schedulerTimer(_timer: Timer, context: InvocationContext): Promise<void> {
-  await runSchedulerTimer(context);
+export async function runSchedulerTimer(
+  context: InvocationContext,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<SchedulerCounts | null> {
+  return (await execute(context, env))?.counts ?? null;
+}
+
+export async function schedulerTimer(_timer: Timer, context: InvocationContext): Promise<TimerCounts> {
+  const run = await execute(context, process.env);
+  if (!run) return { mode: "off" };
+  const errors = Number(run.counts.errors);
+  if (errors > 0) throw new Error(`Facilities scheduler: ${errors} problem(s); first: ${run.firstError}`);
+  return run.counts;
 }
 
 app.timer("schedulerTimer", {

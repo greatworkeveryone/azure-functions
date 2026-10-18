@@ -22,6 +22,8 @@ export interface RunApi {
   createdAt: string | null;
   defectsPeriodId: number | null;
   dueDate: string;
+  /** The linked job has been archived: it is no longer a way to close this due date. */
+  jobArchived: boolean;
   jobId: number | null;
   jobStatus: string | null;
   jobTitle: string | null;
@@ -39,6 +41,7 @@ export function runRowToApi(row: SqlRow): RunApi {
     createdAt: iso(row.CreatedAt),
     defectsPeriodId: row.DefectsPeriodId == null ? null : Number(row.DefectsPeriodId),
     dueDate: (iso(row.DueDate) ?? "").slice(0, 10),
+    jobArchived: Boolean(row.JobArchived),
     jobId: row.JobId == null ? null : Number(row.JobId),
     jobStatus: row.JobStatus == null ? null : String(row.JobStatus),
     jobTitle: row.JobTitle == null ? null : String(row.JobTitle),
@@ -52,7 +55,7 @@ export async function listRuns(connection: Connection, scheduleId: number): Prom
   const rows = await executeQuery(
     connection,
     `SELECT r.ServiceScheduleId, r.DueDate, r.JobId, r.Outcome, r.DefectsPeriodId, r.CompletedAt, r.CreatedAt, r.Note,
-            j.Title AS JobTitle, j.Status AS JobStatus
+            j.Title AS JobTitle, j.Status AS JobStatus, j.IsArchived AS JobArchived
        FROM dbo.ServiceScheduleRuns r
        LEFT JOIN dbo.Jobs j ON j.JobID = r.JobId
       WHERE r.ServiceScheduleId = @ScheduleId

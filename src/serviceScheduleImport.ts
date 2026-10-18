@@ -8,7 +8,7 @@ import ExcelJS from "exceljs";
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "./db";
 import { parseScheduleInput, type ScheduleInput } from "./serviceSchedules";
-import { assertSafeXlsx } from "./xlsx-safe";
+import { assertSafeXlsx, type XlsxLimits } from "./xlsx-safe";
 
 export const IMPORT_HEADERS = [
   "Building",
@@ -29,6 +29,9 @@ type Header = (typeof IMPORT_HEADERS)[number];
 
 export const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 export const MAX_IMPORT_ROWS = 2000;
+// 2,000 rows of 13 columns unpack to about 1 MB of XML; the general 50 MB cap let a 2 MB upload
+// of real cells reach 215 MB of memory (review F2).
+export const IMPORT_UNPACK_LIMITS: XlsxLimits = { maxEntries: 200, maxEntryBytes: 8 * 1024 * 1024, maxTotalBytes: 8 * 1024 * 1024 };
 export const IMPORT_SHEET = "Schedules";
 
 export type ImportCell = Date | number | string | null;
@@ -48,7 +51,7 @@ function cellValue(value: ExcelJS.CellValue): ImportCell {
 /** The data rows of the first non-hidden sheet (row numbers as Excel shows them). */
 export async function readImportRows(buffer: Buffer): Promise<ImportRow[]> {
   // Throws XlsxRejectedError for a zip bomb or a file that isn't an .xlsx.
-  assertSafeXlsx(buffer);
+  assertSafeXlsx(buffer, IMPORT_UNPACK_LIMITS);
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
   const ws = wb.getWorksheet(IMPORT_SHEET) ?? wb.worksheets.find((sheet) => !sheet.name.startsWith("_"));

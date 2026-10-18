@@ -1,6 +1,7 @@
 // The "What Floorplan may do in MYOB" lines of the daily email (plan M4
 // review): the CFO's switches, a file's mode, pause and resume, registering a
-// file, and the MYOB link. Each says who, what changed and their note.
+// file, the MYOB link, and mapping imports (plan M2). Each says who, what
+// changed and their note.
 
 import { darwinStamp } from "../darwinClock";
 import type { ControlEvent } from "./types";
@@ -20,6 +21,10 @@ function what(event: ControlEvent): string {
     const as = typeof after.myobUsername === "string" ? ` as ${after.myobUsername}` : "";
     const scope = typeof after.scope === "string" ? ` (${after.scope})` : "";
     return `${event.ruleApplied === "relink" ? "re-linked" : event.ruleApplied === "unlink" ? "unlinked" : "linked"} Floorplan to MYOB${as}${scope}`;
+  }
+  if (event.ruleApplied?.startsWith("import.")) {
+    const kind = event.ruleApplied.slice("import.".length).replace(/s$/, "");
+    return `imported ${kind} mappings: ${Number(after.added ?? 0)} added, ${Number(after.changed ?? 0)} changed`;
   }
   switch (event.ruleApplied) {
     case "pause":
