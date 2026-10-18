@@ -3,9 +3,9 @@
 // that keeps a surprise from reading the whole database. Queries run one after
 // another because a tedious Connection cannot serve concurrent requests.
 //
-// Test data: D9 adds Jobs.IsTest (and the rest) in Train 2, migration 127. Until
-// then the column does not exist at this base, so the queries below carry a
-// marker where its predicate goes.
+// Test data (D9, migration 127): every read leaves test records out, escalations
+// about a test record are dropped, and the run gets the test-record keys so a
+// digest that would still name one is refused at send time.
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlRow } from "../db";
@@ -14,6 +14,7 @@ import { normaliseRole } from "../escalation/roles";
 import { listLiveEscalations } from "../escalation/store";
 import { jobKindOf } from "../jobKinds";
 import { darwinNextDayStartUtc, parseDarwinDate } from "../ledger/darwinTime";
+import { loadTestSubjectKeys } from "../test-data";
 import type { DigestFacts, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
 
 const asDate = (value: unknown): Date => (value instanceof Date ? value : new Date(String(value)));
@@ -67,7 +68,6 @@ function toWaiting(subject: WaitingApproval["subject"], idColumn: string, row: S
  * Purchase orders have no approval status at this base, so none are read.
  */
 export async function listWaitingApprovals(connection: Connection): Promise<WaitingApproval[]> {
-  // D9: exclude IsTest = 1
   const quotes = await executeQuery(
     connection,
     `SELECT TOP (1000) q.QuoteID, q.JobID, q.Amount, q.Status, q.CreatedAt, j.Title, j.Kind, j.BuildingID, b.BuildingName
@@ -77,9 +77,10 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
       WHERE q.Status IN ('pending', 'awaiting_approval', 'awaiting_director')
         AND j.Status = 'Awaiting Approval'
         AND j.IsArchived = 0
+        AND q.IsTest = 0
+        AND j.IsTest = 0
       ORDER BY q.CreatedAt, q.QuoteID`,
   );
-  // D9: exclude IsTest = 1
   const invoices = await executeQuery(
     connection,
     `SELECT TOP (1000) ji.JobInvoiceID, ji.JobID, ji.Amount, ji.Status, ji.CreatedAt, j.Title, j.Kind, j.BuildingID, b.BuildingName
@@ -90,6 +91,8 @@ export async function listWaitingApprovals(connection: Connection): Promise<Wait
         AND ji.Status IN ('pending', 'awaiting_approval', 'approved')
         AND j.IsArchived = 0
         AND j.Status <> 'Done'
+        AND ji.IsTest = 0
+        AND j.IsTest = 0
       ORDER BY ji.CreatedAt, ji.JobInvoiceID`,
   );
   return [...quotes.map((row) => toWaiting("quote", "QuoteID", row)), ...invoices.map((row) => toWaiting("invoice", "JobInvoiceID", row))];
@@ -104,7 +107,6 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
   const today = parseDarwinDate(darwinDateKey(now));
   if (!today) throw new RangeError("Could not read today's Darwin date");
   const before = darwinNextDayStartUtc(today);
-  // D9: exclude IsTest = 1
   const rows = await executeQuery(
     connection,
     `SELECT TOP (1000) j.JobID, j.Title, j.Kind, j.AssignedToUserID, j.ExpectedProgressUpdate, b.BuildingName
@@ -114,6 +116,7 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
         AND j.Status <> 'Done'
         AND j.AssignedToUserID IS NOT NULL
         AND j.ExpectedProgressUpdate < @Before
+        AND j.IsTest = 0
       ORDER BY j.ExpectedProgressUpdate, j.JobID`,
     [{ name: "Before", options: { scale: 3 }, type: TYPES.DateTime2, value: before }],
   );
@@ -132,7 +135,6 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
 /** Keys still checked out past the batch's expected return (the same test as
  *  IsOverdue in keys.ts), one row per key. */
 export async function listOverdueKeys(connection: Connection, now: Date): Promise<OverdueKey[]> {
-  // D9: exclude IsTest = 1
   const rows = await executeQuery(
     connection,
     `SELECT TOP (1000) kb.Id AS BatchId, kb.ExpectedReturnAt, k.Id AS KeyId, k.KeyNumber, b.BuildingName
@@ -141,6 +143,8 @@ export async function listOverdueKeys(connection: Connection, now: Date): Promis
        JOIN dbo.Keys k ON k.Id = kco.KeyId AND k.IsDeleted = 0
        LEFT JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
       WHERE kb.ExpectedReturnAt < @Now
+        AND kco.IsTest = 0
+        AND k.IsTest = 0
       ORDER BY kb.ExpectedReturnAt, kb.Id, k.Id`,
     [{ name: "Now", options: { scale: 3 }, type: TYPES.DateTime2, value: now }],
   );
@@ -157,9 +161,12 @@ export async function listOverdueKeys(connection: Connection, now: Date): Promis
 
 export async function loadDigestFacts(connection: Connection, now: Date): Promise<DigestFacts> {
   const users = await listDigestUsers(connection);
-  const escalations = await listLiveEscalations(connection);
+  const testKeys = await loadTestSubjectKeys(connection);
+  const escalations = (await listLiveEscalations(connection)).filter(
+    (row) => !testKeys.has(`${row.subjectType}:${row.subjectId}`),
+  );
   const waitingApprovals = await listWaitingApprovals(connection);
   const dueJobs = await listDueJobs(connection, now);
   const overdueKeys = await listOverdueKeys(connection, now);
-  return { dueJobs, escalations, overdueKeys, users, waitingApprovals };
+  return { dueJobs, escalations, overdueKeys, testKeys, users, waitingApprovals };
 }

@@ -22,7 +22,8 @@
 // I asked" in the inbox.
 //
 // Who may answer is checked here, against the request (standing.ts), because it needs
-// the row; the endpoint has only checked the role gate. A refusal is a 403, written to
+// the row; the endpoint has only checked the role gate. Admin gets through that gate
+// and is refused here unless the job is test data. A refusal is a 403, written to
 // the ledger as `denied` once the transaction has rolled back.
 
 import type { Connection } from "tedious";
@@ -38,6 +39,8 @@ import { findLiveEscalation, listActiveUsers } from "../escalation/store";
 import type { DirectoryUser, EscalationRow } from "../escalation/types";
 import { newCorrelationId, record } from "../ledger";
 import { recordRefusal } from "../ledger/refusals";
+import { holdsAdmin } from "../moneyRules";
+import { isTestJob } from "../testRecords";
 import {
   activeUserIdByOid,
   closeNextStep,
@@ -169,7 +172,9 @@ export async function respondDecision(connection: Connection, context: RespondCo
     if (!request) throw new RequestError("not_found", "That request doesn't exist.", 404);
 
     users = await listActiveUsers(connection);
-    const standing = responderStanding(request, { roles: context.roles, userId: actor.userId }, namesAsked(request, users));
+    // Admin answers on a test job only (decision 4), so only an admin's answer needs the job looked at.
+    const testJob = holdsAdmin(context.roles) && (await isTestJob(connection, job.jobId));
+    const standing = responderStanding(request, { roles: context.roles, testJob, userId: actor.userId }, namesAsked(request, users));
     if (!standing.allowed) throw new RequestError("not_a_decision_maker", standing.message, 403, { reason: standing.code });
 
     if (request.state !== "pending") {

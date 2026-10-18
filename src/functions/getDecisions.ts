@@ -24,10 +24,14 @@ import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../paginati
 import { decisionsCsvFileName, decisionsToCsv } from "../ledger/csv";
 import { buildDecisionWhere, parseDecisionFilters } from "../ledger/filters";
 import { DECISION_COLUMNS, toDecisionRow } from "../ledger/rows";
+import { showTestParam } from "../test-data";
 
 const ORDER_BY_OCCURRED_AT = "ORDER BY OccurredAt DESC, LedgerId DESC";
 // NULL impact sorts last on a descending order in SQL Server.
 const ORDER_BY_IMPACT = "ORDER BY FinancialImpact DESC, OccurredAt DESC, LedgerId DESC";
+
+const NOT_TEST_SCOPE = `((JobId IS NULL OR JobId IN (SELECT tj.JobID FROM dbo.Jobs tj WHERE tj.IsTest = 0))
+  AND (TenantId IS NULL OR TenantId IN (SELECT tt.TenantId FROM dbo.Tenants tt WHERE tt.IsTest = 0)) OR @ShowTest = 1)`;
 
 export async function getDecisions(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -42,7 +46,10 @@ export async function getDecisions(request: HttpRequest, context: InvocationCont
   if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
   const { filters } = parsed;
   const asCsv = filters.format === "csv";
-  const { params, whereSql } = buildDecisionWhere(filters);
+  const built = buildDecisionWhere(filters);
+  // D9: decisions about a test job or tenancy only with the admin's Show test data on.
+  const params = [...built.params, await showTestParam(request)];
+  const whereSql = built.whereSql ? `${built.whereSql} AND ${NOT_TEST_SCOPE}` : `WHERE ${NOT_TEST_SCOPE}`;
   const ORDER_BY = filters.sort === "impact" ? ORDER_BY_IMPACT : ORDER_BY_OCCURRED_AT;
 
   // A CSV export is the whole filtered set, so it ignores paging.

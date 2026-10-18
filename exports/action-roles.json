@@ -148,6 +148,10 @@
     "facilities",
     "facilities_manager"
   ],
+  "createTestData": [
+    "admin",
+    "director"
+  ],
   "deleteAnyInspection": [
     "admin",
     "director",
@@ -249,6 +253,9 @@
     "director",
     "facilities_manager"
   ],
+  "manageTestData": [
+    "admin"
+  ],
   "markInvoiceInMyob": [
     "accounts_manager",
     "cfo",
@@ -289,6 +296,9 @@
     "facilities",
     "facilities_manager"
   ],
+  "ratifyScheduleChange": [
+    "director"
+  ],
   "recordEmailOnJob": [
     "accounts_manager",
     "admin",
@@ -307,11 +317,21 @@
     "cfo",
     "director"
   ],
+  "rejectScheduleChange": [
+    "director"
+  ],
   "reopenJob": [
     "accounts_manager",
     "cfo",
     "director",
     "facilities_manager"
+  ],
+  "requestScheduleChange": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
   ],
   "resendDirectorEmail": [
     "accounts",

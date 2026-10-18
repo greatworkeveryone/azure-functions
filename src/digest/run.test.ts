@@ -225,3 +225,20 @@ describe("the summary line", () => {
     );
   });
 });
+
+describe("test records (D9)", () => {
+  it("refuses a person's digest that would name a test record, and says why", async () => {
+    const send = jest.fn().mockResolvedValue(undefined);
+    const d = deps(facts({ dueJobs: [due(1, 100)], testKeys: new Set(["job:100"]), users: [person(1)] }), send);
+    const report = await runDigest(conn, options(), d);
+    expect(send).not.toHaveBeenCalled();
+    expect(report.errors).toEqual(["user #1: Not sent: test record"]);
+    expect(report.sent).toBe(0);
+  });
+
+  it("tells the sender a real digest names no test record", async () => {
+    const d = deps(facts({ dueJobs: [due(1, 100)], testKeys: new Set(["job:999"]), users: [person(1)] }));
+    await runDigest(conn, options(), d);
+    expect(d.send.mock.calls[0][3]).toEqual({ isTest: false });
+  });
+});

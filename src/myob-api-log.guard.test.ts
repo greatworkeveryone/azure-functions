@@ -17,7 +17,7 @@ jest.mock("./myob-health", () => ({
 
 import { todayInDarwin } from "./darwinDate";
 import { MyobRequestRefusedError, MyobTimeoutError, myobRequest, type MyobActor } from "./myob-api-log";
-import { setFloorplanRecordLookup } from "./myob-request-guard";
+import { setFloorplanRecordLookup, setMyobTestRecordLookup } from "./myob-request-guard";
 
 const db = require("./db") as Record<string, jest.Mock>;
 const { raiseMyobHealth } = require("./myob-health") as { raiseMyobHealth: jest.Mock };
@@ -35,6 +35,11 @@ const rows = (): Row[] =>
   db.executeQuery.mock.calls.map((c: unknown[]) =>
     Object.fromEntries((c[2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value])),
   );
+
+// D9's test-record check has its own suite (myob-test-records.test.ts); here
+// every call is about a real record.
+beforeAll(() => setMyobTestRecordLookup(async () => ({ isTest: false, named: true })));
+afterAll(() => setMyobTestRecordLookup(null));
 
 beforeEach(() => {
   jest.clearAllMocks();

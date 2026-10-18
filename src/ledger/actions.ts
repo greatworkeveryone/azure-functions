@@ -107,6 +107,9 @@ export const LEDGER_ACTIONS = {
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // Test data (D9): an admin marks a record as test data, or back. An
+  // exception: it decides whether the record may leave Floorplan.
+  "test_data.flag": { exception: true, reasonRequired: true, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },
   "tenancy.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
 
   // Stored-holdover reset, run once after deploy (WP23a)
@@ -124,6 +127,11 @@ export const LEDGER_ACTIONS = {
   "schedule.change_rejected": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
   "schedule.change_requested": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
   "schedule.change_withdrawn": { exception: false, reasonRequired: true, subjects: ["schedule_change"] },
+  // A director taking a ratchet exemption off a review row, by editing or
+  // deleting the row (WP26c review): the lease's ratchet holds that row and the
+  // ones after it again, so the rent can go up. `before` holds the exemption as
+  // it was. Anyone else's attempt is a `denied` row on the rate step.
+  "schedule.ratchet_exemption_removed": { exception: true, reasonRequired: true, subjects: ["rate_step"] },
 
   // Schedule sign-off (WP24)
   "schedule.sign_off": { exception: false, reasonRequired: false, subjects: ["tenancy"] },

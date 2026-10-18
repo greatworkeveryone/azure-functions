@@ -19,9 +19,11 @@
 //   scheduleVersion  the tenancy's, as the caller read it, else 409 stale_schedule
 //   tenancy     404 not_found; archived 422 tenancy_archived; vacated 422
 //               tenancy_vacated
-//   the schedule (scheduleChange/relief.ts)  409 relief_overlap with a ratified
-//               relief or another awaiting a director (same day and charge);
-//               422 nothing_to_relieve, relief_too_large, not_a_reduction
+//   the schedule (scheduleChange/relief.ts)  422 outside_lease past the lease's
+//               expiry or before its commencement (holdover is refused for now);
+//               409 relief_overlap with a ratified relief or another awaiting a
+//               director (same day and charge); 422 nothing_to_relieve,
+//               relief_too_large, not_a_reduction
 //
 // One transaction, under an update lock on the tenancy (two overlapping requests
 // can't both slip in): the request, pending, and its ledger row,

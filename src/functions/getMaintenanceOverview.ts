@@ -19,7 +19,9 @@ import { listPeriods, periodRowToApi } from "../defectsPeriods";
 import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
 import { addDays } from "../facilitiesRules";
 import { assembleOverview, type OverviewLinkedJob, type OverviewRun } from "../maintenanceOverview";
+import { schedulerMode } from "../schedulerMode";
 import { SELECT_SCHEDULE, scheduleRowToApi } from "../serviceSchedules";
+import { showTestParam } from "../test-data";
 
 const DEFAULT_DAYS = 90;
 const HISTORY_DAYS = 730;
@@ -41,7 +43,8 @@ const LINKED_JOBS = `SELECT ja.AssetId, j.JobID, j.Title, j.Status, j.Completion
   JOIN dbo.Assets a ON a.AssetId = ja.AssetId
   WHERE ja.UnlinkedAt IS NULL AND j.IsArchived = 0 AND j.Kind = 'maintenance' AND j.Status = 'Done'
     AND (@BuildingId IS NULL OR a.BuildingId = @BuildingId)
-    AND COALESCE(j.CompletionDate, j.LastModifiedDate) >= @Since`;
+    AND COALESCE(j.CompletionDate, j.LastModifiedDate) >= @Since
+    AND (j.IsTest = 0 OR @ShowTest = 1)`;
 
 const isoDay = (value: unknown): string => (value ? new Date(value as Date).toISOString().slice(0, 10) : "");
 const isoTime = (value: unknown): string | null => (value ? new Date(value as Date).toISOString() : null);
@@ -91,7 +94,7 @@ export async function getMaintenanceOverview(request: HttpRequest, context: Invo
     const schedules = await executeQuery(connection, SCHEDULES_IN_WINDOW, [scope, { name: "Until", type: TYPES.Date, value: addDays(today, days) }]);
     const has = await executeQuery(connection, HAS_SCHEDULES, [scope]);
     const runs = await executeQuery(connection, RUNS, [scope, since]);
-    const linked = await executeQuery(connection, LINKED_JOBS, [scope, since]);
+    const linked = await executeQuery(connection, LINKED_JOBS, [scope, since, await showTestParam(request)]);
     const periods = await listPeriods(connection, { buildingId, includeArchived: false });
     const overview = assembleOverview({
       days,
@@ -100,6 +103,7 @@ export async function getMaintenanceOverview(request: HttpRequest, context: Invo
       linkedJobs: linked.map(toLinkedJob),
       periods: periods.map((row) => periodRowToApi(row, today)).filter((period) => period.active),
       runs: runs.map(toRun),
+      schedulerMode: schedulerMode(),
       schedules: schedules.map((row) => scheduleRowToApi(row, today)),
       today,
     });

@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "bae5e11ac9f356ee109e353b769b655f0164148ea0c91b6cf1d69ae84994537e";
+const PINNED_SHA256 = "a20db71e4c4f074d9dfcb509b6b7de3b2d7456a4e696ea1ddba69e50bcc4338a";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -80,6 +80,28 @@ describe("the table", () => {
     expect([...ACTION_ROLES.respondToDecision.routes]).toEqual(["respondToJobDecision"]);
     expect(ACTION_ROLES.completeAnyNextStep.match).toBe("exact");
     expect(rolesFor(ACTION_ROLES.completeAnyNextStep)).not.toContain(AppRole.FACILITIES);
+  });
+
+  it("lets a director alone decide a schedule change, and the tenancy desk ask for and withdraw one (WP26c, J4b)", () => {
+    expect(rolesFor(ACTION_ROLES.ratifyScheduleChange)).toEqual([AppRole.DIRECTOR]);
+    expect(rolesFor(ACTION_ROLES.rejectScheduleChange)).toEqual([AppRole.DIRECTOR]);
+    expect(ACTION_ROLES.ratifyScheduleChange.refused).toEqual([AppRole.ADMIN]);
+    expect(rolesFor(ACTION_ROLES.requestScheduleChange)).toEqual([
+      AppRole.ACCOUNTS,
+      AppRole.ACCOUNTS_APPROVAL,
+      AppRole.ADMIN,
+      AppRole.CFO,
+      AppRole.DIRECTOR,
+    ]);
+    expect([...ACTION_ROLES.requestScheduleChange.routes]).toEqual(["requestScheduleChange", "withdrawScheduleChange"]);
+    expect(ACTION_ROLES.requestScheduleChange.why).toContain("requester's alone");
+  });
+
+  it("lets admin manage test data, and admin and directors create it (D9, J4c)", () => {
+    expect(rolesFor(ACTION_ROLES.manageTestData)).toEqual([AppRole.ADMIN]);
+    expect([...ACTION_ROLES.manageTestData.routes]).toEqual(["setTestFlag"]);
+    expect(rolesFor(ACTION_ROLES.createTestData)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR]);
+    expect(ACTION_ROLES.createTestData.match).toBe("exact");
   });
 
   it("archives any job without the cfo until Connor's decision 11 says otherwise", () => {

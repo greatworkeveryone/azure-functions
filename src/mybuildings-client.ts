@@ -1,6 +1,8 @@
 // myBuildings API Client
 // Covers: Buildings, Work Requests, Invoices, Contractors, Attachments, Bulk Status Update
 
+import { assertMayLeave, type EgressSubject } from "./test-data";
+
 const API_URL = process.env.MYBUILDINGS_API_URL!;
 const BEARER_TOKEN = process.env.MYBUILDINGS_BEARER_TOKEN!;
 const PAGE_SIZE = 300;
@@ -205,9 +207,12 @@ export interface AttachmentPayload {
   Attachment_Extension?: string;
 }
 
+/** `egress` is what the file is about; a test job's file is refused (D9). */
 export async function uploadAttachment(
+  egress: EgressSubject,
   payload: AttachmentPayload,
 ): Promise<void> {
+  assertMayLeave("mybuildings", egress);
   await apiFetch("/core/api/workrequest/v1/attachment", "POST", payload);
 }
 

@@ -32,7 +32,7 @@ jest.mock("../escalation/criticalJob", () => ({ raiseCriticalJobEscalation: jest
 jest.mock("../jobPlannerSync", () => ({ syncJobActionTriggersStandalone: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../pdf/job-packet", () => ({ buildJobPacket: jest.fn() }));
 jest.mock("../pdf/job-packet-loader", () => ({ loadJobPacketInputs: jest.fn() }));
-jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn() }));
+jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn(), flush: jest.fn() } }));
 
 import { addJobEvent } from "./jobs";
@@ -63,6 +63,7 @@ function given(current: Record<string, unknown>, runs: Record<string, unknown>[]
     { match: CURRENT, rows: [{ AwaitingRole: "facilities", IsContract: true, IsInternal: false, PreBlockAwaitingRole: null, PreBlockStatus: null, ...current }] },
     { match: RUN_FOR_JOB, rows: runs },
     { match: ADVANCE, rows: [{ ServiceScheduleId: 21 }] },
+    { match: /UPDATE Jobs SET[\s\S]*OUTPUT INSERTED\.JobID/, rows: [{ JobID: 500 }] },
     { match: /INSERT INTO JobEvents/, rows: [{ JobEventID: 1 }] },
     // D4: addJobEvent first refuses archived jobs; this one is live.
     { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
@@ -81,10 +82,7 @@ it("treats on-to-invoice-approval and Done as the work being completed", () => {
   expect(isWorkCompletion("Work", "facilities")).toBe(false);
 });
 
-// Mock gap on integration: J2's guard and D4's archived check read the job with
-// queries this stand-in does not answer in full (404/409). Lane F closes it; the
-// jobs-flow pass covers scheduled-job completion end to end.
-it.skip("completing a scheduled job's work stamps its run and moves the schedule on from the due date, not today", async () => {
+it("completing a scheduled job's work stamps its run and moves the schedule on from the due date, not today", async () => {
   given({ Status: "Work" }, [run()]);
   const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval", Text: "Serviced" }), context);
   expect(response.status).toBe(200);
@@ -96,18 +94,21 @@ it.skip("completing a scheduled job's work stamps its run and moves the schedule
 
 it("does not move a schedule that has already moved on (idempotent)", async () => {
   given({ Status: "Work" }, [run({ CompletedAt: at("2026-10-30"), NextDue: at("2026-11-30") })]);
-  await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);
+  expect((await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context)).status).toBe(200);
+  expect(callsMatching(db.executeQuery, RUN_FOR_JOB)).toHaveLength(1);
   expect(callsMatching(db.executeQuery, STAMP_RUN)).toHaveLength(0);
   expect(callsMatching(db.executeQuery, ADVANCE)).toHaveLength(0);
 });
 
-// Same mock gap as above (this case also mocks rollbackTransaction without a promise).
-it.skip("still completes the job, loudly, on a database without migration 120", async () => {
+it("still completes the job, loudly, on a database without migration 120", async () => {
   given({ Status: "Work" }, []);
   routeQueries(db.executeQuery, [
     { match: CURRENT, rows: [{ AwaitingRole: "facilities", IsContract: true, IsInternal: false, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
     { match: RUN_FOR_JOB, throws: new Error("Invalid object name 'dbo.ServiceScheduleRuns'.") },
     { match: /INSERT INTO JobEvents/, rows: [{ JobEventID: 1 }] },
+    { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
+    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: /UPDATE Jobs SET[\s\S]*OUTPUT INSERTED\.JobID/, rows: [{ JobID: 500 }] },
   ]);
   const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);
   expect(response.status).toBe(200);
@@ -116,12 +117,13 @@ it.skip("still completes the job, loudly, on a database without migration 120", 
 
 it("leaves jobs that didn't come from a schedule alone", async () => {
   given({ Status: "Work" }, []);
-  await addJobEvent(post({ JobID: 600, NewStatus: "Awaiting Approval" }), context);
+  expect((await addJobEvent(post({ JobID: 600, NewStatus: "Awaiting Approval" }), context)).status).toBe(200);
+  expect(callsMatching(db.executeQuery, RUN_FOR_JOB)).toHaveLength(1);
   expect(callsMatching(db.executeQuery, ADVANCE)).toHaveLength(0);
 });
 
 it("doesn't look for a schedule on transitions that aren't completions", async () => {
   given({ Status: "New" }, [run()]);
-  await addJobEvent(post({ JobID: 500, NewStatus: "Work" }), context);
+  expect((await addJobEvent(post({ JobID: 500, NewStatus: "Work" }), context)).status).toBe(200);
   expect(callsMatching(db.executeQuery, RUN_FOR_JOB)).toHaveLength(0);
 });

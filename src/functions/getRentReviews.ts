@@ -25,6 +25,7 @@ import { toReviewDto } from "../rentReview/dto";
 import { RentReviewError, rentReviewErrorResponse, TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { loadReviews, REVIEW_LIST_LIMIT, type ReviewFilters } from "../rentReview/store";
 import { loadPendingChanges, pendingChangesOf } from "../scheduleChange/pending";
+import { showTestParam } from "../test-data";
 
 const INT_MAX = 2_147_483_647;
 
@@ -58,7 +59,12 @@ export async function getRentReviews(request: HttpRequest, context: InvocationCo
 
   let filters: ReviewFilters;
   try {
-    filters = { buildingId: readId(request.query, "buildingId"), states: readStates(request.query), tenantId: readId(request.query, "tenantId") };
+    filters = {
+      buildingId: readId(request.query, "buildingId"),
+      showTest: (await showTestParam(request)).value,
+      states: readStates(request.query),
+      tenantId: readId(request.query, "tenantId"),
+    };
     if (filters.buildingId === undefined && filters.tenantId === undefined && filters.states === undefined) {
       throw new RentReviewError("bad_request", "Give a tenantId, a buildingId or a state to list reviews for");
     }
@@ -72,7 +78,7 @@ export async function getRentReviews(request: HttpRequest, context: InvocationCo
     const rows = await loadReviews(connection, filters);
     const today = todayInDarwin();
     const scope = filters.tenantId !== undefined ? { tenantId: filters.tenantId } : filters.buildingId !== undefined ? { buildingId: filters.buildingId } : { all: true as const };
-    const pending = await loadPendingChanges(connection, scope, "full");
+    const pending = await loadPendingChanges(connection, scope, "full", filters.showTest);
     return {
       jsonBody: {
         asOf: today,

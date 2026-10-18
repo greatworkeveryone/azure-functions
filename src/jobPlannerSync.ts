@@ -30,6 +30,7 @@ import {
   graphGetPlannerTask,
 } from "./planner";
 import { plannerSyncEnabled } from "./plannerFlag";
+import { TestDataEgressError } from "./test-data";
 import { Sentry } from "./sentry";
 import {
   addDaysUTC,
@@ -101,6 +102,8 @@ export interface ReconcileParams {
   /** ISO yyyy-mm-dd. */
   dueDate: string;
   assigneeIds: string[];
+  /** The job's or key's IsTest (D9): Planner refuses a test record's task. */
+  isTest: boolean;
   log?: LogFn;
 }
 
@@ -111,6 +114,7 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     connection, entityType, entityId, triggerType, shouldHaveTask,
     planType, title, description, dueDate, assigneeIds, log,
   } = p;
+  const egress = { isTest: p.isTest };
 
   const existing = await executeQuery(
     connection,
@@ -136,9 +140,16 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     }
 
     if (!row) {
-      const taskId = await graphCreatePlannerTask({
-        planId, bucketId, title, dueDate, assigneeIds, description,
-      });
+      let taskId: string;
+      try {
+        taskId = await graphCreatePlannerTask({
+          planId, bucketId, title, dueDate, assigneeIds, description, egress,
+        });
+      } catch (err: unknown) {
+        if (!(err instanceof TestDataEgressError)) throw err;
+        log?.(`reconcileTask: ${err.message} — no ${triggerType} task for ${entityType} ${entityId}`);
+        return;
+      }
       await executeQuery(
         connection,
         `INSERT INTO dbo.PlannerTasks
@@ -185,9 +196,13 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     let taskId: string;
     try {
       taskId = await graphCreatePlannerTask({
-        planId, bucketId, title, dueDate, assigneeIds, description,
+        planId, bucketId, title, dueDate, assigneeIds, description, egress,
       });
     } catch (err: unknown) {
+      if (err instanceof TestDataEgressError) {
+        log?.(`reconcileTask: ${err.message} — no ${triggerType} task for ${entityType} ${entityId}`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       await recordRowError(connection, rowId!, message, log);
       throw err;
@@ -261,7 +276,7 @@ export async function syncJobOnchargePending(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind,
             j.IsOnchargeable, j.OnchargeAmount, j.OnchargeNotes,
             COALESCE(b.BuildingName, '') AS BuildingName,
             (SELECT TOP 1 1 FROM dbo.JobInvoices ji
@@ -291,6 +306,7 @@ export async function syncJobOnchargePending(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "oncharge_pending",
     shouldHaveTask,
     planType: "accounts",
@@ -313,7 +329,7 @@ export async function syncJobAwaitingAccounts(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -342,6 +358,7 @@ export async function syncJobAwaitingAccounts(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "awaiting_accounts",
     shouldHaveTask,
     planType: "accounts",
@@ -365,7 +382,7 @@ export async function syncJobAwaitingFacilitiesApproval(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid, au.Role AS AssignedToRole
      FROM dbo.Jobs j
@@ -401,6 +418,7 @@ export async function syncJobAwaitingFacilitiesApproval(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "awaiting_facilities_approval",
     shouldHaveTask,
     planType: "facilities",
@@ -447,7 +465,7 @@ export async function syncJobStalled(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
             au.EntraOid AS AssignedToEntraOid
@@ -484,6 +502,7 @@ export async function syncJobStalled(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "stalled_facilities",
     shouldHaveTask,
     planType: "facilities",
@@ -507,7 +526,7 @@ export async function syncJobDirectorApproval(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid,
             ${DIRECTOR_NEEDED_COLUMNS_J}
@@ -541,6 +560,7 @@ export async function syncJobDirectorApproval(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "director_approval",
     shouldHaveTask,
     planType: "accounts",

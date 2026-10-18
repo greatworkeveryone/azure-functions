@@ -62,7 +62,8 @@ export async function upsertServiceSchedule(request: HttpRequest, context: Invoc
       const row = await fetchSchedule(conn, input.serviceScheduleId, true);
       if (!row) return txFail(notFound("Service schedule not found"));
       const before = scheduleRowToApi(row, today);
-      if (before.archived) return txFail(conflict("This schedule is archived. Restore it before editing."));
+      // code: the screen offers "Load their changes" for a stale edit, not for this.
+      if (before.archived) return txFail({ jsonBody: { code: "archived", error: "This schedule is archived. Restore it before editing." }, status: 409 });
       if (before.buildingId !== input.buildingId) return txFail(badRequest("A schedule can't move to another building. Archive it and add a new one."));
       const stale = conflict(`${before.updatedBy ?? "Someone"} changed this schedule since you opened it. Load their changes, then make your edit again.`);
       if (before.rowVersion !== input.rowVersion) return txFail(stale);

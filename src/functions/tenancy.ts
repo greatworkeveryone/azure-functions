@@ -63,6 +63,7 @@ import {
   parseGroups,
   parseMiscFees,
   parseSteps,
+  type RatchetExemption,
   resolveScheduleAnnual,
   ScheduledRateStep,
   StepDiff,
@@ -95,9 +96,11 @@ import {
   rollbackQuietly,
   rowVersionHex,
   runScheduleWrite,
+  type ScheduleMutation,
   scheduleWriteResponse,
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
+import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -130,6 +133,7 @@ import {
   normaliseLeaseAdministration,
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -323,6 +327,8 @@ interface RegisterTenantApi {
   /** Set when the tenancy is archived (D4): out of the register unless asked for. */
   archivedAt: string | null;
   archivedBy: string | null;
+  /** A test record (D9): never leaves Floorplan; out of lists unless an admin shows test data. */
+  isTest: boolean;
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
@@ -603,6 +609,7 @@ function tenantRowToApi(
     reviewType: asStr(row.ReviewType) ?? "none",
     archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
     archivedBy: (row.ArchivedBy as string | null) ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     scheduleSignOff: scheduleSignOffFromRow(row),
@@ -715,14 +722,16 @@ const TENANT_COLUMNS = `
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
-  ArchivedAt, ArchivedBy,
+  ArchivedAt, ArchivedBy, IsTest,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 // The building register: archived tenancies (D4) only when asked for.
 const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+   AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+   AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
 const OCCUPANCY_COLUMNS = `
@@ -762,9 +771,12 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
-  // Archived tenancies (D4) are left out unless asked for; that view isn't cached.
+  // Archived tenancies (D4) and test tenancies (D9) are left out unless asked
+  // for; neither of those views is cached.
   const includeArchived = request.query.get("includeArchived") === "true";
-  const cached = includeArchived ? null : getCachedTenantList(buildingId);
+  const showTest = await showTestParam(request);
+  const cacheable = !includeArchived && !showTest.value;
+  const cached = cacheable ? getCachedTenantList(buildingId) : null;
   if (cached) return { status: 200, jsonBody: cached };
 
   let connection;
@@ -774,7 +786,7 @@ async function getRegisterTenants(
     const tenantRows = await executeQuery(
       connection,
       includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
-      [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
+      [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
     );
 
     if (tenantRows.length === 0) {
@@ -825,7 +837,7 @@ async function getRegisterTenants(
     }
 
     // WP26c: the building's changes awaiting a director, on the list and on each tenancy.
-    const pending = await loadPendingChanges(connection, { buildingId }, "full");
+    const pending = await loadPendingChanges(connection, { buildingId }, "full", showTest.value);
     const tenants = tenantRows.map((row) => {
       const tid = row.TenantId as number;
       return tenantRowToApi(
@@ -837,7 +849,7 @@ async function getRegisterTenants(
     });
 
     const body = { pendingChanges: pendingChangesOf(pending), tenants };
-    if (!includeArchived) setCachedTenantList(buildingId, body);
+    if (cacheable) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
@@ -1058,6 +1070,9 @@ async function upsertRegisterTenant(
 
     let resultId: number;
     if (tenantId === undefined) {
+      // D9: admins and directors may create a test tenancy; an admin's "[TEST]" name does too.
+      const testFlag = await testFlagForCreate(request, body.IsTest, body.LegalName as string);
+      if ("error" in testFlag) return testFlag.error;
       const inserted = await executeQuery(
         connection,
         `INSERT INTO dbo.Tenants (
@@ -1075,7 +1090,7 @@ async function upsertRegisterTenant(
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
             LeaseAdministration,
-            CreatedById, CreatedByName, UpdatedById, UpdatedByName
+            CreatedById, CreatedByName, UpdatedById, UpdatedByName, IsTest
          )
          OUTPUT INSERTED.TenantId
          VALUES (
@@ -1093,7 +1108,7 @@ async function upsertRegisterTenant(
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
             @LeaseAdministration,
-            @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName
+            @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName, @IsTest
          )`,
         [
           ...params,
@@ -1102,6 +1117,7 @@ async function upsertRegisterTenant(
             type: TYPES.NVarChar,
             value: JSON.stringify(defaultLeaseAdministration()),
           },
+          { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
         ],
       );
       resultId = inserted[0].TenantId as number;
@@ -2145,22 +2161,17 @@ async function getReviewsDue(
   try {
     connection = await createRequestConnection(token);
     const where = buildingIdParam ? "WHERE BuildingId = @BuildingId" : "";
-    const params = buildingIdParam
-      ? [
-          {
-            name: "BuildingId",
-            type: TYPES.Int,
-            value: Number(buildingIdParam),
-          },
-        ]
-      : [];
+    const params = [
+      ...(buildingIdParam ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }] : []),
+      await showTestParam(request),
+    ];
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     // Also expiries and option deadlines from yesterday to 91 days ahead: a
     // wider net than the Darwin-day filter below, which is exact.
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (
+       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
          OR (Expiry IS NOT NULL
@@ -2213,6 +2224,7 @@ async function getPortfolioOccupancy(
   const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (roleCheck) return roleCheck;
 
+  const showTest = await showTestParam(request);
   let connection;
   try {
     connection = await createRequestConnection(token);
@@ -2244,13 +2256,14 @@ async function getPortfolioOccupancy(
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
        WHERE t.ArchivedAt IS NULL
+         AND (t.IsTest = 0 OR @ShowTest = 1)
        GROUP BY t.BuildingId`,
-      [],
+      [showTest],
     );
 
     // WP26c: changes awaiting a director across the portfolio, dates and names
     // only: facilities read these figures too.
-    const pending = await loadPendingChanges(connection, { all: true }, "dates_only");
+    const pending = await loadPendingChanges(connection, { all: true }, "dates_only", showTest.value);
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;
@@ -2498,10 +2511,41 @@ function changeLogRowToApi(row: SqlRow) {
 
 const STEP_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
-/** The row keeps the exemption it had, exactly (key order aside). */
-function ratchetExemptionKept(before: ScheduledRateStep["ratchetExempt"], after: ScheduledRateStep["ratchetExempt"]): boolean {
-  return !!before && !!after && before.at === after.at && before.byName === after.byName && before.reason === after.reason;
+/** A refused change to a row's ratchet exemption, as the schedule write returns it: a 403 is ledgered as denied. */
+function refuseExemptionEdit(
+  refusal: { message: string; rule: string; status: number },
+  stepId: string,
+  attempted: string,
+  stored: ScheduledRateStep | null,
+): Extract<ScheduleMutation<unknown>, { kind: "reject" }> {
+  const denied: LedgerDraft = {
+    action: "denied",
+    before: { attempted, ratchetExempt: stored?.ratchetExempt ?? null },
+    reason: refusal.message,
+    ruleApplied: refusal.rule,
+    subject: { id: stepId, type: "rate_step" },
+  };
+  return {
+    ...(refusal.status === 403 ? { denied } : {}),
+    error: refusal.message,
+    kind: "reject",
+    status: refusal.status,
+  };
 }
+
+/** The ledger row for a director taking a ratchet exemption off (WP26c review, finding 1). */
+function exemptionRemovedEntry(stored: ScheduledRateStep, removed: RatchetExemption, reason: string, deleted: boolean): LedgerDraft {
+  return {
+    action: "schedule.ratchet_exemption_removed",
+    after: { ratchetExempt: null, rowDeleted: deleted },
+    before: { effectiveFrom: stored.effectiveFrom, ratchetExempt: removed, reviewId: stored.reviewId ?? null },
+    reason,
+    ruleApplied: "director_removed",
+    subject: { id: stored.id, type: "rate_step" },
+  };
+}
+
+const isDirectorActor = (actor: { kind: string; role?: string }): boolean => actor.kind === "user" && actor.role === AppRole.DIRECTOR;
 
 async function upsertScheduledRateStep(
   request: HttpRequest,
@@ -2530,6 +2574,7 @@ async function upsertScheduledRateStep(
     const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
     if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, step } = parsed;
+    const removalReason = readExemptionRemovalReason(body);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -2541,24 +2586,23 @@ async function upsertScheduledRateStep(
       (locked) => {
         const existing = parseSteps(locked.ScheduledRateSteps as string | null);
         const oldStep = existing.find((s) => s.id === step.id) ?? null;
-        // A ratchet exemption is a director's override (C9, D23), written only by
-        // a rent review approved with the lease's ratchet overridden. An edit may
-        // keep one as it is or take it off (the ratchet then holds the row again),
-        // never add or change one.
-        if (step.ratchetExempt && !ratchetExemptionKept(oldStep?.ratchetExempt, step.ratchetExempt)) {
-          return {
-            error: "A ratchet exemption is a director's override: it is written when a director approves a rent review with the lease's ratchet overridden, not by editing the row",
-            kind: "reject",
-            status: 403,
-          };
+        // A ratchet exemption is a director's override (C9, D23): an edit keeps it
+        // as stored even when the step leaves it off, never adds or changes one, and
+        // only a director takes it off, with a reason (ratchetExemptionEdit.ts).
+        const exemption = exemptionEdit(oldStep, step, removalReason, isDirectorActor(actor));
+        if (exemption.kind === "refuse") {
+          const attempted = removalReason !== null || exemption.rule === "not_director" ? "schedule.ratchet_exemption_removed" : "schedule.manual_edit";
+          return refuseExemptionEdit(exemption, step.id, attempted, oldStep);
         }
+        const edited = exemption.step;
         // Adding a row closes the open-ended row before it (effectiveTo is exclusive).
-        const { closed, steps: withClosed } = closeOpenPredecessor(existing, step);
-        const next = normaliseLegacyEnds(upsertStep(withClosed, step));
-        const saved = next.find((s) => s.id === step.id) ?? step;
+        const { closed, steps: withClosed } = closeOpenPredecessor(existing, edited);
+        const next = normaliseLegacyEnds(upsertStep(withClosed, edited));
+        const saved = next.find((s) => s.id === step.id) ?? edited;
         const ledgerEntries: LedgerDraft[] = [
           { action: "schedule.manual_edit", after: saved, before: oldStep, subject: { id: step.id, type: "rate_step" } },
         ];
+        if (exemption.kind === "remove" && oldStep) ledgerEntries.push(exemptionRemovedEntry(oldStep, exemption.removed, exemption.reason, false));
         if (closed) {
           ledgerEntries.push({
             action: "schedule.manual_edit",
@@ -2641,6 +2685,7 @@ async function deleteScheduledRateStep(
     const expectedVersion = parseExpectedVersion(body.ScheduleVersion);
     if (expectedVersion === null) return { status: 400, jsonBody: { error: "ScheduleVersion must be a non-negative integer" } };
     const { TenantId, BuildingId, stepId } = parsed;
+    const removalReason = readExemptionRemovalReason(body);
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -2654,6 +2699,13 @@ async function deleteScheduledRateStep(
         const deletedStep = existing.find((s) => s.id === stepId);
         const next = deleteStep(existing, stepId);
         if (next === STEP_NOT_FOUND || !deletedStep) return { error: "Step not found", kind: "reject", status: 404 };
+        // Deleting a row a director exempted from the ratchet takes the exemption off too.
+        const exemption = exemptionDelete(deletedStep, removalReason, isDirectorActor(actor));
+        if (exemption.kind === "refuse") return refuseExemptionEdit(exemption, stepId, "schedule.ratchet_exemption_removed", deletedStep);
+        const ledgerEntries: LedgerDraft[] = [
+          { action: "schedule.manual_edit", after: null, before: deletedStep, subject: { id: stepId, type: "rate_step" } },
+        ];
+        if (exemption.kind === "remove") ledgerEntries.push(exemptionRemovedEntry(deletedStep, exemption.removed, exemption.reason, true));
         return {
           afterUpdate: async (conn) => {
             changeId = await insertRentScheduleChangeLog(conn, {
@@ -2669,9 +2721,7 @@ async function deleteScheduledRateStep(
           },
           column: "ScheduledRateSteps",
           kind: "write",
-          ledgerEntries: [
-            { action: "schedule.manual_edit", after: null, before: deletedStep, subject: { id: stepId, type: "rate_step" } },
-          ],
+          ledgerEntries,
           result: next,
           value: next,
         };

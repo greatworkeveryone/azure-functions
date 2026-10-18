@@ -17,6 +17,7 @@ import { resolveRecipient } from "../email-recipient";
 import { reportSystemHealth } from "../email/role-recipients";
 import { graphSendMail } from "../graph";
 import { formatDarwinDateTime } from "../ledger/darwinTime";
+import { assertMayLeave, NOT_A_RECORD, readIsTest, TEST_RECORD_MESSAGE, testKindOfSubject, type EgressSubject } from "../test-data";
 import { getAdapter } from "./adapters/registry";
 import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "./config";
 import { buildDecisionEmail } from "./decisionEmail";
@@ -26,7 +27,8 @@ import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
 
-export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
+/** `egress` is what the email is about; a test record's is refused (D9). */
+export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
 
 export type NotifyEvent = "follow_up" | "raise" | "reminder" | "supersede";
 
@@ -59,7 +61,20 @@ export interface NotifyOutcome {
 // Told when nobody independent is at the level (NoIndependentTarget).
 const OVERSIGHT_ROLES: ReadonlySet<string> = new Set([ROLES.director, ROLES.admin]);
 
-const defaultSend: SendMail = (to, subject, body) => graphSendMail(to, subject, body);
+const defaultSend: SendMail = (to, subject, body, egress) => graphSendMail(egress, to, subject, body);
+
+/** What an escalation email is about: a job, tenancy, rent review, schedule
+ *  change, defects period (through its tenancy) or money record (decisions,
+ *  reviews, sweeps all come through here), or no record at all (system health,
+ *  service schedules). */
+async function egressFor(connection: Connection, row: EscalationRow): Promise<EgressSubject> {
+  const kind = testKindOfSubject(row.subjectType);
+  if (!kind) return NOT_A_RECORD;
+  const numeric = Number(row.subjectId);
+  const id = kind === "rent_review" || kind === "schedule_change" ? row.subjectId : numeric;
+  if (typeof id === "number" && !Number.isInteger(id)) return { isTest: false };
+  return { isTest: await readIsTest(connection, kind, id) };
+}
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const NOTE_IN_EMAIL_MAX = 300;
 
@@ -206,6 +221,7 @@ async function sendWithRetry(
   to: string[],
   subject: string,
   body: string,
+  egress: EgressSubject,
   options: NotifyOptions,
 ): Promise<{ attempts: number; error: string | null }> {
   const total = Math.max(1, Math.trunc(options.attempts ?? 1));
@@ -214,7 +230,7 @@ async function sendWithRetry(
   let error: string | null = null;
   for (let attempt = 1; attempt <= total; attempt += 1) {
     try {
-      await send(to, subject, body);
+      await send(to, subject, body, egress);
       return { attempts: attempt, error: null };
     } catch (caught) {
       error = errorText(caught);
@@ -279,7 +295,11 @@ export async function notifyTargets(
   let outcome: NotifyOutcome;
   try {
     const missing = missingNotificationConfig(env);
-    if (missing.length > 0) {
+    const egress = await egressFor(connection, row);
+    if (egress !== NOT_A_RECORD && egress.isTest) {
+      // Nobody is told about a test job, and there is nothing to retry.
+      outcome = { attempts: 0, error: TEST_RECORD_MESSAGE, recipients: [], state: "none" };
+    } else if (missing.length > 0) {
       outcome = { attempts: 0, error: `Notification settings are missing: ${missing.join(", ")}`, recipients: [], state: "pending" };
     } else {
       const users = options.users ?? (await listActiveUsers(connection));
@@ -288,7 +308,7 @@ export async function notifyTargets(
         outcome = { attempts: 0, error: "No one with an email address is at this level", recipients, state: "none" };
       } else {
         const { body, subject } = buildEmail(event, row, linkFor(row, env), askedOfNames(row, users));
-        const sent = await sendWithRetry(options.sendMail ?? defaultSend, recipients, subject, body, options);
+        const sent = await sendWithRetry(options.sendMail ?? defaultSend, recipients, subject, body, egress, options);
         outcome = { attempts: sent.attempts, error: sent.error, recipients, state: sent.error === null ? "sent" : "failed" };
       }
     }
@@ -315,8 +335,10 @@ export async function notifyPreviousLevel(
     const already = new Set(targetAddresses(next, users, env).map((address) => address.toLowerCase()));
     const recipients = targetAddresses(previous, users, env).filter((address) => !already.has(address.toLowerCase()));
     if (recipients.length === 0) return;
+    const egress = await egressFor(connection, next);
+    assertMayLeave("email", egress);
     const { body, subject } = buildEmail("fyi", next, linkFor(next, env), askedOfNames(next, users));
-    await (options.sendMail ?? defaultSend)(recipients, subject, body);
+    await (options.sendMail ?? defaultSend)(recipients, subject, body, egress);
   } catch (error) {
     options.log?.(`escalation ${previous.escalationId}: could not tell the previous level: ${errorText(error)}`);
   }
@@ -337,8 +359,10 @@ export async function notifyRaiserResolved(
     const raiser = users.find((user) => user.userId === row.raisedByUserId);
     const recipients = uniqueAddresses([raiser?.email]);
     if (recipients.length === 0) return;
+    const egress = await egressFor(connection, row);
+    assertMayLeave("email", egress);
     const { body, subject } = buildEmail("resolved", row, linkFor(row, env), askedOfNames(row, users));
-    await (options.sendMail ?? defaultSend)(recipients, subject, body);
+    await (options.sendMail ?? defaultSend)(recipients, subject, body, egress);
   } catch (error) {
     options.log?.(`escalation ${row.escalationId}: could not tell the raiser: ${errorText(error)}`);
   }

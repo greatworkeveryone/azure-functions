@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { changeTenantName, parsePayload, reliefOfRow, toChangeDto } from "./dto";
+import { appendRelief } from "./store";
 import { REQUESTABLE_KINDS, reliefSummary, reliefTerms, SCHEDULE_CHANGE_KINDS, SCHEDULE_CHANGE_STATES } from "./types";
 
 const migration = readFileSync(join(__dirname, "..", "..", "migrations", "099_schedule_change_requests.sql"), "utf8");
@@ -89,5 +90,35 @@ describe("toChangeDto", () => {
     expect(parsePayload(undefined)).toEqual({});
     expect(reliefOfRow({ ...row, Kind: "manual_change" })).toBeNull();
     expect(changeTenantName({ LegalName: " ", TenantId: 9, TradingName: null })).toBe("Tenancy 9");
+  });
+});
+
+// WP26c review, finding 4: ratifying appends; it never rebuilds the column.
+describe("appendRelief", () => {
+  const entry = { from: "2026-03-01", id: "new", kind: "percent", scope: ["rent"], to: "2026-03-31", value: 50 };
+
+  it("starts a list on an empty column", () => {
+    for (const raw of [null, undefined, "", "  "]) expect(appendRelief(raw, entry)).toEqual({ before: [], json: `[${JSON.stringify(entry)}]`, ok: true });
+    expect(appendRelief("[ ]", entry)).toEqual({ before: [], json: `[ ${JSON.stringify(entry)}]`, ok: true });
+  });
+
+  it("keeps every byte already there, whatever this code can read of it", () => {
+    const raw = '[{"id":"a","kind":"rebate","extra":{"x":1.50}} ,\n {"id":"b","from":"2026-01-01"}]\n';
+    const out = appendRelief(raw, entry);
+    expect(out).toEqual({ before: [{ extra: { x: 1.5 }, id: "a", kind: "rebate" }, { from: "2026-01-01", id: "b" }], json: `${raw.slice(0, raw.lastIndexOf("]"))},${JSON.stringify(entry)}]\n`, ok: true });
+    expect(JSON.parse((out as { json: string }).json)).toHaveLength(3);
+  });
+
+  it.each([
+    ["an object", '{"id":"a"}'],
+    ["a JSON string", '"[]"'],
+    ["text that isn't JSON", "[{"],
+    ["a number", 7],
+  ])("refuses %s, so nothing is written over it", (_label, raw) => {
+    expect(appendRelief(raw, entry)).toEqual({ duplicate: false, ok: false });
+  });
+
+  it("refuses an id already there", () => {
+    expect(appendRelief(`[${JSON.stringify(entry)}]`, entry)).toEqual({ duplicate: true, ok: false });
   });
 });

@@ -267,3 +267,29 @@ describe("getJobs: lists and filters", () => {
     expect(listSql).not.toMatch(/\bKind\s*(=|IN|<>)/i);
   });
 });
+
+describe("test jobs at create (D9)", () => {
+  it("an admin's [TEST] title makes a test job", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    const res = await create({ Title: "[TEST] Leaking tap" });
+    expect(res.status ?? 200).toBeLessThan(300);
+    expect(paramsOf(callsMatching(db.executeQuery, INSERT_JOB)[0]).IsTest).toBe(true);
+  });
+
+  it("a director may ask for a test job; anyone else is refused and nothing is written", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    await create({ IsTest: true });
+    expect(paramsOf(callsMatching(db.executeQuery, INSERT_JOB)[0]).IsTest).toBe(true);
+
+    jest.clearAllMocks();
+    routeQueries(db.executeQuery, [{ match: INSERT_JOB, rows: [{ JobID: 9 }] }]);
+    auth.rolesForRequest.mockResolvedValue(["facilities"]);
+    expect((await create({ IsTest: true })).status).toBe(403);
+    expect(wroteAnything()).toBe(false);
+  });
+
+  it("an ordinary job is not a test job", async () => {
+    await create();
+    expect(paramsOf(callsMatching(db.executeQuery, INSERT_JOB)[0]).IsTest).toBe(false);
+  });
+});

@@ -26,6 +26,9 @@ then the real switch.
 | `PLANNER_SYNC_ENABLED` | off | Microsoft Planner sync, being retired. The only Planner switch: every path that creates, updates or completes a Planner task checks it first, whatever else is set. Until 17 Oct `APP_BASE_URL` doubled as the switch (setting it turned task creation back on through every job save), which is why production kept `APP_BASE_URL` unset and the director approval email went out with no link (jobs-flow N14). That coupling is gone | Leave off |
 | `APP_BASE_URL` | unset: emails have no links | Links only: the director approval email, escalation and decision-request emails and the morning digest link to the record and step they are about (`/jobs?jobId=12&step=quotes`). It switches nothing on, Planner included | Set it with this release, on Connor's yes: `https://floorplan.randazzo.properties` |
 | `PLANNER_UNSIGNED_HOLDBACK_ENABLED` | off | Only matters if Planner sync is on. The nightly timer never raises lease tasks (expiry, option, review) for a tenancy whose schedule is not signed off. This switch also lets it take down the ones already open; off, it leaves them and logs each tenancy with its open task count | Only if Planner sync is turned on, after reading the "not removed" line in the log |
+| `SCHEDULER_ENABLED` | off | The daily timer `schedulerTimer` (22:00 UTC, 07:30 in Darwin) raises defects-period reminders (60 and 30 days before the end), makes each service schedule's maintenance job `lead days` before it is due (one job per due date), skips a due date inside a blocking defects period, and raises overdue-servicing escalations (urgent for Fire & life safety and Lifts, digest for the rest). Needs migrations 119 and 120. Off, it logs "off" and writes nothing but its own `TimerRuns` row. A run that finishes with any problem is recorded as an error in `TimerRuns` and shows on `/api/health?deep=true`. The Maintenance page tells staff "Floorplan isn't making these jobs yet" until this is live | After a dry run, in the same change that turns Maintenance on for directors and facilities managers (Feature flags below) |
+| `SCHEDULER_DRY_RUN` | off | Wins over `SCHEDULER_ENABLED`. The timer reads and logs, with counts, what it would do, and writes nothing | First, and read the counts in the log. By hand: an admin posts `{}` (or `{"dryRun": true}`) to `/api/runSchedulerNow` and gets `{ report, log }` back; `{"dryRun": false}` is refused with a 409 unless the timer itself is live |
+| `SCHEDULER_MAX_ACTIONS` | 100 | Most writes (reminders, jobs, escalations) in one run, so a backlog is paced over several days. A run that stops at the limit says so in the log and in Sentry | Leave at 100 |
 | `ACCESS_LOG_ENABLED` | **on** | Access-event log; `"false"` turns it off | Keep on |
 | `ACCESS_REPORT_ENABLED` | off | Access report email | Once Graph mail is confirmed |
 | `MONEY_ALLOWED_CIDRS` | unset: gate off, health warns | Networks allowed to take money actions | Office and remote-access egress; see `monitoring.md` §5 |
@@ -52,6 +55,22 @@ Escalations and Rent reviews still need their app settings above. Decision jobs
 to preview for the director role first, then for everyone. The backend accepts
 the `admin` job kind whatever the flag says, and the sweep, Planner sync and
 digest skip those jobs.
+Maintenance (`maintenance`) is enabled in the code defaults, but the 13 Oct audit
+found it set to Off for directors in Admin → Features (check the current state). The overdue-servicing escalation and the
+defects-period reminders email a link into `/maintenance` to the facilities
+manager and later a director; a role that has the module hidden lands on the
+dashboard with no word of why. So switch Maintenance on for directors and
+facilities managers in the same change that sets `SCHEDULER_ENABLED=true`, and
+not before: until then no jobs are made, so a schedule that comes due just
+turns overdue. The page says so while the timer is off or in dry run.
+
+Defects periods (Simone's request) can be added, edited, archived and restored by
+`admin`, `director` and `facilities_manager`; nobody else sees "Add defects
+period", and with none in force they see "No defects periods in force. A
+facilities manager sets them." Simone's app role is not yet confirmed: Connor to
+check it in Admin → Users, and give her one of those three before asking her to
+enter the current periods. Service schedules (add, edit, import, mark serviced
+or skip) are managed by the same three roles.
 Rent reviews (`rentReviews`) shows the review screens; the generator and the CPI
 timer behind it need their settings above, and migration 101.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
@@ -75,6 +94,16 @@ npm run migrate -- --target <server>/<database> --apply    # apply as your az lo
 Dry-run on a restored copy first by targeting it. Migration 101 applies out of
 order, with a warning only.
 
+Migrations 119 (`119_defects_periods.sql`, sprint F1) and 120
+(`120_service_schedules.sql`, sprint F2) are applied before the build that serves
+the Maintenance page, the defects and schedule endpoints, and `schedulerTimer`.
+Both are additive and re-runnable, and 120 seeds the overdue-servicing escalation
+policies (insert-only, so an admin's edit survives a re-run). Creating a job and
+completing one tolerate a missing table (no periods, no schedule; Sentry says
+which migration to apply), so a build that runs ahead of them looks healthy on
+the Jobs pages while the Maintenance page, the defects strip and the scheduler
+fail. Dry-run both on a restored copy first, as for any migration. Don't renumber either.
+
 Migration 137 (`job_decision_requests`, A1) is applied before the build that serves
 `requestJobDecision`. It adds `JobDecisionRequests` (including `AutoEscalate BIT NOT
 NULL`, with a CHECK tying it to the tier) and seeds the `job.decision_pending` policy
@@ -92,6 +121,15 @@ Migration 099 (`099_schedule_change_requests.sql`, WP26c) is hand-applied like t
 rest. It is numbered below applied migrations, so the runner applies it out of order
 with a warning only. Apply it before deploying WP26c's backend: the register reads
 select its new columns.
+
+WP26c fixes (18 Oct 2026, both repos): deploy the backend before or with the
+frontend, never the pre-fix WP26c frontend (d088691) with the fixed backend,
+because Approve now sends the tenancy's schedule version (an older frontend gets
+400). Before go-live run this read-only check and fix any row it returns; such a
+tenancy cannot be approved until its reliefs are a JSON array or null:
+`SELECT TenantId FROM dbo.Tenants WHERE RentReliefs IS NOT NULL AND (ISJSON(RentReliefs) = 0 OR LEFT(LTRIM(RentReliefs),1) <> '[')`.
+A pending relief that runs past its lease's expiry is refused at approval
+(`outside_lease`); the director rejects it. Turn the `rentReviews` flag on last.
 
 Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, before
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest

@@ -17,6 +17,8 @@ import { jobUrl, type JobLinkStep, type JobLinkTarget } from "./jobLinks";
 import { optionNoticeWindow } from "./leaseOptions";
 
 export interface PlannerTenantRow {
+  /** Tenants.IsTest (D9); the timer reads only real tenancies, and Planner refuses a test one. */
+  isTest?: boolean;
   tenantId: number;
   legalName: string;
   tradingName: string | null;
@@ -33,6 +35,8 @@ export interface PlannerTenantRow {
 }
 
 export interface PlannerJobRow {
+  /** Jobs.IsTest (D9). */
+  isTest?: boolean;
   jobId: number;
   title: string;
   buildingName: string | null;

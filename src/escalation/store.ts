@@ -369,6 +369,8 @@ export interface ListFilter {
   policyKey?: string;
   /** A whole domain of policies: a prefix ending in "." (finance.). */
   policyKeyPrefix?: string;
+  /** Escalations about test records too: only an admin with Show test data on (D9). */
+  showTest?: boolean;
   status: ListStatus;
   subjectId?: string;
   subjectType?: string;
@@ -376,6 +378,28 @@ export interface ListFilter {
   view: ListView;
   viewer: Viewer;
 }
+
+// D9 review: an escalation about a test record stays out of the inbox and its
+// counts unless an admin has Show test data on. Positive, per database-safety
+// rule 2: shown when its subject is not a record at all, or is a record that
+// exists and is not test data (a money record and its job; a review or a
+// change through its tenancy). A defects period's tenancy is read from the
+// escalation's context (the adapter's summary puts it there), so the inbox
+// never names dbo.DefectsPeriods, which a database may not have yet.
+export const NOT_TEST_SUBJECT_SQL = `(e.SubjectType NOT IN (N'defects_period', N'inspection', N'invoice', N'job', N'key', N'payment', N'purchase_order', N'quote', N'rent_review', N'schedule_change', N'tenancy', N'vacancy')
+  OR (e.SubjectType = N'job' AND EXISTS (SELECT 1 FROM dbo.Jobs s WHERE s.JobID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0))
+  OR (e.SubjectType = N'tenancy' AND EXISTS (SELECT 1 FROM dbo.Tenants s WHERE s.TenantId = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0))
+  OR (e.SubjectType = N'inspection' AND EXISTS (SELECT 1 FROM dbo.Inspections s WHERE s.Id = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0))
+  OR (e.SubjectType = N'key' AND EXISTS (SELECT 1 FROM dbo.Keys s WHERE s.Id = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0))
+  OR (e.SubjectType = N'vacancy' AND EXISTS (SELECT 1 FROM dbo.Vacancies s WHERE s.Id = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0))
+  OR (e.SubjectType = N'quote' AND EXISTS (SELECT 1 FROM dbo.Quotes s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.QuoteID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0 AND sj.IsTest = 0))
+  OR (e.SubjectType = N'invoice' AND EXISTS (SELECT 1 FROM dbo.JobInvoices s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.JobInvoiceID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0 AND sj.IsTest = 0))
+  OR (e.SubjectType = N'purchase_order' AND EXISTS (SELECT 1 FROM dbo.PurchaseOrders s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.PurchaseOrderID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0 AND sj.IsTest = 0))
+  OR (e.SubjectType = N'payment' AND EXISTS (SELECT 1 FROM dbo.Payments s JOIN dbo.Jobs sj ON sj.JobID = s.JobID WHERE s.PaymentID = TRY_CONVERT(INT, e.SubjectId) AND s.IsTest = 0 AND sj.IsTest = 0))
+  OR (e.SubjectType = N'rent_review' AND EXISTS (SELECT 1 FROM dbo.RentReviews s JOIN dbo.Tenants st ON st.TenantId = s.TenantId WHERE s.ReviewId = e.SubjectId AND st.IsTest = 0))
+  OR (e.SubjectType = N'schedule_change' AND EXISTS (SELECT 1 FROM dbo.ScheduleChangeRequests s JOIN dbo.Tenants st ON st.TenantId = s.TenantId WHERE s.RequestId = e.SubjectId AND st.IsTest = 0))
+  OR (e.SubjectType = N'defects_period' AND (JSON_VALUE(e.Context, N'$.tenantId') IS NULL OR EXISTS (SELECT 1 FROM dbo.Tenants st WHERE st.TenantId = TRY_CONVERT(INT, JSON_VALUE(e.Context, N'$.tenantId')) AND st.IsTest = 0)))
+  OR @ShowTest = 1)`;
 
 const ORDER_ACTIVE = "ORDER BY e.Urgent DESC, CASE WHEN e.DueAt IS NULL THEN 1 ELSE 0 END, e.DueAt, e.EscalationId DESC";
 const ORDER_OTHER = "ORDER BY e.UpdatedAt DESC, e.EscalationId DESC";
@@ -466,6 +490,9 @@ export function buildListWhere(filter: ListFilter): { params: SqlParam[]; whereS
   if (filter.status === "active") parts.push(`e.${LIVE_SQL}`);
   else if (filter.status === "open") parts.push(`e.${OPEN_SQL}`);
   else if (filter.status === "closed") parts.push(`e.${CLOSED_SQL}`);
+
+  parts.push(NOT_TEST_SUBJECT_SQL);
+  params.push({ name: "ShowTest", type: TYPES.Bit, value: filter.showTest === true });
 
   if (filter.subjectType) {
     parts.push("e.SubjectType = @SubjectType");

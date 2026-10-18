@@ -7,7 +7,8 @@ jest.mock("./blob-storage", () => ({
     })),
 }));
 
-import { graphFetchEmails } from "./graph";
+import { graphFetchEmails, graphSendMail, graphSendReply } from "./graph";
+import { NOT_A_RECORD, TestDataEgressError } from "./test-data";
 
 const blob = require("./blob-storage") as { uploadBlob: jest.Mock };
 
@@ -154,5 +155,39 @@ describe("graphFetchEmails → attachment retry", () => {
     const [email] = await graphFetchEmails("inbox@example.test");
     expect(email.attachmentBlobNames).toEqual([]);
     expect(fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/attachments?"))).toHaveLength(1);
+  });
+});
+
+describe("graph send helpers refuse test records (D9)", () => {
+  beforeEach(() => {
+    process.env.GRAPH_SENDER_EMAIL = "floorplan@example.com";
+  });
+
+  it("graphSendMail throws before asking for a token when the mail is about a test record", async () => {
+    const fetchMock = routeGraph();
+    await expect(graphSendMail({ isTest: true }, "a@example.com", "Subject", "Body")).rejects.toBeInstanceOf(
+      TestDataEgressError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("graphSendReply throws the same way", async () => {
+    const fetchMock = routeGraph();
+    await expect(graphSendReply({ isTest: true }, "a@example.com", "Subject", "Body", null)).rejects.toThrow(
+      "Not sent: test record",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends a real record's mail, and mail that isn't about a record", async () => {
+    const fetchMock = jest.fn().mockImplementation(async (input: string) =>
+      String(input).startsWith("https://login.microsoftonline.com/")
+        ? respond({ access_token: "graph-tok" })
+        : { ok: true, status: 202, text: async () => "" },
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await graphSendMail({ isTest: false }, "a@example.com", "Subject", "Body");
+    await graphSendMail(NOT_A_RECORD, "a@example.com", "Feedback", "Body");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/sendMail"))).toHaveLength(2);
   });
 });

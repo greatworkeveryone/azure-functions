@@ -81,14 +81,14 @@ describe("sendAnomalyReport", () => {
     db.executeQuery.mockResolvedValueOnce([row()]).mockResolvedValueOnce([{ Email: "ada@rp.example" }, { Email: "jo@rp.example" }]);
     await expect(sendAnomalyReport(NOW)).resolves.toEqual({ count: 1, recipients: 2, sent: true });
     expect(db.executeQuery.mock.calls[1][1]).toMatch(/Role IN \(N'admin', N'cfo'\)/);
-    expect(graph.graphSendMail).toHaveBeenCalledWith(["ada@rp.example", "jo@rp.example"], expect.any(String), expect.any(String));
+    expect(graph.graphSendMail).toHaveBeenCalledWith("not-a-record", ["ada@rp.example", "jo@rp.example"], expect.any(String), expect.any(String));
   });
 
   it("honours DEV_EMAIL_OVERRIDE", async () => {
     process.env.DEV_EMAIL_OVERRIDE = "dev@gwe.example";
     db.executeQuery.mockResolvedValueOnce([row()]).mockResolvedValueOnce([{ Email: "ada@rp.example" }, { Email: "jo@rp.example" }]);
     await sendAnomalyReport(NOW);
-    expect(graph.graphSendMail.mock.calls[0][0]).toEqual(["dev@gwe.example"]);
+    expect(graph.graphSendMail.mock.calls[0][1]).toEqual(["dev@gwe.example"]);
   });
 });
 

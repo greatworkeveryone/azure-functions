@@ -41,6 +41,7 @@ import {
 import { listActiveUsers, listEscalations, type ListFilter, type ListStatus, type ListView } from "../escalation/store";
 import { parsePagination } from "../pagination";
 import type { DirectoryUser, EscalationKind } from "../escalation/types";
+import { showTestParam } from "../test-data";
 
 const VIEWS: readonly string[] = ["mine", "raised", "team", "all", "visible"];
 const STATUSES: readonly string[] = ["active", "open", "closed", "all"];
@@ -119,7 +120,9 @@ export async function getEscalations(request: HttpRequest, context: InvocationCo
     }
 
     const pagination = parsePagination(request.query);
-    const { rows, total } = await listEscalations(connection, filter, pagination);
+    // D9: escalations about test records, and their count, only with an admin's Show test data on.
+    const showTest = (await showTestParam(request)).value;
+    const { rows, total } = await listEscalations(connection, { ...filter, showTest }, pagination);
     directory = await listActiveUsers(connection);
 
     const now = new Date();
