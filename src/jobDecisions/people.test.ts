@@ -30,8 +30,24 @@ describe("naming people", () => {
     expect(makers.role).toBeNull();
   });
 
-  it("asks people of different roles, an admin included", () => {
-    expect(resolveDecisionMakers({ mode: "named", userIds: [3, 5, 7, 8] }, DIRECTORY, ALANA.userId).userIds).toEqual([3, 5, 7, 8]);
+  it("asks people of different roles", () => {
+    expect(resolveDecisionMakers({ mode: "named", userIds: [3, 5, 6, 8] }, DIRECTORY, ALANA.userId).userIds).toEqual([3, 5, 6, 8]);
+  });
+
+  it("refuses an admin, in plain words (422): admin approves nothing real, so a request to them would only be answered by someone who may not", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "named", userIds: [3, ADA.userId] }, DIRECTORY, ALANA.userId))).toMatchObject({
+      code: "decision_maker_role_not_allowed",
+      details: { userIds: [ADA.userId] },
+      message: "Admin looks after Floorplan and doesn't decide on jobs, so Ada can't be asked. Ask someone else.",
+      status: 422,
+    });
+  });
+
+  it("names every admin it refuses, and says nothing of the inbox for them", () => {
+    const BEN = user(21, "Ben", "admin");
+    const error = refused(() => resolveDecisionMakers({ mode: "named", userIds: [ADA.userId, BEN.userId, 5] }, [...DIRECTORY, BEN], ALANA.userId)) as Error;
+    expect(error.message).toBe("Admin looks after Floorplan and doesn't decide on jobs, so Ada, Ben can't be asked. Ask someone else.");
+    expect(error.message).not.toMatch(/inbox/);
   });
 
   it("refuses someone who is not an active user, naming them (422)", () => {
