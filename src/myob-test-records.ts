@@ -6,7 +6,7 @@
 
 import { TYPES } from "tedious";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "./db";
-import { readIsTest, type TestRecordKind } from "./test-data";
+import { readTestRecord, type TestRecordKind } from "./test-data";
 
 export interface MyobRecordRef {
   id: number;
@@ -20,6 +20,8 @@ export interface MyobTestRecordQuery {
 
 export interface MyobTestRecordVerdict {
   isTest: boolean;
+  /** The call names a record (by hand or through its proposal) that doesn't exist: refused, never sent (D11). */
+  missing?: true;
   /** Whether the call could be tied to a Floorplan record at all. */
   named: boolean;
 }
@@ -44,7 +46,8 @@ export const lookupMyobTestRecord: MyobTestRecordLookup = async ({ correlationId
       if (row && PROPOSAL_KINDS.has(kind)) ref = { id: Number(row.SubjectId), kind: kind as MyobRecordRef["kind"] };
     }
     if (!ref) return { isTest: false, named: false };
-    return { isTest: await readIsTest(connection, ref.kind, ref.id), named: true };
+    const isTest = await readTestRecord(connection, ref.kind, ref.id);
+    return isTest === null ? { isTest: false, missing: true, named: true } : { isTest, named: true };
   } finally {
     closeConnection(connection);
   }

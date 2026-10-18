@@ -92,6 +92,10 @@ export async function guardMyobRequest(
   const { companyFileId, rule, uid } = classified;
   const verdict = await (deps.testRecords ?? testRecordLookup)({ correlationId: input.correlationId ?? null, record: input.record ?? null });
   if (verdict.isTest) throw new TestDataEgressError("myob");
+  // Fail closed (D11): a named record with no row is not taken for a real one.
+  if (verdict.missing) {
+    throw new MyobRequestRefusedError("no_record", "This MYOB call names a Floorplan record that doesn't exist, so it was not sent");
+  }
   if (rule.method !== "GET" && !verdict.named) {
     throw new MyobRequestRefusedError("no_record", "A MYOB write must name the Floorplan record it is for");
   }

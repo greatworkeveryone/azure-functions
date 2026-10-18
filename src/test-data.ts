@@ -83,12 +83,18 @@ export const IS_TEST_SQL: Record<TestRecordKind, string> = {
   vacancy: `SELECT IsTest FROM dbo.Vacancies WHERE Id = @Id`,
 };
 
-export async function readIsTest(connection: Connection, kind: TestRecordKind, id: number | string): Promise<boolean> {
+/** A record's test flag, or null when no such record exists. */
+export async function readTestRecord(connection: Connection, kind: TestRecordKind, id: number | string): Promise<boolean | null> {
   const param = TEXT_ID_KINDS.has(kind)
     ? { name: "Id", type: TYPES.NVarChar, value: String(id) }
     : { name: "Id", type: TYPES.Int, value: Number(id) };
   const [row] = await executeQuery(connection, IS_TEST_SQL[kind], [param]);
-  return row?.IsTest === true || row?.IsTest === 1;
+  return row ? row.IsTest === true || row.IsTest === 1 : null;
+}
+
+/** Whether a record is test data; a record that isn't there reads as not test (see readTestRecord to tell). */
+export async function readIsTest(connection: Connection, kind: TestRecordKind, id: number | string): Promise<boolean> {
+  return (await readTestRecord(connection, kind, id)) === true;
 }
 
 /** The test-record kind an escalation's or a ledger row's subject type names, or null. */

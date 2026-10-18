@@ -126,6 +126,35 @@ describe("lookupMyobTestRecord (the default lookup)", () => {
   });
 });
 
+describe("a named record that doesn't exist (D11, from the M review: fail closed)", () => {
+  it("the default lookup says so, for a record named by the caller or through a proposal", async () => {
+    db.executeQuery.mockResolvedValueOnce([]);
+    await expect(lookupMyobTestRecord({ correlationId: null, record: { id: 404, kind: "purchase_order" } })).resolves.toEqual({
+      isTest: false,
+      missing: true,
+      named: true,
+    });
+    db.executeQuery.mockResolvedValueOnce([{ SubjectId: 404, SubjectType: "quote" }]).mockResolvedValueOnce([]);
+    await expect(lookupMyobTestRecord({ correlationId: CORRELATION, record: null })).resolves.toEqual({ isTest: false, missing: true, named: true });
+  });
+
+  it("an existing real record is not missing", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ IsTest: false }]);
+    await expect(lookupMyobTestRecord({ correlationId: null, record: { id: 5, kind: "purchase_order" } })).resolves.toEqual({ isTest: false, named: true });
+  });
+
+  it("myobRequest refuses a read or a write about it (no_record) and never reaches MYOB", async () => {
+    lookup.mockResolvedValue({ isTest: false, missing: true, named: true });
+    for (const call of [() => read(), () => write({ record: { id: 404, kind: "purchase_order" } })]) {
+      const err = await call().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(MyobRequestRefusedError);
+      expect((err as MyobRequestRefusedError).code).toBe("no_record");
+      expect((err as Error).message).toMatch(/doesn't exist/);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("when the test-record check itself fails (D9 review: fail closed)", () => {
   it("myobRequest refuses the call and never reaches MYOB", async () => {
     lookup.mockRejectedValue(new Error("database unreachable"));
