@@ -59,8 +59,20 @@ describe("MYOB writes are never bundled into another action (decision 12)", () =
   });
 });
 
+// The lab's agreement probe (plan M5) builds a DELETE only to show that
+// Floorplan's guard refuses it; it can't send anything, because it reaches
+// neither myobRequest nor any MYOB client (checked here and in probes.test.ts).
+const DELETE_PROBE = "myob/lab/probes.ts";
+
 describe("no DELETE reaches MYOB from anywhere", () => {
   it("no source file asks myobRequest for a DELETE", () => {
-    expect(files.filter((file) => /method:\s*["']DELETE["']/.test(file.text)).map((file) => file.name)).toEqual([]);
+    expect(files.filter((file) => file.name !== DELETE_PROBE && /method:\s*["']DELETE["']/.test(file.text)).map((file) => file.name)).toEqual([]);
+  });
+
+  it("the lab's DELETE probe reaches only the guard, never a MYOB client", () => {
+    const probe = files.find((file) => file.name === DELETE_PROBE);
+    expect(probe).toBeDefined();
+    const code = probe!.text.replace(/\/\/[^\n]*/g, "");
+    expect(code).not.toMatch(/myob-api-log|myob-client|myob-purchase-order|readbackClient|\bmyobRequest\b|\bfetch\s*\(/);
   });
 });

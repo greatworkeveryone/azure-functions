@@ -324,8 +324,8 @@ export const ACTION_ROLES = {
   myobController: {
     gate: [A.CFO],
     refused: [A.ADMIN, A.DIRECTOR],
-    routes: ["setMyobControl", "pauseMyob"],
-    why: "The CFO's MYOB switches and the pause (isMyobController: the cfo role, literally).",
+    routes: ["setMyobControl", "pauseMyob", "acceptMyobBaseline", "runMyobLabProbe", "recordMyobLabResult"],
+    why: "The CFO's MYOB switches and the pause, accepting MYOB's record as the baseline (SPR-M4), and the MYOB lab's probes and results (plan M5) (isMyobController: the cfo role, literally).",
   },
   overrideRentReviewChecks: {
     gate: [A.DIRECTOR],
@@ -508,8 +508,8 @@ export const ACTION_ROLES = {
   },
   viewMyobControls: {
     gate: [A.CFO],
-    routes: ["getMyobControls"],
-    why: "Read the MYOB controls.",
+    routes: ["getMyobControls", "getMyobActivity", "reconcileMyob", "getMyobLab"],
+    why: "Read the MYOB controls, the Activity view and reconciliation (SPR-M4), and the MYOB lab (plan M5).",
   },
   viewPayments: {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.DIRECTOR],

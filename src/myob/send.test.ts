@@ -44,11 +44,18 @@ const deps: SendDeps = { link: () => null, myob: {} as SendDeps["myob"], now: ()
 const send = (person = JOHANNE, over: Record<string, unknown> = {}) =>
   approveAndSend(deps, person, { expectedRowVersion: "v1", payloadHash: "h1", previewedAt: new Date("2026-10-14T00:08:00Z"), proposalId: 5, ...over });
 
+const RP_FILE = "abcdef12-2222-4333-8444-5555555555ee";
+const savedEnv = { ...process.env };
+afterAll(() => {
+  process.env = savedEnv;
+});
+
 let requireReview = true;
 let demonstration: { IsDemonstration: boolean; Name: string } | null = { IsDemonstration: true, Name: "Demo Pty Ltd" };
 
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env = { ...savedEnv, MYOB_RP_COMPANY_FILE_ID: RP_FILE };
   requireReview = true;
   demonstration = { IsDemonstration: true, Name: "Demo Pty Ltd" };
   executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
@@ -126,6 +133,33 @@ describe("approve (inside Floorplan, before any MYOB call)", () => {
     expect(store.updateProposal).not.toHaveBeenCalled();
   });
 
+  it("sends nothing while MYOB_RP_COMPANY_FILE_ID is unset: Floorplan can't tell RP's own file from the demonstration file (M5 review)", async () => {
+    for (const value of [undefined, "", "  "]) {
+      if (value === undefined) delete process.env.MYOB_RP_COMPANY_FILE_ID;
+      else process.env.MYOB_RP_COMPANY_FILE_ID = value;
+      await expect(send()).rejects.toMatchObject({ message: expect.stringContaining("MYOB_RP_COMPANY_FILE_ID"), status: 409 });
+    }
+    expect(buildDraft).not.toHaveBeenCalled();
+    expect(pushApproved).not.toHaveBeenCalled();
+    expect(store.updateProposal).not.toHaveBeenCalled();
+  });
+
+  it("never sends to RP's own file, even one flagged as the demonstration file (M5 review)", async () => {
+    store.getProposal.mockResolvedValue(proposal({ companyFileId: RP_FILE }));
+    demonstration = { IsDemonstration: true, Name: "Randazzo Properties" };
+    process.env.MYOB_RP_COMPANY_FILE_ID = ` ${RP_FILE.toUpperCase()} `;
+    await expect(send()).rejects.toMatchObject({ message: "Randazzo Properties is RP's own company file. Floorplan sends only to the demonstration file until the test-data check and the money gate cover MYOB.", status: 409 });
+    expect(pushApproved).not.toHaveBeenCalled();
+    expect(store.updateProposal).not.toHaveBeenCalled();
+  });
+
+  it("refuses RP's file whatever case its stored id is in (M5 follow-up S06)", async () => {
+    store.getProposal.mockResolvedValue(proposal({ companyFileId: RP_FILE.toUpperCase() }));
+    demonstration = { IsDemonstration: true, Name: "Randazzo Properties" };
+    await expect(send()).rejects.toMatchObject({ message: expect.stringContaining("is RP's own company file"), status: 409 });
+    expect(pushApproved).not.toHaveBeenCalled();
+  });
+
   it("rebuilds the payload with the reviewer as approver at the previewed time", async () => {
     await send();
     expect(buildDraft).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -174,6 +208,17 @@ describe("send and record", () => {
     const outcome = await send();
     expect(outcome.message).toContain("current-period rule");
     expect(outcome.message).not.toContain("controls");
+  });
+
+  it("checks RP's file at approval, before D9's test-record refusal at the push; with both clear of it a test record is still not sent", async () => {
+    delete process.env.MYOB_RP_COMPANY_FILE_ID;
+    await expect(send()).rejects.toMatchObject({ status: 409 });
+    expect(pushApproved).not.toHaveBeenCalled();
+    process.env.MYOB_RP_COMPANY_FILE_ID = RP_FILE;
+    pushApproved.mockResolvedValue({ kind: "refused", message: "Test records never leave Floorplan", reason: "test_record" });
+    const outcome = await send();
+    expect(pushApproved).toHaveBeenCalledTimes(1);
+    expect(outcome.message).toContain("Test records never go to MYOB");
   });
 
   it("records a read-back that differs from what was sent as an exception, never as verified", async () => {
