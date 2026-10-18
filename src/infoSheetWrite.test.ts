@@ -41,20 +41,52 @@ describe("editInfoSheet", () => {
     expect(edit.before).toEqual(JSON.parse(STORED));
   });
 
-  it("updates a section in place, merged over what is stored, and appends a new one, leaving the rest alone", () => {
-    const updated = editInfoSheet(STORED, { kind: "upsertSection", section: { displayOrder: 1, id: "b", rows: [], title: "Café 2" } });
+  it("updates a section's own fields in place, and appends a new one, leaving the rest alone", () => {
+    const updated = editInfoSheet(STORED, { isNew: false, kind: "upsertSection", section: { displayOrder: 1, id: "b", rows: [], title: "Café 2" } });
     if (!updated.ok) throw new Error("expected ok");
     const raws = jsonArrayElements(updated.json)?.map((element) => element.raw) ?? [];
     expect([raws[0], raws[2]]).toEqual([A, C]);
     expect(JSON.parse(raws[1]).title).toBe("Café 2");
 
-    const added = editInfoSheet(STORED, { kind: "upsertSection", section: { displayOrder: 3, id: "d", rows: [], title: "D" } });
+    const added = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", section: { displayOrder: 3, id: "d", rows: [], title: "D" } });
     if (!added.ok) throw new Error("expected ok");
     expect(added.json.startsWith(`[${A},${B},${C},`)).toBe(true);
   });
 
+  // The D11 review's three proven losses, each from a screen that is out of date.
+  it("a rename keeps the rows as stored: a stale screen's rows never replace them (a colleague's new row survives)", () => {
+    const stale = { ...JSON.parse(C), rows: [JSON.parse(C).rows[0]], title: "C renamed" };
+    const edit = editInfoSheet(STORED, { isNew: false, kind: "upsertSection", section: stale });
+    if (!edit.ok) throw new Error("expected ok");
+    const [, , third] = JSON.parse(edit.json);
+    expect(third.title).toBe("C renamed");
+    expect(third.rows).toEqual(JSON.parse(C).rows);
+    expect(third.strikethrough).toBe(true);
+  });
+
+  it("editing a section a colleague deleted doesn't bring it back (404)", () => {
+    expect(editInfoSheet(STORED, { isNew: false, kind: "upsertSection", section: { displayOrder: 9, id: "gone", rows: [], title: "Gone" } })).toEqual(
+      expect.objectContaining({ ok: false, status: 404 }),
+    );
+  });
+
+  it("editing a row a colleague deleted doesn't add it again (404); a new row is added only when it says so", () => {
+    const row = { body: "x", displayOrder: 5, id: "r-gone", subheader: "X" };
+    expect(editInfoSheet(STORED, { isNew: false, kind: "upsertRow", row, sectionId: "c" })).toEqual(expect.objectContaining({ ok: false, status: 404 }));
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertRow", row, sectionId: "c" })).toEqual(expect.objectContaining({ ok: true }));
+  });
+
+  it("refuses (409) a 'new' section or row whose id is already there", () => {
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } })).toEqual(
+      expect.objectContaining({ ok: false, status: 409 }),
+    );
+    expect(
+      editInfoSheet(STORED, { isNew: true, kind: "upsertRow", row: { body: "b", displayOrder: 0, id: "r2", subheader: "S" }, sectionId: "c" }),
+    ).toEqual(expect.objectContaining({ ok: false, status: 409 }));
+  });
+
   it("puts a row into its section only, leaving the other sections as stored", () => {
-    const edit = editInfoSheet(STORED, { kind: "upsertRow", row: { body: "new", displayOrder: 2, id: "r9", subheader: "V" }, sectionId: "c" });
+    const edit = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", row: { body: "new", displayOrder: 2, id: "r9", subheader: "V" }, sectionId: "c" });
     if (!edit.ok) throw new Error("expected ok");
     const raws = jsonArrayElements(edit.json)?.map((element) => element.raw) ?? [];
     expect([raws[0], raws[1]]).toEqual([A, B]);
@@ -63,7 +95,7 @@ describe("editInfoSheet", () => {
 
   it("starts an empty or missing column as an empty list for a new section", () => {
     for (const raw of [null, undefined, "", "  "]) {
-      const edit = editInfoSheet(raw, { kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } });
+      const edit = editInfoSheet(raw, { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } });
       expect(edit).toEqual(expect.objectContaining({ before: [], ok: true }));
     }
   });
@@ -77,8 +109,8 @@ describe("editInfoSheet", () => {
     const ops: InfoSheetOp[] = [
       { kind: "deleteSection", sectionId: "a" },
       { kind: "deleteRow", rowId: "r1", sectionId: "a" },
-      { kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } },
-      { kind: "upsertRow", row: { body: "b", displayOrder: 0, id: "r1", subheader: "S" }, sectionId: "a" },
+      { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } },
+      { isNew: false, kind: "upsertRow", row: { body: "b", displayOrder: 0, id: "r1", subheader: "S" }, sectionId: "a" },
     ];
     for (const op of ops) {
       expect(editInfoSheet(raw, op)).toEqual({ error: expect.stringMatching(/can't be changed safely/), ok: false, status: 422 });
@@ -96,7 +128,7 @@ describe("editInfoSheet", () => {
     expect(editInfoSheet(STORED, { kind: "deleteRow", rowId: "r2", sectionId: "zz" })).toEqual(expect.objectContaining({ ok: false, status: 404 }));
     expect(editInfoSheet(null, { kind: "deleteSection", sectionId: "a" })).toEqual(expect.objectContaining({ ok: false, status: 404 }));
     expect(
-      editInfoSheet(STORED, { kind: "upsertRow", row: { body: "b", displayOrder: 0, id: "r1", subheader: "S" }, sectionId: "zz" }),
+      editInfoSheet(STORED, { isNew: true, kind: "upsertRow", row: { body: "b", displayOrder: 0, id: "r1", subheader: "S" }, sectionId: "zz" }),
     ).toEqual(expect.objectContaining({ ok: false, status: 404 }));
   });
 });

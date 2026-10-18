@@ -266,14 +266,26 @@ describe("the deletes change only what they name", () => {
 });
 
 const UPSERTS = [
-  ["upsertInfoSheetSection", { BuildingId: 5, Section: { displayOrder: 2, id: "sec-3", rows: [], title: "Parking" }, TenantId: 1 }],
-  ["upsertInfoSheetRow", { BuildingId: 5, Row: { body: "b", displayOrder: 2, id: "row-3", subheader: "New" }, SectionId: "sec-1", TenantId: 1 }],
+  ["upsertInfoSheetSection", { BuildingId: 5, IsNew: true, Section: { displayOrder: 2, id: "sec-3", rows: [], title: "Parking" }, TenantId: 1 }],
+  ["upsertInfoSheetRow", { BuildingId: 5, IsNew: true, Row: { body: "b", displayOrder: 2, id: "row-3", subheader: "New" }, SectionId: "sec-1", TenantId: 1 }],
 ] as const;
 
 describe.each(UPSERTS)("%s", (route, body) => {
-  const send = () => handlers[route](makeRequest(body), ctx);
+  const send = (extra: Record<string, unknown> = { InfoSheetVersion: 4 }) => handlers[route](makeRequest({ ...body, ...extra }), ctx);
 
-  it("merges into the sheet as stored under the row lock, moves the version on and returns it, without asking for one", async () => {
+  it.each([{}, { InfoSheetVersion: "4" }, { InfoSheetVersion: -1 }])("needs the version the sheet was shown at (%p → 400), before touching the database", async (extra) => {
+    expect((await send(extra)).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stale write (409) with who changed it, and writes nothing (D11 review)", async () => {
+    const res = await send({ InfoSheetVersion: 3 });
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toBe("This tenancy was changed by Bea Accounts since you opened it. Reload to see their change.");
+    expect(written()).toBeUndefined();
+  });
+
+  it("writes under the row lock at the version shown, moves the version on and returns it", async () => {
     const res = await send();
     expect(res.status).toBe(200);
     expect((res.jsonBody as { infoSheetVersion: number }).infoSheetVersion).toBe(5);
@@ -299,8 +311,45 @@ describe("upsertInfoSheetSection on an empty sheet", () => {
   it("starts the list", async () => {
     sheet = { ...sheet, InfoSheetSections: null };
     const section = { displayOrder: 0, id: "sec-9", rows: [], title: "First" };
-    const res = await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, Section: section, TenantId: 1 }), ctx);
+    const res = await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Section: section, TenantId: 1 }), ctx);
     expect(res.status).toBe(200);
     expect(JSON.parse(writtenJson() ?? "null")).toEqual([section]);
+  });
+});
+
+describe("a screen out of date can't undo a colleague's change (the D11 review's three cases)", () => {
+  const upsertSection = (section: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, Section: section, TenantId: 1, ...extra }), ctx);
+
+  it("a rename sent with stale rows keeps the stored rows: the row a colleague added survives", async () => {
+    const stale = { ...JSON.parse(S1), rows: [JSON.parse(S1).rows[0]], title: "Keys and fobs" };
+    expect((await upsertSection(stale)).status).toBe(200);
+    const [first, second] = JSON.parse(writtenJson() ?? "[]");
+    expect(first.title).toBe("Keys and fobs");
+    expect(first.rows.map((r: { id: string }) => r.id)).toEqual(["row-1", "row-2"]);
+    expect(first.legacyNote).toBe("kept 1.50");
+    expect(second).toEqual(JSON.parse(S2));
+  });
+
+  it("editing a section a colleague deleted answers 404 and doesn't bring it back", async () => {
+    const res = await upsertSection({ displayOrder: 5, id: "sec-deleted", rows: [], title: "Old" });
+    expect(res.status).toBe(404);
+    expect(written()).toBeUndefined();
+  });
+
+  it("editing a row a colleague deleted answers 404 and doesn't add it again", async () => {
+    const res = await handlers.upsertInfoSheetRow(
+      makeRequest({ BuildingId: 5, InfoSheetVersion: 4, Row: { body: "x", displayOrder: 9, id: "row-deleted", subheader: "Gone" }, SectionId: "sec-1", TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+    expect(written()).toBeUndefined();
+  });
+
+  it("a 'new' section or row whose id is already there is a 409, not an overwrite", async () => {
+    expect((await upsertSection(JSON.parse(S2), { IsNew: true })).status).toBe(409);
+    const row = { body: "y", displayOrder: 0, id: "row-1", subheader: "Spare" };
+    expect((await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx)).status).toBe(409);
+    expect(written()).toBeUndefined();
   });
 });

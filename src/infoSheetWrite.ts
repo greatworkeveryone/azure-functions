@@ -17,20 +17,29 @@ import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
 // tenancy's row lock and moves InfoSheetVersion on. A delete names the version
 // it was shown, is refused (409) when the sheet has changed since, and is
 // ledgered with the whole array as it was.
+//
+// D11 review: every write names the version it was shown (409 when stale). A
+// section write changes only the section's own fields (title, order,
+// strikethrough) and keeps its stored rows; rows change only through row
+// writes. A write for a section or row that is no longer there is a 404 unless
+// it says it is new, so a stale screen can't bring back what a colleague took off.
 
 export type InfoSheetOp =
   | { kind: "deleteRow"; rowId: string; sectionId: string }
   | { kind: "deleteSection"; sectionId: string }
-  | { kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
-  | { kind: "upsertSection"; section: InfoSheetSection };
+  | { isNew: boolean; kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
+  | { isNew: boolean; kind: "upsertSection"; section: InfoSheetSection };
 
 export type InfoSheetEdit =
   | { before: unknown[]; json: string; ok: true; sections: InfoSheetSection[] }
-  | { error: string; ok: false; status: 404 | 422 };
+  | { error: string; ok: false; status: 404 | 409 | 422 };
 
 const UNSAFE = "This tenancy's info sheet is stored in a form that can't be changed safely, so nothing was changed. Ask an admin to look at it.";
 const NO_SECTION = "That section is no longer on the info sheet. Reload to see it as it is now.";
 const NO_ROW = "That row is no longer on the info sheet. Reload to see it as it is now.";
+const ALREADY = "That is already on the info sheet. Reload to see it as it is now.";
+/** The fields a section write may change; its rows change only through row writes. */
+const SECTION_FIELDS = ["displayOrder", "strikethrough", "title"] as const;
 
 /** The top-level entries of a JSON array, each as its own stored text, or null when the text isn't a JSON array. */
 export function jsonArrayElements(text: string): { raw: string; value: unknown }[] | null {
@@ -77,7 +86,7 @@ function elementsOf(raw: unknown): { raw: string; value: unknown }[] | null {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const idOf = (value: unknown): unknown => (isRecord(value) ? value.id : undefined);
-const refuse = (status: 404 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
+const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
 
 /** The column after one change, with every other entry as stored; or why not. */
 export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
@@ -92,9 +101,18 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     if (at === -1) return refuse(404, NO_SECTION);
     raws.splice(at, 1);
   } else if (op.kind === "upsertSection") {
-    const current = at === -1 ? null : elements[at].value;
-    if (at === -1) raws.push(JSON.stringify(op.section));
-    else raws[at] = JSON.stringify({ ...(isRecord(current) ? current : {}), ...op.section });
+    if (at === -1 && !op.isNew) return refuse(404, NO_SECTION);
+    if (at !== -1 && op.isNew) return refuse(409, ALREADY);
+    if (at === -1) {
+      // A new section may arrive with its first rows (bulk add).
+      raws.push(JSON.stringify({ ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] }));
+    } else {
+      const current = elements[at].value;
+      if (!isRecord(current)) return refuse(422, UNSAFE);
+      const own: Record<string, unknown> = {};
+      for (const field of SECTION_FIELDS) if (op.section[field] !== undefined) own[field] = op.section[field];
+      raws[at] = JSON.stringify({ ...current, ...own });
+    }
   } else {
     if (at === -1) return refuse(404, NO_SECTION);
     const section = elements[at].value;
@@ -106,12 +124,22 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
       if (rowAt === -1) return refuse(404, NO_ROW);
       nextRows = rows.filter((_row, index) => index !== rowAt);
     } else {
+      if (rowAt === -1 && !op.isNew) return refuse(404, NO_ROW);
+      if (rowAt !== -1 && op.isNew) return refuse(409, ALREADY);
       nextRows = rowAt === -1 ? [...rows, op.row] : rows.map((row, index) => (index === rowAt ? op.row : row));
     }
     raws[at] = JSON.stringify({ ...section, rows: nextRows });
   }
   const json = `[${raws.join(",")}]`;
   return { before, json, ok: true, sections: JSON.parse(json) as InfoSheetSection[] };
+}
+
+/** The version a write names (`InfoSheetVersion`), or a 400 when it doesn't name one. */
+export function infoSheetVersionOf(body: Record<string, unknown>): number | { status: 400; jsonBody: { error: string } } {
+  const version = body.InfoSheetVersion;
+  return typeof version === "number" && Number.isInteger(version) && version >= 0
+    ? version
+    : { jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" }, status: 400 };
 }
 
 const LOCKED_SHEET = `SELECT InfoSheetSections, InfoSheetVersion, UpdatedAt, UpdatedByName
@@ -129,8 +157,8 @@ const WRITE_SHEET = `UPDATE dbo.Tenants SET
 export interface InfoSheetWrite {
   buildingId: number;
   caller: { id: string; name: string };
-  /** The version the client was shown; a delete must name it. Null: no check (an upsert merges into what is stored). */
-  expectedVersion: number | null;
+  /** The version the client was shown; every write names it (D11 review). */
+  expectedVersion: number;
   /** Deletes are ledgered with the whole array as it was. */
   ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
   op: InfoSheetOp;
@@ -154,7 +182,7 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
     const [row] = await executeQuery(connection, LOCKED_SHEET, scope);
     if (!row) return await refused({ status: 404, jsonBody: { error: "Tenant not found" } });
     const current = Number(row.InfoSheetVersion ?? 0);
-    if (write.expectedVersion !== null && write.expectedVersion !== current) {
+    if (write.expectedVersion !== current) {
       return await refused(
         conflictResponse(
           { changedAt: isoTimestamp(row.UpdatedAt), changedBy: (row.UpdatedByName as string | null) ?? null },

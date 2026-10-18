@@ -130,7 +130,7 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { writeInfoSheet } from "../infoSheetWrite";
+import { infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
@@ -3237,16 +3237,19 @@ async function upsertInfoSheetSectionHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !section?.id || !section.title) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, and Section (id, title) required" } };
     }
+    const infoSheetVersion = infoSheetVersionOf(body);
+    if (typeof infoSheetVersion !== "number") return infoSheetVersion;
 
     connection = await createRequestConnection(token);
-    // D11: under the row lock, every other section kept as stored; a column that
-    // isn't a JSON array is refused (422), never saved over.
+    // D11: under the row lock and at the version shown (409 when stale). Only the
+    // section's own fields change; its rows stay as stored. A section that isn't
+    // there is a 404 unless IsNew; a column that isn't a JSON array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
-      expectedVersion: null,
+      expectedVersion: infoSheetVersion,
       ledger: null,
-      op: { kind: "upsertSection", section },
+      op: { isNew: body.IsNew === true, kind: "upsertSection", section },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3290,10 +3293,8 @@ async function deleteInfoSheetSectionHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, and SectionId required" } };
     }
-    const infoSheetVersion = body.InfoSheetVersion;
-    if (typeof infoSheetVersion !== "number" || !Number.isInteger(infoSheetVersion) || infoSheetVersion < 0) {
-      return { status: 400, jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" } };
-    }
+    const infoSheetVersion = infoSheetVersionOf(body);
+    if (typeof infoSheetVersion !== "number") return infoSheetVersion;
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -3350,16 +3351,19 @@ async function upsertInfoSheetRowHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId || !row?.id) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and Row (id) required" } };
     }
+    const infoSheetVersion = infoSheetVersionOf(body);
+    if (typeof infoSheetVersion !== "number") return infoSheetVersion;
 
     connection = await createRequestConnection(token);
-    // D11: under the row lock, every other section kept as stored; a missing
-    // section is a 404 and a column that isn't a JSON array a 422.
+    // D11: under the row lock and at the version shown (409 when stale). A row
+    // that isn't there is a 404 unless IsNew, a missing section a 404, and a
+    // column that isn't a JSON array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
-      expectedVersion: null,
+      expectedVersion: infoSheetVersion,
       ledger: null,
-      op: { kind: "upsertRow", row, sectionId },
+      op: { isNew: body.IsNew === true, kind: "upsertRow", row, sectionId },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3404,10 +3408,8 @@ async function deleteInfoSheetRowHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId || !rowId) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and RowId required" } };
     }
-    const infoSheetVersion = body.InfoSheetVersion;
-    if (typeof infoSheetVersion !== "number" || !Number.isInteger(infoSheetVersion) || infoSheetVersion < 0) {
-      return { status: 400, jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" } };
-    }
+    const infoSheetVersion = infoSheetVersionOf(body);
+    if (typeof infoSheetVersion !== "number") return infoSheetVersion;
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
