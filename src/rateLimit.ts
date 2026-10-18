@@ -8,8 +8,6 @@
 // string the handler picks). Expired entries are purged lazily on access so
 // memory stays bounded under steady load.
 
-import { BlockList, isIP, isIPv4 } from "node:net";
-
 interface Bucket {
   count: number;
   resetAt: number;
@@ -80,45 +78,22 @@ export const SIGN_IN_LIMITS = {
   perOid: { limit: 20, windowMs: 60_000 },
 } as const;
 
-export function checkSignInRateLimit(oid: string, ip: string): RateLimitResult {
+/** Which limit refused a sign-in: the person's own, or the address's. */
+export type SignInBucket = "user" | "address";
+
+export type SignInRateLimitResult =
+  | { allowed: true }
+  | { allowed: false; bucket: SignInBucket; retryAfterMs: number };
+
+/**
+ * `address` is the caller's network address from access/clientIp.ts
+ * clientAddress(), or "unknown" when that cannot be read: those callers share
+ * one bucket, so nothing the caller wrote picks theirs.
+ */
+export function checkSignInRateLimit(oid: string, address: string): SignInRateLimitResult {
   const byOid = checkRateLimit(`registerSelf:oid:${oid}`, SIGN_IN_LIMITS.perOid);
-  if (!byOid.allowed) return byOid;
-  return checkRateLimit(`registerSelf:ip:${ip}`, SIGN_IN_LIMITS.perIp);
-}
-
-// The caller's address: the rightmost PUBLIC entry of X-Forwarded-For. The
-// header is unverified — a caller can send its own, and a proxy that appends
-// leaves the caller's value on the left and the address it saw on the right —
-// so nothing the caller writes can land to the right of the platform's entry,
-// and private hops the platform adds after it are skipped. Unreadable entries
-// are skipped; ports (Azure appends one) and brackets are dropped. Same rule as
-// the access log's clientAddress() (lane S, src/access/clientIp.ts); the
-// integrator keeps one copy when the lanes merge.
-const NOT_PUBLIC = new BlockList();
-for (const [net, prefix] of [
-  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
-  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.168.0.0", 16],
-] as const) NOT_PUBLIC.addSubnet(net, prefix, "ipv4");
-for (const [net, prefix] of [["::", 127], ["fc00::", 7], ["fe80::", 10]] as const) NOT_PUBLIC.addSubnet(net, prefix, "ipv6");
-
-function normaliseForwardedEntry(raw: string): string | null {
-  let entry = raw.trim().replace(/^"|"$/g, "");
-  const bracketed = entry.match(/^\[([^\]]+)\](?::\d+)?$/);
-  if (bracketed) entry = bracketed[1];
-  else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(entry)) entry = entry.slice(0, entry.lastIndexOf(":"));
-  const mapped = entry.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
-  if (mapped) entry = mapped[1];
-  if (!isIP(entry)) return null;
-  return isIPv4(entry) ? entry : entry.toLowerCase();
-}
-
-export function clientIpFromHeaders(get: (name: string) => string | null): string {
-  const entries = (get("x-forwarded-for") ?? "")
-    .split(",")
-    .map(normaliseForwardedEntry)
-    .filter((entry): entry is string => entry !== null);
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    if (!NOT_PUBLIC.check(entries[i], isIPv4(entries[i]) ? "ipv4" : "ipv6")) return entries[i];
-  }
-  return entries[entries.length - 1] ?? "unknown";
+  if (!byOid.allowed) return { ...byOid, bucket: "user" };
+  const byAddress = checkRateLimit(`registerSelf:ip:${address}`, SIGN_IN_LIMITS.perIp);
+  if (!byAddress.allowed) return { ...byAddress, bucket: "address" };
+  return byAddress;
 }

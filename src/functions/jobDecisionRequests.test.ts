@@ -908,6 +908,22 @@ describe("requestJobDecision", () => {
     expect(res).toMatchObject({ headers: { "Retry-After": "12" }, status: 429 });
     nothingWritten();
   });
+
+  it("refuses an over-limit request before it opens a database connection, and counts it by the verified person", async () => {
+    rateLimit.mockReturnValue({ allowed: false, retryAfterMs: 12_000 } as never);
+
+    expect((await ask()).status).toBe(429);
+
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+    expect(rateLimit).toHaveBeenCalledWith("requestJobDecision:oid-alana", { limit: 30, windowMs: 60_000 });
+  });
+
+  it("counts a request that is not allowed in at all as nothing: no token and no role are refused before the limit", async () => {
+    expect((await requestJobDecision(req({ body: VALID_ASK, headers: {} }), context())).status).toBe(401);
+    expect((await requestJobDecision(req({ body: VALID_ASK, headers: as("una") }), context())).status).toBe(403);
+    expect(rateLimit).not.toHaveBeenCalled();
+  });
 });
 
 // ── Read ─────────────────────────────────────────────────────────────────────

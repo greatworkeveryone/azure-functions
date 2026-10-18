@@ -33,6 +33,30 @@ describe("jobMoneyRefusal", () => {
   });
 });
 
+describe("jobMoneyRefusal: admin jobs (A0)", () => {
+  const ADMIN = { code: "admin_is_internal", message: "This is an admin job: it has no quotes, orders or invoices.", status: 422 };
+
+  it("refuses an admin job, in plain words, whatever its other flags say", () => {
+    expect(jobMoneyRefusal({ isInternal: false, kind: "admin", status: "Work" })).toEqual(ADMIN);
+    expect(jobMoneyRefusal({ isInternal: true, kind: "admin", status: "Work" })).toEqual(ADMIN);
+  });
+
+  it("answers before the done, archived and internal rules, so the person is told the real reason", () => {
+    expect(jobMoneyRefusal({ isArchived: true, isInternal: true, kind: "admin", status: "Done" })).toEqual(ADMIN);
+  });
+
+  it("refuses an admin job's outgoing invoice too: the kind has no money flow at all", () => {
+    expect(jobMoneyRefusal({ kind: "admin", status: "Done" }, { outgoingInvoice: true })).toEqual(ADMIN);
+  });
+
+  it("lets the contractor-flow kinds through, and a job whose kind was not loaded reads as facilities", () => {
+    expect(jobMoneyRefusal({ kind: "facilities", status: "Work" })).toBeNull();
+    expect(jobMoneyRefusal({ kind: "maintenance", status: "Work" })).toBeNull();
+    expect(jobMoneyRefusal({ kind: " ", status: "Work" })).toBeNull();
+    expect(jobMoneyRefusal({ status: "Work" })).toBeNull();
+  });
+});
+
 describe("amountRefusal", () => {
   it.each([undefined, null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, "500"])("refuses %p when an amount is required", (value) => {
     expect(amountRefusal(value, "Amount", true)).toEqual({ code: "amount_invalid", message: "Amount is required and must be more than $0.", status: 422 });

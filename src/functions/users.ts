@@ -19,9 +19,10 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { noteSignIn } from "../access/accessEvents";
+import { clientAddress } from "../access/clientIp";
 import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
-import { checkRateLimit, checkSignInRateLimit, clientIpFromHeaders } from "../rateLimit";
+import { checkRateLimit, checkSignInRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
@@ -362,8 +363,10 @@ export async function registerSelf(
 
   // Limits count only verified callers (SEC-10): an anonymous flood naming the
   // office's IP can no longer sign the whole office out.
-  const rl = checkSignInRateLimit(oid, clientIpFromHeaders((h) => request.headers.get(h)));
+  const rl = checkSignInRateLimit(oid, clientAddress(request) ?? "unknown");
   if (!rl.allowed) {
+    // The bucket's kind only: never the oid, the address or the token.
+    context.warn(`registerSelf refused: ${rl.bucket} sign-in limit reached`);
     return {
       status: 429,
       headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },

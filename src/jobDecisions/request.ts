@@ -131,8 +131,21 @@ function readDecisionMakers(mode: unknown, value: unknown): DecisionMakersInput 
   }
   if (typeof makers.role !== "string" || normaliseRole(makers.role) === "") throw bad("decisionMakers.role must name a role");
   const role = normaliseRole(makers.role);
+  const notAskable = roleNotAskable(role);
+  if (notAskable) throw notAskable;
+  return { mode, role };
+}
+
+/**
+ * Why a question can't be put to everyone in `role`, or null when it can. Admin
+ * gets its own reason (it approves nothing real, decision 4); any other role must
+ * be one that can open the escalation inbox. Held to when a request is read and
+ * again when its people are resolved (people.ts), so a role saved by an older build
+ * (a deferred question coming back) is checked as a new one is.
+ */
+export function roleNotAskable(role: string): RequestError | null {
   if (role === ROLES.admin) {
-    throw new RequestError(
+    return new RequestError(
       "decision_maker_role_not_allowed",
       `${ADMIN_DOES_NOT_DECIDE}, so a question can't be put to the Admin role. Ask a director, the CFO or a manager.`,
       422,
@@ -140,9 +153,9 @@ function readDecisionMakers(mode: unknown, value: unknown): DecisionMakersInput 
     );
   }
   if (!DECISION_MAKER_ROLES.includes(role)) {
-    throw bad(`decisionMakers.role must be one of ${DECISION_MAKER_ROLES.join(", ")}`);
+    return bad(`decisionMakers.role must be one of ${DECISION_MAKER_ROLES.join(", ")}`);
   }
-  return { mode, role };
+  return null;
 }
 
 /** A request body -> the typed request, or a RequestError / TierError. */

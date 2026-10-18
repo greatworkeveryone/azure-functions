@@ -45,7 +45,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection } from "../db";
-import { extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
 import "../escalation/adapters";
 import { readBody, resolveCaller, type Caller } from "../escalation/http";
 import { toChaseDto, toRequestDto } from "../jobDecisions/dto";
@@ -65,6 +65,15 @@ export async function requestJobDecision(request: HttpRequest, context: Invocati
   const roleCheck = await requireRole(request, ASK_FOR_DECISION_ROLES);
   if (roleCheck) return roleCheck;
 
+  // Counted by the verified person before anything else is done for them: an
+  // over-limit caller costs no database connection.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const limit = checkRateLimit(`requestJobDecision:${identity.oid}`, ASK_RATE_LIMIT);
+  if (!limit.allowed) {
+    return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
+  }
+
   let connection;
   let caller: Caller | null = null;
   try {
@@ -73,11 +82,6 @@ export async function requestJobDecision(request: HttpRequest, context: Invocati
     connection = await createRequestConnection(token);
     caller = await resolveCaller(request, connection);
     if (!caller) return unauthorizedResponse();
-
-    const limit = checkRateLimit(`requestJobDecision:${caller.actor.userId ?? caller.actor.name}`, ASK_RATE_LIMIT);
-    if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
-    }
 
     const outcome = await requestDecision(connection, { actor: caller.actor }, parsed);
     const people = await peopleByIds(connection, outcome.request.decisionMakers.userIds);

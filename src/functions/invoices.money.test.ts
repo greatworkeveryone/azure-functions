@@ -133,6 +133,8 @@ describe("upsertJobInvoice: creating", () => {
 
   it.each([
     [{ IsInternal: true }, 422, "internal_job"],
+    [{ Kind: "admin" }, 422, "admin_is_internal"],
+    [{ IsInternal: true, Kind: "admin" }, 422, "admin_is_internal"],
     [{ Status: "Done" }, 409, "job_done"],
   ])("refuses an invoice on a job like %p", async (over, status, code) => {
     mockSql([APP_USER, job(over), CREATED]);
@@ -165,6 +167,12 @@ describe("upsertJobInvoice: creating", () => {
     expect(ledgerInserts(db.executeQuery)).toEqual([]);
   });
 
+  it("an admin job takes no outgoing invoice either, even when it is done", async () => {
+    mockSql([APP_USER, job({ Kind: "admin", Status: "Done" }), CREATED]);
+    expect(await call("upsertJobInvoice", { Amount: 500, Direction: "outgoing", JobID: 9 })).toMatchObject({ jsonBody: { code: "admin_is_internal" }, status: 422 });
+    expect(wrote(/INSERT INTO JobInvoices/)).toBe(false);
+  });
+
   it("decision 18: an outgoing invoice on an internal job is still refused", async () => {
     mockSql([APP_USER, job({ IsInternal: true, Status: "Done" }), CREATED]);
     expect(await call("upsertJobInvoice", { Amount: 500, Direction: "outgoing", JobID: 9 })).toMatchObject({ jsonBody: { code: "internal_job" }, status: 422 });
@@ -190,6 +198,7 @@ describe("upsertJobInvoice: creating", () => {
 describe("upsertJobInvoice: control refusals are ledgered", () => {
   it.each([
     ["internal", { IsInternal: true }, "internal_job"],
+    ["admin", { Kind: "admin" }, "admin_is_internal"],
     ["done", { Status: "Done" }, "job_done"],
     ["archived", { IsArchived: true }, "job_archived"],
   ])("creating on an %s job: one `denied` row against the job", async (_label, over, code) => {
@@ -247,6 +256,12 @@ describe("upsertJobInvoice: editing", () => {
     expect(wrote(/UPDATE JobInvoices/)).toBe(false);
   });
 
+  it("refuses edits to an invoice on an admin job, writing nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Kind: "admin" }), invoice(), PAYMENTS(0), INVOICE_SCOPE]);
+    expect(await call("upsertJobInvoice", { JobInvoiceID: 5, Notes: "x" })).toMatchObject({ jsonBody: { code: "admin_is_internal" }, status: 422 });
+    expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+  });
+
   it("refuses edits on a done job, and clearing the amount", async () => {
     mockSql([APP_USER, job({ Status: "Done" }), invoice(), PAYMENTS(0)]);
     expect((await call("upsertJobInvoice", { JobInvoiceID: 5, Notes: "x" })).status).toBe(409);
@@ -261,6 +276,7 @@ describe("approveJobInvoice", () => {
     ["done (incoming)", { Status: "Done" }, 409, "job_done"],
     ["archived", { IsArchived: true }, 409, "job_archived"],
     ["internal", { IsInternal: true }, 422, "internal_job"],
+    ["admin", { Kind: "admin" }, 422, "admin_is_internal"],
   ])("refuses an invoice on a %s job, writing nothing", async (_label, over, status, code) => {
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, job(over), invoice(), INVOICE_SCOPE]);
     expect(await call("approveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code }, status });
@@ -303,6 +319,7 @@ describe("directorApproveJobInvoice", () => {
     ["done (incoming)", { Status: "Done" }, 409, "job_done"],
     ["archived", { IsArchived: true }, 409, "job_archived"],
     ["internal", { IsInternal: true }, 422, "internal_job"],
+    ["admin", { Kind: "admin" }, 422, "admin_is_internal"],
   ])("refuses the director approval on a %s job: nothing written, ledgered", async (_label, over, status, code) => {
     mockSql([APP_USER, JOB_BUILDING, job(over), stageOne(), INVOICE_SCOPE]);
     expect(await call("directorApproveJobInvoice", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code }, status });

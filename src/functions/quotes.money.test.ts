@@ -128,6 +128,8 @@ describe("upsertQuote: creating", () => {
 
   it.each([
     ["an internal job", { IsInternal: true }, 422, "internal_job"],
+    ["an admin job", { Kind: "admin" }, 422, "admin_is_internal"],
+    ["an admin job that is also in-house", { IsInternal: true, Kind: "admin" }, 422, "admin_is_internal"],
     ["a done job", { Status: "Done" }, 409, "job_done"],
     ["an archived job", { IsArchived: true }, 409, "job_archived"],
   ])("refuses a quote on %s, ledgering the refused attempt against the job", async (_label, over, status, code) => {
@@ -139,6 +141,11 @@ describe("upsertQuote: creating", () => {
     expect(ledgerInserts(db.executeQuery)).toEqual([
       expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.create" }), ruleApplied: code, subjectId: "9", subjectType: "job" }),
     ]);
+  });
+
+  it("tells the person in plain words that an admin job has no quotes", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Kind: "admin" }), CREATED]);
+    expect((await create({ Amount: 500 })).jsonBody).toEqual({ code: "admin_is_internal", error: "This is an admin job: it has no quotes, orders or invoices." });
   });
 
   it("a missing amount is plain validation: answered, not ledgered", async () => {
@@ -189,6 +196,12 @@ describe("upsertQuote: editing", () => {
     expect(ledgerInserts(db.executeQuery)).toEqual([
       expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.edit" }), ruleApplied: "job_done", subjectId: "7", subjectType: "quote" }),
     ]);
+  });
+
+  it("refuses editing a quote on an admin job, writing nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Kind: "admin" }), quote(), QUOTE_SCOPE]);
+    expect(await edit({ Notes: "x" })).toMatchObject({ jsonBody: { code: "admin_is_internal" }, status: 422 });
+    expect(wrote(/UPDATE Quotes/)).toBe(false);
   });
 
   it("refuses editing a quote on a done job", async () => {

@@ -1,11 +1,10 @@
 /// <reference types="jest" />
-import { _resetRateLimitForTests, checkSignInRateLimit, clientIpFromHeaders, SIGN_IN_LIMITS } from "./rateLimit";
+import { _resetRateLimitForTests, checkRateLimit, checkSignInRateLimit, SIGN_IN_LIMITS } from "./rateLimit";
 
 // SEC-10: sign-in is limited per user (20/min) with a generous per-IP ceiling
 // (120/min) so a shared office NAT is never locked out by its own staff, and
-// the IP is the one the platform saw, not a header the caller wrote.
-
-const headers = (h: Record<string, string>) => (name: string) => h[name.toLowerCase()] ?? null;
+// the IP is the one the platform saw, not a header the caller wrote (that rule
+// is access/clientIp.ts clientAddress, tested in registerSelf.rateLimit.test.ts).
 
 beforeEach(() => _resetRateLimitForTests());
 
@@ -43,31 +42,56 @@ describe("checkSignInRateLimit", () => {
   });
 });
 
-describe("clientIpFromHeaders", () => {
-  // Same rule as the access log / money gate (lane S, clientAddress): the
-  // rightmost PUBLIC entry, unreadable entries skipped.
-  it("takes the hop the platform appended, not the caller's first entry", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "198.51.100.77, 203.0.113.5" }))).toBe("203.0.113.5");
+describe("which bucket refused", () => {
+  it("names the user bucket when one person is over their own limit", () => {
+    for (let i = 0; i < SIGN_IN_LIMITS.perOid.limit; i++) checkSignInRateLimit("oid-a", "ip");
+    expect(checkSignInRateLimit("oid-a", "ip")).toMatchObject({ allowed: false, bucket: "user" });
   });
 
-  it("skips private hops the platform added after the client", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5, 10.1.2.3, 169.254.0.9" }))).toBe("203.0.113.5");
+  it("names the address bucket when a whole address is over its limit", () => {
+    for (let i = 0; i < SIGN_IN_LIMITS.perIp.limit; i++) checkSignInRateLimit(`oid-${i % 30}`, "ip");
+    expect(checkSignInRateLimit("oid-new", "ip")).toMatchObject({ allowed: false, bucket: "address" });
+  });
+});
+
+describe("a refused call does not extend the window (P4)", () => {
+  const T0 = 1_800_000_000_000;
+  let now: jest.SpyInstance;
+  beforeEach(() => {
+    now = jest.spyOn(Date, "now").mockReturnValue(T0);
+  });
+  afterEach(() => now.mockRestore());
+
+  it("keeps the first window's end however often the caller retries", () => {
+    for (let i = 0; i < SIGN_IN_LIMITS.perOid.limit; i++) checkSignInRateLimit("oid-a", "ip");
+
+    now.mockReturnValue(T0 + 10_000);
+    expect(checkSignInRateLimit("oid-a", "ip")).toMatchObject({ allowed: false, retryAfterMs: 50_000 });
+    now.mockReturnValue(T0 + 30_000);
+    expect(checkSignInRateLimit("oid-a", "ip")).toMatchObject({ allowed: false, retryAfterMs: 30_000 });
+    now.mockReturnValue(T0 + 59_999);
+    expect(checkSignInRateLimit("oid-a", "ip")).toMatchObject({ allowed: false, retryAfterMs: 1 });
+
+    now.mockReturnValue(T0 + 60_000);
+    expect(checkSignInRateLimit("oid-a", "ip").allowed).toBe(true);
   });
 
-  it("skips entries that are not addresses", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5, nonsense, office" }))).toBe("203.0.113.5");
+  it("does not count refused calls toward the next window either", () => {
+    for (let i = 0; i < SIGN_IN_LIMITS.perOid.limit; i++) checkSignInRateLimit("oid-a", "ip");
+    for (let i = 0; i < 50; i++) checkSignInRateLimit("oid-a", "ip");
+
+    now.mockReturnValue(T0 + 60_000);
+    for (let i = 0; i < SIGN_IN_LIMITS.perOid.limit; i++) {
+      expect(checkSignInRateLimit("oid-a", "ip").allowed).toBe(true);
+    }
+    expect(checkSignInRateLimit("oid-a", "ip").allowed).toBe(false);
   });
 
-  it("drops ports and brackets and unwraps IPv4-mapped IPv6", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "203.0.113.5:61234" }))).toBe("203.0.113.5");
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "[2001:DB8::1]:443" }))).toBe("2001:db8::1");
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "::ffff:203.0.113.9" }))).toBe("203.0.113.9");
-  });
-
-  it("falls back to the rightmost address when none is public, then to unknown", () => {
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "127.0.0.1" }))).toBe("127.0.0.1");
-    expect(clientIpFromHeaders(headers({ "x-forwarded-for": "junk" }))).toBe("unknown");
-    expect(clientIpFromHeaders(headers({ "x-azure-clientip": "198.51.100.7" }))).toBe("unknown");
-    expect(clientIpFromHeaders(headers({}))).toBe("unknown");
+  it("holds for the plain limiter too", () => {
+    for (let i = 0; i < 3; i++) checkRateLimit("k", { limit: 3, windowMs: 1000 });
+    now.mockReturnValue(T0 + 900);
+    expect(checkRateLimit("k", { limit: 3, windowMs: 1000 })).toEqual({ allowed: false, retryAfterMs: 100 });
+    now.mockReturnValue(T0 + 1000);
+    expect(checkRateLimit("k", { limit: 3, windowMs: 1000 }).allowed).toBe(true);
   });
 });

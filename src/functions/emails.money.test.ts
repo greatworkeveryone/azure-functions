@@ -121,6 +121,7 @@ describe.each([
 
   it.each([
     ["an internal job", { IsInternal: true }, 422, "internal_job"],
+    ["an admin job", { Kind: "admin" }, 422, "admin_is_internal"],
     ["a done job", { Status: "Done" }, 409, "job_done"],
     ["an archived job", { IsArchived: true }, 409, "job_archived"],
   ])("refuses %s, writing nothing, and ledgers the refused attempt", async (_label, over, status, code) => {

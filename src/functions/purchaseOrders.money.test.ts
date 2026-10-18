@@ -154,6 +154,8 @@ describe("upsertPurchaseOrder: creating", () => {
 
   it.each([
     [{ IsInternal: true }, 422, "internal_job"],
+    [{ Kind: "admin" }, 422, "admin_is_internal"],
+    [{ IsInternal: true, Kind: "admin" }, 422, "admin_is_internal"],
     [{ Status: "Done" }, 409, "job_done"],
     [{ IsArchived: true }, 409, "job_archived"],
   ])("refuses a PO on a job like %p", async (over, status, code) => {
@@ -181,6 +183,7 @@ describe("upsertPurchaseOrder: editing", () => {
     ["done", { Status: "Done" }, 409, "job_done"],
     ["archived", { IsArchived: true }, 409, "job_archived"],
     ["internal", { IsInternal: true }, 422, "internal_job"],
+    ["admin", { Kind: "admin" }, 422, "admin_is_internal"],
   ])("an edit on a %s job is refused and ledgered against the PO (J3 review)", async (_label, over, status, code) => {
     mockSql([APP_USER, JOB_BUILDING, job(over), po(), { match: /FROM PurchaseOrders s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] }]);
     expect(await call("upsertPurchaseOrder", { PurchaseOrderID: 99, Scope: "x" })).toMatchObject({ jsonBody: { code }, status });

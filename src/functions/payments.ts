@@ -12,7 +12,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { adminRefusal, holdsAdmin } from "../moneyRules";
 import { isTestJob } from "../testRecords";
-import { refuseMoneyChange } from "../moneyJob-db";
+import { adminJobMoneyRefusal, refuseMoneyChange } from "../moneyJob-db";
 import { newCorrelationId, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { contractorFacts, jobScope, paymentEdit, paymentFacts, withContractorId } from "../ledger/moneyDecisions";
@@ -341,6 +341,19 @@ async function upsertPayment(
           await rollbackTransaction(connection).catch(() => {});
           return { status: 404, jsonBody: { error: "Invoice not found." } };
         }
+        // A0: an Admin / Accounts job has no invoices, so nothing on it is paid.
+        const adminJob = await adminJobMoneyRefusal(connection, invoice.jobId);
+        if (adminJob) {
+          await rollbackTransaction(connection).catch(() => {});
+          await recordRefusal(
+            connection,
+            ledgerActor,
+            { id: create.jobInvoiceId, type: "invoice" },
+            { attempted: "payment.create", code: adminJob.code, message: adminJob.message, state: { status: invoice.status } },
+            invoice.jobId,
+          );
+          return { status: adminJob.status, jsonBody: { code: adminJob.code, error: adminJob.message } };
+        }
         // Decision 4 (J3): admin pays on test records only.
         const roles = await rolesForRequest(request);
         const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, invoice.jobId)));
@@ -485,6 +498,17 @@ async function upsertPayment(
         return { status: 404, jsonBody: { error: "Payment not found" } };
       }
       const existing = existingRows[0];
+      // A0: an Admin / Accounts job has no invoices, so no payment on it changes.
+      const adminJob = await adminJobMoneyRefusal(connection, existing.JobID as number);
+      if (adminJob) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: typeof Amount === "number" ? "payment.amount_change" : "payment.edit",
+          jobId: existing.JobID as number,
+          refusal: adminJob,
+          state: { status: (existing.Status as string | null) ?? null },
+          subject: { id: PaymentID, type: "payment" },
+        });
+      }
       // Decision 4 (J3 review): admin changes a payment on test records only.
       const roles = await rolesForRequest(request);
       const adminBar = adminRefusal(roles, holdsAdmin(roles) && (await isTestJob(connection, existing.JobID as number)));

@@ -93,6 +93,27 @@ describe("asking everyone in a role", () => {
     expect(makers.userIds).toEqual([ELI.userId]);
   });
 
+  // A request saved before admin could be asked (A1 fix 63523d4) still holds the role;
+  // a re-ask resolves it again, and must not ask admin.
+  it("refuses the admin role, in the words the request form's refusal uses, though admins are in the directory", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "role", role: "admin" }, DIRECTORY, ALANA.userId))).toMatchObject({
+      code: "decision_maker_role_not_allowed",
+      details: { role: "admin" },
+      message: "Admin looks after Floorplan and doesn't decide on jobs, so a question can't be put to the Admin role. Ask a director, the CFO or a manager.",
+      status: 422,
+    });
+  });
+
+  it("reads the stored role the way the request does: trimmed and lower-cased", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "role", role: " Admin " }, DIRECTORY, ALANA.userId))).toMatchObject({ code: "decision_maker_role_not_allowed" });
+    expect(resolveDecisionMakers({ mode: "role", role: " Director " }, DIRECTORY, ALANA.userId).userIds).toEqual([DEE.userId, ELI.userId]);
+  });
+
+  it("refuses a role that can't open the escalation inbox, so nobody in it is asked", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "role", role: "user" }, DIRECTORY, ALANA.userId))).toMatchObject({ code: "bad_request", status: 400 });
+    expect(refused(() => resolveDecisionMakers({ mode: "role", role: "nonsense" }, DIRECTORY, ALANA.userId))).toMatchObject({ code: "bad_request", status: 400 });
+  });
+
   it("refuses a role with nobody else in it (422)", () => {
     expect(refused(() => resolveDecisionMakers({ mode: "role", role: "director" }, [DEE], DEE.userId))).toMatchObject({
       code: "role_has_no_one",

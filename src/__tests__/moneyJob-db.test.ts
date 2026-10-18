@@ -21,7 +21,7 @@ const sql = (): string => String(db.executeQuery.mock.calls[0][1]).replace(/\s+/
 beforeEach(() => {
   jest.clearAllMocks();
   db.executeQuery.mockResolvedValue([
-    { BuildingID: 5, HasApprovedQuote: 1, IsArchived: 0, IsContract: 1, IsInternal: 0, JobID: 9, Status: "Work" },
+    { BuildingID: 5, HasApprovedQuote: 1, IsArchived: 0, IsContract: 1, IsInternal: 0, JobID: 9, Kind: "maintenance", Status: "Work" },
   ]);
   db.rollbackTransaction.mockResolvedValue(undefined);
 });
@@ -50,8 +50,17 @@ describe("loadJobForMoney", () => {
       isContract: true,
       isInternal: false,
       jobId: 9,
+      kind: "maintenance",
       status: "Work",
     });
+  });
+
+  it("reads the job's kind, and a job with none stored reads as facilities", async () => {
+    await loadJobForMoney(connection, 9);
+    expect(sql()).toMatch(/j\.Kind/);
+
+    db.executeQuery.mockResolvedValue([{ BuildingID: 5, JobID: 9, Kind: null, Status: "Work" }]);
+    expect(await loadJobForMoney(connection, 9)).toMatchObject({ kind: "facilities" });
   });
 
   it("is null for a job that isn't there", async () => {

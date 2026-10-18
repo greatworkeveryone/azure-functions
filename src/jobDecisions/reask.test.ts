@@ -341,9 +341,24 @@ describe("who it is asked of the second time", () => {
     skippedWithNothingWritten();
   });
 
+  it("a role-wide request saved as admin before admin could be asked is not asked again: a 422, nothing written", async () => {
+    world.original = original({ assignmentMode: "role", decisionMakers: { role: "admin", userIds: [7] } });
+    usersOf.mockResolvedValue([...USERS, user(7, "Ada", "admin")]);
+    expect(await refused(run())).toMatchObject({ code: "decision_maker_role_not_allowed", status: 422 });
+    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+    skippedWithNothingWritten();
+  });
+
   it("reaskMakers: a role is asked afresh; named people are filtered, not refused one by one", () => {
     expect(reaskMakers(original({ assignmentMode: "role", decisionMakers: { role: "director", userIds: [DEE.userId] } }), USERS).userIds).toEqual([DEE.userId, ELI.userId]);
     expect(reaskMakers(original({ decisionMakers: { role: null, userIds: [CAM.userId, 99] } }), USERS).userIds).toEqual([CAM.userId]);
+  });
+
+  it("reaskMakers: a stored admin role is refused, not resolved to the admins in the directory", () => {
+    const directory = [...USERS, user(7, "Ada", "admin")];
+    expect(() => reaskMakers(original({ assignmentMode: "role", decisionMakers: { role: "admin", userIds: [] } }), directory)).toThrow(
+      expect.objectContaining({ code: "decision_maker_role_not_allowed", status: 422 }),
+    );
   });
 
   it("reaskMakers: an admin a deferred request named (from before admin could not be asked) is not asked again, and a request to nobody else comes back as a 422", () => {

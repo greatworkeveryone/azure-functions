@@ -4,7 +4,7 @@
 
 import { normaliseRole, roleLabel, ROLES } from "../escalation/roles";
 import type { DirectoryUser } from "../escalation/types";
-import { RequestError, type DecisionMakersInput } from "./request";
+import { RequestError, roleNotAskable, type DecisionMakersInput } from "./request";
 import { ADMIN_DOES_NOT_DECIDE, DECISION_MAKER_ROLES } from "./roles";
 
 export interface ResolvedMakers {
@@ -28,13 +28,18 @@ export function resolveDecisionMakers(
   requesterUserId: number | null,
 ): ResolvedMakers {
   if (input.mode === "role") {
+    // The role may come from a row saved before admin could not be asked (a
+    // deferred question coming back, reask.ts), not only from a request just read.
+    const role = normaliseRole(input.role);
+    const notAskable = roleNotAskable(role);
+    if (notAskable) throw notAskable;
     const members = directory
-      .filter((user) => normaliseRole(user.role) === input.role && user.userId !== requesterUserId)
+      .filter((user) => normaliseRole(user.role) === role && user.userId !== requesterUserId)
       .sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId);
     if (members.length === 0) {
-      throw new RequestError("role_has_no_one", `There is nobody else in the ${roleLabel(input.role)} role to ask.`, 422, { role: input.role });
+      throw new RequestError("role_has_no_one", `There is nobody else in the ${roleLabel(role)} role to ask.`, 422, { role });
     }
-    return { people: members, role: input.role, userIds: members.map((user) => user.userId) };
+    return { people: members, role, userIds: members.map((user) => user.userId) };
   }
 
   const people: DirectoryUser[] = [];

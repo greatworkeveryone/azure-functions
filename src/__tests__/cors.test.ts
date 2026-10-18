@@ -72,4 +72,14 @@ describe("corsHeaders", () => {
     expect(headers.Vary).toBe("Origin");
     expect(headers["Access-Control-Allow-Credentials"]).toBe("true");
   });
+
+  // Retry-After is not a header a browser lets a cross-origin page read unless
+  // the response exposes it, so without this the sign-in screen cannot honour it
+  // (PL2). It overwrites whatever a handler set (startup.ts merges corsHeaders
+  // last), so Content-Disposition, which the decisions export exposes itself,
+  // stays on the list.
+  it("exposes Retry-After to the page, and keeps Content-Disposition (the decisions export) exposed", () => {
+    const exposed = corsHeaders(PRODUCTION)["Access-Control-Expose-Headers"].split(",").map((name) => name.trim());
+    expect(exposed).toEqual(expect.arrayContaining(["Retry-After", "Content-Disposition"]));
+  });
 });

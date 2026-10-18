@@ -4,6 +4,7 @@
 // sentence the person sees and the HTTP status.
 
 import { canApprove, decideAuthority, type AuthorityFacts, type Identity } from "./approvalAuthority";
+import { runsContractorFlow } from "./jobKinds";
 
 export interface MoneyRefusal {
   code: string;
@@ -26,16 +27,31 @@ function refuse(code: string, message: string, status: MoneyRefusal["status"]): 
 }
 
 /**
- * The job a money record belongs to must accept money changes: internal jobs
- * have no quotes, POs or invoices; a done job is reopened first (J2's
- * reopenJob); an archived job is restored first. Decision 18: an outgoing
- * (on-charge) invoice may still be raised and worked on after the job is done;
- * contractor-side quotes, POs and incoming invoices need the reopen.
+ * A0: an Admin / Accounts job runs no contractor or money flow, so it has no
+ * quotes, orders, invoices or payments. Whatever chases money (the sweep, the
+ * digest) skips it by kind, so money attached here would wait with nobody
+ * chasing it. The kind is asked for by name (runsContractorFlow): a job whose
+ * kind was not loaded reads as facilities, like the column's default.
+ */
+export function adminJobRefusal(kind: unknown): MoneyRefusal | null {
+  if (runsContractorFlow(kind)) return null;
+  return refuse("admin_is_internal", "This is an admin job: it has no quotes, orders or invoices.", 422);
+}
+
+/**
+ * The job a money record belongs to must accept money changes: admin jobs
+ * (A0) and internal jobs have no quotes, POs or invoices; a done job is
+ * reopened first (J2's reopenJob); an archived job is restored first. Decision
+ * 18: an outgoing (on-charge) invoice may still be raised and worked on after
+ * the job is done; contractor-side quotes, POs and incoming invoices need the
+ * reopen. An admin job takes none of them, so its kind is asked first.
  */
 export function jobMoneyRefusal(
-  job: { isArchived?: unknown; isInternal?: unknown; status?: unknown },
+  job: { isArchived?: unknown; isInternal?: unknown; kind?: unknown; status?: unknown },
   options: { outgoingInvoice?: boolean } = {},
 ): MoneyRefusal | null {
+  const adminJob = adminJobRefusal(job.kind);
+  if (adminJob) return adminJob;
   if (job.isInternal === true || job.isInternal === 1) {
     return refuse("internal_job", "Internal jobs have no quotes, purchase orders or invoices.", 422);
   }

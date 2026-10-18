@@ -45,6 +45,11 @@ export function corsHeaders(origin: string): Record<string, string> {
     // frontend sends it only after registerSelf advertises accessHints, so a
     // frontend deployed ahead of this backend never fails a preflight.
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Token, X-Fp-Country",
+    // Response headers the page may read. Retry-After: the sign-in screen waits
+    // at least that long after a 429. Content-Disposition: the decisions export
+    // sets it itself, but this object is merged over a handler's headers
+    // (functions/startup.ts), so it must be listed here too.
+    "Access-Control-Expose-Headers": "Content-Disposition, Retry-After",
     // The header varies per caller — without this, a shared cache can serve
     // one origin's response to another.
     Vary: "Origin",

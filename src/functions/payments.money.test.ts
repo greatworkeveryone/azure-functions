@@ -89,6 +89,7 @@ const paymentLock = (over: Record<string, unknown> = {}): Route => ({
   rows: [{ Amount: 400, JobID: 9, JobInvoiceID: 5, MyobID: null, PaymentID: 11, PurchaseOrderID: null, QuoteID: null, Status: "pending", ...over }],
 });
 const STORED: Route = { match: /SELECT\s+PaymentID, JobID/, rows: [{ PaymentID: 11 }] };
+const jobKind = (Kind: string): Route => ({ match: /SELECT Kind FROM Jobs WHERE JobID = @JobID/, rows: [{ Kind }] });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -128,6 +129,36 @@ describe("upsertPayment: recording a payment", () => {
     expect(await record()).toMatchObject({ jsonBody: { code: "admin_test_records_only" }, status: 403 });
     expect(wrote(/INSERT INTO Payments/)).toBe(false);
   });
+
+  it.each(["facilities", "maintenance"])("records a payment on a %s job", async (Kind) => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, jobKind(Kind), invoiceLock(), { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] }, STORED]);
+    expect((await record()).status).toBe(200);
+  });
+
+  // A0: an Admin / Accounts job has no quotes, orders or invoices, so nothing
+  // there can be paid. The invoice that a payment names must not be a way round
+  // that, even if one were somehow on the job.
+  it("refuses a payment on an admin job with admin_is_internal, writing nothing, ledgered against the invoice", async () => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, jobKind("admin"), invoiceLock(), INVOICE_SCOPE, { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] }]);
+
+    const res = await record();
+
+    expect(res).toEqual({ jsonBody: { code: "admin_is_internal", error: "This is an admin job: it has no quotes, orders or invoices." }, status: 422 });
+    expect(wrote(/INSERT INTO Payments/)).toBe(false);
+    expect(wrote(/INSERT INTO JobEvents/)).toBe(false);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "payment.create" }), ruleApplied: "admin_is_internal", subjectId: "5", subjectType: "invoice" }),
+    ]);
+  });
+
+  it("looks the job's kind up without locking it (the invoice handlers lock the job first, then the invoice)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, jobKind("facilities"), invoiceLock(), { match: /INSERT INTO Payments/, rows: [{ PaymentID: 11 }] }, STORED]);
+    await record();
+    const lookup = sqls().find((sql) => /SELECT Kind FROM Jobs/.test(sql)) ?? "";
+    expect(lookup).not.toMatch(/UPDLOCK|HOLDLOCK/);
+    expect(paramsOf(/SELECT Kind FROM Jobs/)).toEqual({ JobID: 9 });
+  });
 });
 
 describe("upsertPayment: editing a payment (decision 4)", () => {
@@ -147,6 +178,25 @@ describe("upsertPayment: editing a payment (decision 4)", () => {
     expect(wrote(/UPDATE Payments SET/)).toBe(false);
     expect(ledgerInserts(db.executeQuery)).toEqual([
       expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "payment.amount_change" }), ruleApplied: "admin_test_records_only" }),
+    ]);
+  });
+
+  it("refuses any edit to a payment on an admin job, writing nothing, ledgered against the payment", async () => {
+    mockSql([
+      APP_USER,
+      JOB_BUILDING,
+      NO_TEST_FLAG,
+      jobKind("admin"),
+      { match: /SELECT PaymentID, JobID, JobInvoiceID, Amount, Status, MyobID FROM Payments WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ Amount: 400, JobID: 9, JobInvoiceID: 5, MyobID: null, PaymentID: 11, Status: "pending" }] },
+      PAYMENT_SCOPE,
+    ]);
+
+    const res = await call("upsertPayment", { Amount: 300, PaymentID: 11 });
+
+    expect(res).toMatchObject({ jsonBody: { code: "admin_is_internal" }, status: 422 });
+    expect(wrote(/UPDATE Payments SET/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "payment.amount_change" }), ruleApplied: "admin_is_internal" }),
     ]);
   });
 
