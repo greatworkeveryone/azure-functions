@@ -209,6 +209,13 @@ describe("sendPurchaseOrder", () => {
     rows: [{ ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 4500, EmailAddress: "acme@example.com", EmailBody: "b", EmailSubject: "s", EstimatedCost: 4000, JobID: 9, PDFBlobName: "po/99.pdf", PONumber: "66Se261013", SentAt: null }],
   };
 
+  it("blocks a PO email while an attribution dispute is open", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Work" }), SEND_READ,
+      { match: /FROM dbo\.Escalations/, rows: [{ EscalationId: 7 }] }, STORED]);
+    expect(await call("sendPurchaseOrder", { PurchaseOrderID: 99 })).toMatchObject({ status: 409, jsonBody: { code: "attribution_disputed" } });
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+  });
+
   it("sends a PO on a job whose quote is approved and writes it to the job's history", async () => {
     mockSql([APP_USER, JOB_BUILDING, job({ Status: "Work" }), SEND_READ, STORED]);
     expect((await call("sendPurchaseOrder", { PurchaseOrderID: 99 })).status).toBe(200);

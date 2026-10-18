@@ -1,3 +1,6 @@
+import { manualRentReduction } from "../manualRentReduction";
+import { raiseWithin as raiseReviewNotice } from "../escalation/engine";
+import "../escalation/adapters";
 // Tenancy Register — v2 of the tenants module. The legacy /getTenants +
 // /upsertTenant in `tenants.ts` stays alive for the keys/jobs flows; the
 // endpoints here back the rich spreadsheet + info-sheet UI that replaces
@@ -1227,6 +1230,8 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
 // reference-quarter rule (M4, WP26c) is set at sign-off with the lease's terms
 // and decides a review's rent, so it counts as well.
 const SCHEDULE_TERM_FIELDS: Record<string, string> = {
+  Commencement: "commencement",
+  Expiry: "expiry",
   CpiCapPercent: "cpiCapPercent",
   CpiFloorPercent: "cpiFloorPercent",
   CpiReferenceQuarterRule: "cpiReferenceQuarterRule",
@@ -1398,7 +1403,7 @@ async function updateRegisterTenantRow(
         value,
       });
       const termKey = SCHEDULE_TERM_FIELDS[col];
-      if (termKey && comparableTerm(current[col]) !== comparableTerm(value)) {
+      if (termKey && ((col === "Commencement" || col === "Expiry") ? toIsoDate(current[col]) !== toIsoDate(value) : comparableTerm(current[col]) !== comparableTerm(value))) {
         termsBefore[termKey] = current[col] ?? null;
         termsAfter[termKey] = value ?? null;
       }
@@ -2079,7 +2084,7 @@ async function getReviewsDue(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.USER]);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewTenancy.gate);
   if (roleCheck) return roleCheck;
 
   const buildingIdParam = request.query.get("buildingId");
@@ -2505,6 +2510,7 @@ async function upsertScheduledRateStep(
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return unauthorizedResponse();
     let changeId = "";
+    let rentReduction: { before: number; after: number } | null = null;
     const outcome = await runScheduleWrite(
       connection,
       { actor, buildingId: BuildingId, expectedVersion, signOffClearReason: readSignOffClearReason(body), tenantId: TenantId, updatedById: caller.id },
@@ -2524,6 +2530,7 @@ async function upsertScheduledRateStep(
         const { closed, steps: withClosed } = closeOpenPredecessor(existing, edited);
         const next = normaliseLegacyEnds(upsertStep(withClosed, edited));
         const saved = next.find((s) => s.id === step.id) ?? edited;
+        rentReduction = manualRentReduction(existing, next, step.id, Number(locked.RentPerAnnum) || 0, scheduleTermsOf(locked));
         const ledgerEntries: LedgerDraft[] = [
           { action: "schedule.manual_edit", after: saved, before: oldStep, subject: { id: step.id, type: "rate_step" } },
         ];
@@ -2538,6 +2545,12 @@ async function upsertScheduledRateStep(
         }
         return {
           afterUpdate: async (conn) => {
+            if (rentReduction) await raiseReviewNotice(conn, {
+              actor, policyKey: "tenancy.manual_rent_reduction", subjectType: "review_notice",
+              subjectId: `tenancy:${TenantId}@${Number(locked.ScheduleVersion) + 1}`,
+              summary: `${actor.name} entered lower rent for tenancy #${TenantId}: $${rentReduction.before.toFixed(2)} to $${rentReduction.after.toFixed(2)} a year`,
+              note: "Manual rent reduction saved. Review the schedule and decide whether to retain or amend it.", skipConditionCheck: true,
+            });
             changeId = await insertRentScheduleChangeLog(conn, {
               buildingId: BuildingId,
               changeKind: oldStep ? "updated" : "added",
@@ -2570,7 +2583,7 @@ async function upsertScheduledRateStep(
       },
     );
     if (outcome.kind === "ok") invalidateTenantAndBuilding(TenantId, BuildingId);
-    return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps }));
+    return scheduleWriteResponse(outcome, (steps) => ({ changeId, steps, rentReduction }));
   } catch (error: any) {
     const refusal = ledgerRefusal(error);
     if (refusal) return refusal;

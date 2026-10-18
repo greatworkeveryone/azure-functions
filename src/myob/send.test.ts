@@ -59,7 +59,7 @@ beforeEach(() => {
   requireReview = true;
   demonstration = { IsDemonstration: true, Name: "Demo Pty Ltd" };
   executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-    sql.includes("MyobCompanyFiles") ? (demonstration ? [demonstration] : []) : [{ RequireReview: requireReview }],
+    sql.includes("Escalations") ? [] : sql.includes("MyobCompanyFiles") ? (demonstration ? [demonstration] : []) : [{ RequireReview: requireReview }],
   );
   store.getProposal.mockResolvedValue(proposal());
   store.updateProposal.mockImplementation(async (_tx: unknown, _id: number, _v: string, fields: Record<string, unknown>) =>
@@ -237,4 +237,11 @@ describe("send and record", () => {
     expect(outcome.outcome).toBe("changed_in_myob");
     expect(store.updateProposal.mock.calls[1][3]).toMatchObject({ MyobError: expect.stringContaining("Changed in MYOB"), State: "exception" });
   });
+});
+
+it("blocks the MYOB push when a job has an open attribution dispute", async () => {
+  const base = executeQuery.getMockImplementation();
+  executeQuery.mockImplementation(async (...args: unknown[]) => /FROM dbo\.Escalations/.test(String(args[1])) ? [{ EscalationId: 7 }] : base?.(...args));
+  await expect(send()).rejects.toMatchObject({ status: 409 });
+  expect(pushApproved).not.toHaveBeenCalled();
 });

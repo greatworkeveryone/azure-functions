@@ -155,3 +155,22 @@ describe("entries must fit dbo.DecisionLedger", () => {
     expect(() => assertLedgerEntry(entry({ correlationId: "6f9619ff-8b86-d011-b42d-00c04fc964ff" }))).not.toThrow();
   });
 });
+
+
+describe("within-margin approval on a manager's own authority (decision 18)", () => {
+  const variance = {
+    action: "po.variance_within_tolerance" as const,
+    actor: { kind: "user" as const, name: "Mo Manager", role: "accounts_manager", userId: 12 },
+    reason: "Call-out fee", ruleApplied: "within_margin_own_authority",
+    subject: { id: 5, type: "invoice" as const },
+  };
+  it("records the manager as actor without inventing attribution", () => {
+    expect(() => assertLedgerEntry(entry(variance))).not.toThrow();
+  });
+  it.each(["accounts", "facilities", "admin"])("refuses un-attributed %s authority", role => {
+    expect(() => assertLedgerEntry(entry({ ...variance, actor: { ...variance.actor, role } }))).toThrow(/attributedTo/);
+  });
+  it("still requires attribution when the entry rests on somebody else", () => {
+    expect(() => assertLedgerEntry(entry({ ...variance, ruleApplied: "within_margin" }))).toThrow(/attributedTo/);
+  });
+});

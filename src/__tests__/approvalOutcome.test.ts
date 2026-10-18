@@ -173,6 +173,6 @@ describe("approvalOutcome", () => {
 
   it("always reports the route, so the caller can say who acts next", () => {
     const outcome = approvalOutcome(who("accounts"), item("invoice", 4000), AFTER, REAL);
-    expect(outcome.route.map((step) => step.role)).toEqual(["accounts", "accounts_manager", "cfo", "director"]);
+    expect(outcome.route.map((step) => step.role)).toEqual(["accounts", "facilities_manager", "accounts_manager", "cfo", "director"]);
   });
 });

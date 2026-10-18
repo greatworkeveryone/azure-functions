@@ -7,7 +7,7 @@
 
 jest.mock("../db", () => ({
   executeQuery: jest.fn(async (_c: unknown, sql: string) =>
-    sql.includes("MyobCompanyFiles") ? [{ IsDemonstration: true, Name: "Demo Pty Ltd" }] : [{ RequireReview: true }],
+    sql.includes("Escalations") ? [] : sql.includes("MyobCompanyFiles") ? [{ IsDemonstration: true, Name: "Demo Pty Ltd" }] : [{ RequireReview: true }],
   ),
 }));
 jest.mock("../ledger", () => ({ record: jest.fn().mockResolvedValue(undefined) }));

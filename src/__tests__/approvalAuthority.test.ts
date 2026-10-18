@@ -37,7 +37,7 @@ const TODAY = "2026-10-13";
  * SHA-256 of approvalAuthority.ts, the same in both repos. A change to one
  * copy fails here until the other copy gets the same bytes and both pins move.
  */
-const CORE_SHA256 = "b61233488087dd3cf039ed338ed3fb664377210712968ba6381fb083c7221e51";
+const CORE_SHA256 = "f3ab4502f8f27580e2849607fafec59089ac3decf6924887953d9dd570f7f889";
 
 /** Production ApprovalLimits on 13 Oct 2026, with the legacy row no current role uses. */
 const PROD: RoleLimit[] = [
@@ -135,14 +135,14 @@ const LADDER_VECTORS: LadderVector[] = [
   ["quote", "prod", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ne:- ok ne:-"],
   ["quote", "prod", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
   ["quote", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
-  ["invoice", "prod", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ne:- ok ne:-"],
-  ["invoice", "prod", [5000.01, 20000], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
-  ["invoice", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ok ok ok ne:- ok ne:-"],
+  ["invoice", "prod", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ol:5000 ok ok ne:- ok ne:-"],
+  ["invoice", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
   ["purchase_order", "prod", [0, 4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
   ["purchase_order", "prod", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
   // An unknown amount (negative, or not a finite number) needs the director, even at a residence.
   ["quote", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
-  ["invoice", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:- dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
   ["purchase_order", "prod", [-5, NaN, Infinity, -Infinity], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
   ["quote", "residence-no-fallback", [NaN], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
   // prod+admin: an admin row of 50000 with no env lifts the derived gate to 50000.
@@ -150,10 +150,10 @@ const LADDER_VECTORS: LadderVector[] = [
   ["quote", "prod+admin", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
   ["quote", "prod+admin", [20000.01, 50000], "director=*", "ol:5000 ol:5000 ol:20000 ol:20000 ok ok ne:-"],
   ["quote", "prod+admin", [50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:50000 ok dr:-"],
-  ["invoice", "prod+admin", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ok ok ne:-"],
-  ["invoice", "prod+admin", [5000.01, 20000], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ok ok ne:-"],
-  ["invoice", "prod+admin", [20000.01, 50000], "director=*", "ne:- ol:5000 ne:- ol:20000 ok ok ne:-"],
-  ["invoice", "prod+admin", [50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:50000 ok dr:-"],
+  ["invoice", "prod+admin", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ok ok ok ok ok ne:-"],
+  ["invoice", "prod+admin", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ol:5000 ok ok ok ok ne:-"],
+  ["invoice", "prod+admin", [20000.01, 50000], "director=*", "ne:- ol:5000 ol:20000 ol:20000 ok ok ne:-"],
+  ["invoice", "prod+admin", [50000.01], "!director=*", "dr:- dr:5000 dr:20000 dr:20000 dr:50000 ok dr:-"],
   ["purchase_order", "prod+admin", [0, 4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ok ok ne:-"],
   ["purchase_order", "prod+admin", [20000.01, 50000], "director=*", "ne:- ne:- ol:20000 ol:20000 ok ok ne:-"],
   ["purchase_order", "prod+admin", [50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:50000 ok dr:-"],
@@ -161,24 +161,24 @@ const LADDER_VECTORS: LadderVector[] = [
   ["quote", "prod+env15k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ne:- ok ne:-"],
   ["quote", "prod+env15k", [5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
   ["quote", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
-  ["invoice", "prod+env15k", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ne:- ok ne:-"],
-  ["invoice", "prod+env15k", [5000.01], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
-  ["invoice", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:- ok dr:-"],
+  ["invoice", "prod+env15k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ok ok ok ne:- ok ne:-"],
+  ["invoice", "prod+env15k", [5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ol:5000 ok ok ne:- ok ne:-"],
+  ["invoice", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
   ["purchase_order", "prod+env15k", [0, 4999.99, 5000, 5000.01], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
   ["purchase_order", "prod+env15k", [20000, 20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:- ok dr:-"],
   // prod+admin+env20k: admin at 50000, with the env holding the gate at 20000.
   ["quote", "prod+admin+env20k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ar:5000 ok ok ok ok ok ne:-"],
   ["quote", "prod+admin+env20k", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ol:5000 ol:5000 ok ok ok ok ne:-"],
   ["quote", "prod+admin+env20k", [20000.01, 50000, 50000.01], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:50000 ok dr:-"],
-  ["invoice", "prod+admin+env20k", [0, 4999.99, 5000], "accounts=5000 accounts_manager=20000 director=*", "ne:- ok ne:- ok ok ok ne:-"],
-  ["invoice", "prod+admin+env20k", [5000.01, 20000], "accounts_manager=20000 director=*", "ne:- ol:5000 ne:- ok ok ok ne:-"],
-  ["invoice", "prod+admin+env20k", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:- dr:20000 dr:50000 ok dr:-"],
+  ["invoice", "prod+admin+env20k", [0, 4999.99, 5000], "accounts=5000 facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ok ok ok ok ok ne:-"],
+  ["invoice", "prod+admin+env20k", [5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ol:5000 ok ok ok ok ne:-"],
+  ["invoice", "prod+admin+env20k", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:5000 dr:20000 dr:20000 dr:50000 ok dr:-"],
   ["purchase_order", "prod+admin+env20k", [0, 4999.99, 5000, 5000.01, 20000], "facilities_manager=20000 accounts_manager=20000 director=*", "ne:- ne:- ok ok ok ok ne:-"],
   ["purchase_order", "prod+admin+env20k", [20000.01, 50000, 50000.01], "!director=*", "dr:- dr:- dr:20000 dr:20000 dr:50000 ok dr:-"],
   // Unlimited (NULL) rows sort last and never bypass the director gate.
   ["quote", "am-null", [15000], "facilities_manager=20000 accounts_manager=* director=*", "ol:5000 ol:5000 ok ok ne:- ok ne:-"],
   ["quote", "am-null", [1000000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:* dr:- ok dr:-"],
-  ["invoice", "am-null", [15000], "accounts_manager=* director=*", "ne:- ol:5000 ne:- ok ne:- ok ne:-"],
+  ["invoice", "am-null", [15000], "facilities_manager=20000 accounts_manager=* director=*", "ne:- ol:5000 ok ok ne:- ok ne:-"],
   ["quote", "all-null", [1000000], "facilities_manager=* accounts_manager=* director=*", "ne:- ne:- ok ok ne:- ok ne:-"],
   // A director row is ignored: the director is always unlimited and never sets the gate.
   ["quote", "director-row", [150000], "!director=*", "dr:5000 dr:5000 dr:20000 dr:20000 dr:- ok dr:-"],
@@ -195,7 +195,7 @@ const LADDER_VECTORS: LadderVector[] = [
   ["quote", "fm-high", [55000], "facilities_manager=60000 director=*", "ne:- ne:- ok ne:- ol:50000 ok ne:-"],
   // Residences: no role ladder and no director gate, whatever the amount.
   ["quote", "residence", [1000000], "~#205=* ~#202=* ~#201=* ~director=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:- rs nr:-"],
-  ["invoice", "residence", [100], "~#205=* ~#202=* ~#201=* ~director=*", "nr:- nr:5000 nr:- nr:20000 nr:- rs nr:-"],
+  ["invoice", "residence", [100], "~#205=* ~#202=* ~#201=* ~director=*", "nr:- nr:5000 nr:20000 nr:20000 nr:- rs nr:-"],
   ["quote", "residence-no-fallback", [100], "~#205=* ~#202=* ~#201=*", "nr:5000 nr:5000 nr:20000 nr:20000 nr:- nr:* nr:-"],
   ["purchase_order", "residence-empty", [100], "", "nr:- nr:- nr:20000 nr:20000 nr:- nr:* nr:-"],
 ];
@@ -357,6 +357,7 @@ describe("approval authority: shared vectors", () => {
   it("returns complete route steps", () => {
     expect(decideAuthority(inputOf("invoice", 100), FACTS.prod).route).toEqual([
       { basis: "role_limit", kind: "role", limit: 5000, role: "accounts" },
+      { basis: "role_limit", kind: "role", limit: 20000, role: "facilities_manager" },
       { basis: "role_limit", kind: "role", limit: 20000, role: "accounts_manager" },
       { basis: "role_limit", kind: "role", limit: null, role: "director" },
     ]);
@@ -407,7 +408,7 @@ describe("approval authority: shared vectors", () => {
   it("keeps the authority tables as agreed, frozen", () => {
     expect(ROLE_ORDER).toEqual(["facilities", "accounts", "facilities_manager", "accounts_manager", "cfo", "director"]);
     expect(SUBJECT_ELIGIBLE_ROLES).toEqual({
-      invoice: ["accounts", "accounts_manager", "cfo", "admin", "director"],
+      invoice: ["accounts", "accounts_manager", "facilities_manager", "cfo", "admin", "director"],
       purchase_order: ["facilities_manager", "accounts_manager", "cfo", "admin", "director"],
       quote: ["facilities_manager", "accounts", "accounts_manager", "cfo", "admin", "director"],
     });
@@ -444,7 +445,7 @@ describe("approval authority: backend only", () => {
     });
 
     it("is a step between the managers and the director once it has a limit", () => {
-      expect(roles(decideAuthority(inputOf("invoice", 15000), withCfo).route)).toEqual(["accounts_manager", "cfo", "director"]);
+      expect(roles(decideAuthority(inputOf("invoice", 15000), withCfo).route)).toEqual(["facilities_manager", "accounts_manager", "cfo", "director"]);
       expect(roles(decideAuthority(inputOf("invoice", 30000), withCfo).route)).toEqual(["cfo", "director"]);
       expect(roles(decideAuthority(inputOf("quote", 30000), withCfo).route)).toEqual(["cfo", "director"]);
       expect(roles(decideAuthority(inputOf("purchase_order", 30000), withCfo).route)).toEqual(["cfo", "director"]);
@@ -454,7 +455,7 @@ describe("approval authority: backend only", () => {
 
     it("comes after a manager with the same limit", () => {
       const tied = ladder([...PROD, { limit: 20000, role: "cfo" }], 100000);
-      expect(roles(decideAuthority(inputOf("invoice", 15000), tied).route)).toEqual(["accounts_manager", "cfo", "director"]);
+      expect(roles(decideAuthority(inputOf("invoice", 15000), tied).route)).toEqual(["facilities_manager", "accounts_manager", "cfo", "director"]);
     });
 
     it("approves within its own limit and not beyond it", () => {

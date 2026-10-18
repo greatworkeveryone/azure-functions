@@ -5,16 +5,16 @@
 //                          are decided by the same audience rule, procedureAudience.ts
 //                          (director and admin see all). Least privilege: editing does
 //                          not widen reading.
-//   publishing             a director's act. requireRole lets admin through every gate,
-//                          but an approval is a person's, so admin alone is refused
-//                          (as for schedule sign-off, decision 4).
+//   publishing             a scoped team manager or the CFO/director, according to
+//                          the procedure's endorsement authority. Admin alone cannot
+//                          endorse (decisions 24/26).
 
 import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { type Connection, TYPES } from "tedious";
 import { forbiddenResponse, requireRole, rolesForRequest, serviceUnavailableResponse } from "./auth";
 import { executeQuery } from "./db";
 import { splitAudience } from "./procedureLibrary";
-import { PROCEDURE_APPROVER_ROLE } from "./procedureRoles";
+import { ENDORSER_ROLES } from "./procedureEndorsement";
 
 /** The caller's roles, or null when they cannot be read (the caller then answers 503, writing nothing). */
 export async function readCallerRoles(request: HttpRequest): Promise<string[] | null> {
@@ -42,10 +42,10 @@ export async function storedAudience(connection: Connection, slug: string): Prom
  * a 403 (or a 503 when roles cannot be read) when not.
  */
 export async function requireProcedureApprover(request: HttpRequest): Promise<HttpResponseInit | null> {
-  const denied = await requireRole(request, [PROCEDURE_APPROVER_ROLE]);
+  const denied = await requireRole(request, ENDORSER_ROLES as import("./auth").AppRole[]);
   if (denied) return denied;
   const roles = await readCallerRoles(request);
   if (roles === null) return serviceUnavailableResponse();
-  if (roles.includes(PROCEDURE_APPROVER_ROLE)) return null;
-  return forbiddenResponse("Only a director can publish a procedure. Admin alone cannot approve one.");
+  if (roles.some(role => ENDORSER_ROLES.includes(role))) return null;
+  return forbiddenResponse("Only an eligible manager, CFO or director can endorse a procedure. Admin alone cannot approve one.");
 }

@@ -4,6 +4,7 @@
 // sentence the person sees and the HTTP status.
 
 import { canApprove, decideAuthority, type AuthorityFacts, type Identity } from "./approvalAuthority";
+import { nameableRoles } from "./attributedApproval";
 import { runsContractorFlow } from "./jobKinds";
 
 export interface MoneyRefusal {
@@ -223,7 +224,7 @@ export interface VarianceFigures {
 
 export type VarianceDecision =
   | { kind: "no_variance" }
-  | { attributedTo: VariancePerson; figures: VarianceFigures; kind: "within_tolerance"; rationale: string }
+  | { attributedTo: VariancePerson | null; figures: VarianceFigures; kind: "within_tolerance"; rationale: string }
   | { figures: VarianceFigures | null; kind: "director_override"; overridden: MoneyRefusal; reason: string }
   | { figures: VarianceFigures | null; kind: "refused"; refusal: MoneyRefusal };
 
@@ -301,6 +302,10 @@ function decideVariance(input: VarianceInput, original: number, facts: VarianceF
       refusal: refuse("variance_amount_unknown", `This ${word} has no amount, so it can't be checked against the approved ${formatDollars(original)}. Add its amount first.`, 422),
     };
   }
+  if (input.subject === "invoice" && cents(next) > cents(original) &&
+      (input.editor.roles ?? []).includes("accounts") && nameableRoles(input.editor.roles ?? []).length === 0) {
+    return { figures: null, kind: "refused", refusal: refuse("invoice_increase_manager_required", "An accounts manager, facilities manager, CFO or director must approve an invoice above its approved quote or purchase order.", 422) };
+  }
   const covered = Math.max(cents(original), cents(input.acceptedAmount ?? 0));
   if (cents(next) <= covered) return { kind: "no_variance" };
 
@@ -337,9 +342,14 @@ function decideVariance(input: VarianceInput, original: number, facts: VarianceF
   const rationale = input.request.rationale?.trim() ?? "";
   if (rationale === "") return refused("variance_rationale_required", `${above}, within the margin. Say why it went up (a rationale is required).`);
 
+  // Decision 18: a manager acts on their own authority, without naming another person.
+  const own = canApprove(withoutAdmin(input.editor), { amount: next, buildingId: input.buildingId, subject: input.subject }, authority);
+  if (nameableRoles(input.editor.roles ?? []).length > 0 && own.allowed && own.basis === "own_authority") {
+    return { attributedTo: null, figures, kind: "within_tolerance", rationale };
+  }
   const named = input.request.attributedTo;
   if (!named) return refused("variance_manager_required", `${above}, within the margin. Name the manager who agreed to it.`);
-  const theirs = canApprove(withoutAdmin(named), { amount: next, buildingId: input.buildingId, subject: input.subject }, authority);
+  const theirs = canApprove({ ...withoutAdmin(named), roles: nameableRoles(named.roles ?? []) }, { amount: next, buildingId: input.buildingId, subject: input.subject }, authority);
   if (samePersonIdentity(input.editor, named) || !theirs.allowed || theirs.basis !== "own_authority") {
     const who = named.displayName?.trim() || "The person you named";
     return refused("variance_manager_invalid", `${who} can't approve ${formatDollars(next)} themselves, so they can't agree to this increase. Name a manager who can, and not yourself.`);

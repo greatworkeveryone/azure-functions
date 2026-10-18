@@ -38,6 +38,7 @@ const amounts = (...values: (number | null)[]): string => JSON.stringify(values.
 beforeEach(() => {
   delete process.env.DIRECTOR_APPROVAL_THRESHOLD;
   db.executeQuery.mockReset();
+  db.executeQuery.mockResolvedValue([]);
 });
 
 describe("directorNeededCount", () => {

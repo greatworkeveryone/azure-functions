@@ -171,3 +171,19 @@ describe("formatDollars", () => {
     expect(formatDollars(1240.5)).toBe("$1,240.50");
   });
 });
+
+
+describe("Connor's decisions 18 and 21", () => {
+  it("lets a manager whose own limit covers the rise act without naming anyone", () => {
+    expect(decide({ editor: MANAGER, request: { rationale: "Scope confirmed" } })).toMatchObject({ kind: "within_tolerance", attributedTo: null });
+  });
+  it("still requires a rationale from a manager", () => {
+    expect(decide({ editor: MANAGER, request: {} })).toMatchObject({ kind: "refused", refusal: { code: "variance_rationale_required" } });
+  });
+  it("refuses a clerk's above-quote invoice even when a manager was named or a rise was previously accepted", () => {
+    expect(decide({ subject: "invoice", editor: { roles: ["accounts"] }, originalAmount: 4000, newAmount: 4100, acceptedAmount: 4200 })).toMatchObject({ kind: "refused", refusal: { code: "invoice_increase_manager_required" } });
+  });
+  it("does not stop a clerk recording an invoice at the approved quote", () => {
+    expect(decide({ subject: "invoice", editor: { roles: ["accounts"] }, newAmount: 10000 }).kind).toBe("no_variance");
+  });
+});

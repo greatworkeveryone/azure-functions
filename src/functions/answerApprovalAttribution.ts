@@ -136,14 +136,16 @@ async function writeAnswer(connection: Connection, actor: LedgerActor, found: At
     ruleApplied: found.ref.kind === "quote" ? "attributed_approval_disputed" : "variance_disputed",
     subject: subjectOf(found),
   });
-  return raiseWithin(connection, {
-    actor,
-    summary: disputeSummary(found, actor.name),
-    note: answer.reason,
-    policyKey: disputedPolicy(found.ref.kind),
-    subjectId,
-    subjectType: ATTRIBUTION_SUBJECT_TYPE,
+  const operational = await raiseWithin(connection, {
+    actor, summary: disputeSummary(found, actor.name), note: answer.reason,
+    policyKey: disputedPolicy(found.ref.kind), subjectId, subjectType: ATTRIBUTION_SUBJECT_TYPE,
   });
+  await raiseWithin(connection, {
+    actor, summary: disputeSummary(found, actor.name), note: answer.reason,
+    policyKey: found.ref.kind === "quote" ? "finance.attribution_disputed" : "finance.variance_disputed",
+    subjectId, subjectType: ATTRIBUTION_SUBJECT_TYPE, skipConditionCheck: true,
+  });
+  return operational;
 }
 
 export async function answerApprovalAttribution(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {

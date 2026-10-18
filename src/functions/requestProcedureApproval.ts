@@ -23,15 +23,16 @@ import { resolveRecipient } from "../email-recipient";
 import { listActiveUsers } from "../escalation/store";
 import { graphSendMail } from "../graph";
 import { outsideAudienceResponse, readCallerRoles } from "../procedureAccess";
-import { canReadProcedure } from "../procedureAudience";
 import { splitAudience } from "../procedureLibrary";
-import { PROCEDURE_APPROVER_ROLE, PROCEDURE_EDITOR_GATE } from "../procedureRoles";
+import { ENDORSER_ROLES, canEndorseProcedure, canAccessProcedure } from "../procedureEndorsement";
+import { PROCEDURE_EDITOR_GATE } from "../procedureRoles";
 import { NOT_A_RECORD } from "../test-data";
 
 /** The same director is not asked again within this long. */
 const ASK_AGAIN_AFTER_MS = 10 * 60_000;
 
 interface Approver {
+  role: string;
   email: string | null;
   name: string;
   userId: number;
@@ -43,8 +44,8 @@ async function findApprover(userId: number): Promise<Approver | null> {
   try {
     connection = await createServiceRequestConnection();
     const users = await listActiveUsers(connection);
-    const found = users.find((user) => user.userId === userId && user.role === PROCEDURE_APPROVER_ROLE);
-    return found ? { email: found.email, name: found.name, userId: found.userId } : null;
+    const found = users.find((user) => user.userId === userId && ENDORSER_ROLES.includes(user.role));
+    return found ? { email: found.email, name: found.name, role: found.role, userId: found.userId } : null;
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -109,7 +110,7 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     }
 
     const approver = await findApprover(approverUserId);
-    if (!approver) return { status: 400, jsonBody: { error: "Pick a director: only a director can approve a procedure." } };
+    if (!approver) return { status: 400, jsonBody: { error: "Pick an eligible manager, CFO or director." } };
 
     const requester = userInfoFromToken(token);
     const requestedBy = requester?.name ?? requester?.email ?? "Someone";
@@ -117,7 +118,7 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     connection = await createRequestConnection(token);
     const drafts = await executeQuery(
       connection,
-      `SELECT v.Title, v.VersionNo, v.BlocksJson, v.ApprovalRequestedAt, v.ApprovalRequestedFromUserId, p.Audience
+      `SELECT v.Title, v.VersionNo, v.BlocksJson, v.ApprovalRequestedAt, v.ApprovalRequestedFromUserId, p.Audience, p.EndorsementAuthority
        FROM dbo.ProcedureVersions v
        INNER JOIN dbo.Procedures p ON p.Slug = v.Slug
        WHERE v.Slug = @Slug AND v.VersionId = @VersionId AND v.Status = 'draft'`,
@@ -130,7 +131,10 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     if (!draft) return { status: 409, jsonBody: { error: "That draft is not there any more: it was published or replaced." } };
     const roles = await readCallerRoles(request);
     if (roles === null) return serviceUnavailableResponse();
-    if (!canReadProcedure(roles, splitAudience(draft.Audience))) return outsideAudienceResponse();
+    if (!canAccessProcedure(roles, splitAudience(draft.Audience), String(draft.EndorsementAuthority ?? "team"))) return outsideAudienceResponse();
+    if (!canEndorseProcedure([approver.role], splitAudience(draft.Audience), String(draft.EndorsementAuthority ?? "team"))) {
+      return { status: 400, jsonBody: { error: "That person cannot endorse this procedure under its authority setting." } };
+    }
     if (!hasContent(draft.BlocksJson)) return { status: 409, jsonBody: { error: "Add some content before asking for approval." } };
 
     const wait = waitBeforeAskingAgain(draft, approver);

@@ -83,11 +83,16 @@ export const ACTION_ROLES = {
     routes: [],
     why: "Approve a rent review you prepared: directors are never blocked by separation of duties (decision 17).",
   },
+  manageProcedureEndorsement: {
+    gate: [A.CFO, A.DIRECTOR], match: "exact",
+    routes: ["setProcedureEndorsement"],
+    why: "Classify each procedure for team-manager or CFO/director endorsement, with an audit trail.",
+  },
   approveProcedures: {
-    gate: [A.DIRECTOR],
+    gate: [A.DIRECTOR, A.CFO, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     refused: [A.ADMIN],
     routes: ["publishProcedure"],
-    why: "Publish a procedure, which stamps the approval onto that version. The handler re-checks the director role (requireProcedureApprover): admin alone is refused, as for sign-off.",
+    why: "Publish a procedure, which stamps the approval onto that version. The handler checks each procedure’s team/executive endorsement policy; admin alone is refused.",
   },
   // Package 117 (attributed approval) adds the attributed roles to this gate and
   // lists them as `conditional`, so they pass the gate without being offered the
@@ -120,13 +125,13 @@ export const ACTION_ROLES = {
     why: "Approve a rent review, or return it to its preparer (REVIEW_APPROVE_ROLES). Admin is never an approver (D20).",
   },
   approveTimesheets: {
-    gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     match: "exact",
     routes: ["approveTimesheet"],
     why: "Approve timesheets (isApprovalManager, timesheets.ts: a literal role check).",
   },
   archiveAnyJob: {
-    gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     match: "exact",
     // Swept with a job someone else created (action-roles.parity.test PROBES):
     // the gate is editJobs, this list decides who archives a job that isn't theirs.
@@ -335,7 +340,7 @@ export const ACTION_ROLES = {
     why: "Override a rent review's rule checks with a reason: directors only.",
   },
   promoteEmail: {
-    gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES],
+    gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.FACILITIES],
     routes: ["promoteEmailToJob", "promoteEmailToQuote", "promoteEmailToInvoice"],
     why: "Turn an email into a job, a quote or an invoice. Field officers do this (decision 1).",
   },
@@ -452,10 +457,23 @@ export const ACTION_ROLES = {
     routes: ["getAccessEvents"],
     why: "Recent sign-ins and anomalies (ACCESS_VIEW_ROLES).",
   },
+  viewFinanceControlsPack: { gate: [A.CFO, A.DIRECTOR], routes: ["getFinanceControlsPack"], why: "Read the CFO controls matrix and sign-off history (WP55)." },
+  signFinanceControlsPack: { gate: [A.CFO], match: "exact", routes: ["signFinanceControlsPack"], why: "The CFO records her review of the current controls pack; this enables no MYOB writes." },
+  manageApprovalLimits: {
+    gate: [A.CFO, A.DIRECTOR], match: "exact", routes: ["setApprovalLimit"],
+    why: "The CFO or a director sets approval limits; confirmed, money-gated and ledgered (WP55).",
+  },
+  manageVarianceMargin: {
+    gate: [A.CFO],
+    match: "exact",
+    routes: ["setApprovalFact"],
+    why: "The CFO sets variance margin and cap; every change is money-gated and ledgered (decision 17).",
+  },
+  viewTechnicalSettings: { gate: [A.ADMIN], match: "exact", routes: [], why: "Technical administration pages remain admin-only; directors have business Settings." },
   viewAdmin: {
-    gate: [A.ADMIN],
+    gate: [A.ADMIN, A.DIRECTOR],
     routes: ["upsertFeatureFlag"],
-    why: "The Admin pages.",
+    why: "Settings and rollout controls: admin and directors (decision 6); CFO controls live in Finance.",
   },
   viewAllEscalations: {
     gate: [A.DIRECTOR],
@@ -518,7 +536,7 @@ export const ACTION_ROLES = {
     why: "Read a job's payments.",
   },
   viewPayroll: {
-    gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     match: "exact",
     routes: ["getTimesheets"],
     why: "The Payroll page (isApprovalManager, timesheets.ts: a literal role check).",
@@ -550,7 +568,7 @@ export const ACTION_ROLES = {
   },
   viewTenancy: {
     gate: TENANCY_DESK,
-    routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges"],
+    routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges", "getReviewsDue"],
     why: "The tenancy register, a tenant's detail and its schedule changes (TENANCY_VIEW_ROLES, CHANGE_VIEW_ROLES).",
   },
   viewTenancyDecisionHistory: {

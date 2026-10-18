@@ -61,7 +61,7 @@ export async function getApprovalCandidates(request: HttpRequest, context: Invoc
       .filter((user) => !(subject === "quote" && samePerson(creator, user.name)))
       .filter((user) => {
         const own = [user.role].filter((role) => role && role !== "admin");
-        const roles = subject === "quote" ? nameableRoles(own) : own;
+        const roles = subject === "quote" || subject === "invoice" ? nameableRoles(own) : own;
         const decision = canApprove({ email: user.email ?? undefined, roles, userId: user.userId }, { amount, buildingId: 0, subject }, facts);
         return decision.allowed && decision.basis === "own_authority";
       })

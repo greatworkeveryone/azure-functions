@@ -1,3 +1,4 @@
+import { initialAdminDeadline } from "../initialAdminDeadline";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
 import {
@@ -608,7 +609,10 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
       // kind decides that, not a person, so the manager gate below leaves it alone
       // and the internal close path (jobTransitionGuard) is open to it.
       const isAdminJob = fields.Kind === ADMIN_KIND;
-      if (isAdminJob) fields.IsInternal = true;
+      if (isAdminJob) {
+        fields.IsInternal = true;
+        fields.ExpectedProgressUpdate = `${initialAdminDeadline(fields.Priority as string | undefined)}T00:00:00.000Z`;
+      }
       // N4 (J2): only a manager starts a job as contract or internal.
       if (fields.IsContract || (fields.IsInternal && !isAdminJob)) {
         const refusal = flagChangeRefusal({ actor: { kind: "user", roles: await rolesForRequest(request) }, hasMoneyRecords: false });

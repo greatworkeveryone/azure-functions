@@ -95,11 +95,11 @@ describe("requestProcedureApproval", () => {
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
-  it("will only ask an active director: anyone else cannot approve", async () => {
-    for (const approverUserId of [3, 99]) {
+  it("rejects an inactive or missing approver", async () => {
+    for (const approverUserId of [99]) {
       const response = await requestProcedureApproval(request({ ...body, approverUserId }), context);
       expect(response.status).toBe(400);
-      expect((response.jsonBody as { error: string }).error).toMatch(/director/i);
+      expect((response.jsonBody as { error: string }).error).toMatch(/eligible/i);
     }
     expect(updateCall()).toBeUndefined();
     expect(graph.graphSendMail).not.toHaveBeenCalled();

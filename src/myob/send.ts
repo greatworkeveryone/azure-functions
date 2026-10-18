@@ -1,3 +1,4 @@
+import { hasOpenAttributionDispute, ATTRIBUTION_DISPUTE_MESSAGE } from "../attributionDispute";
 // "Approve and send to MYOB" (decision 12). Three steps, so a MYOB call never
 // runs inside a database transaction and nothing is marked sent before MYOB
 // has said so:
@@ -101,6 +102,7 @@ async function approve(deps: SendDeps, person: Person, input: SendInput): Promis
     if ((await reviewRequired(tx, proposal)) && samePerson(proposal, person)) {
       throw new ProposalError(403, "A second person must approve this: you proposed it.");
     }
+    if (proposal.jobId !== null && await hasOpenAttributionDispute(tx, proposal.jobId)) throw new ProposalError(409, ATTRIBUTION_DISPUTE_MESSAGE);
     await refuseUnlessDemonstration(tx, proposal.companyFileId);
     checkPreviewTime(input.previewedAt, now);
     const result = await buildDraft(tx, {

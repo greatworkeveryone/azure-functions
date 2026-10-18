@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
 
 jest.mock("../approval-limits-db");
+jest.mock("../db", () => ({ executeQuery: jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]) }));
 
 import { Connection } from "tedious";
 import { getCachedApprovalLimits } from "../approval-limits-db";

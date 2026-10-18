@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "7e236d15f087d66d49f106b285762f07be355f84ff982409d213e5378b02bccf";
+const PINNED_SHA256 = "3d639ec01a815771648255da1ff1e3c2932714e1ad4256f7db18b20eaf5d6284";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -108,8 +108,8 @@ describe("the table", () => {
     expect(ACTION_ROLES.createTestData.match).toBe("exact");
   });
 
-  it("archives any job without the cfo until Connor's decision 11 says otherwise", () => {
-    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL].sort());
+  it("lets the CFO archive any job under Connor's decision 11", () => {
+    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR, AppRole.CFO, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL].sort());
   });
 
   it("works each entry out by requireRole's hierarchy unless it says exact", () => {

@@ -41,6 +41,7 @@ const LOCKED_COLUMNS = `
   TenantId, BuildingId, ScheduleVersion, RowVersion, UpdatedByName, UpdatedAt,
   Commencement, LastReviewDate, ReviewIntervalMonths, NextReviewDate,
   ScheduledRateSteps, CarparkScheduleGroups, MiscFees, Incentives,
+  RentPerAnnum, CpiCapPercent, CpiFloorPercent, ReviewRatchet,
   ${SIGN_OFF_COLUMNS},
   ${RESOLVED_REVIEW_DATES_SQL}
 `;

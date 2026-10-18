@@ -83,3 +83,20 @@ describe("corsHeaders", () => {
     expect(exposed).toEqual(expect.arrayContaining(["Retry-After", "Content-Disposition"]));
   });
 });
+
+
+it("allows the test-data header while leaving its authority to the handler", () => {
+  expect(corsHeaders("http://localhost:3000")["Access-Control-Allow-Headers"]).toContain("X-Show-Test-Data");
+});
+it("allows the developer role header only when backend overrides are enabled", () => {
+  const previous = process.env.DEV_ROLE_OVERRIDE_ENABLED;
+  try {
+    delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
+    expect(corsHeaders("http://localhost:3000")["Access-Control-Allow-Headers"]).not.toContain("X-Dev-Roles");
+    process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
+    expect(corsHeaders("http://localhost:3000")["Access-Control-Allow-Headers"]).toContain("X-Dev-Roles");
+  } finally {
+    if (previous === undefined) delete process.env.DEV_ROLE_OVERRIDE_ENABLED;
+    else process.env.DEV_ROLE_OVERRIDE_ENABLED = previous;
+  }
+});

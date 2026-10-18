@@ -8,6 +8,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
+import { ACTION_ROLES } from "../action-roles";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
@@ -76,9 +77,8 @@ export async function upsertFeatureFlag(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  // Admin only — matches the frontend's viewAdmin gate on the Features
-  // console. Director deliberately does not pass an [ADMIN]-only gate.
-  const denied = await requireRole(request, [AppRole.ADMIN]);
+  // Decision 6: directors share Settings/rollout access; CFO policy is separate.
+  const denied = await requireRole(request, ACTION_ROLES.viewAdmin.gate);
   if (denied) return denied;
 
   const token = extractToken(request);

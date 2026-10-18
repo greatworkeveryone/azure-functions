@@ -22,7 +22,9 @@ import {
   rollbackTransaction,
 } from "../db";
 import { errorResponse, extractToken, unauthorizedResponse, userInfoFromToken } from "../auth";
-import { requireProcedureApprover } from "../procedureAccess";
+import { requireProcedureApprover, readCallerRoles } from "../procedureAccess";
+import { canEndorseProcedure } from "../procedureEndorsement";
+import { splitAudience } from "../procedureLibrary";
 import { REVIEW_INTERVALS } from "../procedureLibrary";
 
 const NO_DRAFT: HttpResponseInit = {
@@ -71,6 +73,16 @@ export async function publishProcedure(request: HttpRequest, context: Invocation
       { name: "VersionId", type: TYPES.UniqueIdentifier, value: versionId },
     ];
 
+    const policy = await executeQuery(connection,
+      "SELECT Audience, EndorsementAuthority FROM dbo.Procedures WITH (UPDLOCK, HOLDLOCK) WHERE Slug = @Slug",
+      [{ name: "Slug", type: TYPES.NVarChar, value: slug }]);
+    const roles = await readCallerRoles(request);
+    if (roles === null || !policy[0] || !canEndorseProcedure(roles, splitAudience(policy[0].Audience), String(policy[0].EndorsementAuthority ?? "team"))) {
+      await rollbackTransaction(connection);
+      inTransaction = false;
+      return { status: roles === null ? 503 : 403, jsonBody: { error: "This procedure requires endorsement by its team manager or the CFO/director, according to its authority setting." } };
+    }
+
     // Read and lock the draft first: nothing is archived unless it is still there.
     const drafts = await executeQuery(
       connection,
@@ -99,7 +111,7 @@ export async function publishProcedure(request: HttpRequest, context: Invocation
            ApprovedBy = @Approver,
            ApprovedAt = SYSUTCDATETIME(),
            PublishedAt = SYSUTCDATETIME(),
-           ReviewDue = CAST(DATEADD(MONTH, @Months, SYSUTCDATETIME()) AS DATE)
+           ReviewDue = CASE WHEN @Months = 0 THEN NULL ELSE CAST(DATEADD(MONTH, @Months, SYSUTCDATETIME()) AS DATE) END
        OUTPUT INSERTED.VersionId
        WHERE Slug = @Slug AND VersionId = @VersionId AND Status = 'draft'`,
       [...key, { name: "Approver", type: TYPES.NVarChar, value: approverName }, { name: "Months", type: TYPES.Int, value: months }],

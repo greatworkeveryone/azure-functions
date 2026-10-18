@@ -222,7 +222,7 @@ export async function recordVariance(connection: Connection, input: RecordVarian
     correlationId: input.correlationId,
     jobId: input.scope.jobId,
     reason: rationale,
-    ruleApplied: within ? "within_margin" : decision.overridden.code,
+    ruleApplied: within ? (named ? "within_margin" : "within_margin_own_authority") : decision.overridden.code,
     subject: input.subject,
   });
   return { attributedToUserId: attributedUserId, varianceId };

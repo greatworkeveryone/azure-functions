@@ -41,7 +41,7 @@ export function darwinToday(now: Date = new Date()): string {
 export async function loadApprovalFacts(conn: Connection, buildingId: number | null): Promise<AuthorityFacts> {
   const rows = await getCachedApprovalLimits(conn);
   return {
-    directorThreshold: parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD),
+    directorThreshold: await loadDirectorThreshold(conn),
     // WP44 seam: the residence flag is the Category column on dbo.Buildings
     // ('residence'), added by migration 136 (U8); migration 118 is not needed
     // for it. Residences also need BuildingApprovers, looked up by buildingId.
@@ -121,4 +121,11 @@ export async function loadNamedUser(conn: Connection, userId: number): Promise<N
     roles: role ? [role] : [],
     userId: Number(row.UserID),
   };
+}
+
+/** CFO-managed value wins over the release default, without an authority cache. */
+export async function loadDirectorThreshold(connection: Connection): Promise<number | null> {
+  const rows = await executeQuery(connection, "SELECT FactKey, FactValue FROM dbo.ApprovalFacts WHERE FactKey = 'director_approval_threshold'");
+  const configured = rows.find(row => row.FactKey === "director_approval_threshold");
+  return configured ? parseDirectorThreshold(String(configured.FactValue)) : parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD);
 }

@@ -215,7 +215,7 @@ export const approvalAttributionAdapter: EscalationAdapter = {
     const parsed = parseAttributionSubjectId(ref.subjectId);
     if (!parsed) return false;
     // A dispute stays until a person resolves it; a notice ends with the answer.
-    if (ref.policyKey === disputedPolicy(parsed.kind)) return true;
+    if (ref.policyKey === disputedPolicy(parsed.kind) || ref.policyKey === "finance.attribution_disputed" || ref.policyKey === "finance.variance_disputed") return true;
     const record = await loadAttribution(connection, parsed);
     return record !== null && record.current && record.answeredAt === null;
   },

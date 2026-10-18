@@ -1,6 +1,6 @@
 // POST /api/setApprovalFact   (LAUNCH-READINESS R13, WP43a-2)
 //
-// Admin edits a fact beside the approval limits: the PO variance margin
+// The CFO edits a fact beside the approval limits: the PO variance margin
 // (percent of the original approved amount) or its cap in dollars. Defaults 10%
 // and $1,000, seeded by migration 117; Connor and Johanne to confirm.
 //
@@ -20,6 +20,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { requireMoneyContext } from "../moneyGate";
 
 const BOUNDS: Record<string, { label: string; max: number }> = {
+  director_approval_threshold: { label: "The director approval threshold", max: 1_000_000_000 },
   [VARIANCE_FACT_KEYS.capDollars]: { label: "The variance cap", max: 1_000_000 },
   [VARIANCE_FACT_KEYS.marginPercent]: { label: "The variance margin", max: 100 },
 };
@@ -29,8 +30,8 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
   if (!token) return unauthorizedResponse();
 
   const userRoles = await rolesForRequest(request);
-  if (!userRoles.includes(AppRole.ADMIN)) {
-    return { status: 403, jsonBody: { error: "Admin role required" } };
+  if (!userRoles.includes(AppRole.CFO)) {
+    return { status: 403, jsonBody: { error: "CFO role required" } };
   }
   // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
   const gate = await requireMoneyContext(request);
@@ -43,7 +44,7 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
     const bounds = BOUNDS[key];
     if (!bounds) return { status: 400, jsonBody: { error: `factKey must be one of ${Object.keys(BOUNDS).join(", ")}` } };
     const value = body.value;
-    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > bounds.max || Math.round(value * 100) !== value * 100) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || (key === "director_approval_threshold" && value === 0) || value > bounds.max || Math.round(value * 100) !== value * 100) {
       return { status: 400, jsonBody: { error: `${bounds.label} must be a number from 0 to ${bounds.max}, with at most 2 decimal places` } };
     }
     const identity = await verifiedIdentityFromRequest(request);

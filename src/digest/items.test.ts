@@ -178,7 +178,7 @@ describe("approvals waiting for a role they hold", () => {
   });
 
   it("an invoice goes to the roles that approve invoices", () => {
-    expect(who(facts({ waitingApprovals: [approval({ amount: 1_500, subject: "invoice" })] }))).toEqual(["accounts", "accountsManager", "cfo", "director"]);
+    expect(who(facts({ waitingApprovals: [approval({ amount: 1_500, subject: "invoice" })] }))).toEqual(["accounts", "accountsManager", "cfo", "director", "facilitiesManager"]);
   });
 
   it("an approved invoice waits for the director only when its amount needs one", () => {
@@ -206,7 +206,7 @@ describe("approvals waiting for a role they hold", () => {
 
   it("a junior's invoice waiting for a senior reaches those whose limit covers it, and not the junior", () => {
     const f = facts({ waitingApprovals: [approval({ amount: 3_000, status: "awaiting_approval", subject: "invoice" })] });
-    expect(who(f)).toEqual(["accountsManager", "cfo", "director"]);
+    expect(who(f)).toEqual(["accountsManager", "cfo", "director", "facilitiesManager"]);
     expect(deriveItems(USERS.accounts, f, ctx)).toEqual([]);
     expect(lines(USERS.accountsManager, f)[0]).toMatch(/^Approve invoice: /);
   });

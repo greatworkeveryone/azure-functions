@@ -52,7 +52,7 @@ const APP_USER: Route = { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ U
 beforeEach(() => {
   jest.clearAllMocks();
   auth.requireRole.mockResolvedValue(null);
-  auth.rolesForRequest.mockResolvedValue(["admin"]);
+  auth.rolesForRequest.mockResolvedValue(["cfo"]);
   auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "ada@example.com", name: "Ada Admin", oid: "ada-oid" });
   db.beginTransaction.mockResolvedValue(undefined);
   db.commitTransaction.mockResolvedValue(undefined);
@@ -93,7 +93,7 @@ describe("setApprovalFact", () => {
   });
 
   it.each([
-    [{ factKey: "director_threshold", value: 1 }],
+    [{ factKey: "unknown_fact", value: 1 }],
     [{ factKey: "po_variance_margin_percent", value: 101 }],
     [{ factKey: "po_variance_cap", value: -1 }],
     [{ factKey: "po_variance_cap", value: 10.005 }],
@@ -102,7 +102,7 @@ describe("setApprovalFact", () => {
     expect((await setApprovalFact(post(body), ctx)).status).toBe(400);
   });
 
-  it("is admin only", async () => {
+  it("is CFO only", async () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
     expect((await setApprovalFact(post({ factKey: "po_variance_cap", value: 500 }), ctx)).status).toBe(403);
   });
@@ -148,9 +148,9 @@ describe("getApprovalCandidates", () => {
     expect((res.jsonBody as { candidates: { userId: number }[] }).candidates.map((c) => c.userId)).toEqual([33]);
   });
 
-  it("for an invoice rise an accounts clerk still counts (Connor's decision 21 is open)", async () => {
+  it("never names an accounts clerk for an invoice rise (decision 21)", async () => {
     const res = await getApprovalCandidates(get({ amount: "4500", subject: "invoice" }), ctx);
-    expect((res.jsonBody as { candidates: { userId: number }[] }).candidates.map((c) => c.userId)).toContain(34);
+    expect((res.jsonBody as { candidates: { userId: number }[] }).candidates.map((c) => c.userId)).not.toContain(34);
   });
 
   it("narrows as the amount rises", async () => {

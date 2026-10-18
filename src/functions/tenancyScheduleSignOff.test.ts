@@ -170,6 +170,8 @@ describe("upsertRegisterTenant on a signed-off tenancy (PLAN WP24)", () => {
   });
 
   it.each([
+    ["Commencement", "2020-02-01", { Commencement: "2020-01-01" }],
+    ["Expiry", "2031-06-30", { Expiry: "2030-06-30" }],
     ["RentPerAnnum", 110000, { RentPerAnnum: 100000 }],
     ["ReviewType", "Fixed 3%", { ReviewType: "CPI" }],
     ["FixedReviewPercent", 3.5, { FixedReviewPercent: 3 }],
@@ -201,7 +203,9 @@ describe("upsertRegisterTenant on a signed-off tenancy (PLAN WP24)", () => {
   it.each([
     ["a name", { LegalName: "Acme Pty Ltd" }],
     ["a comment", { Comments: "Prefers email" }],
-    ["the expiry", { Expiry: "2031-06-30" }],
+    ["option periods", { OptionPeriods: "2 x 5 years" }],
+    ["option notice", { OptionNoticeMonths: 6 }],
+    ["last review", { LastReviewDate: "2026-01-01" }],
     ["a rent value re-sent unchanged", { RentPerAnnum: 100000 }],
   ])("leaves the sign-off alone when only %s is edited", async (_what, change) => {
     db.executeQuery

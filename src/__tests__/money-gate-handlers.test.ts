@@ -27,7 +27,7 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "none" })}.${encode(payload)}.sig`;
 }
 
-function makeRequest(claims: Record<string, unknown>, forwardedFor: string, roles = "admin") {
+function makeRequest(claims: Record<string, unknown>, forwardedFor: string, roles = "cfo") {
   const token = makeJwt({ name: "Ada Admin", oid: "oid-ada", preferred_username: "ada@example.com", ...claims });
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, "x-dev-roles": roles, "x-forwarded-for": forwardedFor };
   const json = jest.fn().mockResolvedValue({ MaxApprovalAmount: 5000, RoleName: "accounts_manager" });

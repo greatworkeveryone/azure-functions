@@ -319,7 +319,7 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
     expect((insert?.[2] as { name: string; value: unknown }[]).find((p) => p.name === "QuoteID")?.value).toBe(70);
   });
 
-  it("routed up to someone senior, the rise isn't recorded yet: their approval, and their check, counts", async () => {
+  it("a clerk cannot approve an increase by naming a senior manager (decision 21)", async () => {
     auth.rolesForRequest.mockResolvedValue(["accounts"]);
     limitsDb.getCachedApprovalLimits.mockResolvedValue([
       { MaxApprovalAmount: 100, RoleName: "accounts" },
@@ -330,8 +330,8 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
 
     const res = await approve({ variance: { attributedToUserId: 30, rationale: "Call-out fee" } });
 
-    expect(res.status).toBe(200);
-    expect(ledgerInserts(db.executeQuery).map((r) => r.action)).toEqual(["invoice.approve"]);
+    expect(res.status).toBe(422);
+    expect(ledgerInserts(db.executeQuery).map((r) => r.action)).toEqual(["denied"]);
     expect(ran(/INSERT INTO dbo\.MoneyVariances/)).toBe(false);
   });
 
@@ -351,7 +351,7 @@ describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
   it("an on-charge (outgoing) invoice is not measured against the contractor's quote", async () => {
     mockSql(routes({ Amount: 600, Direction: "outgoing" }));
     expect((await approve()).status).toBe(200);
-    expect(ran(/FROM dbo\.ApprovalFacts/)).toBe(false);
+    expect(ran(/FactKey IN/)).toBe(false);
   });
 });
 
@@ -601,9 +601,9 @@ describe("rejectJobInvoice", () => {
 
       db.executeQuery.mockClear();
       mockSql([APP_USER, JOB_BUILDING, waiting(), STORED]);
-      expect((await decline()).status).toBe(200);
-      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.reject", reason: "Not the work we ordered" });
-      expect(eventText()).toBe("Rejected invoice IV-9-1 — Not the work we ordered");
+      expect((await decline()).status).toBe(422);
+      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "denied", ruleApplied: "decline_director_required" });
+      expect(ran(/SET Status = 'rejected'/)).toBe(false);
     });
 
     it("an approved invoice below the director gate is final, not waiting: no reason needed", async () => {

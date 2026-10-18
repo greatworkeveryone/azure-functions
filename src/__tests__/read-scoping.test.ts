@@ -122,7 +122,7 @@ describe("getReviewsDue", () => {
 
   it("returns only the widget's fields — no ABN, contacts or rent", async () => {
     db.executeQuery.mockResolvedValueOnce([ROW]);
-    const res = await handler("getReviewsDue")(request("facilities"), ctx);
+    const res = await handler("getReviewsDue")(request("accounts"), ctx);
 
     expect(res.status).toBe(200);
     const [tenant] = res.jsonBody.tenants;

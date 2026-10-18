@@ -1,3 +1,4 @@
+import { declineDirector, needsDeclineDirector, DIRECTOR_ATTRIBUTION_REQUIRED, notifyProxyDecline } from "../directorDeclineAttribution";
 // Quotes — CRUD + approve/reject. A contractor replies to a PO email and
 // we materialise their quote here. Approving a quote sets Jobs.ApprovedQuoteID
 // and stamps ApprovedBy/ApprovedAt so the Payment step has everything it needs.
@@ -926,6 +927,7 @@ async function approveQuote(
 const IN_APP_REJECTABLE_STATUSES = ["pending", "awaiting_director"] as const;
 
 interface RejectQuoteBody {
+  AttributedDirectorUserId?: unknown;
   QuoteID?: unknown;
   /** Why it is turned down; required when declining a quote that waits on a director (J6). */
   Reason?: unknown;
@@ -968,6 +970,15 @@ export async function rejectQuote(
     await beginTransaction(connection);
     let outcome;
     try {
+      const current = await executeQuery(connection, "SELECT Status FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID=@Id", [{ name: "Id", type: TYPES.Int, value: QuoteID }]);
+      const waiting = current[0]?.Status === "awaiting_director";
+      const attributedDirector = await declineDirector(connection, actor, waiting, body.AttributedDirectorUserId);
+      if (needsDeclineDirector(actor, waiting) && reason !== null && !attributedDirector) {
+        await rollbackTransaction(connection);
+        await recordRefusal(connection, actor, { id: QuoteID, type: "quote" },
+          { attempted: "quote.reject", code: "decline_director_required", message: DIRECTOR_ATTRIBUTION_REQUIRED.jsonBody.error }, null);
+        return DIRECTOR_ATTRIBUTION_REQUIRED;
+      }
       outcome = await rejectQuoteWrite(connection, {
         byDirector: actor.kind === "user" && actor.role === AppRole.DIRECTOR,
         expectedStatuses: IN_APP_REJECTABLE_STATUSES,
@@ -1001,6 +1012,7 @@ export async function rejectQuote(
             ? "quote.director_reject"
             : "quote.reject",
         actor,
+        ...(attributedDirector ? { attributedTo: attributedDirector } : {}),
         after: { status: "rejected", ...quoteFacts(outcome.quote) },
         before: { status: outcome.previousStatus ?? null, ...contractorFacts(outcome.quote) },
         buildingId: scope.buildingId,
@@ -1008,6 +1020,7 @@ export async function rejectQuote(
         reason,
         subject: { id: QuoteID, type: "quote" },
       });
+      if (attributedDirector) await notifyProxyDecline(connection, { actor, director: attributedDirector, kind: "quote", id: QuoteID, jobId: outcome.jobId, reason });
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});

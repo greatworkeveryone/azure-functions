@@ -43,7 +43,7 @@ import { loadSeedEntries, planSeed, runSeed, SEED_FILE, type LibraryState, type 
 // data is the frontend's exports/procedures-seed.json, kept here byte for byte
 // and pinned in both repos. The loader is idempotent by slug and version, and it
 // never touches what is already in the library: a published version is immutable.
-const PINNED_SHA256 = "a0506d06cee3ee5a96653bef42c9e95ce21327cb480428135df7d3d59beb9564";
+const PINNED_SHA256 = "4367b6e7532bbf29c29f064d6dd4b6eaa41787d7db60b4b5153d3db8d5630d18";
 
 const db = require("../db") as { executeQuery: jest.Mock };
 const entries = loadSeedEntries();

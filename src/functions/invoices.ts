@@ -1,9 +1,10 @@
+import { declineDirector, needsDeclineDirector, DIRECTOR_ATTRIBUTION_REQUIRED, notifyProxyDecline } from "../directorDeclineAttribution";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, createRequestConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { SUBJECT_ELIGIBLE_ROLES, decideAuthority, toRoleLimits } from "../approvalAuthority";
-import { loadApprovalFacts, loadVarianceFacts, parseDirectorThreshold, resolveApprovalAuthority } from "../approvalAuthority-db";
+import { loadApprovalFacts, loadVarianceFacts, loadDirectorThreshold, resolveApprovalAuthority } from "../approvalAuthority-db";
 import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { isTestJob } from "../testRecords";
 import {
@@ -110,6 +111,7 @@ interface DirectorApproveJobInvoiceBody {
 }
 interface UndoDirectorApproveJobInvoiceBody { JobInvoiceID: number }
 interface RejectJobInvoiceBody {
+  AttributedDirectorUserId?: unknown;
   JobInvoiceID: number;
   /** Why it is turned down; required when declining an invoice that waits on a director (J6). */
   Reason?: unknown;
@@ -1501,7 +1503,7 @@ async function getApprovalLimits(
       .slice()
       .sort((a, b) => a.role.localeCompare(b.role))
       .map((row) => ({ maxApprovalAmount: row.limit, roleName: row.role }));
-    const directorThreshold = parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD);
+    const directorThreshold = await loadDirectorThreshold(connection);
     const { effectiveDirectorThreshold } = decideAuthority(
       { amount: 0, buildingId: 0, subject: "invoice" },
       { directorThreshold, isResidence: false, limits, residenceApprovers: [], residenceDirectorFallback: true, today: "" },
@@ -1640,6 +1642,14 @@ async function rejectJobInvoice(
         return refusalResponse(reasonMissing);
       }
 
+      const attributedDirector = await declineDirector(connection, actor, waitsOnDirector, body.AttributedDirectorUserId);
+      if (needsDeclineDirector(actor, waitsOnDirector) && !attributedDirector) {
+        await rollbackTransaction(connection);
+        await recordRefusal(connection, actor, { id: JobInvoiceID, type: "invoice" },
+          { attempted: "invoice.reject", code: "decline_director_required", message: DIRECTOR_ATTRIBUTION_REQUIRED.jsonBody.error }, jobId);
+        return DIRECTOR_ATTRIBUTION_REQUIRED;
+      }
+
       await executeQuery(
         connection,
         "UPDATE JobInvoices SET Status = 'rejected' WHERE JobInvoiceID = @Id",
@@ -1667,6 +1677,7 @@ async function rejectJobInvoice(
       await record(connection, {
         action: asDirector ? "invoice.director_reject" : "invoice.reject",
         actor,
+        ...(attributedDirector ? { attributedTo: attributedDirector } : {}),
         after: { status: "rejected", ...invoiceFacts(known) },
         before: { status: (invoice.Status as string | null) ?? null, ...contractorFacts(known) },
         buildingId: scope.buildingId,
@@ -1674,6 +1685,7 @@ async function rejectJobInvoice(
         reason,
         subject: { id: JobInvoiceID, type: "invoice" },
       });
+      if (attributedDirector) await notifyProxyDecline(connection, { actor, director: attributedDirector, kind: "invoice", id: JobInvoiceID, jobId, reason });
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});

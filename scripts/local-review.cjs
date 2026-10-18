@@ -114,6 +114,23 @@ async function prepare() {
       { name: "Features", type: TYPES.NVarChar, value: JSON.stringify(features) },
       { name: "Roles", type: TYPES.NVarChar, value: JSON.stringify(roles) },
     ]);
+    // The historical schema seed omits manager limits; complete the local fixture
+    // without overwriting any limits the reviewer has already changed.
+    await db.executeBatch(connection, `
+      IF NOT EXISTS (SELECT 1 FROM dbo.ApprovalLimits WHERE RoleName='accounts_manager')
+        INSERT INTO dbo.ApprovalLimits (RoleName,MaxApprovalAmount) VALUES ('accounts_manager',20000);
+      IF NOT EXISTS (SELECT 1 FROM dbo.ApprovalLimits WHERE RoleName='facilities_manager')
+        INSERT INTO dbo.ApprovalLimits (RoleName,MaxApprovalAmount) VALUES ('facilities_manager',20000);
+    `);
+    // Clearly synthetic colleagues make approval routing and inbox testing possible.
+    for (const [role, name] of [["director", "Review Director"], ["cfo", "Review CFO"], ["accounts_manager", "Review Accounts Manager"], ["facilities_manager", "Review Facilities Manager"], ["accounts", "Review Accounts"], ["facilities", "Review Facilities"]]) {
+      await db.executeQuery(connection, `IF NOT EXISTS (SELECT 1 FROM dbo.AppUsers WHERE Email=@Email)
+        INSERT INTO dbo.AppUsers (DisplayName,Email,Role,InvitedAt) VALUES (@Name,@Email,@Role,SYSUTCDATETIME());`, [
+        { name: "Email", type: TYPES.NVarChar, value: `${role}@review.invalid` },
+        { name: "Name", type: TYPES.NVarChar, value: name },
+        { name: "Role", type: TYPES.NVarChar, value: role },
+      ]);
+    }
     const position = process.argv.indexOf("--email");
     const emails = position >= 0 ? [process.argv[position + 1]] : [];
     const rolePosition = process.argv.indexOf("--role");
@@ -129,6 +146,8 @@ async function prepare() {
     }
     console.log("Enabled all module flags in the local database; role permissions still apply.");
   } finally { connection.close(); }
+  const portfolio = path.join(state, "buildings-source.json");
+  run(process.execPath, ["scripts/import-review-buildings.cjs", ...(fs.existsSync(portfolio) ? [portfolio] : [])]);
   prepareRuntime();
   console.log("Next: local-review.cjs storage and local-review.cjs api in separate terminals, then the frontend npm run dev.");
 }
@@ -138,9 +157,10 @@ async function main() {
   if (command === "prepare") return prepare();
   if (command === "storage") return run("azurite", ["--silent", "--location", path.join(state, "storage"), "--blobHost", "127.0.0.1", "--queueHost", "127.0.0.1", "--tableHost", "127.0.0.1"]);
   if (command === "api") {
+    if (process.versions.node.split(".")[0] !== "22") throw new Error("Use Node 22 for the review API (nvm use 22), then run this command again.");
     if (!fs.existsSync(path.join(runtime, "local.settings.json"))) throw new Error("Run prepare first.");
     return run(path.join(root, "node_modules/.bin/func"), ["start", "--script-root", runtime, "--port", "7071"], {
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, NODE_ENV: "development", FUNCTIONS_CORE_TOOLS_TELEMETRY_OPTOUT: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1" },
+      env: { PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, NODE_ENV: "development", FUNCTIONS_CORE_TOOLS_TELEMETRY_OPTOUT: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1" },
     });
   }
   throw new Error("Usage: node scripts/local-review.cjs prepare [--email you@example.com] | storage | api");

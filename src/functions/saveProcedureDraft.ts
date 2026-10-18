@@ -63,7 +63,10 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
     if (roles === null) return serviceUnavailableResponse();
     // An existing procedure keeps the audience it was made with; a new one is made with the one asked for.
     const audienceInForce = (await storedAudience(connection, slug)) ?? written;
-    if (!canReadProcedure(roles, audienceInForce)) return outsideAudienceResponse();
+    if (!canReadProcedure(roles, audienceInForce)) {
+      const policy = roles.includes("cfo") ? await executeQuery(connection, "SELECT EndorsementAuthority FROM dbo.Procedures WHERE Slug=@Slug", [{ name: "Slug", type: TYPES.NVarChar, value: slug }]) : [];
+      if (policy[0]?.EndorsementAuthority !== "executive") return outsideAudienceResponse();
+    }
 
     await executeQuery(
       connection,

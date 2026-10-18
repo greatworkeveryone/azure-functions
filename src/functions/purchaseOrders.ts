@@ -1,3 +1,4 @@
+import { hasOpenAttributionDispute, ATTRIBUTION_DISPUTE_MESSAGE } from "../attributionDispute";
 // Purchase Orders — CRUD + "send" stub. The send endpoint persists the
 // outgoing email metadata and flips SentAt/SentBy; actual PDF generation
 // and Microsoft Graph sendMail are follow-on work that plug into the same
@@ -895,6 +896,10 @@ async function sendPurchaseOrder(
         contractorRows[0].JobID as number,
       );
       return refusalResponse(sendRefusal);
+    }
+
+    if (await hasOpenAttributionDispute(connection, contractorRows[0].JobID as number)) {
+      return { status: 409, jsonBody: { code: "attribution_disputed", error: ATTRIBUTION_DISPUTE_MESSAGE } };
     }
 
     // R13: a PO above its approved quote goes out only within the margin (or up

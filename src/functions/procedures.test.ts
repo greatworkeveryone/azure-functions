@@ -204,7 +204,7 @@ describe("getProcedures: asking for approval (U4)", () => {
       { email: "a@rp.com", name: "Ann Accounts", role: "accounts_manager", userId: 3 },
     ]);
     const body = (await getProcedures(emptyRequest, context)).jsonBody as any;
-    expect(body.approvers).toEqual([{ name: "Dee Director", userId: 7 }, { name: "Zed Director", userId: 9 }]);
+    expect(body.approvers).toEqual([{ name: "Ann Accounts", role: "accounts_manager", userId: 3 }, { name: "Dee Director", role: "director", userId: 7 }, { name: "Zed Director", role: "director", userId: 9 }]);
   });
 
   it("offers nobody else the list, and never reads the users for them", async () => {
@@ -369,6 +369,7 @@ describe("publishProcedure", () => {
   function library({ draftThere = true, promoted = 1 }: { draftThere?: boolean; promoted?: number } = {}) {
     const order: string[] = [];
     db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (/SELECT Audience, EndorsementAuthority/.test(sql)) return [{ Audience: "facilities", EndorsementAuthority: "team" }];
       if (/UPDLOCK/.test(sql)) {
         order.push("lock");
         return draftThere ? [{ VersionId: "abc" }] : [];
@@ -488,7 +489,7 @@ describe("publishProcedure", () => {
   it("locks the draft row it reads, so two publishes of it cannot both pass", async () => {
     library();
     await publishProcedure(requestWithBody(publishBody), context);
-    const lock = db.executeQuery.mock.calls.find((call) => /UPDLOCK/.test(String(call[1])))!;
+    const lock = db.executeQuery.mock.calls.find((call) => /UPDLOCK, ROWLOCK/.test(String(call[1])))!;
     expect(String(lock[1])).toMatch(/Status = 'draft'/);
     expect(String(lock[1])).toMatch(/WHERE Slug = @Slug AND VersionId = @VersionId/);
   });

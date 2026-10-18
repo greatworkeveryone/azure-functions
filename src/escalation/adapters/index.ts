@@ -5,6 +5,7 @@
 
 import { approvalAttributionAdapter } from "./approvalAttribution";
 import { defectsPeriodAdapter } from "./defectsPeriod";
+import { reviewNoticeAdapter } from "./reviewNotice";
 import { jobAdapter } from "./job";
 import { registerAdapter } from "./registry";
 import { rentReviewAdapter } from "./rentReview";
@@ -16,6 +17,7 @@ import { tenancyAdapter } from "./tenancy";
 registerAdapter(approvalAttributionAdapter);
 registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);
+registerAdapter(reviewNoticeAdapter);
 registerAdapter(rentReviewAdapter);
 registerAdapter(scheduleChangeAdapter);
 registerAdapter(serviceScheduleAdapter);

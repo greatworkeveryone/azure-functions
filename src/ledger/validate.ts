@@ -89,7 +89,11 @@ export function assertLedgerEntry(entry: LedgerEntryInput): void {
   }
 
   const attributed = entry.attributedTo;
-  if (def.attributionRequired && !attributed) {
+  // Decision 18: a manager acting within their own limit names nobody else.
+  const ownVariance = entry.action === "po.variance_within_tolerance" &&
+    entry.ruleApplied === "within_margin_own_authority" && actor.kind === "user" &&
+    ["facilities_manager", "accounts_manager", "cfo", "director"].includes(actor.role);
+  if (def.attributionRequired && !attributed && !ownVariance) {
     throw new LedgerValidationError(`${entry.action} needs attributedTo: the person whose authority it relies on`);
   }
   if (attributed) {

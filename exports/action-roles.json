@@ -12,7 +12,8 @@
     "accounts",
     "accounts_manager",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "approveInvoiceAsDirector": [
     "director"
@@ -21,7 +22,10 @@
     "director"
   ],
   "approveProcedures": [
-    "director"
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
   ],
   "approveQuote": [
     "accounts",
@@ -44,12 +48,14 @@
   "approveTimesheets": [
     "accounts_manager",
     "admin",
+    "cfo",
     "director",
     "facilities_manager"
   ],
   "archiveAnyJob": [
     "accounts_manager",
     "admin",
+    "cfo",
     "director",
     "facilities_manager"
   ],
@@ -226,6 +232,10 @@
   "manageAccessProfiles": [
     "admin"
   ],
+  "manageApprovalLimits": [
+    "cfo",
+    "director"
+  ],
   "manageAssetTypes": [
     "admin",
     "director",
@@ -235,6 +245,10 @@
     "admin",
     "director",
     "facilities_manager"
+  ],
+  "manageProcedureEndorsement": [
+    "cfo",
+    "director"
   ],
   "managePurchaseOrders": [
     "accounts_manager",
@@ -258,6 +272,9 @@
   ],
   "manageTestData": [
     "admin"
+  ],
+  "manageVarianceMargin": [
+    "cfo"
   ],
   "markInvoiceInMyob": [
     "accounts_manager",
@@ -283,6 +300,7 @@
     "director"
   ],
   "promoteEmail": [
+    "accounts",
     "accounts_manager",
     "admin",
     "cfo",
@@ -378,6 +396,9 @@
     "director",
     "facilities_manager"
   ],
+  "signFinanceControlsPack": [
+    "cfo"
+  ],
   "signOffTenancySchedule": [
     "accounts_manager",
     "cfo",
@@ -419,7 +440,8 @@
     "director"
   ],
   "viewAdmin": [
-    "admin"
+    "admin",
+    "director"
   ],
   "viewAllEscalations": [
     "admin",
@@ -447,6 +469,11 @@
     "director",
     "facilities",
     "facilities_manager"
+  ],
+  "viewFinanceControlsPack": [
+    "admin",
+    "cfo",
+    "director"
   ],
   "viewInspections": [
     "admin",
@@ -511,6 +538,7 @@
   "viewPayroll": [
     "accounts_manager",
     "admin",
+    "cfo",
     "director",
     "facilities_manager"
   ],
@@ -554,6 +582,9 @@
     "cfo",
     "director",
     "facilities_manager"
+  ],
+  "viewTechnicalSettings": [
+    "admin"
   ],
   "viewTenancy": [
     "accounts",

@@ -37,8 +37,8 @@ export async function setApprovalLimit(
   if (!token) return unauthorizedResponse();
 
   const userRoles = await rolesForRequest(request);
-  if (!userRoles.includes(AppRole.ADMIN)) {
-    return { status: 403, jsonBody: { error: "Admin role required" } };
+  if (!userRoles.some(role => role === AppRole.CFO || role === AppRole.DIRECTOR)) {
+    return { status: 403, jsonBody: { error: "CFO or director role required" } };
   }
   // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
   const gate = await requireMoneyContext(request);

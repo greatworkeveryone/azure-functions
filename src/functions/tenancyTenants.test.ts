@@ -709,7 +709,7 @@ describe("upsertRegisterTenant — review terms and next review", () => {
     expect(res.status).toBe(400);
   });
 
-  it("re-derives NextReviewDate when a review date field changes; a derived date alone isn't ledgered", async () => {
+  it("re-derives NextReviewDate and records a commencement change as a schedule term", async () => {
     db.executeQuery
       .mockResolvedValueOnce([
         lockedRow({ NextReviewDate: new Date("2025-07-01T00:00:00Z"), ScheduledRateSteps: schedule }),
@@ -718,7 +718,7 @@ describe("upsertRegisterTenant — review terms and next review", () => {
       .mockResolvedValueOnce(storedRow());
     await handlers.upsertRegisterTenant(makeRequest({ Commencement: "2024-07-01", TenantId: 7 }), ctx);
     expect(param("NextReviewDate")).toBe("2027-07-01");
-    expect(ledger.record).not.toHaveBeenCalled();
+    expect(ledger.record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "schedule.terms_edit" }));
   });
 
   it("ignores a typed NextReviewDate on a tenancy with a schedule — the schedule decides", async () => {

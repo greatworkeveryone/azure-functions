@@ -16,23 +16,23 @@ import { closeConnection, createRequestConnection, createServiceRequestConnectio
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { listActiveUsers } from "../escalation/store";
 import { readCallerRoles } from "../procedureAccess";
-import { canReadProcedure } from "../procedureAudience";
 import { approvalRequestOf, parseBlocks, splitAudience, toIsoDate, toIsoDateTime } from "../procedureLibrary";
-import { PROCEDURE_APPROVER_ROLE, PROCEDURE_EDITOR_GATE } from "../procedureRoles";
+import { ENDORSER_ROLES, canAccessProcedure } from "../procedureEndorsement";
+import { PROCEDURE_EDITOR_GATE } from "../procedureRoles";
 
 /**
  * The directors an editor can ask to approve a draft, by name. Read on the service
  * connection (the user table is not the editor's to read) and never fatal: the
  * library is more use without the picker than not at all.
  */
-async function listApprovers(context: InvocationContext): Promise<Array<{ name: string; userId: number }>> {
+async function listApprovers(context: InvocationContext): Promise<Array<{ name: string; role: string; userId: number }>> {
   let connection;
   try {
     connection = await createServiceRequestConnection();
     const users = await listActiveUsers(connection);
     return users
-      .filter((user) => user.role === PROCEDURE_APPROVER_ROLE)
-      .map((user) => ({ name: user.name, userId: user.userId }))
+      .filter((user) => ENDORSER_ROLES.includes(user.role))
+      .map((user) => ({ name: user.name, role: user.role, userId: user.userId }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch (error: any) {
     context.warn(`procedures: could not list approvers: ${error.message}`);
@@ -62,7 +62,7 @@ export async function getProcedures(request: HttpRequest, context: InvocationCon
     connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT p.Slug, p.Category, p.Audience, p.SortOrder, p.Owner,
+      `SELECT p.Slug, p.Category, p.Audience, p.SortOrder, p.Owner, p.EndorsementAuthority, p.EndorsementVersion,
               v.VersionId, v.VersionNo, v.Title, v.Summary, v.BlocksJson, v.Status,
               v.CreatedBy, v.CreatedAt, v.ApprovedBy, v.ApprovedAt, v.PublishedAt, v.ReviewDue,
               v.ApprovalRequestedAt, v.ApprovalRequestedBy, v.ApprovalRequestedFromUserId, v.ApprovalRequestedFromName
@@ -71,15 +71,18 @@ export async function getProcedures(request: HttpRequest, context: InvocationCon
        ORDER BY p.SortOrder, p.Slug, v.VersionNo DESC`,
     );
 
+    const published = new Set(rows.filter(row => row.Status === "published").map(row => String(row.Slug)));
     const bySlug = new Map<string, { versions: unknown[]; [key: string]: unknown }>();
     for (const row of rows) {
       const slug = String(row.Slug);
       let record = bySlug.get(slug);
       if (!record) {
         const audience = splitAudience(row.Audience);
-        if (!canReadProcedure(roles, audience)) continue;
+        if (!canAccessProcedure(roles, audience, String(row.EndorsementAuthority ?? "team"))) continue;
         record = {
           audience,
+          endorsementAuthority: row.EndorsementAuthority ?? "team",
+          endorsementVersion: Number(row.EndorsementVersion ?? 0),
           category: String(row.Category),
           order: Number(row.SortOrder),
           owner: row.Owner ?? undefined,
@@ -89,7 +92,7 @@ export async function getProcedures(request: HttpRequest, context: InvocationCon
         bySlug.set(slug, record);
       }
       if (!row.VersionId) continue;
-      if (String(row.Status) === "draft" && !isEditor) continue;
+      if (String(row.Status) === "draft" && !isEditor && published.has(slug)) continue;
 
       record.versions.push({
         approvedAt: toIsoDateTime(row.ApprovedAt),

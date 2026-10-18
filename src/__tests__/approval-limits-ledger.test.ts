@@ -42,7 +42,7 @@ function authHeaders(roles: string): Record<string, string> {
   };
 }
 
-function makeRequest(body: unknown, headers: Record<string, string> = authHeaders("admin")): HttpRequest {
+function makeRequest(body: unknown, headers: Record<string, string> = authHeaders("cfo")): HttpRequest {
   return {
     headers: { get: (key: string) => headers[key.toLowerCase()] ?? null },
     json: async () => body,
@@ -95,8 +95,8 @@ beforeEach(() => {
 });
 
 describe("setApprovalLimit gate", () => {
-  it("is admin-only: a director is refused and nothing is touched", async () => {
-    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: 5000, RoleName: "accounts" }, authHeaders("director")), makeContext());
+  it("refuses admin: finance controls belong to the CFO and directors", async () => {
+    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: 5000, RoleName: "accounts" }, authHeaders("admin")), makeContext());
 
     expect(res.status).toBe(403);
     expect(db.beginTransaction).not.toHaveBeenCalled();
@@ -133,7 +133,7 @@ describe("changing an existing limit", () => {
     expect(param(ledger, "SubjectType")?.value).toBe("approval_limit");
     expect(param(ledger, "SubjectId")?.value).toBe("accounts");
     expect(param(ledger, "ActorName")?.value).toBe("Ada Admin");
-    expect(param(ledger, "ActorRole")?.value).toBe("admin");
+    expect(param(ledger, "ActorRole")?.value).toBe("cfo");
     expect(param(ledger, "ActorUserId")?.value).toBe(3);
     expect(param(ledger, "IsException")?.value).toBe(true);
     expect(JSON.parse(param(ledger, "Before")?.value as string)).toEqual({ maxApprovalAmount: 1000 });

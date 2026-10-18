@@ -7,7 +7,7 @@ import { AppRole } from "./auth";
 
 export const BLOCK_KINDS = ["heading", "image", "list", "paragraph", "table"];
 export const KNOWN_AUDIENCES: string[] = ["all", ...Object.values(AppRole)];
-export const REVIEW_INTERVALS = [3, 6, 12, 24];
+export const REVIEW_INTERVALS = [0, 3, 6, 12, 24];
 export const MAX_BLOCKS_BYTES = 512 * 1024;
 
 /** Rejects anything the frontend renderer would not understand. */

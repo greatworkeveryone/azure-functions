@@ -275,14 +275,14 @@ describe("approveJobInvoice", () => {
   const approve = () => approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
   const landed = (): unknown => param(/UPDATE JobInvoices\s+SET Status = @Status/, "Status");
 
-  it("lets every role that may approve an invoice through the gate, and no facilities role", async () => {
+  it("admits invoice approval roles including facilities managers, excluding officers", async () => {
     as("accounts");
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, invoice(4000), STORED]);
 
     await approve();
 
     const allowed = auth.requireRole.mock.calls[0][1] as string[];
-    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director"]);
+    expect([...allowed].sort()).toEqual(["accounts", "accounts_manager", "admin", "cfo", "director", "facilities_manager"]);
   });
 
   it("accounts approves a $4,000 invoice", async () => {
@@ -344,14 +344,13 @@ describe("approveJobInvoice", () => {
     expect(landed()).toBe("approved");
   });
 
-  it("refuses a facilities manager, whose role approves no invoices", async () => {
+  it("allows a facilities manager within their invoice limit (decision 21)", async () => {
     as("facilities_manager");
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, invoice(100), STORED]);
 
     const res = await approve();
 
-    expect(res.status).toBe(403);
-    expect(res.jsonBody).toMatchObject({ code: "not_eligible" });
+    expect(res.status).toBe(200);
   });
 });
 

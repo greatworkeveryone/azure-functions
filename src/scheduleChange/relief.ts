@@ -3,9 +3,8 @@
 // between). Pure: the endpoint loads the tenancy and its other requests.
 //
 //   outside_lease       422  it runs past the lease's last day (Expiry) or starts
-//                            before its first (Commencement). A tenancy holding
-//                            over past its expiry is refused too, for now: whether
-//                            holdover can carry a relief is Connor's call
+//                            before its first (Commencement). During holdover the
+//                            required, explicit relief end date caps the relief.
 //   relief_overlap      409  it shares a day and a charge with a ratified relief
 //                            or with another request awaiting a director
 //   nothing_to_relieve  422  the schedule charges nothing on its first day (not
@@ -20,6 +19,7 @@
 
 import type { SqlRow } from "../db";
 import { formatDisplayDate } from "../digest/format";
+import { todayInDarwin } from "../darwinDate";
 import { sqlDateToIso } from "../nextReviewDate";
 import { ancillariesByRow } from "../rentReview/cascade";
 import {
@@ -41,7 +41,7 @@ import { type ReliefPayload, reliefDates, reliefTerms } from "./types";
 export interface TenancySchedule {
   input: ChargeInput;
   /** Tenants.Commencement and Expiry (the lease's first and last days); null when not recorded. */
-  lease: { commencement: string | null; expiry: string | null };
+  lease: { commencement: string | null; expiry: string | null; holdover?: boolean };
   /** The reliefs already ratified (Tenants.RentReliefs). */
   ratified: RentRelief[];
   rows: ScheduleRow[];
@@ -64,7 +64,7 @@ export function tenancySchedule(row: SqlRow, totalSqm: number): TenancySchedule 
       fallbackAnnual,
       reliefs: ratified,
     },
-    lease: { commencement: sqlDateToIso(row.Commencement), expiry: sqlDateToIso(row.Expiry) },
+    lease: { commencement: sqlDateToIso(row.Commencement), expiry: sqlDateToIso(row.Expiry), holdover: row.Status === "holdover" || (row.Status === "current" && sqlDateToIso(row.Expiry) !== null && sqlDateToIso(row.Expiry)! < todayInDarwin()) },
     ratified,
     rows,
   };
@@ -97,7 +97,7 @@ export interface OtherRequest {
 /** The checks in the header, for `relief` (with the id it has or will have) on `schedule`. */
 export function checkRelief(relief: ReliefPayload & { id: string }, schedule: TenancySchedule, pending: readonly OtherRequest[]): ReliefCheck {
   const { commencement, expiry } = schedule.lease;
-  if (expiry !== null && relief.to > expiry) {
+  if (expiry !== null && relief.to > expiry && !schedule.lease.holdover) {
     return refuse("outside_lease", `This relief runs to ${formatDisplayDate(relief.to)}, after the lease ends on ${formatDisplayDate(expiry)}. A relief has to end by the lease's last day.`, {
       leaseExpiry: expiry,
     });
