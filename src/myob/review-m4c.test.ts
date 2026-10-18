@@ -26,7 +26,7 @@ const MAPPING = { account: { label: "6-1100 Repairs", uid: "acct" }, companyFile
 const SENT = { Comment: "FP 66Sm261014 · proposed Ray", Date: "2026-10-14T00:00:00", IsTaxInclusive: true, JournalMemo: "FP 66Sm261014 · proposed Ray",
   Lines: [{ Account: { UID: "acct" }, Description: "66Sm261014 · Floorplan job #12", TaxCode: { UID: "gst" }, Total: 4840, Type: "Transaction" }], Number: "66Sm261014", Supplier: { UID: "sup" } };
 const ACCEPTED = { ...SENT, JournalMemo: "Johanne: hold until the roof report", Lines: [{ ...SENT.Lines[0], Description: "Roof - hold for report" }], PromisedDate: "2026-10-30T00:00:00", RowVersion: "9", Status: "Open" };
-const created = { companyFileId: CF, correlationId: "c-1", myobUid: UID, operation: "orders.create", payload: SENT, readBack: { ...SENT, RowVersion: "7" }, state: "verified" };
+const created = { companyFileId: CF, correlationId: "c-1", myobNumber: "66Sm261014", myobUid: UID, operation: "orders.create", payload: SENT, proposalId: 3, readBack: { ...SENT, RowVersion: "7" }, state: "verified" };
 const update = () => buildDraft({} as never, { operation: "orders.update", proposer: { at: new Date("2026-10-15T00:00:00Z"), name: "Ray" }, subjectId: 9, subjectType: "purchase_order" });
 
 beforeEach(() => {
@@ -47,4 +47,12 @@ it("refuses Update in MYOB on a record whose MYOB version the CFO accepted, so n
 it("still builds the update when no baseline was accepted", async () => {
   baselineAccepted.mockResolvedValue(false);
   expect((await update()).ok).toBe(true);
+});
+
+// The re-review's note (18 Oct): a fresh "Propose to MYOB" for the same record would mint a new
+// correlation id that baselineAccepted doesn't know, and its create would bypass the acceptance.
+it("refuses a fresh create for a record Floorplan already created in MYOB, so the acceptance can't be bypassed", async () => {
+  baselineAccepted.mockResolvedValue(true);
+  const result = await buildDraft({} as never, { operation: "orders.create", proposer: { at: new Date("2026-10-15T00:00:00Z"), name: "Ray" }, subjectId: 9, subjectType: "purchase_order" });
+  expect(result).toMatchObject({ ok: false, reasons: [expect.stringContaining("already created this Order in MYOB")], status: 409 });
 });

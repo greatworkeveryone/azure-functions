@@ -2,9 +2,10 @@
 // happened (m4c review, 18 Oct).
 //   acceptanceProblems  the fields she may accept are the ones that aren't
 //     Floorplan's money or identity: memo, comment, line descriptions, dates
-//     other than the record's date, freight, and MYOB's status. A difference
-//     in amount, tax-inclusive, supplier, account, tax code, number, the
-//     record's date, the lines themselves, or anything else is refused:
+//     other than the record's date, and MYOB's status. A difference in amount,
+//     freight or its tax code (money: the headline amount compares line totals
+//     only), tax-inclusive, supplier, account, tax code, number, the record's
+//     date, the lines themselves, or anything else is refused:
 //     "accept MYOB's value into Floorplan" isn't built, and accepting it would
 //     leave Floorplan's record and MYOB's disagreeing with nothing to say so.
 //   baselineAccepted  the ledger's record of her acceptance for a proposal;
@@ -16,7 +17,7 @@ import { TYPES } from "tedious";
 import { executeQuery } from "../../db";
 import type { DiscrepancyField } from "../readbackCompare";
 
-const ACCEPTABLE = [/^JournalMemo$/, /^Comment$/, /^Lines\[\d+\]\.Description$/, /^(?!Date$)(?:[A-Za-z]+\.)*[A-Za-z]*Date$/, /^Freight$/, /^FreightTaxCode\.UID$/, /^status$/];
+const ACCEPTABLE = [/^JournalMemo$/, /^Comment$/, /^Lines\[\d+\]\.Description$/, /^(?!Date$)(?:[A-Za-z]+\.)*[A-Za-z]*Date$/, /^status$/];
 
 /** The labels of the differences she may not accept; empty when all of them may be. */
 export function acceptanceProblems(fields: readonly DiscrepancyField[]): string[] {
