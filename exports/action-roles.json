@@ -34,6 +34,9 @@
   "approveQuoteAsDirector": [
     "director"
   ],
+  "approveQuoteAttributed": [
+    "facilities"
+  ],
   "approveRentReview": [
     "accounts_manager",
     "cfo",
@@ -48,7 +51,6 @@
   "archiveAnyJob": [
     "accounts_manager",
     "admin",
-    "cfo",
     "director",
     "facilities_manager"
   ],
@@ -194,6 +196,9 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "hardDeleteTenancyRows": [
+    "admin"
   ],
   "manageAccessProfiles": [
     "admin"

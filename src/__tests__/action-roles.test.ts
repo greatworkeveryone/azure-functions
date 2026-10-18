@@ -6,13 +6,13 @@
 import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ACTION_ROLES, ALL_ROLES, exportActionRoles, rolesFor, type ActionRoles } from "../action-roles";
-import { AppRole, rolesPassGate } from "../auth";
+import { ACTION_ROLES, admittedBy, exportActionRoles, rolesFor, type ActionRoles } from "../action-roles";
+import { AppRole } from "../auth";
 
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "5511323b4c937b2a3947eefc17251e72db4fa199899d511cc29128f0f230996c";
+const PINNED_SHA256 = "fa9576a31508aa9c586366b7db87d657d3ea1aa23829b6064acae477520dc583";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -27,17 +27,56 @@ describe("the export", () => {
 });
 
 describe("the table", () => {
-  it("lists each route under one capability only", () => {
+  // archiveJob's gate is editJobs; who may archive a job they didn't create is
+  // archiveAnyJob's literal list, swept with a probe (action-roles.parity.test).
+  const SHARED_ROUTES: Record<string, string[]> = { archiveJob: ["archiveAnyJob", "editJobs"] };
+
+  it("lists each route under one capability only, but for a route whose inner check is a capability of its own", () => {
     const routes = entries.flatMap(([, entry]) => entry.routes);
-    expect(routes.filter((route, index) => routes.indexOf(route) !== index)).toEqual([]);
+    expect(routes.filter((route, index) => routes.indexOf(route) !== index && !SHARED_ROUTES[route])).toEqual([]);
+    for (const [route, capabilities] of Object.entries(SHARED_ROUTES)) {
+      expect(entries.filter(([, entry]) => entry.routes.includes(route)).map(([capability]) => capability).sort()).toEqual(capabilities);
+    }
   });
 
-  it("refuses only roles its gate admits, and always says why", () => {
+  it("refuses, or admits on a condition, only roles its gate admits, and always says why", () => {
     for (const [capability, entry] of entries) {
-      const admitted = entry.match === "exact" ? [...entry.gate] : ALL_ROLES.filter((role) => rolesPassGate([role], entry.gate));
+      const admitted = admittedBy(entry);
       expect({ capability, stray: (entry.refused ?? []).filter((role) => !admitted.includes(role)) }).toEqual({ capability, stray: [] });
+      expect({ capability, strayConditional: (entry.conditional ?? []).filter((role) => !admitted.includes(role)) }).toEqual({
+        capability,
+        strayConditional: [],
+      });
       expect({ capability, why: entry.why.length > 10 }).toEqual({ capability, why: true });
     }
+  });
+
+  it("leaves conditional roles out of what is offered, while the gate still admits them (package 117's encoding)", () => {
+    const entry: ActionRoles = {
+      conditional: [AppRole.FACILITIES],
+      gate: [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL],
+      refused: [AppRole.ADMIN],
+      routes: [],
+      why: "approve, facilities only by attribution",
+    };
+    expect(rolesFor(entry)).toEqual([AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL]);
+    expect(admittedBy(entry)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  });
+
+  it("offers the attributed quote approval to the attributed roles alone, and not yet the plain one", () => {
+    expect(rolesFor(ACTION_ROLES.approveQuoteAttributed)).toEqual([AppRole.FACILITIES]);
+    expect(exportActionRoles().approveQuoteAttributed).toEqual(["facilities"]);
+    expect(rolesFor(ACTION_ROLES.approveQuote)).not.toContain(AppRole.FACILITIES);
+  });
+
+  it("keeps hard deletes of tenancy rows to admin, apart from the draft-only register deletes (J4 review)", () => {
+    expect(rolesFor(ACTION_ROLES.hardDeleteTenancyRows)).toEqual([AppRole.ADMIN]);
+    expect([...ACTION_ROLES.hardDeleteTenancyRows.routes].sort()).toEqual(["deleteCarpark", "deleteOccupancy"]);
+    expect([...ACTION_ROLES.deleteTenancyRegisterRows.routes].sort()).toEqual(["deleteRegisterTenant", "deleteTenant"]);
+  });
+
+  it("archives any job without the cfo until Connor's decision 11 says otherwise", () => {
+    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).toEqual([AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL].sort());
   });
 
   it("works each entry out by requireRole's hierarchy unless it says exact", () => {
@@ -52,11 +91,6 @@ describe("the table", () => {
     expect(rolesFor({ gate: [AppRole.DIRECTOR], refused: [AppRole.ADMIN], routes: [], why: "director, admin refused" })).toEqual([
       AppRole.DIRECTOR,
     ]);
-  });
-
-  it("lets the cfo archive any job: archiveJob checks the list literally, so the cfo is on it", () => {
-    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).toContain(AppRole.CFO);
-    expect(rolesFor(ACTION_ROLES.archiveAnyJob)).not.toContain(AppRole.FACILITIES);
   });
 
   // Decision 1: field officers create jobs, request quotes, add received quotes
@@ -76,8 +110,21 @@ describe("the table", () => {
 // writes its own list fails here. The exceptions are reads and syncs that are
 // not job actions.
 describe("job-action handlers read their gate from the table", () => {
-  const FILES = ["jobs", "quotes", "invoices", "purchaseOrders", "payments", "jobRequestedContractors", "reopenJob"];
-  const NOT_JOB_ACTIONS = new Set(["syncInvoices", "getApprovalLimits", "getJobRequestedContractors"]);
+  const FILES = ["jobs", "quotes", "invoices", "purchaseOrders", "payments", "jobRequestedContractors", "reopenJob", "emails"];
+  // Reads, syncs and the shared inbox's own housekeeping: not job actions.
+  const NOT_JOB_ACTIONS = new Set([
+    "syncInvoices",
+    "getApprovalLimits",
+    "getJobRequestedContractors",
+    "getEmails",
+    "getEmail",
+    "getEmailThread",
+    "ingestEmail",
+    "archiveEmail",
+    "flagEmailForReview",
+    "sendEmailReply",
+    "syncEmailsNow",
+  ]);
 
   it.each(FILES)("%s.ts", (file) => {
     const source = readFileSync(join(__dirname, "..", "functions", `${file}.ts`), "utf8");
