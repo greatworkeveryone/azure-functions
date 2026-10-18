@@ -2,7 +2,7 @@
 import { buildDigestEmail, formatDisplayDate } from "./email";
 import type { DigestItem, DigestUser } from "./types";
 
-const user: DigestUser = { email: "fay@randazzo.properties", name: "Fay Staff", optedOut: false, role: "facilities_manager", userId: 1 };
+const user: DigestUser = { email: "fay@randazzo.properties", lastSentOn: null, name: "Fay Staff", optedOut: false, role: "facilities_manager", userId: 1 };
 const BASE = "https://floorplan.randazzo.properties";
 
 function item(n: number, over: Partial<DigestItem> = {}): DigestItem {

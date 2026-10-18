@@ -4,7 +4,11 @@
 // resolveRecipient (DEV_EMAIL_OVERRIDE), and one person's failed send never stops
 // the others. A dry run does everything except send.
 //
-// Reads only: nothing in the database is written.
+// One email per person per Darwin day: a person stamped with today (migration 143)
+// is skipped, and each person is stamped as soon as their email has gone, so a run
+// that dies part-way and is replayed tells only the people it had not reached. A
+// dry run reads the stamps but writes none; where DEV_EMAIL_OVERRIDE redirects the
+// mail the guard stands aside (dedup.ts).
 
 import type { Connection } from "tedious";
 import { loadApprovalFacts } from "../approvalAuthority-db";
@@ -17,8 +21,10 @@ import { darwinDateKey } from "../escalation/businessTime";
 import { graphSendMail } from "../graph";
 import { assertMayLeave, type EgressSubject } from "../test-data";
 import { DIGEST_MAX_LINES } from "./config";
+import { alreadySentToday, dedupApplies } from "./dedup";
 import { buildDigestEmail } from "./email";
 import { deriveItems, type DeriveContext } from "./items";
+import { recordDigestSent } from "./sentStore";
 import { loadDigestFacts } from "./store";
 import type { DigestFacts, DigestUser } from "./types";
 
@@ -34,6 +40,8 @@ export interface DigestOptions {
 
 /** What a run did. In a dry run `wouldSend` is what it would have sent. */
 export interface DigestReport {
+  /** Already emailed today (stamped with today's Darwin day), so skipped. */
+  alreadySent: number;
   /** Mail settings that are missing; the run sent and read nothing. */
   configMissing: string[];
   /** People considered: active, with a role, not opted out. */
@@ -53,6 +61,8 @@ export interface DigestReport {
 export interface DigestDeps {
   authority(connection: Connection, buildingIds: readonly (number | null)[]): Promise<DeriveContext["authorityFacts"]>;
   load(connection: Connection, now: Date): Promise<DigestFacts>;
+  /** Stamps a person with the Darwin day their digest went. */
+  record(connection: Connection, userId: number, darwinDay: string): Promise<void>;
   send: SendMail;
 }
 
@@ -69,11 +79,12 @@ async function loadAuthority(connection: Connection, buildingIds: readonly (numb
 export const defaultDeps: DigestDeps = {
   authority: loadAuthority,
   load: loadDigestFacts,
+  record: recordDigestSent,
   send: (to, subject, body, egress) => graphSendMail(egress, to, subject, body),
 };
 
 function emptyReport(dryRun: boolean): DigestReport {
-  return { configMissing: [], considered: 0, dryRun, errors: [], noAddress: 0, nothingToSend: 0, optedOut: 0, sent: 0, wouldSend: 0 };
+  return { alreadySent: 0, configMissing: [], considered: 0, dryRun, errors: [], noAddress: 0, nothingToSend: 0, optedOut: 0, sent: 0, wouldSend: 0 };
 }
 
 function errorText(error: unknown): string {
@@ -98,10 +109,17 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
   const authorityFacts = await deps.authority(connection, buildingIds);
   const context: DeriveContext = { authorityFacts, now };
   const today = darwinDateKey(now);
+  const dedup = dedupApplies(env);
 
   // Everything for one person runs in one try: a problem with one person's items,
   // email or send is recorded against them and never stops the others.
   const handle = async (user: DigestUser): Promise<void> => {
+    if (dedup && alreadySentToday(user.lastSentOn, today)) {
+      report.alreadySent += 1;
+      options.log(`digest: user #${user.userId} was already emailed on ${today}`);
+      return;
+    }
+
     const items = deriveItems(user, facts, context);
     if (items.length === 0) {
       report.nothingToSend += 1;
@@ -136,6 +154,15 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
     assertMayLeave("digest", egress);
     await deps.send([recipient.address], email.subject, email.body, egress);
     report.sent += 1;
+
+    // Stamped the moment the email has gone, not at the end of the run: a crash
+    // after this line and before the next person is the case the stamp is for.
+    if (!dedup) return;
+    try {
+      await deps.record(connection, user.userId, today);
+    } catch (error) {
+      report.errors.push(`user #${user.userId}: the email went but could not be recorded, so a rerun today may repeat it: ${errorText(error)}`);
+    }
   };
 
   for (const user of facts.users) {
@@ -155,7 +182,7 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
 
 /** The one log line a run leaves: the counts a TimerRuns row records. */
 export function formatDigestSummary(report: DigestReport, darwinDate: string): string {
-  const skipped = report.nothingToSend + report.optedOut + report.noAddress;
+  const skipped = report.nothingToSend + report.optedOut + report.noAddress + report.alreadySent;
   const lead = report.dryRun ? `dry-run: wouldSend=${report.wouldSend} sent=${report.sent}` : `live: sent=${report.sent}`;
-  return `digest ${darwinDate} ${lead} skipped=${skipped} errors=${report.errors.length} (nothingToSend=${report.nothingToSend} optedOut=${report.optedOut} noAddress=${report.noAddress})`;
+  return `digest ${darwinDate} ${lead} skipped=${skipped} errors=${report.errors.length} (nothingToSend=${report.nothingToSend} optedOut=${report.optedOut} noAddress=${report.noAddress} alreadySent=${report.alreadySent})`;
 }

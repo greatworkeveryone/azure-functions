@@ -24,18 +24,20 @@ beforeEach(() => db.executeQuery.mockReset());
 describe("listDigestUsers", () => {
   it("reads active users who have a role, with the opt-out flag", async () => {
     db.executeQuery.mockResolvedValue([
-      { DigestOptOut: null, DisplayName: "Fay Field", Email: " fay@x.test ", Role: " Facilities ", UserID: 1 },
-      { DigestOptOut: false, DisplayName: "Amy", Email: "amy@x.test", Role: "accounts_manager", UserID: 2 },
-      { DigestOptOut: true, DisplayName: null, Email: "", Role: "director", UserID: "3" },
+      { DigestLastSentOn: null, DigestOptOut: null, DisplayName: "Fay Field", Email: " fay@x.test ", Role: " Facilities ", UserID: 1 },
+      { DigestLastSentOn: "2026-10-13", DigestOptOut: false, DisplayName: "Amy", Email: "amy@x.test", Role: "accounts_manager", UserID: 2 },
+      { DigestLastSentOn: " ", DigestOptOut: true, DisplayName: null, Email: "", Role: "director", UserID: "3" },
     ]);
     const users = await listDigestUsers(conn);
     expect(lastSql()).toMatch(/FROM dbo\.AppUsers/);
     expect(lastSql()).toMatch(/IsActive = 1/);
     expect(lastSql()).toMatch(/Role IS NOT NULL/);
+    // The date comes back as ISO text, so no time zone can shift the day.
+    expect(lastSql()).toMatch(/CONVERT\(CHAR\(10\), DigestLastSentOn, 23\) AS DigestLastSentOn/);
     expect(users).toEqual([
-      { email: "fay@x.test", name: "Fay Field", optedOut: false, role: "facilities", userId: 1 },
-      { email: "amy@x.test", name: "Amy", optedOut: false, role: "accounts_manager", userId: 2 },
-      { email: null, name: "User 3", optedOut: true, role: "director", userId: 3 },
+      { email: "fay@x.test", lastSentOn: null, name: "Fay Field", optedOut: false, role: "facilities", userId: 1 },
+      { email: "amy@x.test", lastSentOn: "2026-10-13", name: "Amy", optedOut: false, role: "accounts_manager", userId: 2 },
+      { email: null, lastSentOn: null, name: "User 3", optedOut: true, role: "director", userId: 3 },
     ]);
   });
 });
@@ -124,6 +126,10 @@ describe("loadDigestFacts", () => {
 
 describe("the source", () => {
   const source = readFileSync(join(__dirname, "store.ts"), "utf8");
+
+  it("only reads: the one write the digest makes lives in sentStore.ts", () => {
+    expect(source).not.toMatch(/\b(UPDATE|INSERT|DELETE|MERGE|TRUNCATE)\b/);
+  });
 
   it("never selects *", () => {
     expect(source).not.toMatch(/SELECT\s+\*/i);

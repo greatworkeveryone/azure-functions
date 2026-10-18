@@ -11,7 +11,7 @@ const TODAY_START = new Date("2026-10-13T14:30:00Z"); // 00:00 Darwin on the 14t
 const YESTERDAY = new Date("2026-10-12T20:00:00Z");
 const TOMORROW = new Date("2026-10-14T20:00:00Z");
 
-const user = (userId: number, role: string, name = `User ${userId}`): DigestUser => ({ email: `${name.toLowerCase().replace(/\s/g, ".")}@x.test`, name, optedOut: false, role, userId });
+const user = (userId: number, role: string, name = `User ${userId}`): DigestUser => ({ email: `${name.toLowerCase().replace(/\s/g, ".")}@x.test`, lastSentOn: null, name, optedOut: false, role, userId });
 const USERS = {
   accounts: user(3, "accounts", "Alan Accounts"),
   accountsManager: user(4, "accounts_manager", "Amy Accounts"),

@@ -1,4 +1,5 @@
-// The SQL side of the morning digest (N1): five reads, no writes. Every value is
+// The SQL side of the morning digest (N1): five reads, no writes (the one write the
+// digest makes, stamping a person once their email has gone, is in sentStore.ts). Every value is
 // a parameter; the only literals in the SQL are status names and a row cap (TOP 1000)
 // that keeps a surprise from reading the whole database. Queries run one after
 // another because a tedious Connection cannot serve concurrent requests.
@@ -23,18 +24,20 @@ const asText = (value: unknown): string | null => (typeof value === "string" && 
 
 // ── Users ────────────────────────────────────────────────────────────────────
 
-/** Everyone active who has a role, with whether they switched the digest off.
- *  NULL (never chose) counts as receiving it. */
+/** Everyone active who has a role, with whether they switched the digest off
+ *  (NULL, never chose, counts as receiving it) and the Darwin day their last
+ *  digest went, read as ISO text so no time zone can move the day. */
 export async function listDigestUsers(connection: Connection): Promise<DigestUser[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT UserID, DisplayName, Email, Role, DigestOptOut
+    `SELECT UserID, DisplayName, Email, Role, DigestOptOut, CONVERT(CHAR(10), DigestLastSentOn, 23) AS DigestLastSentOn
        FROM dbo.AppUsers
       WHERE IsActive = 1 AND Role IS NOT NULL
       ORDER BY UserID`,
   );
   return rows.map((row) => ({
     email: asText(row.Email),
+    lastSentOn: asText(row.DigestLastSentOn),
     name: asText(row.DisplayName) ?? asText(row.Email) ?? `User ${row.UserID}`,
     optedOut: Boolean(row.DigestOptOut),
     role: normaliseRole(row.Role),
