@@ -9,7 +9,8 @@
 // demonstration file (LAB_PROBE_RECORD), not a test record, answered here
 // without a database read, so D9's "a write must name its record" rule lets
 // the case's own rule answer; a probe that named nothing would read
-// "refused, but not by the rule this case checks (no_record …)". Its evidence is the lab_result row she
+// "refused, but not by the rule this case checks (no_record …)", and one D9
+// took for a test record "(test_record …)". Its evidence is the lab_result row she
 // records; it isn't in MyobApiLog, because going through myobRequest would
 // raise the agreement health alert for the Card File and Accounts probes and
 // put lab refusals in the daily email.
@@ -22,6 +23,7 @@
 
 import { myobApiBase, type MyobMethod } from "../../myob-endpoints";
 import { MyobRequestRefusedError, MyobWritesDisabledError, type MyobRefusalCode } from "../../myob-errors";
+import { TestDataEgressError } from "../../test-data";
 import { periodStart } from "../../myob-period";
 import { guardMyobRequest } from "../../myob-request-guard";
 import type { MyobRecordRef, MyobTestRecordLookup } from "../../myob-test-records";
@@ -35,7 +37,7 @@ export const OFF_FILE_PROBE_ID = "00000000-0000-4000-8000-000000000000";
 /** The synthetic order a write probe names: on the demonstration file, never a test record, never in the database. */
 export const LAB_PROBE_RECORD: MyobRecordRef = Object.freeze({ id: 0, kind: "purchase_order" as const });
 /** D9's question for a probe, answered without a database read: named only when it is the probe's record. */
-const labProbeRecords: MyobTestRecordLookup = async ({ record }) => ({ isTest: false, named: record === LAB_PROBE_RECORD });
+export const labProbeRecords: MyobTestRecordLookup = async ({ record }) => ({ isTest: false, named: record === LAB_PROBE_RECORD });
 
 /** An order uid Floorplan never created. */
 const FOREIGN_UID = "11111111-1111-4111-8111-111111111111";
@@ -93,6 +95,7 @@ export interface ProbeResult {
 function refusal(error: unknown): { code: string; message: string } | null {
   if (error instanceof MyobRequestRefusedError) return { code: error.code, message: error.message };
   if (error instanceof MyobWritesDisabledError) return { code: "writes_disabled", message: error.message };
+  if (error instanceof TestDataEgressError) return { code: "test_record", message: error.message };
   return null;
 }
 

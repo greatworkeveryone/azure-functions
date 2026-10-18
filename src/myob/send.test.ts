@@ -153,6 +153,13 @@ describe("approve (inside Floorplan, before any MYOB call)", () => {
     expect(store.updateProposal).not.toHaveBeenCalled();
   });
 
+  it("refuses RP's file whatever case its stored id is in (M5 follow-up S06)", async () => {
+    store.getProposal.mockResolvedValue(proposal({ companyFileId: RP_FILE.toUpperCase() }));
+    demonstration = { IsDemonstration: true, Name: "Randazzo Properties" };
+    await expect(send()).rejects.toMatchObject({ message: expect.stringContaining("is RP's own company file"), status: 409 });
+    expect(pushApproved).not.toHaveBeenCalled();
+  });
+
   it("rebuilds the payload with the reviewer as approver at the previewed time", async () => {
     await send();
     expect(buildDraft).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

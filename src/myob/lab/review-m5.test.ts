@@ -50,6 +50,16 @@ it("a probe that D9's no-record rule refuses isn't a pass either: that rule answ
   spy.mockRestore();
 });
 
+it("a probe D9 refuses as a test record reads not passed (test_record), not an error (M5 follow-up K01)", async () => {
+  process.env = { ...saved, MYOB_WRITES_ENABLED: "true" };
+  const guard = require("../../myob-request-guard") as typeof import("../../myob-request-guard");
+  const real = guard.guardMyobRequest;
+  const spy = jest.spyOn(guard, "guardMyobRequest").mockImplementation((input, now) => real(input, now, { testRecords: async () => ({ isTest: true, named: true }) }));
+  const result = await runLabProbe("prior_period", DEMO, NOW).finally(() => spy.mockRestore());
+  expect(result).toMatchObject({ code: "test_record", expected: "outside_period", refused: false });
+  expect(result.message).toMatch(/^Refused, but not by the rule this case checks \(test_record: .+\)\. Nothing was sent\.$/);
+});
+
 it("update_existing with orders.update off isn't a pass: the record rule was never reached", async () => {
   process.env = { ...saved, MYOB_WRITES_ENABLED: "true" };
   assertMyobControlsAllow.mockRejectedValue(new MyobRequestRefusedError("controls", "orders.update is switched off"));
