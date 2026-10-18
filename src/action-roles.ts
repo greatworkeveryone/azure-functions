@@ -85,8 +85,9 @@ export const ACTION_ROLES = {
   },
   approveProcedures: {
     gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
     routes: ["publishProcedure"],
-    why: "Publish a procedure, which stamps the approval onto that version.",
+    why: "Publish a procedure, which stamps the approval onto that version. The handler re-checks the director role (requireProcedureApprover): admin alone is refused, as for sign-off.",
   },
   // Package 117 (attributed approval) adds the attributed roles to this gate and
   // lists them as `conditional`, so they pass the gate without being offered the
@@ -252,8 +253,8 @@ export const ACTION_ROLES = {
   },
   editProcedures: {
     gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
-    routes: ["saveProcedureDraft"],
-    why: "Write procedure drafts (EDITOR_GATE, procedures.ts).",
+    routes: ["saveProcedureDraft", "requestProcedureApproval"],
+    why: "Write procedure drafts and ask a director to approve one (PROCEDURE_EDITOR_GATE, procedureRoles.ts).",
   },
   editTenancy: {
     gate: TENANCY_DESK,

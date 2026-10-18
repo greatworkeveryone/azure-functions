@@ -9,47 +9,11 @@
 
 const { execFileSync } = require("node:child_process");
 const path = require("node:path");
-const { Connection } = require("tedious");
 const { checkMigrations, runMigrations } = require("../dist/migrate");
 const { MIGRATE_USAGE, parseMigrateArgs, resolveMigrationTarget } = require("../dist/migrate-cli");
+const { connectionFactory } = require("./lib/sql-connection.cjs");
 
 const ROOT = path.join(__dirname, "..");
-
-function azureSqlToken() {
-  try {
-    return execFileSync(
-      "az",
-      ["account", "get-access-token", "--resource", "https://database.windows.net/", "--query", "accessToken", "-o", "tsv"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
-    ).trim();
-  } catch {
-    throw new Error("Could not get a SQL token from the Azure CLI. Run `az login` as the operator and try again.");
-  }
-}
-
-function connectionFactory(target) {
-  const local = process.env.LOCAL_SQL === "true";
-  const authentication = local
-    ? { type: "default", options: { userName: process.env.SQL_USERNAME, password: process.env.SQL_PASSWORD } }
-    : { type: "azure-active-directory-access-token", options: { token: azureSqlToken() } };
-  return () =>
-    new Promise((resolve, reject) => {
-      const connection = new Connection({
-        server: target.server,
-        authentication,
-        options: {
-          database: target.database,
-          encrypt: true,
-          trustServerCertificate: local,
-          connectTimeout: 30_000,
-          // An index build or backfill can outlast tedious' 15 s default.
-          requestTimeout: 10 * 60_000,
-        },
-      });
-      connection.on("connect", (err) => (err ? reject(err) : resolve(connection)));
-      connection.connect();
-    });
-}
 
 // Apply only what is committed: a migration edited or added in the working
 // tree must not reach a shared database unreviewed.

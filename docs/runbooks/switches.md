@@ -145,6 +145,35 @@ Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, befo
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest
 tolerates a database without it.
 
+Procedures (U4): apply migration 142 (`142_procedure_approval_request.sql`) before
+the build that serves `getProcedures` and `requestProcedureApproval`; it adds four
+nullable columns to `ProcedureVersions` and `getProcedures`, `saveProcedureDraft`
+and the request endpoint read or write them, so without it all three fail. Then
+load the library's six starting documents once, so Procedures is not empty on the
+day it is switched on:
+
+```
+npm run seed:procedures -- --target <server>/<database>            # dry run: says what it would add
+npm run seed:procedures -- --target <server>/<database> --apply
+```
+
+It only adds, and it is safe to run again: a procedure that already has any version
+is left alone, so it never overwrites a document edited in the app and a published
+version stays immutable. Documents whose markdown names no approver are stored as
+published with the approver "Connor (from content/procedures)", because the table
+refuses a published version without one; a director re-approving them in the app
+replaces that with a real approval. Changed wording in `content/procedures` after
+the first load is not picked up: edit the document in the app (a new draft). Who
+sees what: a manager sees what is written for their officers, the CFO what is
+written for accounts, admin and director see all. That holds for editors too
+(managers, the CFO): they read, edit and ask about only the procedures written for
+their own team, and a draft or a save outside it is refused (403). Only a director
+publishes: admin alone is refused, as for schedule sign-off. The starting documents
+stay out of the deployed package (`.funcignore`); they are loaded from a checkout.
+A manager asks a director to approve a draft from the
+editor (the same director again only after ten minutes); the director gets an email (a link to the editor, nothing about the
+procedure in the subject) and the library reads "Awaiting approval by {name}".
+
 ## Escalations
 
 `job.next_step` (seeded active): a decision's next step goes to its owner, then the owner's manager (16 business hours), then a director. Kill switch: set its Active to 0. Answers still work and the step is recorded and handed on, but it isn't chased or emailed.

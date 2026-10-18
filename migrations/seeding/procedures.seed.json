@@ -1,0 +1,553 @@
+[
+  {
+    "audience": [
+      "all"
+    ],
+    "blocks": [
+      {
+        "id": "getting-started-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "What this is"
+      },
+      {
+        "id": "getting-started-1",
+        "kind": "paragraph",
+        "text": "Floorplan is where the day-to-day work of the portfolio now lives — inspections, keys, jobs, tenancy records. It replaces a spread of spreadsheets, emails and myBuildings screens with one place that knows about all of them."
+      },
+      {
+        "id": "getting-started-2",
+        "kind": "paragraph",
+        "text": "It is being switched on a piece at a time. You will not see the whole thing at once, and that is deliberate."
+      },
+      {
+        "id": "getting-started-3",
+        "kind": "heading",
+        "level": 2,
+        "text": "Signing in"
+      },
+      {
+        "id": "getting-started-4",
+        "kind": "paragraph",
+        "text": "Go to **floorplan.randazzo.properties** and choose **Sign in with Microsoft**."
+      },
+      {
+        "id": "getting-started-5",
+        "kind": "paragraph",
+        "text": "That is the whole process. It is the same account you use for email and Teams, so there is no new password, and if you are already signed in on that machine you will usually go straight through. Bookmark it."
+      },
+      {
+        "id": "getting-started-6",
+        "kind": "paragraph",
+        "text": "If you see **\"Access pending\"**, your account exists but nobody has given it a role yet. Ask Connor — it takes him about ten seconds."
+      },
+      {
+        "id": "getting-started-7",
+        "kind": "heading",
+        "level": 2,
+        "text": "What you'll see"
+      },
+      {
+        "id": "getting-started-8",
+        "kind": "paragraph",
+        "text": "Your tabs across the top depend on your job. Facilities and Accounts see different things, and neither sees everything. If a colleague mentions a tab you do not have, that is the design, not a fault."
+      },
+      {
+        "id": "getting-started-9",
+        "kind": "paragraph",
+        "text": "Some tabs carry a small blue **SOON** chip. Those are real parts of the app that are not open to you yet. Click one and you will get a placeholder showing the shape of the screen. They are there on purpose: by the time a tab actually switches on, you will already know where it lives and roughly what it looks like. Nothing you do in a SOON tab is saved, because there is nothing to do in it yet."
+      },
+      {
+        "id": "getting-started-10",
+        "kind": "heading",
+        "level": 2,
+        "text": "Your first week"
+      },
+      {
+        "id": "getting-started-11",
+        "kind": "paragraph",
+        "text": "Use the module you have been given for real work from day one. It is not a trial running alongside the old way — where a module is on, it is the system of record. Running both is how records drift apart."
+      },
+      {
+        "id": "getting-started-12",
+        "kind": "paragraph",
+        "text": "Two things worth knowing:"
+      },
+      {
+        "id": "getting-started-13",
+        "items": [
+          "**It works on a phone.** Inspections in particular are built for walking a building with one hand free. Inspections keep working with no signal and sync when you are back in range.",
+          "**Ctrl/Cmd + K** opens search from anywhere."
+        ],
+        "kind": "list",
+        "ordered": false
+      },
+      {
+        "id": "getting-started-14",
+        "kind": "heading",
+        "level": 2,
+        "text": "When something is wrong"
+      },
+      {
+        "id": "getting-started-15",
+        "kind": "paragraph",
+        "text": "Tell Connor, and be specific about what you were doing. \"The building dropdown was empty on the inspection screen\" gets fixed; \"it's broken\" does not. In the bottom right corner there is a feedback form for non urgent feedback."
+      },
+      {
+        "id": "getting-started-16",
+        "kind": "paragraph",
+        "text": "If a number looks wrong, say so before working around it. Early on, a wrong number usually means something needs fixing at the source, and a workaround hides that."
+      }
+    ],
+    "category": "Getting started",
+    "order": 0,
+    "owner": "Connor",
+    "reviewDue": "2026-10-06",
+    "slug": "getting-started",
+    "status": "published",
+    "summary": "What Floorplan is, how to sign in, and what to expect in your first week.",
+    "title": "Getting started with Floorplan",
+    "updated": "2026-08-11",
+    "version": 1
+  },
+  {
+    "audience": [
+      "facilities"
+    ],
+    "blocks": [
+      {
+        "id": "inspections-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "What it's for"
+      },
+      {
+        "id": "inspections-1",
+        "kind": "paragraph",
+        "text": "Recording a building walk-through as you do it, so that what you found becomes actual work rather than a note you meant to write up later."
+      },
+      {
+        "id": "inspections-2",
+        "kind": "paragraph",
+        "text": "The structure is **building → level → room → issue**. You add levels and rooms as you go; you do not have to set anything up in advance."
+      },
+      {
+        "id": "inspections-3",
+        "kind": "heading",
+        "level": 2,
+        "text": "What you do in it"
+      },
+      {
+        "id": "inspections-4",
+        "kind": "paragraph",
+        "text": "Start a new inspection, pick the building, then work through it. Add a level, add rooms on that level, and against each room log whatever needs attention. Photos matter more than words here — on a phone the camera button goes straight to the rear camera, and a photo of a cracked pane says more than a paragraph."
+      },
+      {
+        "id": "inspections-5",
+        "kind": "paragraph",
+        "text": "When you have finished the walk, **Mark complete**. That locks it so the record of what you found on the day cannot drift afterwards. Then **Create jobs** turns the issues into real jobs, either one job per issue or one per room, whichever suits what you found."
+      },
+      {
+        "id": "inspections-6",
+        "kind": "paragraph",
+        "text": "If you got it wrong, **Reopen for editing** unlocks it again. If two of you walked the same building separately, **Merge** folds those drafts into one."
+      },
+      {
+        "id": "inspections-7",
+        "kind": "heading",
+        "level": 2,
+        "text": "Offline"
+      },
+      {
+        "id": "inspections-8",
+        "kind": "paragraph",
+        "text": "This is the part built for the field. Inspections work with no signal — edits and photos queue on your phone and sync when you are back in range. The chip in the header tells you what is still waiting."
+      },
+      {
+        "id": "inspections-9",
+        "kind": "paragraph",
+        "text": "You cannot mark an inspection complete while anything is still queued. That is intentional: completing locks the record, and locking a record that is missing half its photos would be worse than waiting."
+      },
+      {
+        "id": "inspections-10",
+        "kind": "heading",
+        "level": 2,
+        "text": "Worth knowing"
+      },
+      {
+        "id": "inspections-11",
+        "items": [
+          "An inspection is a snapshot of a day, not a living document. Do not reopen an old one to log something new — start a new inspection.",
+          "You can delete and reopen your own inspections. Managers can do it to anyone's.",
+          "**Summary** gives you a PDF, which is the thing to send when someone outside the app needs to see what you found."
+        ],
+        "kind": "list",
+        "ordered": false
+      }
+    ],
+    "category": "Field work",
+    "order": 1,
+    "owner": "Connor",
+    "reviewDue": "2026-11-11",
+    "slug": "inspections",
+    "status": "published",
+    "summary": "Walk a building, log what you find room by room, turn the findings into jobs.",
+    "title": "Inspections",
+    "updated": "2026-08-11",
+    "version": 1
+  },
+  {
+    "audience": [
+      "facilities"
+    ],
+    "blocks": [
+      {
+        "id": "key-register-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "What it's for"
+      },
+      {
+        "id": "key-register-1",
+        "kind": "paragraph",
+        "text": "Knowing who holds what. The register covers physical keys and access codes together, because from a \"who can get into that room\" point of view they are the same question."
+      },
+      {
+        "id": "key-register-2",
+        "kind": "heading",
+        "level": 2,
+        "text": "What you do in it"
+      },
+      {
+        "id": "key-register-3",
+        "kind": "paragraph",
+        "text": "Mostly two things: **check out** and **check in**."
+      },
+      {
+        "id": "key-register-4",
+        "kind": "paragraph",
+        "text": "Checking out is by batch — select every key going to the same person at once and they travel as one movement, with an expected return date and a photo of what actually left the cabinet. Checking in is the same in reverse, with a photo of what came back. On a phone, the recipient signs on screen."
+      },
+      {
+        "id": "key-register-5",
+        "kind": "paragraph",
+        "text": "The photos are not bureaucracy. A photo at check-out and check-in is the difference between \"we think key 14 came back\" and knowing."
+      },
+      {
+        "id": "key-register-6",
+        "kind": "paragraph",
+        "text": "Beyond that: **Register new key** for anything new, **Report lost** when one goes missing — that closes any open check-outs and marks it so it stops showing as available. If you are loading a whole building at once, the bulk import takes a spreadsheet."
+      },
+      {
+        "id": "key-register-7",
+        "kind": "heading",
+        "level": 2,
+        "text": "What the screen tells you at a glance"
+      },
+      {
+        "id": "key-register-8",
+        "kind": "paragraph",
+        "text": "Red and amber blocks at the top are lost keys and overdue keys. Those are the two things worth acting on, so they sit above everything else. Filter by building, or by status if you want to see everything currently out."
+      },
+      {
+        "id": "key-register-9",
+        "kind": "heading",
+        "level": 2,
+        "text": "Worth knowing"
+      },
+      {
+        "id": "key-register-10",
+        "items": [
+          "**Overdue means overdue, not lost.** It means the expected return date has passed. Chase it before reporting it lost.",
+          "Expected return dates only work if you set them honestly. \"End of the week\" is a useful date; a default nobody meant is not.",
+          "Nobody is emailed automatically when a key goes overdue yet. Checking the register is still a person's job."
+        ],
+        "kind": "list",
+        "ordered": false
+      }
+    ],
+    "category": "Field work",
+    "order": 2,
+    "owner": "Connor",
+    "reviewDue": "2026-11-11",
+    "slug": "key-register",
+    "status": "published",
+    "summary": "Which keys and access codes exist, where they live, and who has them right now.",
+    "title": "Key Register",
+    "updated": "2026-08-11",
+    "version": 1
+  },
+  {
+    "audience": [
+      "accounts"
+    ],
+    "blocks": [
+      {
+        "id": "tenancy-schedule-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "What it's for"
+      },
+      {
+        "id": "tenancy-schedule-1",
+        "kind": "paragraph",
+        "text": "One register per building holding every tenancy: who the tenant is, what they occupy, what they pay, when it is reviewed, when it expires. It replaces the schedule spreadsheets."
+      },
+      {
+        "id": "tenancy-schedule-2",
+        "kind": "paragraph",
+        "text": "The difference from a spreadsheet is that Floorplan works things out rather than storing them. Annual rent, rate per square metre, WALE, days to expiry, whether a review is due — all calculated from what you enter. You will not find a cell to type the annual rent into, because it is derived from the rate and the area. Enter the inputs correctly and the outputs look after themselves."
+      },
+      {
+        "id": "tenancy-schedule-3",
+        "kind": "heading",
+        "level": 2,
+        "text": "What you do in it"
+      },
+      {
+        "id": "tenancy-schedule-4",
+        "kind": "paragraph",
+        "text": "Pick a building; you get its tenancies. Click a tenant for the full record — lease term, rent schedule, car parks, security deposit, options, occupancies, lease documents."
+      },
+      {
+        "id": "tenancy-schedule-5",
+        "kind": "paragraph",
+        "text": "For getting existing data in, **Paste from spreadsheet** takes a block copied straight out of Excel and creates the tenants and their occupancies in one go. The rent schedule has its own paste for period-by-period rent history — it reads From, To, Review Method, CPI, Rent pm and Rent pa columns and tells you before it commits anything."
+      },
+      {
+        "id": "tenancy-schedule-6",
+        "kind": "paragraph",
+        "text": "The rent schedule is the part worth taking slowly. It is the history of what the rent has been and why it changed, period by period. Get it right and rent review alerts, expiry warnings and portfolio figures all follow from it."
+      },
+      {
+        "id": "tenancy-schedule-7",
+        "kind": "heading",
+        "level": 2,
+        "text": "Checking your work"
+      },
+      {
+        "id": "tenancy-schedule-8",
+        "kind": "paragraph",
+        "text": "**Compare schedule** is the tool for this and it is worth using properly. Paste your existing Excel schedule and it will highlight every figure that differs from what is now in Floorplan — higher, lower, and what your spreadsheet said."
+      },
+      {
+        "id": "tenancy-schedule-9",
+        "kind": "paragraph",
+        "text": "Treat a clean comparison as the definition of a building being done. It is the check you would do by eye anyway, without the eye strain."
+      },
+      {
+        "id": "tenancy-schedule-10",
+        "kind": "heading",
+        "level": 2,
+        "text": "While we're loading data"
+      },
+      {
+        "id": "tenancy-schedule-11",
+        "kind": "paragraph",
+        "text": "For now this is data entry. Enter, then compare against the spreadsheet, then move to the next building. Do not act on a figure Floorplan shows — rent review alerts, expiry warnings, occupancy — until that building has been compared clean. Those numbers are only as good as what is underneath them, and right now what is underneath them is half-loaded."
+      },
+      {
+        "id": "tenancy-schedule-12",
+        "kind": "paragraph",
+        "text": "Connor will confirm building by building when the numbers can be relied on."
+      },
+      {
+        "id": "tenancy-schedule-13",
+        "kind": "heading",
+        "level": 2,
+        "text": "Worth knowing"
+      },
+      {
+        "id": "tenancy-schedule-14",
+        "items": [
+          "Pasted dates are read day first, DD/MM/YYYY. A month-first date like 10/13/2026 is rejected with its row number, and words like Holdover or TBA in a date column are left blank.",
+          "The spreadsheets stay the reference until a building has been compared clean. After that, Floorplan is the reference and the spreadsheet is history.",
+          "Rounding differences of a few dollars a year are usually a day-count or rate-precision difference, not an error. Flag them anyway — better a dull explanation than a silent assumption.",
+          "Anything you change is logged with your name against it, so an unexplained change is traceable rather than mysterious."
+        ],
+        "kind": "list",
+        "ordered": false
+      }
+    ],
+    "category": "Tenancy",
+    "order": 3,
+    "owner": "Connor",
+    "reviewDue": "2026-10-06",
+    "slug": "tenancy-schedule",
+    "status": "published",
+    "summary": "The tenancy register — leases, rent, reviews and everything that hangs off them.",
+    "title": "Tenancy Schedule",
+    "updated": "2026-08-11",
+    "version": 1
+  },
+  {
+    "audience": [
+      "facilities",
+      "accounts"
+    ],
+    "blocks": [
+      {
+        "id": "jobs-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "What it's for"
+      },
+      {
+        "id": "jobs-1",
+        "kind": "paragraph",
+        "text": "Everything that happens to a piece of work, in one record: raising it, getting quotes, approving one, raising the purchase order, receiving the invoice, approving that, closing it. This is the part that takes over most of what myBuildings does today."
+      },
+      {
+        "id": "jobs-2",
+        "kind": "heading",
+        "level": 2,
+        "text": "The one thing to understand"
+      },
+      {
+        "id": "jobs-3",
+        "kind": "paragraph",
+        "text": "**Every job shows exactly one next action.** Not a menu of options — one button saying what needs to happen now. \"Request quotes\", \"Add received quote\", \"Review quote\", \"Mark work complete\", \"Review invoice\", \"Close job\"."
+      },
+      {
+        "id": "jobs-4",
+        "kind": "paragraph",
+        "text": "If the button says **\"Waiting on Accounts\"**, the job is not yours at that moment and there is nothing for you to do. That is the system working, not the system stuck."
+      },
+      {
+        "id": "jobs-5",
+        "kind": "paragraph",
+        "text": "This means you cannot really get a job into a wrong state. Jobs move through a fixed sequence and the app only offers the move that is legal from where it is."
+      },
+      {
+        "id": "jobs-6",
+        "kind": "heading",
+        "level": 2,
+        "text": "Who does what"
+      },
+      {
+        "id": "jobs-7",
+        "kind": "paragraph",
+        "text": "Broadly: Facilities raises jobs, chases quotes and confirms work is done. Accounts handles purchase orders and invoices. Managers approve. Above a threshold, a director has to approve as well — the app works out when and routes it, so you do not have to remember the number."
+      },
+      {
+        "id": "jobs-8",
+        "kind": "paragraph",
+        "text": "Standing-contract work skips the quote stage entirely and goes straight to work."
+      },
+      {
+        "id": "jobs-9",
+        "kind": "heading",
+        "level": 2,
+        "text": "Your board"
+      },
+      {
+        "id": "jobs-10",
+        "kind": "paragraph",
+        "text": "The board splits into **Needs your action**, **Alerts** and **History**. Live in the first one. Alerts are jobs that have gone quiet or need chasing. History is everything else."
+      },
+      {
+        "id": "jobs-11",
+        "kind": "heading",
+        "level": 2,
+        "text": "Worth knowing"
+      },
+      {
+        "id": "jobs-12",
+        "items": [
+          "MYOB is not connected yet. Where you see \"Mark created in MYOB\", that is you telling the app you have done it there. It cannot check, so only tick it when it is true — a job will not close until you do.",
+          "Rejecting an invoice currently flags the invoice but leaves the job sitting in approval. Tell Connor if you hit that so the job can be moved on by hand.",
+          "Attachments go with the job, so quotes, photos and invoices stay together and the packet at the end is complete."
+        ],
+        "kind": "list",
+        "ordered": false
+      }
+    ],
+    "category": "Jobs & maintenance",
+    "order": 4,
+    "owner": "Connor",
+    "reviewDue": "2026-10-06",
+    "slug": "jobs",
+    "status": "published",
+    "summary": "A job from raised to paid — quotes, purchase order, invoice — in one place.",
+    "title": "Jobs",
+    "updated": "2026-08-11",
+    "version": 1
+  },
+  {
+    "audience": [
+      "facilities",
+      "accounts"
+    ],
+    "blocks": [
+      {
+        "id": "from-mybuildings-0",
+        "kind": "heading",
+        "level": 2,
+        "text": "The short version"
+      },
+      {
+        "id": "from-mybuildings-1",
+        "kind": "paragraph",
+        "text": "Floorplan takes over the *work*. myBuildings keeps being where work requests arrive from and where building records ultimately live."
+      },
+      {
+        "id": "from-mybuildings-2",
+        "kind": "paragraph",
+        "text": "Once Jobs is switched on for you, a job's life happens in Floorplan — quoting, approving, ordering, invoicing, closing. There is no equivalent of that in myBuildings, which is why it is worth the change."
+      },
+      {
+        "id": "from-mybuildings-3",
+        "kind": "heading",
+        "level": 2,
+        "text": "What still comes from myBuildings"
+      },
+      {
+        "id": "from-mybuildings-4",
+        "items": [
+          "**Work requests.** These are still raised there and sync into Floorplan automatically. You will see them under **Incoming**.",
+          "**The building list** and their base records.",
+          "**Attachments**, eventually — files handed over once a job is archived."
+        ],
+        "kind": "list",
+        "ordered": false
+      },
+      {
+        "id": "from-mybuildings-5",
+        "kind": "heading",
+        "level": 2,
+        "text": "How to tell which is which"
+      },
+      {
+        "id": "from-mybuildings-6",
+        "kind": "paragraph",
+        "text": "If you are looking at a screen in Floorplan, you are working in Floorplan. The only place the distinction is visible is on a synced work request, where some fields come from myBuildings and some are Floorplan's own. Those fields carry a **\"Reset to myBuildings\"** option, which is the giveaway: it means Floorplan is holding a local version of something myBuildings also knows about."
+      },
+      {
+        "id": "from-mybuildings-7",
+        "kind": "heading",
+        "level": 2,
+        "text": "What this means day to day"
+      },
+      {
+        "id": "from-mybuildings-8",
+        "kind": "paragraph",
+        "text": "Stop updating a job in both places. Once a work request has become a Floorplan job, the job is where the truth is. Updating myBuildings as well produces two half-true records rather than one good one."
+      },
+      {
+        "id": "from-mybuildings-9",
+        "kind": "paragraph",
+        "text": "If you are not sure whether something has moved yet, check your tabs. If the module is not there, it has not moved for you."
+      }
+    ],
+    "category": "Getting started",
+    "order": 5,
+    "owner": "Connor",
+    "reviewDue": "2026-10-06",
+    "slug": "from-mybuildings",
+    "status": "published",
+    "summary": "What moves to Floorplan, what stays in myBuildings, and how to tell which is which.",
+    "title": "What changes from myBuildings",
+    "updated": "2026-08-11",
+    "version": 1
+  }
+]
