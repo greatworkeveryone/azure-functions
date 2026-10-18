@@ -200,6 +200,12 @@ export const ACTION_ROLES = {
     routes: ["upsertQuote"],
     why: "Add or edit a received quote. Field officers do this (decision 1); approving one is approveQuote.",
   },
+  createTestData: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    match: "exact",
+    routes: [],
+    why: "Create a record marked as test data (D9). It gates the create forms' test checkbox; the rule itself lives inside the creates (test-data.ts testFlagForCreate, a literal admin-or-director check), so no route of its own.",
+  },
   deleteAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
     refused: [A.FACILITIES],
@@ -280,6 +286,11 @@ export const ACTION_ROLES = {
     gate: MANAGE_SERVICE_SCHEDULES_ROLES,
     routes: ["upsertServiceSchedule", "archiveServiceSchedule", "importServiceSchedules"],
     why: "Add, edit, archive and import service schedules.",
+  },
+  manageTestData: {
+    gate: [A.ADMIN],
+    routes: ["setTestFlag"],
+    why: "Show test data and mark or unmark a record as test data (D9, setTestFlag).",
   },
   markInvoiceInMyob: {
     gate: [A.ACCOUNTS_APPROVAL],
