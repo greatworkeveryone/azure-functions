@@ -203,6 +203,17 @@ describe("send and record", () => {
     expect(outcome.message).not.toContain("controls");
   });
 
+  it("checks RP's file at approval, before D9's test-record refusal at the push; with both clear of it a test record is still not sent", async () => {
+    delete process.env.MYOB_RP_COMPANY_FILE_ID;
+    await expect(send()).rejects.toMatchObject({ status: 409 });
+    expect(pushApproved).not.toHaveBeenCalled();
+    process.env.MYOB_RP_COMPANY_FILE_ID = RP_FILE;
+    pushApproved.mockResolvedValue({ kind: "refused", message: "Test records never leave Floorplan", reason: "test_record" });
+    const outcome = await send();
+    expect(pushApproved).toHaveBeenCalledTimes(1);
+    expect(outcome.message).toContain("Test records never go to MYOB");
+  });
+
   it("records a read-back that differs from what was sent as an exception, never as verified", async () => {
     pushApproved.mockResolvedValue({ diff: [{ field: "total", myob: 5000, sent: 4840 }], kind: "differs", linked: false, readBack: { RowVersion: "7" }, uid: UID });
     const outcome = await send();

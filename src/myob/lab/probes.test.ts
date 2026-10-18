@@ -6,9 +6,10 @@
 
 jest.mock("../../myob-controls", () => ({ assertMyobControlsAllow: jest.fn() }));
 jest.mock("../floorplanRecords", () => ({ installFloorplanRecordLookup: jest.fn(), isFloorplanRecord: jest.fn().mockResolvedValue(false) }));
+jest.mock("../../db", () => ({ closeConnection: jest.fn(), createServiceRequestConnection: jest.fn(), executeQuery: jest.fn() }));
 
 import { MyobRequestRefusedError } from "../../myob-errors";
-import { LAB_PROBES, OFF_FILE_PROBE_ID, runLabProbe } from "./probes";
+import { LAB_PROBE_RECORD, LAB_PROBES, OFF_FILE_PROBE_ID, runLabProbe } from "./probes";
 
 const { assertMyobControlsAllow } = require("../../myob-controls") as { assertMyobControlsAllow: jest.Mock };
 const DEMO = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
@@ -49,6 +50,13 @@ describe("runLabProbe", () => {
     const result = await runLabProbe("file_off", DEMO, NOW); // controls mocked to allow it
     expect(result).toMatchObject({ code: null, refused: false });
     expect(result.message).toMatch(/let this through/);
+  });
+
+  it("names its synthetic order on the demonstration file, so D9's no-record rule lets the case's own rule answer, without a database read", async () => {
+    const { createServiceRequestConnection } = require("../../db") as { createServiceRequestConnection: jest.Mock };
+    for (const probe of ["prior_period", "update_existing"] as const) expect((await runLabProbe(probe, DEMO, NOW)).code).not.toBe("no_record");
+    expect(createServiceRequestConnection).not.toHaveBeenCalled();
+    expect(LAB_PROBE_RECORD).toEqual({ id: 0, kind: "purchase_order" });
   });
 
   it("dates the prior-period probe the day before the period starts", async () => {

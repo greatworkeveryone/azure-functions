@@ -5,7 +5,11 @@
 // rule (the write switch, the CFO's controls) would hide whether that rule
 // works, so it is reported as not refused (M5 review). A probe never sends
 // anything: it calls the guard, not the MYOB client, so even a guard that let
-// it through would reach nothing. Its evidence is the lab_result row she
+// it through would reach nothing. A write probe names a synthetic order on the
+// demonstration file (LAB_PROBE_RECORD), not a test record, answered here
+// without a database read, so D9's "a write must name its record" rule lets
+// the case's own rule answer; a probe that named nothing would read
+// "refused, but not by the rule this case checks (no_record …)". Its evidence is the lab_result row she
 // records; it isn't in MyobApiLog, because going through myobRequest would
 // raise the agreement health alert for the Card File and Accounts probes and
 // put lab refusals in the daily email.
@@ -20,6 +24,7 @@ import { myobApiBase, type MyobMethod } from "../../myob-endpoints";
 import { MyobRequestRefusedError, MyobWritesDisabledError, type MyobRefusalCode } from "../../myob-errors";
 import { periodStart } from "../../myob-period";
 import { guardMyobRequest } from "../../myob-request-guard";
+import type { MyobRecordRef, MyobTestRecordLookup } from "../../myob-test-records";
 import { installFloorplanRecordLookup } from "../floorplanRecords";
 
 // The real "is this Floorplan's record" lookup, so update_existing meets the rule as myobRequest would.
@@ -27,6 +32,11 @@ installFloorplanRecordLookup();
 
 /** A company file id no one can register: its mode is always off. */
 export const OFF_FILE_PROBE_ID = "00000000-0000-4000-8000-000000000000";
+/** The synthetic order a write probe names: on the demonstration file, never a test record, never in the database. */
+export const LAB_PROBE_RECORD: MyobRecordRef = Object.freeze({ id: 0, kind: "purchase_order" as const });
+/** D9's question for a probe, answered without a database read: named only when it is the probe's record. */
+const labProbeRecords: MyobTestRecordLookup = async ({ record }) => ({ isTest: false, named: record === LAB_PROBE_RECORD });
+
 /** An order uid Floorplan never created. */
 const FOREIGN_UID = "11111111-1111-4111-8111-111111111111";
 
@@ -90,7 +100,7 @@ export async function runLabProbe(probe: LabProbe, demo: string, now: Date): Pro
   const { build, expect: expected } = LAB_PROBES[probe];
   const request = build(demo, now);
   try {
-    await guardMyobRequest(request, now);
+    await guardMyobRequest({ ...request, record: LAB_PROBE_RECORD }, now, { testRecords: labProbeRecords });
     return { code: null, expected, message: "Floorplan's guard let this through: the agreement isn't enforced here. Nothing was sent.", probe, refused: false, request };
   } catch (error) {
     const refused = refusal(error);
