@@ -511,6 +511,17 @@ describe("rejectScheduleChange", () => {
     expect((await call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), scheduleVersion: 4 }, PEOPLE.dee)).status).toBe(200);
     expect(bodyOf(await reject(requestId))).toMatchObject({ code: "invalid_state", error: "This change has been approved, so it can't be rejected" });
   });
+
+  it("rolls everything back when the ledger write fails: the request stays pending and nothing else moves", async () => {
+    const requestId = await asked();
+    const picture = world.picture();
+    world.failLedger = (row) => row.Action === "schedule.change_rejected";
+    const res = await reject(requestId);
+    expect(res.status).toBe(500);
+    expect(world.picture()).toBe(picture);
+    expect(world.change(requestId)).toMatchObject({ DecidedByName: null, State: "pending" });
+    expect(escalation.settleRatification).not.toHaveBeenCalled();
+  });
 });
 
 describe("withdrawScheduleChange", () => {
@@ -545,6 +556,17 @@ describe("withdrawScheduleChange", () => {
     expect((await call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), scheduleVersion: 4 }, PEOPLE.dee)).status).toBe(200);
     expect(bodyOf(await withdraw(requestId))).toMatchObject({ code: "invalid_state", error: "This change has been approved, so it can't be withdrawn" });
   });
+
+  it("rolls everything back when the ledger write fails: the request stays pending and nothing else moves", async () => {
+    const requestId = await asked();
+    const picture = world.picture();
+    world.failLedger = (row) => row.Action === "schedule.change_withdrawn";
+    const res = await withdraw(requestId);
+    expect(res.status).toBe(500);
+    expect(world.picture()).toBe(picture);
+    expect(world.change(requestId)).toMatchObject({ DecidedByName: null, State: "pending" });
+    expect(escalation.settleRatification).not.toHaveBeenCalled();
+  });
 });
 
 describe("getScheduleChanges", () => {
@@ -562,13 +584,33 @@ describe("getScheduleChanges", () => {
   });
 
   it.each([
-    [{}, /Give a tenantId or a state/],
+    [{}, /Give a requestId, a tenantId or a state/],
+    [{ requestId: "not an id!" }, /requestId must be/],
     [{ state: "lost" }, /isn't one of/],
     [{ tenantId: "x" }, /whole number/],
   ])("refuses %p", async (query, message) => {
     const res = await getScheduleChanges(getRequest(query as Record<string, string>), ctx);
     expect(res.status).toBe(400);
     expect(bodyOf(res).error).toMatch(message);
+  });
+
+  // WP26c review, finding 13: the director's page reads one request by its key.
+  it("reads one request by requestId, with only its own tenancy's warnings", async () => {
+    const first = await asked();
+    const second = await asked({ relief: { ...RELIEF, from: DAY(200), to: DAY(230) } });
+    db.executeQuery.mockClear();
+    const one = await getScheduleChanges(getRequest({ requestId: first }), ctx);
+    expect(one.status).toBe(200);
+    expect(bodyOf(one).changes.map((change: { requestId: string }) => change.requestId)).toEqual([first]);
+    expect(bodyOf(one).pendingChanges.items.map((item: { requestId: string }) => item.requestId).sort()).toEqual([first, second].sort());
+    const sql = db.executeQuery.mock.calls.map(([, text]: [unknown, string]) => text);
+    expect(sql.find((text) => /FROM dbo\.ScheduleChangeRequests c\s+INNER JOIN/.test(text) && /TOP \(@Limit\)/.test(text))).toMatch(/WHERE c\.RequestId = @FilterRequestId/);
+    expect(sql.filter((text) => /WHERE c\.State = N'pending'/.test(text)).every((text) => /AND c\.TenantId = @TenantId/.test(text))).toBe(true);
+
+    const none = await getScheduleChanges(getRequest({ requestId: "no-such-request" }), ctx);
+    expect(bodyOf(none)).toMatchObject({ changes: [], pendingChanges: { count: 0, items: [] } });
+    const combined = await getScheduleChanges(getRequest({ requestId: first, state: "ratified" }), ctx);
+    expect(bodyOf(combined).changes).toEqual([]);
   });
 
   it("is for the roles that may read a tenancy", async () => {

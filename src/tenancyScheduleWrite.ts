@@ -16,6 +16,7 @@ import {
 } from "./db";
 import * as ledger from "./ledger";
 import type { LedgerActor, LedgerEntryInput } from "./ledger";
+import { recordApart } from "./ledger/refusals";
 import { deriveNextReviewDate, nextReviewInputFromRow, RESOLVED_REVIEW_DATES_SQL } from "./nextReviewDate";
 import { parseSteps, type ScheduledRateStep } from "./scheduledRateStepLogic";
 import {
@@ -61,7 +62,8 @@ export type ScheduleMutation<T> =
       result: T;
       value: unknown;
     }
-  | { error: string; kind: "reject"; status: number };
+  /** Refused; `denied` is the refused attempt the ledger records once the write has rolled back. */
+  | { denied?: LedgerDraft; error: string; kind: "reject"; status: number };
 
 export type ScheduleWriteOutcome<T> =
   | { conflict: ScheduleConflict; kind: "conflict" }
@@ -222,6 +224,14 @@ export async function runScheduleWrite<T>(
     const mutation = await mutate(locked);
     if (mutation.kind === "reject") {
       await rollbackQuietly(connection);
+      if (mutation.denied) {
+        await recordApart(
+          connection,
+          { ...mutation.denied, actor: target.actor, buildingId: target.buildingId, tenantId: target.tenantId },
+          "refused schedule edit",
+          "schedule-write-refusal",
+        );
+      }
       return { error: mutation.error, kind: "rejected", status: mutation.status };
     }
     if (!SCHEDULE_JSON_COLUMNS.includes(mutation.column)) {

@@ -39,6 +39,8 @@ export async function changeForUpdate(connection: Connection, requestId: string)
 }
 
 export interface ChangeFilters {
+  /** One request (the director's page): read by its key, not out of the whole list. */
+  requestId?: string;
   states?: readonly ScheduleChangeState[];
   tenantId?: number;
 }
@@ -47,6 +49,10 @@ export interface ChangeFilters {
 export async function loadChanges(connection: Connection, filters: ChangeFilters): Promise<SqlRow[]> {
   const where: string[] = [];
   const params: SqlParam[] = [{ name: "Limit", type: TYPES.Int, value: CHANGE_LIST_LIMIT }];
+  if (filters.requestId !== undefined) {
+    where.push("c.RequestId = @FilterRequestId");
+    params.push({ name: "FilterRequestId", type: TYPES.NVarChar, value: filters.requestId });
+  }
   if (filters.tenantId !== undefined) {
     where.push("c.TenantId = @TenantId");
     params.push({ name: "TenantId", type: TYPES.Int, value: filters.tenantId });
