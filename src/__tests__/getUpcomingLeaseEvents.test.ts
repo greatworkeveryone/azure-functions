@@ -133,6 +133,37 @@ describe("the building filter", () => {
   });
 });
 
+describe("test tenancies (D9 review)", () => {
+  const withShowTest = (roles: string) => {
+    const request = getRequest("", roles);
+    const read = request.headers.get.bind(request.headers);
+    return { ...request, headers: { get: (key: string) => (key.toLowerCase() === "x-show-test-data" ? "1" : read(key)) } } as typeof request;
+  };
+  const READS = [/FROM dbo\.Tenants t\s+WHERE/, /FROM dbo\.RentReviews r[\s\S]*r\.ScheduledFor <= @Until/, /FROM dbo\.ScheduleChangeRequests c/, /WHERE r\.State = 'awaiting_approval'/];
+
+  it("leaves them out of all three kinds and out of the changes awaiting a director", async () => {
+    await ask();
+    for (const pattern of READS) {
+      const { params, sql } = sqlOf(pattern);
+      expect(sql).toContain("(t.IsTest = 0 OR @ShowTest = 1)");
+      expect(params.ShowTest).toBe(false);
+    }
+  });
+
+  it("keeps them out when it narrows to a building", async () => {
+    await ask("buildingId=5");
+    for (const pattern of READS) expect(sqlOf(pattern).sql).toContain("(t.IsTest = 0 OR @ShowTest = 1)");
+  });
+
+  it.each([
+    ["admin", true],
+    ["director", false],
+  ])("shows them to %s with Show test data on: %s", async (roles, shown) => {
+    await getUpcomingLeaseEvents(withShowTest(roles), ctx);
+    for (const pattern of READS) expect(sqlOf(pattern).params.ShowTest).toBe(shown);
+  });
+});
+
 describe("what it reads: names and dates only", () => {
   const SENSITIVE = [
     "RentPerAnnum", "RentPerSqm", "Abn", "Acn", "AccountsEmail", "AccountsPhone", "PrimaryContact", "PostalAddress",

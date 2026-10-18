@@ -8,6 +8,7 @@
 // Nothing here retries: a failure becomes an exception for a person to look at.
 
 import { MyobRequestRefusedError, MyobWritesDisabledError, type MyobActor } from "../myob-api-log";
+import { TestDataEgressError } from "../test-data";
 import type { MyobRefusalCode } from "../myob-errors";
 import {
   createPurchase,
@@ -41,7 +42,7 @@ export type PushResult =
   | { kind: "failed"; message: string };
 
 /** Why Floorplan held a request back before it reached MYOB. */
-export type RefusalReason = MyobRefusalCode | "writes_disabled";
+export type RefusalReason = MyobRefusalCode | "test_record" | "writes_disabled";
 export type HeldBack = Extract<PushResult, { kind: "dry_run" | "refused" }>;
 export const isHeldBack = (result: PushResult): result is HeldBack => result.kind === "dry_run" || result.kind === "refused";
 
@@ -106,6 +107,7 @@ export async function pushApproved(myob: MyobPurchases, input: PushInput): Promi
       return { kind: error.code === "dry_run" ? "dry_run" : "refused", message: error.message, reason: error.code };
     }
     if (error instanceof MyobWritesDisabledError) return { kind: "refused", message: error.message, reason: "writes_disabled" };
+    if (error instanceof TestDataEgressError) return { kind: "refused", message: error.message, reason: "test_record" };
     if (error instanceof MyobPurchaseError) return { kind: "failed", message: error.message };
     const message = error instanceof Error ? error.message : String(error);
     return {

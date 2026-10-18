@@ -14,6 +14,8 @@ import { buildNextStepEmail, outcomeLabel } from "./nextStepEmail";
 import { availableActions, canAct, canSee, canWithdraw } from "./permissions";
 import type { DirectoryUser, EscalationRow, Viewer } from "./types";
 
+// Escalation emails ask whether their subject is a test record (D9); none is here.
+jest.mock("../test-data", () => ({ ...jest.requireActual("../test-data"), readIsTest: jest.fn().mockResolvedValue(false) }));
 jest.mock("./store", () => ({
   ...jest.requireActual("./store"),
   listActiveUsers: jest.fn(),

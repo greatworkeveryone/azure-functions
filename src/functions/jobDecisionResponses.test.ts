@@ -37,6 +37,8 @@ jest.mock("../db", () => ({
   rollbackTransaction: jest.fn(),
 }));
 jest.mock("../ledger", () => ({ ...jest.requireActual("../ledger"), record: jest.fn() }));
+// Escalation emails ask whether the job is a test record (D9); none is here.
+jest.mock("../test-data", () => ({ ...jest.requireActual("../test-data"), readIsTest: jest.fn().mockResolvedValue(false) }));
 jest.mock("../graph", () => ({ graphSendMail: jest.fn() }));
 jest.mock("../rateLimit", () => ({ checkRateLimit: jest.fn(() => ({ allowed: true })) }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn(), flush: jest.fn() } }));
@@ -610,7 +612,7 @@ beforeEach(() => {
     mockWorld.events.push(`ledger:${entry.action}`);
     mockWorld.ledger.push(entry);
   });
-  send.mockImplementation(async (to, subject, body) => {
+  send.mockImplementation(async (_egress, to, subject, body) => {
     mockWorld.events.push("send");
     if (mockWorld.mailFails) throw new Error("Graph sendMail failed: 503");
     mockWorld.mail.push({ body, subject, to: Array.isArray(to) ? to : [to] });

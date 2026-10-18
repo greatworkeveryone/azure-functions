@@ -788,7 +788,8 @@ describe("getInspections parameter usage (F10)", () => {
     for (const call of db.executeQuery.mock.calls as SqlCall[]) {
       const [, sql, params] = call;
       expect(sql).not.toContain("@I0");
-      expect(params).toEqual([]);
+      // The only parameter is the server's Show test data flag on the list itself (D9).
+      expect(params.filter((p) => p.name !== "ShowTest")).toEqual([]);
     }
   });
 });

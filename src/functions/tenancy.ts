@@ -133,6 +133,7 @@ import {
   normaliseLeaseAdministration,
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -326,6 +327,8 @@ interface RegisterTenantApi {
   /** Set when the tenancy is archived (D4): out of the register unless asked for. */
   archivedAt: string | null;
   archivedBy: string | null;
+  /** A test record (D9): never leaves Floorplan; out of lists unless an admin shows test data. */
+  isTest: boolean;
   /** Hex of Tenants.RowVersion — tenant writes send it back; a mismatch is a 409. */
   rowVersion: string;
   /** Tenants.ScheduleVersion — schedule writes send it back; a mismatch is a 409. */
@@ -606,6 +609,7 @@ function tenantRowToApi(
     reviewType: asStr(row.ReviewType) ?? "none",
     archivedAt: row.ArchivedAt ? new Date(row.ArchivedAt as string | Date).toISOString() : null,
     archivedBy: (row.ArchivedBy as string | null) ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
     rowVersion: rowVersionHex(row.RowVersion),
     scheduleVersion: Number(row.ScheduleVersion ?? 0),
     scheduleSignOff: scheduleSignOffFromRow(row),
@@ -718,14 +722,16 @@ const TENANT_COLUMNS = `
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
-  ArchivedAt, ArchivedBy,
+  ArchivedAt, ArchivedBy, IsTest,
   ${RESOLVED_REVIEW_DATES_SQL}
 `;
 
 // The building register: archived tenancies (D4) only when asked for.
 const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+   AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+   AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
 const OCCUPANCY_COLUMNS = `
@@ -765,9 +771,12 @@ async function getRegisterTenants(
     return { status: 400, jsonBody: { error: "buildingId must be a number" } };
   }
 
-  // Archived tenancies (D4) are left out unless asked for; that view isn't cached.
+  // Archived tenancies (D4) and test tenancies (D9) are left out unless asked
+  // for; neither of those views is cached.
   const includeArchived = request.query.get("includeArchived") === "true";
-  const cached = includeArchived ? null : getCachedTenantList(buildingId);
+  const showTest = await showTestParam(request);
+  const cacheable = !includeArchived && !showTest.value;
+  const cached = cacheable ? getCachedTenantList(buildingId) : null;
   if (cached) return { status: 200, jsonBody: cached };
 
   let connection;
@@ -777,7 +786,7 @@ async function getRegisterTenants(
     const tenantRows = await executeQuery(
       connection,
       includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
-      [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
+      [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
     );
 
     if (tenantRows.length === 0) {
@@ -828,7 +837,7 @@ async function getRegisterTenants(
     }
 
     // WP26c: the building's changes awaiting a director, on the list and on each tenancy.
-    const pending = await loadPendingChanges(connection, { buildingId }, "full");
+    const pending = await loadPendingChanges(connection, { buildingId }, "full", showTest.value);
     const tenants = tenantRows.map((row) => {
       const tid = row.TenantId as number;
       return tenantRowToApi(
@@ -840,7 +849,7 @@ async function getRegisterTenants(
     });
 
     const body = { pendingChanges: pendingChangesOf(pending), tenants };
-    if (!includeArchived) setCachedTenantList(buildingId, body);
+    if (cacheable) setCachedTenantList(buildingId, body);
     return { status: 200, jsonBody: body };
   } catch (error: any) {
     context.error("getRegisterTenants failed:", error.message);
@@ -1061,6 +1070,9 @@ async function upsertRegisterTenant(
 
     let resultId: number;
     if (tenantId === undefined) {
+      // D9: admins and directors may create a test tenancy; an admin's "[TEST]" name does too.
+      const testFlag = await testFlagForCreate(request, body.IsTest, body.LegalName as string);
+      if ("error" in testFlag) return testFlag.error;
       const inserted = await executeQuery(
         connection,
         `INSERT INTO dbo.Tenants (
@@ -1078,7 +1090,7 @@ async function upsertRegisterTenant(
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
             LeaseAdministration,
-            CreatedById, CreatedByName, UpdatedById, UpdatedByName
+            CreatedById, CreatedByName, UpdatedById, UpdatedByName, IsTest
          )
          OUTPUT INSERTED.TenantId
          VALUES (
@@ -1096,7 +1108,7 @@ async function upsertRegisterTenant(
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
             @LeaseAdministration,
-            @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName
+            @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName, @IsTest
          )`,
         [
           ...params,
@@ -1105,6 +1117,7 @@ async function upsertRegisterTenant(
             type: TYPES.NVarChar,
             value: JSON.stringify(defaultLeaseAdministration()),
           },
+          { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
         ],
       );
       resultId = inserted[0].TenantId as number;
@@ -2148,22 +2161,17 @@ async function getReviewsDue(
   try {
     connection = await createRequestConnection(token);
     const where = buildingIdParam ? "WHERE BuildingId = @BuildingId" : "";
-    const params = buildingIdParam
-      ? [
-          {
-            name: "BuildingId",
-            type: TYPES.Int,
-            value: Number(buildingIdParam),
-          },
-        ]
-      : [];
+    const params = [
+      ...(buildingIdParam ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }] : []),
+      await showTestParam(request),
+    ];
     /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     // Also expiries and option deadlines from yesterday to 91 days ahead: a
     // wider net than the Darwin-day filter below, which is exact.
     const rows = await executeQuery(
       connection,
       `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
-       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (
+       ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
          OR (Expiry IS NOT NULL
@@ -2216,6 +2224,7 @@ async function getPortfolioOccupancy(
   const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (roleCheck) return roleCheck;
 
+  const showTest = await showTestParam(request);
   let connection;
   try {
     connection = await createRequestConnection(token);
@@ -2247,13 +2256,14 @@ async function getPortfolioOccupancy(
          GROUP BY TenantId
        ) occ ON occ.TenantId = t.TenantId
        WHERE t.ArchivedAt IS NULL
+         AND (t.IsTest = 0 OR @ShowTest = 1)
        GROUP BY t.BuildingId`,
-      [],
+      [showTest],
     );
 
     // WP26c: changes awaiting a director across the portfolio, dates and names
     // only: facilities read these figures too.
-    const pending = await loadPendingChanges(connection, { all: true }, "dates_only");
+    const pending = await loadPendingChanges(connection, { all: true }, "dates_only", showTest.value);
     const buildings = rows.map((r) => {
       const totalSqm = Number(r.TotalSqm) || 0;
       const activeSqm = Number(r.ActiveSqm) || 0;

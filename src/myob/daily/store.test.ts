@@ -86,3 +86,21 @@ describe("loadCfoRecipients", () => {
     expect(recipients).toEqual([{ email: "j@rp", name: "Johanne", userId: 12 }, { email: null, name: "User 13", userId: 13 }]);
   });
 });
+
+describe("test records (D9)", () => {
+  it("keeps only proposal events whose record and job are both real (a positive IsTest = 0 selection)", async () => {
+    await loadDailyFacts({} as never, SINCE, UNTIL);
+    const sql = String((executeQuery.mock.calls.find((call: unknown[]) => String(call[1]).includes("DecisionLedger")) as unknown[])[1]);
+    expect(sql).not.toMatch(/NOT EXISTS|NOT IN/);
+    expect(sql).toMatch(/p\.SubjectType = N'purchase_order' AND EXISTS \(SELECT 1 FROM dbo\.PurchaseOrders s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.PurchaseOrderID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType = N'quote' AND EXISTS \(SELECT 1 FROM dbo\.Quotes s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.QuoteID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType = N'invoice' AND EXISTS \(SELECT 1 FROM dbo\.JobInvoices s JOIN dbo\.Jobs sj ON sj\.JobID = s\.JobID WHERE s\.JobInvoiceID = p\.SubjectId AND s\.IsTest = 0 AND sj\.IsTest = 0\)/);
+    expect(sql).toMatch(/p\.SubjectType, p\.SubjectId/);
+  });
+
+  it("hands the run the test-record keys", async () => {
+    const facts = await loadDailyFacts({} as never, SINCE, UNTIL);
+    expect(facts.testKeys).toBeInstanceOf(Set);
+    expect(executeQuery.mock.calls.some((call: unknown[]) => String(call[1]).includes("DECLARE @Keys TABLE"))).toBe(true);
+  });
+});

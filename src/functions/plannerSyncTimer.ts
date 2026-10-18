@@ -131,11 +131,13 @@ export async function plannerSyncTimer(
          t.OptionPeriods,
          CONVERT(VARCHAR(10), t.NextReviewDate, 120) AS NextReviewDate,
          t.ReviewType,
-         t.ScheduleSignedOffAt
+         t.ScheduleSignedOffAt,
+         t.IsTest
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
          AND t.ArchivedAt IS NULL
+         AND t.IsTest = 0
          AND (t.Expiry IS NOT NULL OR t.NextReviewDate IS NOT NULL)`,
     );
 
@@ -151,6 +153,7 @@ export async function plannerSyncTimer(
       nextReviewDate: (r.NextReviewDate as string | null) ?? null,
       reviewType: (r.ReviewType as string | null) ?? null,
       scheduleSignedOff: Boolean(r.ScheduleSignedOffAt),
+      isTest: Boolean(r.IsTest),
     }));
 
     let created = 0;
@@ -242,6 +245,7 @@ export async function plannerSyncTimer(
           if (existing.length === 0) {
             try {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -295,6 +299,7 @@ export async function plannerSyncTimer(
           if (rowStatus === "resolved") {
             try {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -339,6 +344,7 @@ export async function plannerSyncTimer(
               await recordPlannerSyncOutcome(connection, rowId, null);
             } else {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -384,12 +390,13 @@ export async function plannerSyncTimer(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title, j.Kind,
+      `SELECT j.JobID, j.Title, j.Kind, j.IsTest,
               COALESCE(b.BuildingName, '') AS BuildingName,
               CONVERT(VARCHAR(23), j.ExpectedProgressUpdate, 126) AS ExpectedProgressUpdate
        FROM Jobs j
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
        WHERE j.IsArchived = 0
+         AND j.IsTest = 0
          AND j.Status <> 'Done'
          AND j.ExpectedProgressUpdate IS NOT NULL
          -- Sargable form: compare the indexed column directly to the start of
@@ -406,6 +413,7 @@ export async function plannerSyncTimer(
         title: r.Title as string,
         buildingName: (r.BuildingName as string | null) ?? null,
         expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
+        isTest: Boolean(r.IsTest),
       }));
 
     let jobCreated = 0;
@@ -448,6 +456,7 @@ export async function plannerSyncTimer(
       if (existing.length === 0) {
         try {
           const taskId = await graphCreatePlannerTask({
+            egress: { isTest: job.isTest },
             planId: jobPlanId,
             bucketId: jobBucketId,
             title,
@@ -491,6 +500,7 @@ export async function plannerSyncTimer(
             await recordPlannerSyncOutcome(connection, rowId, null);
           } else {
             const taskId = await graphCreatePlannerTask({
+              egress: { isTest: job.isTest },
               planId: jobPlanId,
               bucketId: jobBucketId,
               title,
@@ -523,6 +533,7 @@ export async function plannerSyncTimer(
       } else {
         try {
           const taskId = await graphCreatePlannerTask({
+            egress: { isTest: job.isTest },
             planId: jobPlanId,
             bucketId: jobBucketId,
             title,
@@ -570,7 +581,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'stalled_facilities'
-       WHERE (j.IsStalled = 1 AND j.IsArchived = 0 AND j.Status <> 'Done'
+       WHERE (j.IsTest = 0 AND j.IsStalled = 1 AND j.IsArchived = 0 AND j.Status <> 'Done'
               AND (j.AwaitingRole IS NULL OR j.AwaitingRole = 'facilities'))
           OR (pt.Status = 'active')`,
     );
@@ -610,7 +621,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'awaiting_accounts'
-       WHERE (j.IsArchived = 0 AND j.Status <> 'Done' AND j.AwaitingRole = 'accounts')
+       WHERE (j.IsTest = 0 AND j.IsArchived = 0 AND j.Status <> 'Done' AND j.AwaitingRole = 'accounts')
           OR (pt.Status = 'active')`,
     );
 
@@ -650,7 +661,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'awaiting_facilities_approval'
-       WHERE (j.IsArchived = 0 AND j.Status = 'Awaiting Approval' AND j.AwaitingRole = 'facilities')
+       WHERE (j.IsTest = 0 AND j.IsArchived = 0 AND j.Status = 'Awaiting Approval' AND j.AwaitingRole = 'facilities')
           OR (pt.Status = 'active')`,
     );
 
@@ -691,7 +702,7 @@ export async function plannerSyncTimer(
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'director_approval'
        WHERE (
-              j.IsArchived = 0 AND j.Status <> 'Done' AND (
+              j.IsTest = 0 AND j.IsArchived = 0 AND j.Status <> 'Done' AND (
                 EXISTS (SELECT 1 FROM dbo.JobInvoices ji
                         WHERE ji.JobID = j.JobID AND ji.Status = 'approved')
                 OR EXISTS (SELECT 1 FROM dbo.Quotes q
@@ -737,7 +748,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'oncharge_pending'
-       WHERE (j.IsOnchargeable = 1 AND j.IsArchived = 0 AND j.Status <> 'Done')
+       WHERE (j.IsTest = 0 AND j.IsOnchargeable = 1 AND j.IsArchived = 0 AND j.Status <> 'Done')
           OR (pt.Status = 'active')`,
     );
 

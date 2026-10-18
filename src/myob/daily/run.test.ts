@@ -64,7 +64,7 @@ describe("runMyobDaily", () => {
   it("tells the email when the window was capped after a longer gap", async () => {
     const d = deps({ lastCovered: jest.fn().mockResolvedValue(new Date("2026-08-01T22:00:00Z")) });
     await run(d);
-    expect(d.send).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.stringContaining("This email could not be sent since 02/08 07:30. This one covers the last 14 days"));
+    expect(d.send).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.stringContaining("This email could not be sent since 02/08 07:30. This one covers the last 14 days"), { isTest: false });
   });
 
   it("asks for the last run of its own kind (live or dry run) and reads from where it ended", async () => {
@@ -80,7 +80,7 @@ describe("runMyobDaily", () => {
     const d = deps();
     const report = await run(d);
     expect(d.load).toHaveBeenCalledWith(expect.anything(), new Date("2026-10-12T22:00:00Z"), new Date("2026-10-13T22:00:00Z"));
-    expect(d.send).toHaveBeenCalledWith(["johanne@rp"], "What Floorplan did in MYOB, 14/10/2026", expect.stringContaining("Good morning Johanne,"));
+    expect(d.send).toHaveBeenCalledWith(["johanne@rp"], "What Floorplan did in MYOB, 14/10/2026", expect.stringContaining("Good morning Johanne,"), { isTest: false });
     expect(report).toMatchObject({ calls: 1, errors: [], recipients: 1, sent: 1 });
   });
 
@@ -113,7 +113,7 @@ describe("runMyobDaily", () => {
       send: jest.fn().mockRejectedValueOnce(new Error("Graph 503")).mockResolvedValue(undefined),
     });
     const report = await run(d);
-    expect(d.send).toHaveBeenCalledWith(["dev@rp"], expect.any(String), expect.stringContaining("meant for johanne@rp"));
+    expect(d.send).toHaveBeenCalledWith(["dev@rp"], expect.any(String), expect.stringContaining("meant for johanne@rp"), { isTest: false });
     expect(report).toMatchObject({ errors: ["user #12: Graph 503"], sent: 1 });
     delete process.env.DEV_EMAIL_OVERRIDE;
     const none = deps({ recipients: jest.fn().mockResolvedValue([{ email: null, name: "Johanne", userId: 12 }]) });
@@ -125,5 +125,39 @@ describe("runMyobDaily", () => {
   it("reports an error when there is something to tell but no active CFO", async () => {
     const report = await run(deps({ recipients: jest.fn().mockResolvedValue([]) }));
     expect(report.errors).toEqual([expect.stringContaining("No active user has the cfo role")]);
+  });
+});
+
+describe("test records (D9)", () => {
+  const EVENT = {
+    action: "myob.push", actorName: "Johanne", after: null, companyFileId: CF, companyFileName: "Demo Pty Ltd", jobId: 42, myobNumber: "66Sm1",
+    myobUrl: null, occurredAt: new Date("2026-10-13T00:05:00Z"), operation: "orders.create", proposalId: 7, proposedBy: "Cam", reason: null,
+    rendered: { number: "66Sm1" }, reviewedBy: "Johanne", ruleApplied: null, subjectId: 70, subjectType: "purchase_order",
+  };
+
+  it("sends nothing that names a test job, and says why", async () => {
+    const d = deps({ load: jest.fn().mockResolvedValue(facts({ events: [EVENT], testKeys: new Set(["job:42"]) })) });
+    const report = await run(d);
+    expect(d.send).not.toHaveBeenCalled();
+    expect(report.errors).toEqual(["user #12: Not sent: test record"]);
+  });
+
+  it.each([
+    ["purchase_order", 70],
+    ["quote", 71],
+    ["invoice", 72],
+  ])("also refuses an email naming a test %s on a real job", async (subjectType, subjectId) => {
+    const d = deps({
+      load: jest.fn().mockResolvedValue(facts({ events: [{ ...EVENT, subjectId, subjectType }], testKeys: new Set([`${subjectType}:${subjectId}`]) })),
+    });
+    const report = await run(d);
+    expect(d.send).not.toHaveBeenCalled();
+    expect(report.errors).toEqual(["user #12: Not sent: test record"]);
+  });
+
+  it("tells the sender a real email names no test record", async () => {
+    const d = deps({ load: jest.fn().mockResolvedValue(facts({ events: [EVENT], testKeys: new Set(["job:41"]) })) });
+    await run(d);
+    expect((d.send as jest.Mock).mock.calls[0][3]).toEqual({ isTest: false });
   });
 });

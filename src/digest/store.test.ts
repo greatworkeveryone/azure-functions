@@ -109,7 +109,7 @@ describe("loadDigestFacts", () => {
   it("reads users, live escalations, approvals, due jobs and keys, one query at a time", async () => {
     db.executeQuery.mockResolvedValue([]);
     const facts = await loadDigestFacts(conn, NOW);
-    expect(facts).toEqual({ dueJobs: [], escalations: [], overdueKeys: [], users: [], waitingApprovals: [] });
+    expect(facts).toEqual({ dueJobs: [], escalations: [], overdueKeys: [], testKeys: new Set(), users: [], waitingApprovals: [] });
     const sql = calls().map((c) => c[1]).join("\n");
     for (const table of ["dbo.AppUsers", "dbo.Escalations", "dbo.Quotes", "dbo.JobInvoices", "dbo.Jobs", "dbo.KeyCheckoutBatches"]) {
       expect(sql).toContain(table);
@@ -129,8 +129,37 @@ describe("the source", () => {
     expect(source).not.toMatch(/SELECT\s+\*/i);
   });
 
-  it("marks where D9's test-data predicate goes, until the column exists", () => {
-    // IsTest arrives in Train 2 (migration 127). Grep for this marker when D9 merges.
-    expect(source.match(/D9: exclude IsTest = 1/g)?.length).toBeGreaterThanOrEqual(4);
+  it("leaves test records out of every read (D9, migration 127)", () => {
+    expect(source).not.toMatch(/D9: exclude IsTest = 1/);
+  });
+
+});
+
+describe("test records (D9)", () => {
+  it.each([
+    ["quotes", () => listWaitingApprovals(conn), /FROM dbo\.Quotes q[\s\S]*AND q\.IsTest = 0[\s\S]*AND j\.IsTest = 0/],
+    ["invoices", () => listWaitingApprovals(conn), /FROM dbo\.JobInvoices ji[\s\S]*AND ji\.IsTest = 0[\s\S]*AND j\.IsTest = 0/],
+    ["due jobs", () => listDueJobs(conn, NOW), /FROM dbo\.Jobs j[\s\S]*AND j\.IsTest = 0/],
+    ["overdue keys", () => listOverdueKeys(conn, NOW), /AND kco\.IsTest = 0[\s\S]*AND k\.IsTest = 0/],
+  ])("leaves test %s out", async (_label, read, pattern) => {
+    db.executeQuery.mockResolvedValue([]);
+    await read();
+    expect(calls().map((c) => c[1]).join("\n")).toMatch(pattern);
+  });
+
+  it("drops escalations about a test record and hands the run the test keys", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/FROM dbo\.Escalations/.test(sql)) {
+        return [
+          { EscalationId: 1, SubjectId: "12", SubjectType: "job" },
+          { EscalationId: 2, SubjectId: "13", SubjectType: "job" },
+        ];
+      }
+      if (/DECLARE @Keys TABLE/.test(sql)) return [{ Id: "12", Kind: "job" }];
+      return [];
+    });
+    const facts = await loadDigestFacts(conn, NOW);
+    expect(facts.escalations.map((e) => e.escalationId)).toEqual([2]);
+    expect([...(facts.testKeys ?? [])]).toEqual(["job:12"]);
   });
 });

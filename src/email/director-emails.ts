@@ -9,6 +9,7 @@ import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
 import { buildJobPacket, nonMergeableAttachments, type PacketInput } from "../pdf/job-packet";
 import { loadJobPacketInputs } from "../pdf/job-packet-loader";
+import { assertMayLeave, readIsTest } from "../test-data";
 import type { Connection } from "tedious";
 import { resolveRoleRecipients } from "./role-recipients";
 
@@ -82,6 +83,10 @@ export async function sendDirectorApprovalEmail(
     throw new Error("No director to email: no active director in AppUsers and DIRECTOR_APPROVAL_EMAILS is empty");
   }
 
+  // A test job's packet never leaves Floorplan (D9).
+  const isTest = await readIsTest(args.connection, "job", args.jobId);
+  assertMayLeave("email", { isTest });
+
   const input = await loadJobPacketInputs(args.connection, args.jobId);
   const packet = await buildJobPacket(input);
   // Non-PDF / non-image attachments can't be merged into the packet — send
@@ -113,6 +118,7 @@ ${linkLine}
 `;
 
   await graphSendMail(
+    { isTest },
     recipients,
     subject,
     body.trim() + "\n",

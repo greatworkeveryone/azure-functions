@@ -16,6 +16,7 @@ const MIGRATIONS = [
   "115_myob_api_log.sql",
   "124_myob_controls.sql",
   "123_graph_subscriptions.sql",
+  "127_test_data_flag.sql",
   "128_timer_runs.sql",
   "129_email_intake_watermark.sql",
   "133_email_archive_columns.sql",
@@ -258,5 +259,30 @@ describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) 
     expect(code).toMatch(/BEGIN TRY\s+BEGIN TRANSACTION;/);
     expect(code).toMatch(/COMMIT TRANSACTION;\s*END TRY/);
     expect(code).toMatch(/BEGIN CATCH\s+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;\s*END CATCH;/);
+  });
+});
+
+describe("migration 127 matches the code that uses it", () => {
+  const TABLES = [
+    "Emails",
+    "Inspections",
+    "JobInvoices",
+    "Jobs",
+    "KeyCheckouts",
+    "Keys",
+    "Payments",
+    "PurchaseOrders",
+    "Quotes",
+    "Tenants",
+    "Vacancies",
+  ];
+
+  it("adds IsTest BIT NOT NULL DEFAULT 0, behind a column guard, to every record table D9 names", () => {
+    const code = stripComments(read("127_test_data_flag.sql"));
+    for (const table of TABLES) {
+      expect(code).toContain(`IF COL_LENGTH(N'dbo.${table}', N'IsTest') IS NULL`);
+      expect(code).toContain(`ALTER TABLE dbo.${table} ADD IsTest BIT NOT NULL CONSTRAINT DF_${table}_IsTest DEFAULT 0;`);
+    }
+    expect(code.match(/ADD IsTest/g)).toHaveLength(TABLES.length);
   });
 });

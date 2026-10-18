@@ -57,6 +57,8 @@ export interface DigestFacts {
   /** Open and acknowledged escalations. */
   escalations: EscalationRow[];
   overdueKeys: OverdueKey[];
+  /** "<kind>:<id>" of every test record (D9): none may appear in a digest. */
+  testKeys?: ReadonlySet<string>;
   users: DigestUser[];
   waitingApprovals: WaitingApproval[];
 }
