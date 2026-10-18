@@ -3,8 +3,9 @@ import { join, relative } from "node:path";
 import { aliasOf, filtersArchived, PART_READ, statementAt } from "./fixtures/archivedPartReads";
 
 // D10 guard: archived areas and car parks leave the register, the summary,
-// the portfolio figures and the planner. Every read of dbo.TenantOccupancies
-// or dbo.Carparks must carry a positive `ArchivedAt IS NULL` predicate on that
+// the portfolio figures and the planner; archived notes (D11) leave the
+// tenancy's notes and the register's note counts. Every read of
+// dbo.TenantOccupancies, dbo.Carparks or dbo.TenantNotes must carry a positive `ArchivedAt IS NULL` predicate on that
 // table's own alias (unqualified when it has none), except the reviewed reads
 // below that must see archived rows on purpose.
 
@@ -14,11 +15,12 @@ const SRC = join(ROOT, "src");
 // file → number of reads that may see archived rows, and why.
 const SEES_ARCHIVED: Record<string, { count: number; why: string }> = {
   "src/functions/tenancy.ts": {
-    count: 6,
-    why: "upsertOccupancy's cell check and upsertCarpark's identifier check (to refuse an archived cell or bay), the stored row read back by id after each upsert, and the two 'with archived' lists behind includeArchived",
+    count: 7,
+    why: "upsertOccupancy's cell check and upsertCarpark's identifier check (to refuse an archived cell or bay), the stored row read back by id after each upsert, the two 'with archived' lists behind includeArchived, and createTenantNote's read-back of the note it just wrote",
   },
+  "src/tenant-notes.ts": { count: 2, why: "archive / restore read the note by id under lock, whatever its state, and the Archived view reads archived notes on purpose" },
   "src/tenancy-parts-archive.ts": { count: 2, why: "archive / restore read the row by id under lock, whatever its state" },
-  "src/tenancy-records.ts": { count: 2, why: "the empty-draft check: an archived area or bay still holds the tenancy's history" },
+  "src/tenancy-records.ts": { count: 3, why: "the empty-draft check: an archived area, bay or note still holds the tenancy's history" },
 };
 
 function sourceFiles(dir: string): string[] {

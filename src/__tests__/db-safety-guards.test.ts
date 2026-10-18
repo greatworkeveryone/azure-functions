@@ -86,10 +86,9 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   "src/functions/jobRequestedContractors.ts": { deleteFrom: 1 },
   "src/functions/purchaseOrders.ts": { deleteBlob: 1, deleteFrom: 1 },
   "src/functions/quotes.ts": { deleteFrom: 1 },
-  // The tenant-note delete (grandfathered). Areas and car parks are archived
-  // (D10, tenancy-parts-archive.ts); the tenancy delete moved to
-  // src/tenancy-records.ts and is reviewed below.
-  "src/functions/tenancy.ts": { deleteFrom: 1 },
+  // src/functions/tenancy.ts deletes nothing: areas and car parks are archived
+  // (D10, tenancy-parts-archive.ts), notes too (D11, tenant-notes.ts), and the
+  // tenancy delete moved to src/tenancy-records.ts and is reviewed below.
   // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
   "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
   "src/functions/vacancies.ts": { deleteFrom: 1 },

@@ -42,6 +42,7 @@ export type LedgerSubjectType =
   | "schedule_change"
   | "service_schedule"
   | "tenancy"
+  | "tenancy_note"
   | "vacancy";
 
 export type LedgerActor =

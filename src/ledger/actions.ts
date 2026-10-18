@@ -113,6 +113,9 @@ export const LEDGER_ACTIONS = {
   "occupancy.unarchive": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
   "carpark.archive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
   "carpark.unarchive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
+  // A tenancy's notes are archived, never deleted (D11). Each needs a reason.
+  "tenancy_note.archive": { exception: true, reasonRequired: true, subjects: ["tenancy_note"] },
+  "tenancy_note.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy_note"] },
   "schedule.manual_edit": {
     exception: false,
     reasonRequired: false,
@@ -126,6 +129,9 @@ export const LEDGER_ACTIONS = {
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // An info sheet section or row taken off (D11), with the whole sheet as it was in Before.
+  "tenancy.info_sheet_row_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.info_sheet_section_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   // Test data (D9): an admin marks a record as test data, or back. An
   // exception: it decides whether the record may leave Floorplan.
   "test_data.flag": { exception: true, reasonRequired: true, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },

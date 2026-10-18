@@ -64,6 +64,8 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
   ["schedule_change", TENANCY_READ],
   ["service_schedule", FACILITIES_READ],
   ["tenancy", TENANCY_READ],
+  // A note is read through getRegisterTenant / getArchivedTenantNotes, the tenancy's own gate.
+  ["tenancy_note", TENANCY_READ],
 ]);
 
 export function historyReadRoles(subjectType: string): readonly AppRole[] {

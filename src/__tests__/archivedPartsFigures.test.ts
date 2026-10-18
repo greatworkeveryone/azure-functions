@@ -48,6 +48,22 @@ const area = (id: string, sqm: number, archivedAt: Date | null): Row => ({
 });
 const AREAS = [area("occ-live", 100, null), area("occ-archived", 50, new Date("2026-10-01T00:00:00Z"))];
 const areasFor = (sql: string) => (sqlFiltersArchived(sql, "TenantOccupancies") ? AREAS.filter((row) => row.ArchivedAt === null) : AREAS);
+const note = (id: string, archivedAt: Date | null): Row => ({
+  AnchorKind: "tenant",
+  ArchiveReason: archivedAt ? "Duplicate" : null,
+  ArchivedAt: archivedAt,
+  ArchivedBy: archivedAt ? "Ann Accounts" : null,
+  Body: `Note ${id}`,
+  CreatedAt: new Date("2026-10-01T00:00:00Z"),
+  CreatedById: "oid-1",
+  CreatedByName: "Bob",
+  FieldKey: null,
+  NoteId: id,
+  OccupancyId: null,
+  TenantId: 7,
+});
+const NOTES = [note("note-live", null), note("note-archived", new Date("2026-10-10T00:00:00Z"))];
+const notesFor = (sql: string) => (sqlFiltersArchived(sql, "TenantNotes") ? NOTES.filter((row) => row.ArchivedAt === null) : NOTES);
 const sqmOf = (rows: Row[]) => rows.reduce((sum, row) => sum + Number(row.SizeSqm), 0);
 
 beforeEach(() => {
@@ -66,8 +82,18 @@ beforeEach(() => {
       return [{ ActiveSqm: sqm, ActiveTenantCount: 1, AnnualRent: RENT, BuildingId: 5, TotalSqm: sqm, UnsignedTenantCount: 0, WaleDenominatorSqm: 0, WaleNumeratorSqmDays: 0 }];
     }],
     [/FROM dbo\.TenantOccupancies/, (_params, sql) => areasFor(sql)],
-    [/FROM dbo\.Tenants t WHERE BuildingId/, () => [tenancyRow({ CreatedAt: new Date(), RentPerAnnum: RENT, RowVersion: Buffer.from("0000000000000a01", "hex"), UpdatedAt: new Date() })]],
-    [/FROM dbo\.TenantNotes/, () => []],
+    [/FROM dbo\.Tenants t WHERE (BuildingId|TenantId)/, () => [tenancyRow({ CreatedAt: new Date(), InfoSheetVersion: 4, RentPerAnnum: RENT, RowVersion: Buffer.from("0000000000000a01", "hex"), UpdatedAt: new Date() })]],
+    // The register's note counts: one row per anchor, over the notes the query lets in.
+    [/COUNT\(\*\) AS Cnt[\s\S]*FROM dbo\.TenantNotes n/, (_params, sql) => {
+      const kept = notesFor(sql);
+      return kept.length > 0 ? [{ AnchorKind: "tenant", Cnt: kept.length, FieldKey: "", OccupancyId: "", TenantId: 7 }] : [];
+    }],
+    [/FROM dbo\.TenantNotes/, (_params, sql) => notesFor(sql)],
+    [/FROM dbo\.RentReviews\s+WHERE TenantId/, () => []],
+    [/FROM dbo\.TenantOccupancyHistory/, () => []],
+    [/FROM dbo\.RentScheduleChangeLog/, () => []],
+    [/FROM dbo\.PlannerTasks/, () => []],
+    [/FROM dbo\.CpiIndex/, () => []],
   ]);
 });
 
@@ -87,6 +113,22 @@ describe("archived areas stay out of the figures (D10 review)", () => {
     expect(tenant.occupancies.map((o: { occupancyId: string }) => o.occupancyId).sort()).toEqual(["occ-archived", "occ-live"]);
     expect(tenant.totalSizeSqm).toBe(100);
     expect(tenant.costPerSqm).toBe(RENT / 100);
+  });
+
+  it("archived notes (D11) leave the register's note counts and the tenancy's notes", async () => {
+    const [listed] = (await register({})).tenants;
+    expect(listed.noteCountByAnchor).toEqual({ tenant: 1 });
+    const res = await handlers.getRegisterTenant(getRequest({ tenantId: "7" }), ctx);
+    expect(res.status).toBe(200);
+    const { tenant } = res.jsonBody as { tenant: { noteCountByAnchor: Record<string, number>; notes: Array<{ noteId: string }> } };
+    expect(tenant.notes.map((n) => n.noteId)).toEqual(["note-live"]);
+    expect(tenant.noteCountByAnchor).toEqual({ tenant: 1 });
+  });
+
+  it("carries the info sheet's version (D11), which an info sheet delete sends back", async () => {
+    expect((await register({})).tenants[0].infoSheetVersion).toBe(4);
+    const res = await handlers.getRegisterTenant(getRequest({ tenantId: "7" }), ctx);
+    expect((res.jsonBody as { tenant: { infoSheetVersion: number } }).tenant.infoSheetVersion).toBe(4);
   });
 
   it("the portfolio figures: total and active m² leave the archived area out", async () => {

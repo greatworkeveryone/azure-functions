@@ -119,13 +119,9 @@ import {
   signOffReasonRequiredResponse,
 } from "../scheduleSignOff";
 import {
-  deleteInfoSheetRow,
-  deleteInfoSheetSection,
   InfoSheetRow as InfoSheetRowApi,
   InfoSheetSection as InfoSheetSectionApi,
   parseInfoSheetSections,
-  upsertInfoSheetRow,
-  upsertInfoSheetSection,
 } from "../infoSheetLogic";
 import {
   defaultLeaseAdministration,
@@ -134,6 +130,8 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
+import { writeInfoSheet } from "../infoSheetWrite";
+import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -285,6 +283,8 @@ interface RegisterTenantApi {
   miscFees: MiscFee[];
   /** m069 — info sheet general sections (header / subheader / body rows). */
   infoSheetSections: InfoSheetSectionApi[];
+  /** D11 (m141): goes up on every info sheet write; an info sheet delete sends back the one it was shown. */
+  infoSheetVersion: number;
   /** m078 — lease document administration (execution dates, licences, etc.). */
   leaseAdministration: LeaseAdministration;
   /** WP26c: changes awaiting a director (relief requests, reviews awaiting approval),
@@ -368,17 +368,6 @@ interface TenantOccupancyApi {
   sizeSqm: number;
   tenantId: number;
   updatedAt: string;
-}
-
-interface TenantNoteApi {
-  anchorKind: "field" | "occupancy" | "tenant";
-  body: string;
-  createdAt: string;
-  createdBy: UserRef;
-  fieldKey?: string;
-  noteId: string;
-  occupancyId?: string;
-  tenantId: number;
 }
 
 interface RentReviewApi {
@@ -584,6 +573,7 @@ function tenantRowToApi(
     ),
     miscFees: parseMiscFees(row.MiscFees as string | null | undefined),
     infoSheetSections: parseInfoSheetSections(row.InfoSheetSections as string | null | undefined),
+    infoSheetVersion: Number(row.InfoSheetVersion ?? 0),
     leaseAdministration: parseLeaseAdministration(row.LeaseAdministration as string | null | undefined),
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
@@ -654,22 +644,6 @@ function occupancyRowToApi(row: SqlRow): TenantOccupancyApi {
   };
 }
 
-function noteRowToApi(row: SqlRow): TenantNoteApi {
-  return {
-    anchorKind: row.AnchorKind as TenantNoteApi["anchorKind"],
-    body: row.Body as string,
-    createdAt: toIso(row.CreatedAt),
-    createdBy: {
-      id: (row.CreatedById as string) ?? "",
-      name: (row.CreatedByName as string) ?? "",
-    },
-    fieldKey: asStr(row.FieldKey),
-    noteId: row.NoteId as string,
-    occupancyId: asStr(row.OccupancyId),
-    tenantId: row.TenantId as number,
-  };
-}
-
 function reviewRowToApi(row: SqlRow): RentReviewApi {
   return {
     completedAt: row.CompletedAt ? toIso(row.CompletedAt) : undefined,
@@ -727,6 +701,7 @@ const TENANT_COLUMNS = `
   MiscFees,
   RentReliefs,
   InfoSheetSections,
+  InfoSheetVersion,
   LeaseAdministration,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
@@ -840,7 +815,7 @@ async function getRegisterTenants(
               COUNT(*) AS Cnt
        FROM dbo.TenantNotes n
        INNER JOIN dbo.Tenants t ON t.TenantId = n.TenantId
-       WHERE t.BuildingId = @BuildingId
+       WHERE t.BuildingId = @BuildingId AND n.ArchivedAt IS NULL
        GROUP BY n.TenantId, n.AnchorKind, n.OccupancyId, n.FieldKey`,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }],
     );
@@ -933,10 +908,10 @@ async function getRegisterTenant(
     const occupancyRows = await executeQuery(connection, TENANT_OCCUPANCIES_SQL, tenantIdParam);
     const noteRows = await executeQuery(
       connection,
-      `SELECT NoteId, TenantId, AnchorKind, OccupancyId, FieldKey, Body,
-              CreatedAt, CreatedById, CreatedByName
+      // D11: archived notes are in the Archived view (getArchivedTenantNotes), not here.
+      `SELECT ${NOTE_COLUMNS}
        FROM dbo.TenantNotes
-       WHERE TenantId = @TenantId
+       WHERE TenantId = @TenantId AND ArchivedAt IS NULL
        ORDER BY CreatedAt DESC`,
       tenantIdParam,
     );
@@ -2033,8 +2008,7 @@ async function createTenantNote(
     );
     const stored = await executeQuery(
       connection,
-      `SELECT NoteId, TenantId, AnchorKind, OccupancyId, FieldKey, Body,
-              CreatedAt, CreatedById, CreatedByName
+      `SELECT ${NOTE_COLUMNS}
        FROM dbo.TenantNotes WHERE NoteId = @Id`,
       [{ name: "Id", type: TYPES.NVarChar, value: NoteId }],
     );
@@ -2048,43 +2022,7 @@ async function createTenantNote(
   }
 }
 
-// ── POST /api/deleteTenantNote ───────────────────────────────────────────────
-
-async function deleteTenantNote(
-  request: HttpRequest,
-  context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const token = extractToken(request);
-  if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
-  if (roleCheck) return roleCheck;
-
-  let connection;
-  try {
-    const body = (await request.json()) as { NoteId?: string };
-    if (typeof body.NoteId !== "string") {
-      return { status: 400, jsonBody: { error: "NoteId required" } };
-    }
-    connection = await createRequestConnection(token);
-    const noteRows = await executeQuery(
-      connection,
-      `SELECT TenantId FROM dbo.TenantNotes WHERE NoteId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: body.NoteId }],
-    );
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.TenantNotes WHERE NoteId = @Id`,
-      [{ name: "Id", type: TYPES.NVarChar, value: body.NoteId }],
-    );
-    if (noteRows.length > 0) invalidateTenant(noteRows[0].TenantId as number);
-    return { status: 200, jsonBody: { deleted: true, noteId: body.NoteId } };
-  } catch (error: any) {
-    context.error("deleteTenantNote failed:", error.message);
-    return errorResponse("Delete tenant note failed", error.message);
-  } finally {
-    if (connection) closeConnection(connection);
-  }
-}
+// Notes are archived, not deleted (D11): see tenantNotesArchive.ts.
 
 // ── POST /api/deleteRegisterTenant ───────────────────────────────────────────
 // Body { TenantId }. Hard-deletes an empty draft only (D4, DL-04); anything a
@@ -3301,38 +3239,19 @@ async function upsertInfoSheetSectionHandler(
     }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
-    const next = upsertInfoSheetSection(existing, section);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         InfoSheetSections = @InfoSheetSections,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
+    // D11: under the row lock, every other section kept as stored; a column that
+    // isn't a JSON array is refused (422), never saved over.
+    const outcome = await writeInfoSheet(connection, {
+      buildingId: BuildingId,
+      caller,
+      expectedVersion: null,
+      ledger: null,
+      op: { kind: "upsertSection", section },
+      tenantId: TenantId,
+    });
+    if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { sections: next } };
+    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, sections: outcome.sections } };
   } catch (error: any) {
     context.error("upsertInfoSheetSection failed:", error.message);
     return errorResponse("Failed to upsert info sheet section", error.message);
@@ -3371,40 +3290,27 @@ async function deleteInfoSheetSectionHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, and SectionId required" } };
     }
+    const infoSheetVersion = body.InfoSheetVersion;
+    if (typeof infoSheetVersion !== "number" || !Number.isInteger(infoSheetVersion) || infoSheetVersion < 0) {
+      return { status: 400, jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" } };
+    }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
-    const next = deleteInfoSheetSection(existing, sectionId);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         InfoSheetSections = @InfoSheetSections,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    // D11: refused when the sheet moved on since it was shown (409), ledgered with
+    // the whole sheet as it was; the other sections are kept as stored.
+    const outcome = await writeInfoSheet(connection, {
+      buildingId: BuildingId,
+      caller,
+      expectedVersion: infoSheetVersion,
+      ledger: { action: "tenancy.info_sheet_section_delete", actor },
+      op: { kind: "deleteSection", sectionId },
+      tenantId: TenantId,
+    });
+    if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { deleted: true, sectionId } };
+    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, sectionId } };
   } catch (error: any) {
     context.error("deleteInfoSheetSection failed:", error.message);
     return errorResponse("Failed to delete info sheet section", error.message);
@@ -3446,38 +3352,19 @@ async function upsertInfoSheetRowHandler(
     }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
-    const next = upsertInfoSheetRow(existing, sectionId, row);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         InfoSheetSections = @InfoSheetSections,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
+    // D11: under the row lock, every other section kept as stored; a missing
+    // section is a 404 and a column that isn't a JSON array a 422.
+    const outcome = await writeInfoSheet(connection, {
+      buildingId: BuildingId,
+      caller,
+      expectedVersion: null,
+      ledger: null,
+      op: { kind: "upsertRow", row, sectionId },
+      tenantId: TenantId,
+    });
+    if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { sections: next } };
+    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, sections: outcome.sections } };
   } catch (error: any) {
     context.error("upsertInfoSheetRow failed:", error.message);
     return errorResponse("Failed to upsert info sheet row", error.message);
@@ -3517,40 +3404,27 @@ async function deleteInfoSheetRowHandler(
     if (!Number.isFinite(TenantId) || !Number.isFinite(BuildingId) || !sectionId || !rowId) {
       return { status: 400, jsonBody: { error: "TenantId, BuildingId, SectionId, and RowId required" } };
     }
+    const infoSheetVersion = body.InfoSheetVersion;
+    if (typeof infoSheetVersion !== "number" || !Number.isInteger(infoSheetVersion) || infoSheetVersion < 0) {
+      return { status: 400, jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" } };
+    }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT InfoSheetSections FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    const existing = parseInfoSheetSections(rows[0].InfoSheetSections as string | null);
-    const next = deleteInfoSheetRow(existing, sectionId, rowId);
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         InfoSheetSections = @InfoSheetSections,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "InfoSheetSections", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    // D11: refused when the sheet moved on since it was shown (409), ledgered with
+    // the whole sheet as it was; only the row's own section is rewritten.
+    const outcome = await writeInfoSheet(connection, {
+      buildingId: BuildingId,
+      caller,
+      expectedVersion: infoSheetVersion,
+      ledger: { action: "tenancy.info_sheet_row_delete", actor },
+      op: { kind: "deleteRow", rowId, sectionId },
+      tenantId: TenantId,
+    });
+    if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { deleted: true, sectionId, rowId } };
+    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, rowId, sectionId } };
   } catch (error: any) {
     context.error("deleteInfoSheetRow failed:", error.message);
     return errorResponse("Failed to delete info sheet row", error.message);
@@ -3787,11 +3661,6 @@ app.http("createTenantNote", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: createTenantNote,
-});
-app.http("deleteTenantNote", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: deleteTenantNote,
 });
 app.http("deleteRegisterTenant", {
   methods: ["POST"],

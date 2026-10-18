@@ -257,8 +257,17 @@ export const ACTION_ROLES = {
   },
   editTenancy: {
     gate: TENANCY_DESK,
-    routes: ["upsertRegisterTenant", "upsertOccupancy", "upsertCarpark", "upsertMiscFee", "upsertTenantIncentive", "upsertLeaseAdministration"],
-    why: "Edit the tenancy register and a tenant's detail.",
+    routes: [
+      "upsertRegisterTenant",
+      "upsertOccupancy",
+      "upsertCarpark",
+      "upsertMiscFee",
+      "upsertTenantIncentive",
+      "upsertLeaseAdministration",
+      "archiveTenantNote",
+      "unarchiveTenantNote",
+    ],
+    why: "Edit the tenancy register and a tenant's detail, and archive or restore its notes with a reason (D11).",
   },
   manageAccessProfiles: {
     gate: [A.ADMIN],

@@ -24,6 +24,7 @@ const MIGRATIONS = [
   "134_invoice_attachments.sql",
   "135_attachment_archive.sql",
   "140_archive_occupancy_carpark.sql",
+  "141_tenant_notes_archive_infosheet_versions.sql",
   "136_building_category_owner.sql",
   "139_keys_rowversion.sql",
   "137_job_decision_requests.sql",
@@ -261,6 +262,23 @@ describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) 
     expect(code).toMatch(/BEGIN TRY\s+BEGIN TRANSACTION;/);
     expect(code).toMatch(/COMMIT TRANSACTION;\s*END TRY/);
     expect(code).toMatch(/BEGIN CATCH\s+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\s*THROW;\s*END CATCH;/);
+  });
+});
+
+describe("migration 141 matches the code that uses it (D11)", () => {
+  const code = stripComments(read("141_tenant_notes_archive_infosheet_versions.sql"));
+
+  it("adds ArchivedAt, ArchivedBy and ArchiveReason to TenantNotes, nullable and guarded", () => {
+    for (const [column, type] of [["ArchivedAt", "DATETIME2"], ["ArchivedBy", "NVARCHAR(255)"], ["ArchiveReason", "NVARCHAR(2000)"]]) {
+      expect(code).toContain(`IF COL_LENGTH(N'dbo.TenantNotes', N'${column}') IS NULL`);
+      expect(code).toContain(`ALTER TABLE dbo.TenantNotes ADD ${column} ${type} NULL;`);
+    }
+  });
+
+  it("adds Tenants.InfoSheetVersion, NOT NULL DEFAULT 0, guarded, so existing rows read 0", () => {
+    expect(code).toContain("IF COL_LENGTH(N'dbo.Tenants', N'InfoSheetVersion') IS NULL");
+    expect(code).toContain("ALTER TABLE dbo.Tenants ADD InfoSheetVersion INT NOT NULL CONSTRAINT DF_Tenants_InfoSheetVersion DEFAULT 0;");
+    expect(code.match(/ALTER TABLE/g)).toHaveLength(4);
   });
 });
 
