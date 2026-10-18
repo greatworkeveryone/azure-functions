@@ -123,6 +123,19 @@ describe("getDefectsPeriods", () => {
     expect(paramsOf(call)).toEqual({ BuildingId: 1 });
   });
 
+  // Review F2 finding 12: Tenants.TradingName is nullable (migration 037) and can be blank; the tenancy's
+  // name must then be the legal name, in the list and in the read taken under lock for an edit.
+  it("names the tenancy by trading name, falling back to the legal name when that is NULL or blank", async () => {
+    const TENANT_NAME = "COALESCE(NULLIF(LTRIM(RTRIM(t.TradingName)), ''), t.LegalName) AS TenantName";
+    await getDefectsPeriods(get({ buildingId: "1" }), context);
+    routeQueries(db.executeQuery, baseRoutes([{ match: UPDATE, rows: [{ DefectsPeriodId: 3 }] }]));
+    await upsertDefectsPeriod(post(validBody({ defectsPeriodId: 3, rowVersion: ROW_VERSION.toString("base64") })), context);
+    const selects = db.executeQuery.mock.calls.map((call: unknown[]) => String(call[1])).filter((sql: string) => sql.includes("AS TenantName"));
+    expect(selects.length).toBeGreaterThanOrEqual(2);
+    expect(selects.some((sql: string) => sql.includes("UPDLOCK"))).toBe(true);
+    for (const sql of selects) expect(sql).toContain(TENANT_NAME);
+  });
+
   it("includes archived periods only when asked", async () => {
     routeQueries(db.executeQuery, [{ match: PERIOD_LIST, rows: [] }]);
     await getDefectsPeriods(get({ includeArchived: "true" }), context);

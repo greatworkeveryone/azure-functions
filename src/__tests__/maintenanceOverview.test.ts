@@ -20,7 +20,7 @@ const run = (overrides: Partial<OverviewRun> = {}): OverviewRun => ({
 });
 
 function build(input: Partial<Parameters<typeof assembleOverview>[0]> = {}) {
-  return assembleOverview({ days: 90, hasSchedules: true, linkedJobs: [], periods: [], runs: [], scheduleCount: 1, schedules: [schedule()], today: TODAY, ...input });
+  return assembleOverview({ days: 90, hasSchedules: true, linkedJobs: [], periods: [], runs: [], scheduleCount: 1, schedulerMode: "live", schedules: [schedule()], today: TODAY, ...input });
 }
 
 describe("assembleOverview", () => {
@@ -59,6 +59,23 @@ describe("assembleOverview", () => {
     expect(overview.buildings[0].assets[0].services[0].status).toBe("scheduled");
     const archived = build({ runs: [run({ jobArchived: true })] });
     expect(archived.buildings[0].assets[0].services[0].status).toBe("scheduled");
+  });
+
+  // Review F2 finding 5: an overdue service whose job was archived said "Chase job #n" and offered no way out.
+  it("doesn't offer an archived job to chase: the service is overdue with no job, and the archived one is named", () => {
+    const overdue = schedule({ NextDue: at("2026-10-01") });
+    const overview = build({ runs: [run({ dueDate: "2026-10-01", jobArchived: true, jobId: 501 })], schedules: [overdue] });
+    const [service] = overview.buildings[0].assets[0].services;
+    expect(service).toMatchObject({ archivedJobId: 501, jobId: null, jobStatus: null, status: "overdue" });
+  });
+
+  it("names an archived job only for the due date that is overdue", () => {
+    const overview = build({ runs: [run({ jobArchived: true })] });
+    expect(overview.buildings[0].assets[0].services[0]).toMatchObject({ archivedJobId: null, jobId: null, status: "scheduled" });
+  });
+
+  it("carries the scheduler's mode so the page doesn't promise jobs that won't be made", () => {
+    expect(build({ schedulerMode: "dry-run" }).schedulerMode).toBe("dry-run");
   });
 
   it("knows when each asset was last serviced, from schedule runs and from linked maintenance jobs", () => {

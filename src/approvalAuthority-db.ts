@@ -40,8 +40,10 @@ export async function loadApprovalFacts(conn: Connection, buildingId: number | n
   const rows = await getCachedApprovalLimits(conn);
   return {
     directorThreshold: parseDirectorThreshold(process.env.DIRECTOR_APPROVAL_THRESHOLD),
-    // WP44 seam: residences need Buildings.PropertyType and BuildingApprovers,
-    // looked up by buildingId. Until then every building is a non-residence.
+    // WP44 seam: the residence flag is the Category column on dbo.Buildings
+    // ('residence'), added by migration 136 (U8); migration 118 is not needed
+    // for it. Residences also need BuildingApprovers, looked up by buildingId.
+    // Until then every building is a non-residence.
     isResidence: false,
     // Trims and lower-cases RoleName, so the 'Admin' row seeded by migration
     // 026 applies to admin, for its limit as well as for the director gate.

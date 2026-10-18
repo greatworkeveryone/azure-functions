@@ -3,6 +3,7 @@ import { createRequestConnection, executeQuery, closeConnection, SqlRow } from "
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
 import { vacanciesReadSasUrl } from "../blob-storage";
+import { buildingCategoryColumnExists } from "../buildingCategoryColumn";
 
 // HeroImageUrl is stored bare (no SAS) in the private vacancies container.
 // Mint a short-lived read SAS per request so the client can load it without the
@@ -33,8 +34,15 @@ const BUILDING_COLUMNS = `
   ThirdPartySystem_BuildingID, RegionID, Region, NLA, InvoicingAddress,
   ContactPhoneNumber, Levels, Active, LastModifiedDate,
   WRsLastSyncedAt, LastSyncedAt, CreatedAt, UpdatedAt,
-  HeroImageUrl, Category, OwnerName
+  HeroImageUrl
 `;
+
+// Category and OwnerName come from migration 136, applied by hand. They are
+// named in the query only once the column exists, so a build deployed ahead of
+// the migration still lists every building (the frontend reads a missing
+// Category as commercial).
+const SELECT_BUILDINGS = `SELECT ${BUILDING_COLUMNS} FROM Buildings WHERE 1=1`;
+const SELECT_BUILDINGS_WITH_CATEGORY = `SELECT ${BUILDING_COLUMNS}, Category, OwnerName FROM Buildings WHERE 1=1`;
 
 export function clearBuildingsCache(): void {
   buildingsCache = null;
@@ -62,7 +70,8 @@ export async function getBuildings(request: HttpRequest, context: InvocationCont
   try {
     connection = await createRequestConnection(token);
 
-    let sql = `SELECT ${BUILDING_COLUMNS} FROM Buildings WHERE 1=1`;
+    const withCategory = await buildingCategoryColumnExists(connection);
+    let sql = withCategory ? SELECT_BUILDINGS_WITH_CATEGORY : SELECT_BUILDINGS;
     const params: { name: string; type: any; value: any }[] = [];
 
     if (buildingId) {
