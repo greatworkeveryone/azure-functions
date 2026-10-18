@@ -25,6 +25,14 @@ const store = require("./proposalsStore") as Record<string, jest.Mock>;
 
 const CF = "0f9e8d7c-6b5a-4f3e-9d2c-1b0a99887766";
 const UID = "44444444-2222-4333-8444-555555555555";
+// send.ts sends nothing while RP's own file isn't named (M5 review); these scenarios run on the demonstration file.
+const savedEnv = { ...process.env };
+beforeAll(() => {
+  process.env = { ...savedEnv, MYOB_RP_COMPANY_FILE_ID: "abcdef12-2222-4333-8444-5555555555ee" };
+});
+afterAll(() => {
+  process.env = savedEnv;
+});
 const JOHANNE: Person = { ledger: { kind: "user", name: "Johanne", role: "cfo", userId: 12 }, name: "Johanne", oid: "cfo-oid" };
 const NOW = new Date("2026-10-14T00:10:00Z");
 const doc = (total: number) => ({

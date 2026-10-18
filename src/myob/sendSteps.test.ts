@@ -4,6 +4,7 @@
 
 import { MyobRequestRefusedError, MyobTimeoutError, MyobWritesDisabledError } from "../myob-api-log";
 import { MyobPurchaseError } from "../myob-purchase-order";
+import { TestDataEgressError } from "../test-data";
 import { canonicalJson } from "./hash";
 import { pushApproved, type MyobPurchases } from "./sendSteps";
 import type { ProposalRow } from "./proposalsStore";
@@ -82,6 +83,19 @@ describe("create", () => {
   ])("reports a %s refusal from inside Floorplan with its reason (%s)", async (kind, reason, error) => {
     const myob = fakeMyob({ find: jest.fn().mockRejectedValue(error) });
     expect(await push(myob)).toMatchObject({ kind, reason });
+  });
+
+  // D9: myobRequest refuses a test record's call before anything leaves. Unmapped, the CFO would read
+  // "MYOB didn't answer clearly … may or may not exist" for a record that never went (M5 follow-up T01).
+  it("reports a test record refused inside Floorplan as refused (test_record), not as an unclear answer", async () => {
+    const error = new TestDataEgressError("myob");
+    for (const myob of [fakeMyob({ find: jest.fn().mockRejectedValue(error) }), fakeMyob({ create: jest.fn().mockRejectedValue(error) })]) {
+      const result = await push(myob);
+      expect(result).toEqual({ kind: "refused", message: error.message, reason: "test_record" });
+      expect(JSON.stringify(result)).not.toMatch(/didn't answer clearly|may or may not exist/);
+    }
+    const update = fakeMyob({ get: jest.fn().mockRejectedValue(error) });
+    expect(await push(update, { operation: "orders.update", targetUid: UID }, { myobRowVersion: "7", readBack: PAYLOAD })).toMatchObject({ kind: "refused", reason: "test_record" });
   });
 });
 

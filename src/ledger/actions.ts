@@ -270,6 +270,9 @@ export const LEDGER_ACTIONS = {
   // The read-back sync (plan M10): MYOB now differs from what Floorplan sent,
   // the record is missing there, or the difference cleared. RuleApplied says which.
   "myob.discrepancy": { exception: true, reasonRequired: false, subjects: ["myob_proposal"] },
+  // Johanne's lab (plan M5): her result for one scripted case on the
+  // demonstration file, with her note. RuleApplied is the case id.
+  "myob.lab_result": { exception: false, reasonRequired: true, subjects: ["myob_control"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
