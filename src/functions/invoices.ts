@@ -3,7 +3,7 @@ import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, createRequestConnection, executeQuery, closeConnection, beginTransaction, commitTransaction, rollbackTransaction, SqlParam } from "../db";
 import { getCachedApprovalLimits } from "../approval-limits-db";
 import { SUBJECT_ELIGIBLE_ROLES, decideAuthority, toRoleLimits } from "../approvalAuthority";
-import { loadApprovalFacts, parseDirectorThreshold, resolveApprovalAuthority } from "../approvalAuthority-db";
+import { loadApprovalFacts, loadVarianceFacts, parseDirectorThreshold, resolveApprovalAuthority } from "../approvalAuthority-db";
 import { approvalOutcome, type ApprovalRefusalReason } from "../approvalOutcome";
 import { isTestJob } from "../testRecords";
 import {
@@ -17,6 +17,10 @@ import {
   refusalResponse,
 } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
+import { DEFAULT_VARIANCE_FACTS } from "../moneyRules";
+import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance, type VarianceBody } from "../moneyVariance-db";
+import { raiseAttributionNotice } from "../approvalAttributionNotice";
+import { attributedApprovalEnabled } from "../attributedApproval";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
@@ -92,6 +96,8 @@ interface UpsertJobInvoiceBody {
 }
 interface ApproveJobInvoiceBody {
   JobInvoiceID: number;
+  /** R13: an incoming invoice above the approved quote, within the margin: { attributedToUserId, rationale, directorOverrideReason? }. */
+  variance?: unknown;
   /** @deprecated ignored — identity comes from the token */
   ApprovedBy?: string;
 }
@@ -785,6 +791,8 @@ const APPROVE_INVOICE_TARGET: RefusalTarget = {
 
 interface InvoiceApproval {
   amount: number;
+  /** R13: the variance accepted with this approval, for its manager's notice. */
+  variance: RecordedVariance | null;
   directorGateEngaged: boolean;
   /** The invoice's ledger facts, for the director request that may follow. */
   facts: Record<string, unknown>;
@@ -802,6 +810,7 @@ type InvoiceApprovalOutcome =
 interface InvoiceRefusal {
   action: "denied" | "sod_blocked";
   code: ApprovalRefusalReason | string;
+  details?: Record<string, unknown>;
   httpStatus: number;
   message: string;
   status: string | null;
@@ -811,6 +820,7 @@ function invoiceRefusal(refusal: MoneyRefusal, invoiceStatus: string | null): In
   return {
     action: refusal.code === "creator" ? "sod_blocked" : "denied",
     code: refusal.code,
+    details: refusal.details,
     httpStatus: refusal.status,
     message: refusal.message,
     status: invoiceStatus,
@@ -819,7 +829,15 @@ function invoiceRefusal(refusal: MoneyRefusal, invoiceStatus: string | null): In
 
 async function approveInvoiceInTransaction(
   connection: Connection,
-  input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; invoiceId: number; userRoles: string[] },
+  input: {
+    actor: LedgerActor;
+    approvedBy: string;
+    correlationId: string;
+    email: string;
+    invoiceId: number;
+    userRoles: string[];
+    variance: VarianceBody | null;
+  },
 ): Promise<InvoiceApprovalOutcome> {
   const { actor, approvedBy, correlationId, email, invoiceId, userRoles } = input;
   await beginTransaction(connection);
@@ -855,6 +873,29 @@ async function approveInvoiceInTransaction(
     if (stateRefusal) {
       await rollbackTransaction(connection).catch(() => {});
       return { jobId, ok: false, refusal: invoiceRefusal(stateRefusal, invoiceStatus) };
+    }
+
+    // R13: a contractor's invoice above the job's approved quote is approved
+    // only within the margin (cumulative, against the quote; an amount already
+    // accepted on the job's POs or invoices counts), with a rationale and a
+    // named manager. An invoice with no amount is left to the director, as the
+    // authority core sends it there; an on-charge invoice isn't the contractor's.
+    const invoiceAmount = invoice.Amount == null ? null : Number(invoice.Amount);
+    const variance =
+      invoice.Direction !== "outgoing" && invoiceAmount !== null
+        ? await checkVariance(connection, {
+            accepted: { jobId },
+            body: input.variance,
+            buildingId: moneyJob?.buildingId ?? null,
+            editor: { email, roles: userRoles, userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
+            jobId,
+            newAmount: invoiceAmount,
+            subject: "invoice",
+          })
+        : null;
+    if (variance?.decision.kind === "refused") {
+      await rollbackTransaction(connection).catch(() => {});
+      return { jobId, ok: false, refusal: invoiceRefusal(variance.decision.refusal, invoiceStatus) };
     }
 
     // The approval-authority core decides (J1), as for quotes. Past the
@@ -940,8 +981,29 @@ async function approveInvoiceInTransaction(
       subject: { id: invoiceId, type: "invoice" },
     });
 
+    // Recorded only once the invoice is approved (stage 1 included): routed up
+    // to someone senior, it is their approval, and their check, that counts.
+    const accepted =
+      newStatus === "approved" && variance && (variance.decision.kind === "within_tolerance" || variance.decision.kind === "director_override")
+        ? await recordVariance(connection, {
+            actor,
+            after: ledgerFacts,
+            before: contractorFacts(known),
+            correlationId,
+            decision: variance.decision,
+            jobId,
+            previousAmount: variance.originalAmount,
+            quoteId: variance.quoteId,
+            scope,
+            subject: { id: invoiceId, type: "invoice" },
+          })
+        : null;
+
     await commitTransaction(connection);
-    return { ok: true, approval: { amount, directorGateEngaged, facts: ledgerFacts, jobId, newStatus, routesToAwaitingApproval } };
+    return {
+      ok: true,
+      approval: { amount, directorGateEngaged, facts: ledgerFacts, jobId, newStatus, routesToAwaitingApproval, variance: accepted },
+    };
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
     throw err;
@@ -971,6 +1033,8 @@ async function approveJobInvoice(
     if (typeof JobInvoiceID !== "number") {
       return { status: 400, jsonBody: { error: "JobInvoiceID (number) required" } };
     }
+    const varianceBody = readVarianceBody(body?.variance);
+    if (!varianceBody.ok) return { status: 400, jsonBody: { error: varianceBody.error } };
 
     connection = await createRequestConnection(token);
     const actor = await resolveLedgerActor(request, connection);
@@ -979,6 +1043,7 @@ async function approveJobInvoice(
     // The approval and the director request it triggers are one operation.
     const correlationId = newCorrelationId();
     const outcome = await approveInvoiceInTransaction(connection, {
+      variance: varianceBody.value,
       actor,
       approvedBy: identity.name,
       correlationId,
@@ -988,18 +1053,21 @@ async function approveJobInvoice(
     });
     if (!outcome.ok) {
       if ("response" in outcome) return outcome.response;
-      const { action, code, httpStatus, message, status } = outcome.refusal;
+      const { action, code, details, httpStatus, message, status } = outcome.refusal;
       // Ledgered in a transaction of its own now that the decision's has rolled back.
-      await recordRefusal(
-        connection,
-        actor,
-        { id: JobInvoiceID, type: "invoice" },
-        { action, attempted: "invoice.approve", code, message, state: { status } },
-        outcome.jobId,
-      );
-      return { status: httpStatus, jsonBody: { code, error: message } };
+      return await refuseMoneyChange(connection, request, {
+        action,
+        attempted: "invoice.approve",
+        jobId: outcome.jobId,
+        refusal: { code, details, message, status: httpStatus as MoneyRefusal["status"] },
+        state: { status },
+        subject: { id: JobInvoiceID, type: "invoice" },
+      });
     }
-    const { amount, directorGateEngaged, facts, jobId, newStatus, routesToAwaitingApproval } = outcome.approval;
+    const { amount, directorGateEngaged, facts, jobId, newStatus, routesToAwaitingApproval, variance } = outcome.approval;
+    if (variance && variance.attributedToUserId !== null) {
+      await raiseAttributionNotice(connection, { actor, managerUserId: variance.attributedToUserId, ref: { id: variance.varianceId, jobId, kind: "variance" } });
+    }
 
     // Director email + job→Done transition both gated on a successful approve
     // landing at status='approved'. If we routed to awaiting_approval, nothing
@@ -1434,7 +1502,15 @@ async function getApprovalLimits(
       { amount: 0, buildingId: 0, subject: "invoice" },
       { directorThreshold, isResidence: false, limits, residenceApprovers: [], residenceDirectorFallback: true, today: "" },
     );
-    return { status: 200, jsonBody: { approvalLimits, directorThreshold, effectiveDirectorThreshold } };
+    // R13: the variance margin and cap beside the limits. Shown only, so a
+    // database that hasn't had migration 117 yet shows the defaults.
+    const varianceMargin = await loadVarianceFacts(connection).catch(() => DEFAULT_VARIANCE_FACTS);
+    // R2: whether attributed quote approval is switched on (ATTRIBUTED_APPROVAL_ENABLED),
+    // so the frontend offers it only when the backend will accept it.
+    return {
+      status: 200,
+      jsonBody: { approvalLimits, attributedApprovalEnabled: attributedApprovalEnabled(), directorThreshold, effectiveDirectorThreshold, varianceMargin },
+    };
   } catch (error: any) {
     context.error("getApprovalLimits failed:", error.message);
     return errorResponse("Failed to fetch approval limits", error.message);

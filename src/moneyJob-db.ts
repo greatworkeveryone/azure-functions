@@ -54,7 +54,15 @@ export async function loadJobForMoney(connection: Connection, jobId: number): Pr
 export async function refuseMoneyChange(
   connection: Connection,
   request: HttpRequest,
-  input: { attempted: Refusal["attempted"]; jobId: number; refusal: MoneyRefusal; state?: Record<string, unknown>; subject: RefusalSubject },
+  input: {
+    /** `sod_blocked` for a self-approval block; `denied` otherwise. */
+    action?: Refusal["action"];
+    attempted: Refusal["attempted"];
+    jobId: number;
+    refusal: MoneyRefusal;
+    state?: Record<string, unknown>;
+    subject: RefusalSubject;
+  },
 ): Promise<HttpResponseInit> {
   await rollbackTransaction(connection).catch(() => {});
   const actor = await resolveLedgerActor(request, connection).catch(() => null);
@@ -63,7 +71,7 @@ export async function refuseMoneyChange(
       connection,
       actor,
       input.subject,
-      { attempted: input.attempted, code: input.refusal.code, message: input.refusal.message, state: input.state },
+      { action: input.action, attempted: input.attempted, code: input.refusal.code, message: input.refusal.message, state: input.state },
       input.jobId,
     );
   }

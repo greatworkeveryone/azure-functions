@@ -139,7 +139,7 @@ Any request to a gated money endpoint outside 06:00–20:00 Mon–Sat Darwin.
 Keep the name list in step with `src/money-gated-routes.ts`.
 
 ```kusto
-let gated = dynamic(["setApprovalLimit", "upsertPayment", "markPaymentPaid", "directorApproveJobInvoice",
+let gated = dynamic(["setApprovalLimit", "setApprovalFact", "upsertPayment", "markPaymentPaid", "directorApproveJobInvoice",
   "markJobInvoiceMyobCreated", "unmarkJobInvoiceMyobCreated", "markPurchaseOrderMyobCreated", "unmarkPurchaseOrderMyobCreated",
   "submitRentReview", "approveRentReview", "waiveRentReview", "revertRentReview"]);
 requests
@@ -189,7 +189,7 @@ traces
 
 ## 5. The money-action gate (S11, decision 16)
 
-Money endpoints (today: `setApprovalLimit`, `upsertPayment`, `markPaymentPaid`,
+Money endpoints (today: `setApprovalLimit`, `setApprovalFact`, `upsertPayment`, `markPaymentPaid`,
 `directorApproveJobInvoice`, `markJobInvoiceMyobCreated`,
 `unmarkJobInvoiceMyobCreated`, `markPurchaseOrderMyobCreated`,
 `unmarkPurchaseOrderMyobCreated`, and WP26's rent review decisions

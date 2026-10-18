@@ -92,7 +92,10 @@ export const ACTION_ROLES = {
   // lists them as `conditional`, so they pass the gate without being offered the
   // plain approval; approveQuoteAttributed is what offers it to them.
   approveQuote: {
-    gate: roles(SUBJECT_ELIGIBLE_ROLES.quote),
+    gate: roles([...SUBJECT_ELIGIBLE_ROLES.quote, ...ATTRIBUTED_APPROVAL_ROLES.quote]),
+    // The gate admits these only while ATTRIBUTED_APPROVAL_ENABLED="true"
+    // (src/attributedApproval.ts unlessHeldOff); held off, decisions 1 and 9.
+    conditional: [A.FACILITIES],
     refused: [A.ADMIN],
     routes: ["approveQuote"],
     why: `Approve (or send up for approval) a selected quote: the approval-authority core's eligible roles (J1); ${ADMIN_TEST_ONLY}.`,
@@ -101,7 +104,7 @@ export const ACTION_ROLES = {
     gate: roles(ATTRIBUTED_APPROVAL_ROLES.quote),
     match: "exact",
     routes: [],
-    why: "Approve a quote within your own limit by naming the person whose authority it rests on (ATTRIBUTED_APPROVAL_ROLES). Package 117 gives it its route.",
+    why: "Approve a quote within your own limit by naming the manager it was agreed with (ATTRIBUTED_APPROVAL_ROLES). Its route is approveQuote, where plain facilities is conditional and held off unless ATTRIBUTED_APPROVAL_ENABLED is \"true\".",
   },
   approveQuoteAsDirector: {
     gate: [A.DIRECTOR],

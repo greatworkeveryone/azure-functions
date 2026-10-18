@@ -2,7 +2,9 @@
 // (approvalAuthority.ts) decides on. Kept apart so the core stays pure and
 // byte-identical to its frontend twin.
 
-import { Connection } from "tedious";
+import { Connection, TYPES } from "tedious";
+import { executeQuery } from "./db";
+import { DEFAULT_VARIANCE_FACTS, type VarianceFacts } from "./moneyRules";
 import { getCachedApprovalLimits } from "./approval-limits-db";
 import { AuthorityFacts, AuthorityInput, AuthorityResult, decideAuthority, toRoleLimits } from "./approvalAuthority";
 
@@ -61,4 +63,62 @@ export async function resolveApprovalAuthority(
 ): Promise<{ facts: AuthorityFacts; result: AuthorityResult }> {
   const facts = await loadApprovalFacts(conn, input.buildingId);
   return { facts, result: decideAuthority(input, facts) };
+}
+
+// ── R13 variance facts and named people (WP43a-2) ────────────────────────────
+
+/** dbo.ApprovalFacts keys (migration 117). */
+export const VARIANCE_FACT_KEYS = { capDollars: "po_variance_cap", marginPercent: "po_variance_margin_percent" } as const;
+
+/**
+ * The PO variance margin and cap, Admin-editable beside the approval limits. A
+ * key with no row (or a value that is not a finite number >= 0) takes the
+ * default (10%, $1,000), with a warning. Not cached: read only when an amount
+ * has risen past what was approved.
+ */
+export async function loadVarianceFacts(conn: Connection): Promise<VarianceFacts> {
+  const rows = await executeQuery(conn, `SELECT FactKey, FactValue FROM dbo.ApprovalFacts WHERE FactKey IN (@Margin, @Cap)`, [
+    { name: "Margin", type: TYPES.NVarChar, value: VARIANCE_FACT_KEYS.marginPercent },
+    { name: "Cap", type: TYPES.NVarChar, value: VARIANCE_FACT_KEYS.capDollars },
+  ]);
+  const read = (key: string, fallback: number): number => {
+    const raw = rows.find((row) => row.FactKey === key)?.FactValue;
+    const value = raw === null || raw === undefined ? NaN : Number(raw);
+    if (Number.isFinite(value) && value >= 0) return value;
+    console.warn(`[approvalAuthority] ApprovalFacts ${key} is missing or not a number; using the default ${fallback}`);
+    return fallback;
+  };
+  return {
+    capDollars: read(VARIANCE_FACT_KEYS.capDollars, DEFAULT_VARIANCE_FACTS.capDollars),
+    marginPercent: read(VARIANCE_FACT_KEYS.marginPercent, DEFAULT_VARIANCE_FACTS.marginPercent),
+  };
+}
+
+/** A person named on an approval, as AppUsers has them: roles from the table, never the client. */
+export interface NamedUser {
+  displayName: string;
+  email?: string;
+  role: string;
+  roles: string[];
+  userId: number;
+}
+
+/** An active AppUsers row by id, or null. */
+export async function loadNamedUser(conn: Connection, userId: number): Promise<NamedUser | null> {
+  const rows = await executeQuery(
+    conn,
+    `SELECT UserID, DisplayName, Email, Role FROM dbo.AppUsers WHERE UserID = @UserID AND IsActive = 1`,
+    [{ name: "UserID", type: TYPES.Int, value: userId }],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const role = typeof row.Role === "string" ? row.Role.trim().toLowerCase() : "";
+  const email = typeof row.Email === "string" && row.Email.trim() ? row.Email.trim() : undefined;
+  return {
+    displayName: String(row.DisplayName ?? email ?? `User ${userId}`),
+    email,
+    role,
+    roles: role ? [role] : [],
+    userId: Number(row.UserID),
+  };
 }
