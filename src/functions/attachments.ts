@@ -30,6 +30,7 @@ import {
   moneyLinksOfJob,
   readDetachTarget,
 } from "../money-record-files";
+import { assertMayLeave, NOT_A_RECORD, readIsTest, TestDataEgressError, type EgressSubject } from "../test-data";
 
 // A stored name that is not a minted wr-attachments name (a legacy row, or
 // one claimed before SEC-01 was fixed) gets no link rather than failing the list.
@@ -114,6 +115,12 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
     const originalName = (file as any).name as string;
     const buffer = Buffer.from(await (file as any).arrayBuffer());
 
+    // D9: what the file is about, read before anything is stored or sent. A
+    // test job's file stays in Floorplan; a work request with no job yet is not
+    // a flagged record.
+    connection = await createRequestConnection(token);
+    const egress: EgressSubject = jobId !== null ? { isTest: await readIsTest(connection, "job", jobId) } : NOT_A_RECORD;
+
     // Blob path uses the strongest scope we have: prefer job-scoped, fall back
     // to wr-scoped for legacy intake. Path is purely organisational — the row
     // is what actually anchors the file to a Job/WR. Prefix shape is
@@ -131,18 +138,25 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
     // Push to myBuildings only when there's a WR to push it to. Job-scoped
     // uploads with no WR stay local.
     const extension = originalName.includes(".") ? originalName.split(".").pop() ?? "" : "";
+    let myBuildings: string | null = null;
     if (workRequestId !== null) {
-      await uploadAttachment({
-        Attachment_Extension: extension,
-        Attachment_Name: originalName,
-        Attachment_URL: sasUrl,
-        JobCode: jobCode ?? undefined,
-        WorkRequestID: workRequestId,
-      });
+      try {
+        assertMayLeave("mybuildings", egress);
+        await uploadAttachment(egress, {
+          Attachment_Extension: extension,
+          Attachment_Name: originalName,
+          Attachment_URL: sasUrl,
+          JobCode: jobCode ?? undefined,
+          WorkRequestID: workRequestId,
+        });
+      } catch (err) {
+        if (!(err instanceof TestDataEgressError)) throw err;
+        myBuildings = err.message;
+        context.log(`uploadAttachment: ${err.message} — ${originalName} kept in Floorplan only`);
+      }
     }
 
     // Record locally
-    connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
       `INSERT INTO Attachments (JobID, WorkRequestID, JobCode, BlobName, OriginalName, Extension, ContentType, SizeBytes, UploadedBy)
@@ -166,6 +180,7 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
       status: 200,
       jsonBody: {
         attachment: { ...row, sasUrl },
+        ...(myBuildings ? { myBuildings } : {}),
       },
     };
   } catch (error: any) {

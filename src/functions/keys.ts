@@ -28,6 +28,7 @@ import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "../keyRoles";
 import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
 import { rollbackQuietly, rowVersionHex } from "../tenancyScheduleWrite";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
@@ -96,7 +97,7 @@ const KEY_COLUMNS = `
   k.CreatedById, k.CreatedByName, k.CreatedAt,
   k.IsDeleted, k.DeletedAt, k.DeletedById, k.DeletedByName,
   k.LostAt, k.LostById, k.LostByName, k.LostComment,
-  k.Version
+  k.Version, k.IsTest
 `;
 
 // Photo SAS URLs are baked into list/detail responses. Tight TTL keeps the
@@ -161,6 +162,7 @@ function formatKey(row: Record<string, unknown>) {
       ? { id: row.LostById as string, name: (row.LostByName as string) ?? "Unknown user" }
       : null,
     lostComment: (row.LostComment as string | null) ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
     // Hex of Keys.Version (migration 139): an edit sends it back, a mismatch is a 409.
     rowVersion: rowVersionHex(row.Version),
   };
@@ -210,8 +212,9 @@ async function getKeys(
          ORDER BY kb.CheckedOutAt DESC
        ) cb
        WHERE k.IsDeleted = 0
+         AND (k.IsTest = 0 OR @ShowTest = 1)
        ORDER BY b.BuildingName, k.KeyNumber`,
-      [],
+      [await showTestParam(request)],
     );
 
     // Fetch all open checkout rows to attach to batches
@@ -397,6 +400,9 @@ async function createKey(
       return { status: 400, jsonBody: { error: "BuildingId, KeyNumber, Description required" } };
     }
 
+    // D9: admins and directors may create a test key; an admin's "[TEST]" description does too.
+    const testFlag = await testFlagForCreate(request, body?.IsTest, Description);
+    if ("error" in testFlag) return testFlag.error;
     const caller = callerFromToken(token);
     connection = await createRequestConnection(token);
 
@@ -405,13 +411,14 @@ async function createKey(
       `INSERT INTO dbo.Keys
          (BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
           Registration, Description, PhotoBlobUrl, StorageLocation,
-          CreatedById, CreatedByName)
+          CreatedById, CreatedByName, IsTest)
        OUTPUT INSERTED.Id
        VALUES
          (@BuildingId, @TenancyId, @Level, @KeyNumber, @ItemType, @SubType,
           @Registration, @Description, @PhotoBlobUrl, @StorageLocation,
-          @CreatedById, @CreatedByName)`,
+          @CreatedById, @CreatedByName, @IsTest)`,
       [
+        { name: "IsTest",          type: TYPES.Bit,      value: testFlag.isTest },
         { name: "BuildingId",      type: TYPES.Int,      value: BuildingId },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
         { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },

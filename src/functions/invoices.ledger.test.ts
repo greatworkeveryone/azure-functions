@@ -36,6 +36,7 @@ jest.mock("../auth", () => {
 });
 
 jest.mock("../approval-limits-db", () => ({ getCachedApprovalLimits: jest.fn() }));
+jest.mock("../approvalAttributionNotice", () => ({ raiseAttributionNotice: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../jobPlannerSync", () => ({ syncJobActionTriggersStandalone: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../email/director-emails", () => ({ sendDirectorApprovalEmail: jest.fn() }));
@@ -292,6 +293,65 @@ describe("approveJobInvoice", () => {
       }),
     ]);
     expect(ran(/UPDATE JobInvoices/)).toBe(false);
+  });
+});
+
+describe("approveJobInvoice: R13, an invoice above the approved quote", () => {
+  const QUOTE: Route = { match: /SELECT q\.Amount(, q\.QuoteID)? FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 500, QuoteID: 70 }] };
+  const FACT_ROWS: Route = { match: /FROM dbo\.ApprovalFacts/, rows: [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }] };
+  const MANAGER: Route = { match: /FROM dbo\.AppUsers WHERE UserID = @UserID/, rows: [{ DisplayName: "Mo Manager", Role: "accounts_manager", UserID: 30 }] };
+  const INSERTED: Route = { match: /INSERT INTO dbo\.MoneyVariances/, rows: [{ VarianceID: 8 }] };
+  const routes = (over: Record<string, unknown>) => [APP_USER, JOB_BUILDING, QUOTE, FACT_ROWS, MANAGER, INSERTED, INVOICE_SCOPE, invoiceRow(over), STORED];
+  const approve = (body: Record<string, unknown> = {}) => approveJobInvoice(makeRequest({ JobInvoiceID: 5, ...body }), ctx);
+
+  it("within the margin, with a rationale and a manager: approved, and po.variance_within_tolerance recorded against the invoice", async () => {
+    mockSql(routes({ Amount: 540 }));
+
+    const res = await approve({ variance: { attributedToUserId: 30, rationale: "Call-out fee" } });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery).map((r) => [r.action, r.subjectType, r.subjectId])).toEqual([
+      ["invoice.approve", "invoice", "5"],
+      ["po.variance_within_tolerance", "invoice", "5"],
+    ]);
+    // B6d: the rise is tied to the quote it was measured against.
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO dbo\.MoneyVariances/.test(String(c[1])));
+    expect((insert?.[2] as { name: string; value: unknown }[]).find((p) => p.name === "QuoteID")?.value).toBe(70);
+  });
+
+  it("routed up to someone senior, the rise isn't recorded yet: their approval, and their check, counts", async () => {
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 100, RoleName: "accounts" },
+      { MaxApprovalAmount: 1000, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+    mockSql(routes({ Amount: 540 }));
+
+    const res = await approve({ variance: { attributedToUserId: 30, rationale: "Call-out fee" } });
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery).map((r) => r.action)).toEqual(["invoice.approve"]);
+    expect(ran(/INSERT INTO dbo\.MoneyVariances/)).toBe(false);
+  });
+
+  it("above the margin it is refused, naming the margin, and nothing is approved", async () => {
+    mockSql(routes({ Amount: 600 }));
+
+    const res = await approve({ variance: { attributedToUserId: 30, rationale: "More work" } });
+
+    expect(res).toEqual({
+      jsonBody: { amount: 600, code: "variance_over_margin", originalApprovedAmount: 500, error: "This is $100 (20%) above the approved $500 — the allowed margin is 10% up to $1,000. A director can let it through with a reason, or have the quote re-approved at the new amount." },
+      status: 422,
+    });
+    expect(ran(/UPDATE JobInvoices/)).toBe(false);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "variance_over_margin" })]);
+  });
+
+  it("an on-charge (outgoing) invoice is not measured against the contractor's quote", async () => {
+    mockSql(routes({ Amount: 600, Direction: "outgoing" }));
+    expect((await approve()).status).toBe(200);
+    expect(ran(/FROM dbo\.ApprovalFacts/)).toBe(false);
   });
 });
 

@@ -32,7 +32,8 @@ export type MyobRefusalCode =
   | "not_floorplan_record" // an update to a record Floorplan did not create
   | "controls" // Johanne's controls are missing or say no
   | "dry_run" // the operation is in dry run: logged with its payload, not sent
-  | "config"; // a MYOB setting is missing or malformed
+  | "config" // a MYOB setting is missing or malformed
+  | "no_record"; // a company-file write that names no Floorplan record (D9)
 
 /** Refused inside Floorplan before anything was sent to MYOB. */
 export class MyobRequestRefusedError extends Error {

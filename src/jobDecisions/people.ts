@@ -2,10 +2,10 @@
 // or everyone in a role, checked against the people who can actually be asked.
 // Pure: the caller passes the active directory.
 
-import { normaliseRole, roleLabel } from "../escalation/roles";
+import { normaliseRole, roleLabel, ROLES } from "../escalation/roles";
 import type { DirectoryUser } from "../escalation/types";
 import { RequestError, type DecisionMakersInput } from "./request";
-import { DECISION_MAKER_ROLES } from "./roles";
+import { ADMIN_DOES_NOT_DECIDE, DECISION_MAKER_ROLES } from "./roles";
 
 export interface ResolvedMakers {
   /** The people it goes to, in the order asked (named) or by name (a role). */
@@ -49,6 +49,13 @@ export function resolveDecisionMakers(
   }
   if (requesterUserId !== null && people.some((user) => user.userId === requesterUserId)) {
     throw new RequestError("decision_maker_is_requester", "You can't ask yourself. Ask someone else, or a whole role.", 422, { userIds: [requesterUserId] });
+  }
+  // Admin can open the inbox but approves nothing real (decision 4), so it gets its own reason.
+  const admins = people.filter((user) => normaliseRole(user.role) === ROLES.admin);
+  if (admins.length > 0) {
+    throw new RequestError("decision_maker_role_not_allowed", `${ADMIN_DOES_NOT_DECIDE}, so ${names(admins)} can't be asked. Ask someone else.`, 422, {
+      userIds: admins.map((user) => user.userId),
+    });
   }
   const cannot = people.filter((user) => !DECISION_MAKER_ROLES.includes(normaliseRole(user.role)));
   if (cannot.length > 0) {

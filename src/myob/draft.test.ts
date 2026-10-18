@@ -3,6 +3,7 @@
 jest.mock("./subjects", () => ({ loadSubject: jest.fn() }));
 jest.mock("./mappings", () => ({ resolveMapping: jest.fn() }));
 jest.mock("./proposalsStore", () => ({ latestVerifiedForUid: jest.fn(), proposalsForSubject: jest.fn() }));
+jest.mock("./activity/acceptedBaseline", () => ({ baselineAccepted: jest.fn().mockResolvedValue(false) }));
 
 import { buildDraft } from "./draft";
 import { payloadHash } from "./hash";
@@ -79,6 +80,29 @@ describe("buildDraft for a create", () => {
   it("404s a record that no longer exists", async () => {
     loadSubject.mockResolvedValueOnce(null);
     await expect(draft()).resolves.toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+describe("buildDraft for a create that MYOB already has (m4c review note)", () => {
+  const sent = (over: Record<string, unknown>) => ({ myobNumber: "66Sm261014", myobUid: UID, operation: "orders.create", proposalId: 3, state: "verified", ...over });
+
+  it.each([
+    ["verified", sent({})],
+    ["went in but reads back differently", sent({ state: "exception" })],
+  ])("is refused when Floorplan's create %s, so no new correlation id slips past an accepted baseline", async (_label, row) => {
+    store.proposalsForSubject.mockResolvedValue([row]);
+    await expect(draft()).resolves.toEqual({
+      ok: false,
+      reasons: ["Floorplan already created this Order in MYOB (66Sm261014). Use Update in MYOB to change it."],
+      status: 409,
+    });
+  });
+
+  it("still builds when the earlier create never reached MYOB, or for the create being sent again itself", async () => {
+    store.proposalsForSubject.mockResolvedValue([sent({ myobUid: null, state: "withdrawn" }), sent({ myobUid: null, state: "exception" }), sent({ operation: "orders.update", proposalId: 4 })]);
+    expect((await draft()).ok).toBe(true);
+    store.proposalsForSubject.mockResolvedValue([sent({ state: "exception" })]);
+    expect((await draft({ proposalId: 3 })).ok).toBe(true);
   });
 });
 

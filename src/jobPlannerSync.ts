@@ -19,6 +19,8 @@
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery, type SqlRow } from "./db";
+import { SUBJECT_ELIGIBLE_ROLES } from "./approvalAuthority";
+import { DIRECTOR_NEEDED_COLUMNS_J, withDirectorNeeded } from "./directorNeeded";
 import { runsContractorFlow } from "./jobKinds";
 import {
   getPlanConfig,
@@ -28,6 +30,7 @@ import {
   graphGetPlannerTask,
 } from "./planner";
 import { plannerSyncEnabled } from "./plannerFlag";
+import { TestDataEgressError } from "./test-data";
 import { Sentry } from "./sentry";
 import {
   addDaysUTC,
@@ -99,6 +102,8 @@ export interface ReconcileParams {
   /** ISO yyyy-mm-dd. */
   dueDate: string;
   assigneeIds: string[];
+  /** The job's or key's IsTest (D9): Planner refuses a test record's task. */
+  isTest: boolean;
   log?: LogFn;
 }
 
@@ -109,6 +114,7 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     connection, entityType, entityId, triggerType, shouldHaveTask,
     planType, title, description, dueDate, assigneeIds, log,
   } = p;
+  const egress = { isTest: p.isTest };
 
   const existing = await executeQuery(
     connection,
@@ -134,9 +140,16 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     }
 
     if (!row) {
-      const taskId = await graphCreatePlannerTask({
-        planId, bucketId, title, dueDate, assigneeIds, description,
-      });
+      let taskId: string;
+      try {
+        taskId = await graphCreatePlannerTask({
+          planId, bucketId, title, dueDate, assigneeIds, description, egress,
+        });
+      } catch (err: unknown) {
+        if (!(err instanceof TestDataEgressError)) throw err;
+        log?.(`reconcileTask: ${err.message} — no ${triggerType} task for ${entityType} ${entityId}`);
+        return;
+      }
       await executeQuery(
         connection,
         `INSERT INTO dbo.PlannerTasks
@@ -183,9 +196,13 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
     let taskId: string;
     try {
       taskId = await graphCreatePlannerTask({
-        planId, bucketId, title, dueDate, assigneeIds, description,
+        planId, bucketId, title, dueDate, assigneeIds, description, egress,
       });
     } catch (err: unknown) {
+      if (err instanceof TestDataEgressError) {
+        log?.(`reconcileTask: ${err.message} — no ${triggerType} task for ${entityType} ${entityId}`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       await recordRowError(connection, rowId!, message, log);
       throw err;
@@ -259,7 +276,7 @@ export async function syncJobOnchargePending(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind,
             j.IsOnchargeable, j.OnchargeAmount, j.OnchargeNotes,
             COALESCE(b.BuildingName, '') AS BuildingName,
             (SELECT TOP 1 1 FROM dbo.JobInvoices ji
@@ -289,6 +306,7 @@ export async function syncJobOnchargePending(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "oncharge_pending",
     shouldHaveTask,
     planType: "accounts",
@@ -311,7 +329,7 @@ export async function syncJobAwaitingAccounts(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid
      FROM dbo.Jobs j
@@ -340,6 +358,7 @@ export async function syncJobAwaitingAccounts(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "awaiting_accounts",
     shouldHaveTask,
     planType: "accounts",
@@ -363,9 +382,9 @@ export async function syncJobAwaitingFacilitiesApproval(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
-            au.EntraOid AS AssignedToEntraOid
+            au.EntraOid AS AssignedToEntraOid, au.Role AS AssignedToRole
      FROM dbo.Jobs j
      LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
      LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
@@ -385,13 +404,21 @@ export async function syncJobAwaitingFacilitiesApproval(
     (r.Status as string | null) === "Awaiting Approval" &&
     (r.AwaitingRole as string | null) === "facilities";
 
+  // J4: reviewing the quote is for someone who can approve it. The assignee
+  // when they can; otherwise the approvers in the Facilities group.
   const assignedToEntraOid = (r.AssignedToEntraOid as string | null) ?? null;
-  const assigneeIds = assignedToEntraOid ? [assignedToEntraOid] : facilitiesMembers;
+  const assigneeIds =
+    assignedToEntraOid && isQuoteApprover(r.AssignedToRole)
+      ? [assignedToEntraOid]
+      : shouldHaveTask
+        ? await quoteApprovers(connection, facilitiesMembers)
+        : facilitiesMembers;
 
   await reconcileTask({
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "awaiting_facilities_approval",
     shouldHaveTask,
     planType: "facilities",
@@ -401,6 +428,30 @@ export async function syncJobAwaitingFacilitiesApproval(
     assigneeIds,
     log,
   });
+}
+
+/** Who may approve a quote on their own authority: J1's eligible roles less
+ *  admin, which acts on test records only (decision 4). Plain facilities adds
+ *  quotes but approves none (decision 1). */
+const QUOTE_APPROVER_ROLES: readonly string[] = SUBJECT_ELIGIBLE_ROLES.quote.filter((role) => role !== "admin");
+
+function isQuoteApprover(role: unknown): boolean {
+  return typeof role === "string" && QUOTE_APPROVER_ROLES.includes(role.trim().toLowerCase());
+}
+
+/** The members of a Planner group who can approve a quote, or the whole group
+ *  when none can (so the task still lands with someone who can chase it). */
+async function quoteApprovers(connection: Connection, members: readonly string[]): Promise<string[]> {
+  if (members.length === 0) return [...members];
+  const people = await executeQuery(
+    connection,
+    "SELECT EntraOid, Role FROM dbo.AppUsers WHERE IsActive = 1 AND EntraOid IS NOT NULL",
+  );
+  const approvers = new Set(
+    people.filter((person) => isQuoteApprover(person.Role)).map((person) => String(person.EntraOid).toLowerCase()),
+  );
+  const picked = members.filter((member) => approvers.has(member.toLowerCase()));
+  return picked.length > 0 ? picked : [...members];
 }
 
 /** Stalled facilities: job marked stalled and not handed to accounts.
@@ -414,7 +465,7 @@ export async function syncJobStalled(
   const { connection, facilitiesMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind, j.IsStalled, j.AwaitingRole,
             COALESCE(b.BuildingName, '') AS BuildingName,
             CONVERT(VARCHAR(23), j.StalledAt, 126) AS StalledAt,
             au.EntraOid AS AssignedToEntraOid
@@ -451,6 +502,7 @@ export async function syncJobStalled(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "stalled_facilities",
     shouldHaveTask,
     planType: "facilities",
@@ -474,14 +526,10 @@ export async function syncJobDirectorApproval(
   const { connection, accountsMembers, appBaseUrl, log } = deps;
   const rows = await executeQuery(
     connection,
-    `SELECT j.JobID, j.Title, j.IsArchived, j.Status, j.Kind,
+    `SELECT j.JobID, j.Title, j.IsTest, j.IsArchived, j.Status, j.Kind,
             COALESCE(b.BuildingName, '') AS BuildingName,
             au.EntraOid AS AssignedToEntraOid,
-            (SELECT COUNT(*) FROM dbo.JobInvoices ji
-             WHERE ji.JobID = j.JobID AND ji.Status = 'approved') +
-            (SELECT COUNT(*) FROM dbo.Quotes q
-             WHERE q.JobID = j.JobID AND q.Status = 'awaiting_director')
-              AS DirectorNeededCount
+            ${DIRECTOR_NEEDED_COLUMNS_J}
      FROM dbo.Jobs j
      LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
      LEFT JOIN dbo.AppUsers au ON au.UserID = j.AssignedToUserID
@@ -489,7 +537,9 @@ export async function syncJobDirectorApproval(
     [{ name: "JobID", type: TYPES.Int, value: jobId }],
   );
   if (rows.length === 0) return;
-  const r = rows[0];
+  // The final-state rule (directorNeeded.ts): a stage-1 invoice below the
+  // director gate needs nobody.
+  const r = (await withDirectorNeeded(connection, rows))[0];
   if (!followsPlanner(r)) return;
   const job: PlannerAccountsJobRow = {
     jobId: r.JobID as number,
@@ -508,6 +558,7 @@ export async function syncJobDirectorApproval(
     connection,
     entityType: "job",
     entityId: jobId,
+    isTest: Boolean(r.IsTest),
     triggerType: "director_approval",
     shouldHaveTask,
     planType: "accounts",

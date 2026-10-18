@@ -243,4 +243,15 @@ describe("resendDirectorInvoiceEmail", () => {
     expect(callMatching(/DirectorEmailSentBy = @SentBy/)?.params.SentBy).toBe("Johanne CFO");
     expectNoForgedName();
   });
+
+  it("says 'Not sent: test record' (409) for a test job and stamps nothing (D9)", async () => {
+    routeSql([[/SELECT JobID, Amount, Status, InvoiceNumber/, [{ Amount: 5000, JobID: 9, Status: "approved" }]]]);
+    const { TestDataEgressError } = jest.requireActual("../test-data") as typeof import("../test-data");
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValueOnce(new TestDataEgressError("email"));
+
+    const res = await HANDLERS.resendDirectorInvoiceEmail(makeRequest({ JobInvoiceID: 5 }), ctx);
+
+    expect(res).toEqual({ jsonBody: { code: "TEST_RECORD", error: "Not sent: test record" }, status: 409 });
+    expect(callMatching(/DirectorEmailSentBy/)).toBeUndefined();
+  });
 });

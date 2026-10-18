@@ -88,6 +88,16 @@ describe("parseRequestBody", () => {
     expect(refused(named({ assignmentMode: "role", ...over }))).toMatchObject({ code: "bad_request", status: 400, message: expect.stringContaining(message) });
   });
 
+  it("refuses a request to the admin role, in plain words (422): admin approves nothing real", () => {
+    for (const role of ["admin", " Admin "]) {
+      expect(refused(named({ assignmentMode: "role", decisionMakers: { role } }))).toMatchObject({
+        code: "decision_maker_role_not_allowed",
+        message: "Admin looks after Floorplan and doesn't decide on jobs, so a question can't be put to the Admin role. Ask a director, the CFO or a manager.",
+        status: 422,
+      });
+    }
+  });
+
   it("lets a role request carry an empty people list", () => {
     expect(parseRequestBody(named({ assignmentMode: "role", decisionMakers: { role: "director", userIds: [] } })).makers).toEqual({ mode: "role", role: "director" });
   });

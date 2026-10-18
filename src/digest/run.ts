@@ -13,13 +13,15 @@ import { resolveRecipient } from "../email-recipient";
 import { appBaseUrl, missingNotificationConfig } from "../escalation/config";
 import { darwinDateKey } from "../escalation/businessTime";
 import { graphSendMail } from "../graph";
+import { assertMayLeave, type EgressSubject } from "../test-data";
 import { DIGEST_MAX_LINES } from "./config";
 import { buildDigestEmail } from "./email";
 import { deriveItems, type DeriveContext } from "./items";
 import { loadDigestFacts } from "./store";
 import type { DigestFacts, DigestUser } from "./types";
 
-export type SendMail = (to: string[], subject: string, body: string) => Promise<void>;
+/** `egress` is what the digest names; one that names a test record is refused (D9). */
+export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
 
 export interface DigestOptions {
   dryRun: boolean;
@@ -65,7 +67,7 @@ async function loadAuthority(connection: Connection, buildingIds: readonly (numb
 export const defaultDeps: DigestDeps = {
   authority: loadAuthority,
   load: loadDigestFacts,
-  send: (to, subject, body) => graphSendMail(to, subject, body),
+  send: (to, subject, body, egress) => graphSendMail(egress, to, subject, body),
 };
 
 function emptyReport(dryRun: boolean): DigestReport {
@@ -126,7 +128,11 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
       return;
     }
 
-    await deps.send([recipient.address], email.subject, email.body);
+    // The reads already leave test records out; this is the last check before
+    // anything leaves (an item's key is "job:<id>" for a job line).
+    const egress = { isTest: items.some((item) => facts.testKeys?.has(item.dedupeKey) ?? false) };
+    assertMayLeave("digest", egress);
+    await deps.send([recipient.address], email.subject, email.body, egress);
     report.sent += 1;
   };
 

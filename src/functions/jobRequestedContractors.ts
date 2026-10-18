@@ -13,6 +13,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
 
@@ -91,7 +92,7 @@ async function addJobRequestedContractor(
   // Accounts can drive the quote-request flow too — when work originates
   // from a tenancy enquiry they often add the contractor themselves rather
   // than waiting on a facilities manager.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;
@@ -192,7 +193,7 @@ async function removeJobRequestedContractor(
   if (!token) return unauthorizedResponse();
 
   // Mirrors addJobRequestedContractor — whoever can add can also undo.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;
@@ -274,7 +275,7 @@ async function toggleRequestedContractorSent(
 
   // Same set as add/remove — toggling whether the request email has been
   // sent is part of the same workflow.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;

@@ -13,6 +13,7 @@ jest.mock("./myob-health", () => ({
 }));
 
 import { todayInDarwin } from "./darwinDate";
+import { setMyobTestRecordLookup } from "./myob-request-guard";
 import {
   MAX_LOGGED_RESPONSE_CHARS,
   MyobAuditLogError,
@@ -49,6 +50,11 @@ const rows = (): Row[] =>
   );
 
 const original = { writes: process.env.MYOB_WRITES_ENABLED, version: process.env.APP_VERSION };
+
+// D9's test-record check has its own suite (myob-test-records.test.ts); here
+// every call is about a real record.
+beforeAll(() => setMyobTestRecordLookup(async () => ({ isTest: false, named: true })));
+afterAll(() => setMyobTestRecordLookup(null));
 
 beforeEach(() => {
   jest.clearAllMocks();

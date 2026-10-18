@@ -132,6 +132,8 @@ export async function reviewForUpdate(connection: Connection, reviewId: string):
 
 export interface ReviewFilters {
   buildingId?: number;
+  /** The admin's Show test data toggle (D9). */
+  showTest?: boolean;
   states?: readonly RentReviewState[];
   tenantId?: number;
 }
@@ -156,7 +158,12 @@ export async function loadReviews(connection: Connection, filters: ReviewFilters
     whereParts.push(`r.State IN (${placeholders})`);
     filters.states.forEach((state, index) => params.push({ name: `State${index}`, type: TYPES.NVarChar, value: state }));
   }
-  if (filters.tenantId === undefined) whereParts.push("t.ArchivedAt IS NULL");
+  if (filters.tenantId === undefined) {
+    whereParts.push("t.ArchivedAt IS NULL");
+    // Test tenancies' reviews (D9) only with the admin's Show test data on.
+    whereParts.push("(t.IsTest = 0 OR @ShowTest = 1)");
+    params.push({ name: "ShowTest", type: TYPES.Bit, value: filters.showTest === true });
+  }
   const whereSql = whereParts.join(" AND ");
   return executeQuery(
     connection,

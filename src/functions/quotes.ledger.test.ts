@@ -41,6 +41,14 @@ jest.mock("../jobStatusHelpers", () => ({ advanceJobStatus: jest.fn().mockResolv
 jest.mock("../jobPlannerSync", () => ({ syncJobActionTriggersStandalone: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../email/director-emails", () => ({ sendDirectorApprovalEmail: jest.fn() }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
+jest.mock("../escalation/engine", () => ({
+  ...jest.requireActual("../escalation/engine"),
+  raiseWithin: jest.fn().mockResolvedValue({ announce: jest.fn().mockResolvedValue({}), created: true, escalation: {} }),
+  resolveWithin: jest.fn().mockResolvedValue({}),
+}));
+jest.mock("../escalation/store", () => ({ ...jest.requireActual("../escalation/store"), findLiveEscalation: jest.fn().mockResolvedValue(null) }));
+jest.mock("../quoteAttributionColumn", () => ({ quoteAttributionColumnExists: jest.fn().mockResolvedValue(true) }));
+jest.mock("../approvalAttributionNotice", () => ({ raiseAttributionNotice: jest.fn().mockResolvedValue(undefined) }));
 
 const auth = require("../auth") as {
   requireRole: jest.Mock;
@@ -61,6 +69,8 @@ const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest
 const planner = require("../planner") as { resolveActivePlannerTasks: jest.Mock };
 const plannerSync = require("../jobPlannerSync") as { syncJobActionTriggersStandalone: jest.Mock };
 const directorEmails = require("../email/director-emails") as { sendDirectorApprovalEmail: jest.Mock };
+const columnProbe = require("../quoteAttributionColumn") as { quoteAttributionColumnExists: jest.Mock };
+const notices = require("../approvalAttributionNotice") as { raiseAttributionNotice: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ jsonBody?: unknown; status?: number }>;
@@ -78,6 +88,7 @@ const registered = (name: string): Handler => {
 const approveQuote = registered("approveQuote");
 const upsertQuote = registered("upsertQuote");
 const resendDirectorQuoteEmail = registered("resendDirectorQuoteEmail");
+const { answerApprovalAttribution } = require("./answerApprovalAttribution") as { answerApprovalAttribution: Handler };
 const unapproveQuote = registered("unapproveQuote");
 const completeQuote = registered("completeQuote");
 const uncompleteQuote = registered("uncompleteQuote");
@@ -99,6 +110,13 @@ const sqlCalls = (): { sql: string; order: number }[] =>
     order: db.executeQuery.mock.invocationCallOrder[i],
     sql: String(c[1]),
   }));
+const calledWith = (re: RegExp): { params: Record<string, unknown>; sql: string } | undefined =>
+  db.executeQuery.mock.calls
+    .map((c: unknown[]) => ({
+      params: Object.fromEntries(((c[2] as { name: string; value: unknown }[] | undefined) ?? []).map((p) => [p.name, p.value])),
+      sql: String(c[1]),
+    }))
+    .find((c: { sql: string }) => re.test(c.sql));
 const orderOf = (re: RegExp): number => sqlCalls().find((c) => re.test(c.sql))?.order ?? -1;
 const flush = async () => {
   for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r));
@@ -696,6 +714,12 @@ describe("quote reversals and deletions", () => {
       });
     });
 
+    it("clears an attribution that belonged to the approval being undone", async () => {
+      mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
+      await call(unapproveQuote);
+      expect(calledWith(/UPDATE Quotes/)?.sql).toMatch(/ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/);
+    });
+
     it("says the amount did not move, and what the approval being undone covered", async () => {
       mockSql([APP_USER, JOB_BUILDING, approvedOnce(), noPayments, stored]);
 
@@ -1074,6 +1098,11 @@ describe("upsertQuote: an amount edit that tears down an approval", () => {
   beforeEach(() => {
     db.buildUpdateSet.mockReturnValue({ params: [], setClause: "Amount = @Amount" });
     mockSql([APP_USER, JOB_BUILDING, quote(), stored]);
+  });
+
+  it("clears an attribution with the approval it belonged to", async () => {
+    await edit();
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => /SET Status = 'pending'/.test(String(c[1])) && /ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/.test(String(c[1])))).toBe(true);
   });
 
   it("writes one quote.approval_reset exception: the old amount, status and approval stamps before, the new amount after", async () => {
@@ -1606,6 +1635,219 @@ describe("resendDirectorQuoteEmail", () => {
       }),
     ]);
     expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("migration 117 still pending (review 117 R2)", () => {
+  const quoteRow: Route = {
+    match: /SELECT JobID, QuoteNumber, ContractorName, Amount/,
+    rows: [{ Amount: 500, ContractorID: 3, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
+  };
+  afterEach(() => columnProbe.quoteAttributionColumnExists.mockResolvedValue(true));
+
+  it("approves without naming the attribution columns, so the write doesn't fail", async () => {
+    columnProbe.quoteAttributionColumnExists.mockResolvedValue(false);
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] }]);
+    expect((await approveQuote(makeRequest({ QuoteID: 7 }), ctx)).status).toBe(200);
+    const writes = db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1])).filter((sql: string) => /UPDATE Quotes/.test(sql));
+    expect(writes.length).toBeGreaterThan(0);
+    for (const sql of writes) expect(sql).not.toMatch(/ApprovalAttributedToUserID|AttributionAnsweredAt/);
+  });
+});
+
+describe("approveQuote: attributed approval by plain facilities (R2, Connor 13 Oct)", () => {
+  const quoteRow: Route = {
+    match: /SELECT JobID, QuoteNumber, ContractorName, Amount/,
+    rows: [{ Amount: 4500, ContractorID: 3, ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteNumber: "QT-9-1", Status: "pending" }],
+  };
+  const stored: Route = { match: /SELECT\s+QuoteID, JobID/, rows: [{ QuoteID: 7 }] };
+  const QUOTE_SCOPE: Route = { match: /FROM Quotes s INNER JOIN Jobs j/, rows: [{ BuildingID: 5, JobID: 9 }] };
+  const named = (over: Record<string, unknown> = {}): Route => ({
+    match: /FROM dbo\.AppUsers WHERE UserID = @UserID/,
+    rows: [{ DisplayName: "Mo Manager", Email: "mo@example.com", Role: "facilities_manager", UserID: 30, ...over }],
+  });
+  const approve = (body: Record<string, unknown>) => approveQuote(makeRequest({ QuoteID: 7, ...body }), ctx);
+  const updates = () => sqlCalls().filter((c) => /UPDATE Quotes/.test(c.sql));
+
+  beforeEach(() => {
+    process.env.ATTRIBUTED_APPROVAL_ENABLED = "true";
+    auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "fi@example.com", name: "Fi Facilities", oid: "fi-oid" });
+    auth.rolesForRequest.mockResolvedValue(["facilities"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 5000, RoleName: "facilities" },
+      { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+  });
+
+  afterEach(() => {
+    delete process.env.ATTRIBUTED_APPROVAL_ENABLED;
+  });
+
+  it("is held off unless ATTRIBUTED_APPROVAL_ENABLED is \"true\": facilities isn't let through, and a manager named is ignored", async () => {
+    for (const value of [undefined, "1", "TRUE"]) {
+      if (value === undefined) delete process.env.ATTRIBUTED_APPROVAL_ENABLED;
+      else process.env.ATTRIBUTED_APPROVAL_ENABLED = value;
+      auth.requireRole.mockClear();
+      mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored, QUOTE_SCOPE]);
+      const res = await approve({ attributedToUserId: 30, declared: true });
+      expect(auth.requireRole.mock.calls[0][1]).not.toContain("facilities");
+      expect(res.jsonBody).toMatchObject({ code: "attribution_required" });
+      expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["an admin (decision 4)", { Role: "admin", UserID: 40 }, 40],
+    ["an accounts clerk, whose own $5,000 row would cover it", { Role: "accounts", UserID: 41 }, 41],
+  ])("refuses %s as the manager who agreed (422), approving nothing", async (_label, over, id) => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(over), stored, QUOTE_SCOPE]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 5000, RoleName: "facilities" },
+      { MaxApprovalAmount: 5000, RoleName: "accounts" },
+      { MaxApprovalAmount: 50000, RoleName: "admin" },
+      { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+
+    const res = await approve({ attributedToUserId: id, declared: true });
+
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "attribution_invalid" });
+    expect(updates()).toEqual([]);
+  });
+
+  it("refuses the manager who added the quote as the one who agreed to it (J3, no self-approval by proxy)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, { ...quoteRow, rows: [{ ...quoteRow.rows![0], CreatedBy: "Mo Manager" }] }, named(), stored, QUOTE_SCOPE]);
+
+    const res = await approve({ attributedToUserId: 30, declared: true });
+
+    expect(res).toEqual({
+      jsonBody: { code: "attribution_invalid", error: "Mo Manager added this quote, so they can't be the manager who agreed to it. Name someone else." },
+      status: 422,
+    });
+    expect(updates()).toEqual([]);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "attribution_invalid" })]);
+  });
+
+  it("lets plain facilities through the role gate", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored]);
+    await approve({ attributedToUserId: 30, declared: true });
+    expect(auth.requireRole).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(["facilities"]));
+  });
+
+  it("within the officer's row, declared and naming a manager who could approve it: approved, stored, ledgered and noticed", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored]);
+
+    const res = await approve({ attributedToUserId: 30, declared: true });
+
+    expect(res.status).toBe(200);
+    const update = calledWith(/UPDATE Quotes/);
+    expect(update?.sql).toMatch(/ApprovalAttributedToUserID = @AttributedTo/);
+    expect(update?.sql).toMatch(/ApprovalAttributionDeclaredAt = SYSUTCDATETIME\(\)/);
+    expect(update?.params).toMatchObject({ AttributedTo: 30, Status: "approved" });
+    expect(calledWith(/INSERT INTO JobEvents/)?.params.Text).toBe("Approved by Fi Facilities, agreed with Mo Manager — QT-9-1 from Acme");
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({
+        action: "quote.approve_attributed",
+        actorName: "Fi Facilities",
+        actorRole: "facilities",
+        attributedName: "Mo Manager",
+        attributedRole: "facilities_manager",
+        attributedUserId: 30,
+        isException: false,
+        ruleApplied: "attributed",
+      }),
+    ]);
+    expect(notices.raiseAttributionNotice).toHaveBeenCalledWith(expect.anything(), {
+      actor: expect.objectContaining({ name: "Fi Facilities" }),
+      managerUserId: 30,
+      ref: { id: 7, jobId: 9, kind: "quote" },
+    });
+    expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeLessThan(notices.raiseAttributionNotice.mock.invocationCallOrder[0]);
+  });
+
+  it.each([
+    ["no manager named", {}],
+    ["a manager named but nothing declared", { attributedToUserId: 30 }],
+    ["declared without a manager", { declared: true }],
+  ])("refuses with attribution_required (422) when %s: a `denied` row, nothing written", async (_label, body) => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored, QUOTE_SCOPE]);
+
+    const res = await approve(body);
+
+    expect(res).toEqual({
+      jsonBody: { code: "attribution_required", error: "To approve this quote yourself, tick that you discussed it with a manager and name them." },
+      status: 422,
+    });
+    expect(updates()).toEqual([]);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "quote.approve" }), ruleApplied: "attribution_required" }),
+    ]);
+    expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["someone who couldn't approve it themselves", named({ Role: "facilities", UserID: 31 }), 31],
+    ["someone who isn't an active user", { match: /FROM dbo\.AppUsers WHERE UserID = @UserID/, rows: [] }, 32],
+    ["the officer themselves", named({ UserID: 21 }), 21],
+  ])("refuses with attribution_invalid (422) when the person named is %s", async (_label, who, id) => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, who as Route, stored, QUOTE_SCOPE]);
+
+    const res = await approve({ attributedToUserId: id, declared: true });
+
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "attribution_invalid" });
+    expect(updates()).toEqual([]);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "attribution_invalid" })]);
+  });
+
+  it("a malformed manager id is a 400 before anything is read", async () => {
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored]);
+    expect((await approve({ attributedToUserId: "30", declared: true })).status).toBe(400);
+    expect((await approve({ attributedToUserId: 30, declared: "yes" })).status).toBe(400);
+    expect(updates()).toEqual([]);
+  });
+
+  it("above the officer's own row it waits for a manager as before, and records no attribution", async () => {
+    mockSql([APP_USER, JOB_BUILDING, { ...quoteRow, rows: [{ ...quoteRow.rows![0], Amount: 6000 }] }, named(), stored]);
+
+    const res = await approve({ attributedToUserId: 30, declared: true });
+
+    expect(res.status).toBe(200);
+    expect(calledWith(/UPDATE Quotes/)?.sql).not.toMatch(/ApprovalAttributedToUserID = @AttributedTo/);
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "quote.approve", ruleApplied: "over_limit" })]);
+    expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+  });
+
+  it("a caller with authority of their own approves outright; a manager they name is not recorded", async () => {
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    mockSql([APP_USER, JOB_BUILDING, quoteRow, named(), stored]);
+
+    await approve({ attributedToUserId: 30, declared: true });
+
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "quote.approve", ruleApplied: "own_authority" })]);
+    // An earlier attribution on this quote no longer applies.
+    expect(calledWith(/UPDATE Quotes/)?.sql).toMatch(/ApprovalAttributedToUserID = NULL, ApprovalAttributionDeclaredAt = NULL, AttributionAnsweredAt = NULL/);
+    expect(notices.raiseAttributionNotice).not.toHaveBeenCalled();
+  });
+  it("the named manager's \"I didn't agree to this\" is ledgered against the quote with its money facts", async () => {
+    auth.verifiedIdentityFromRequest.mockResolvedValue({ email: "mo@example.com", name: "Mo Manager", oid: "mo-oid" });
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    mockSql([
+      { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ UserID: 30 }] },
+      {
+        match: /FROM Quotes q WITH \(UPDLOCK, HOLDLOCK\)/,
+        rows: [{ Amount: 4500, ApprovalAttributedToUserID: 30, ApprovedBy: "Fi Facilities", AttributedToName: "Mo Manager", BuildingID: 5, ContractorID: 3, ContractorName: "Acme", JobID: 9, QuoteNumber: "QT-9-1" }],
+      },
+    ]);
+
+    const res = await answerApprovalAttribution(makeRequest({ agreed: false, id: 7, kind: "quote", reason: "Never discussed" }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "quote.attribution_disputed", actorName: "Mo Manager", isException: true, reason: "Never discussed" }),
+    ]);
   });
 });
 

@@ -36,6 +36,13 @@ import { autoResolve, escalateFurther, hasNextLevel, raise, SWEEP_ACTOR } from "
 import type { AutoResolveInput, EscalateFurtherInput, EscalateFurtherResult, RaiseInput, RaiseResult } from "./engine";
 import { EscalationError } from "./errors";
 import { getAdapter, type EscalationAdapter } from "./adapters/registry";
+import {
+  ATTRIBUTION_SUBJECT_TYPE,
+  attributionSubjectId,
+  listUnansweredAttributions,
+  noticePolicy,
+  type AttributionRef,
+} from "./adapters/approvalAttribution";
 import { latestEmailArrivals, loadLiveJobFacts } from "./adapters/jobFacts";
 import {
   conditionEpoch,
@@ -97,6 +104,8 @@ export interface SweepDeps {
   latestTimesBySubject(connection: Connection, subjectType: string): Promise<Map<string, LatestEscalationTimes>>;
   listDueDeferrals(connection: Connection, today: string, limit: number): Promise<DueDeferral[]>;
   listLiveEscalations(connection: Connection): Promise<EscalationRow[]>;
+  /** R2/R13: attributions nobody has answered. Optional, so a sweep built without it skips the step. */
+  listUnansweredAttributions?(connection: Connection): Promise<{ attributedToUserId: number; ref: AttributionRef }[]>;
   loadLiveJobFacts(connection: Connection): Promise<JobFacts[]>;
   notifyTargets(connection: Connection, row: EscalationRow, event: NotifyEvent, options: NotifyOptions): Promise<NotifyOutcome>;
   raise(connection: Connection, input: RaiseInput): Promise<RaiseResult>;
@@ -114,6 +123,7 @@ export const defaultSweepDeps: SweepDeps = {
   latestTimesBySubject,
   listDueDeferrals: dueDeferrals,
   listLiveEscalations,
+  listUnansweredAttributions,
   loadLiveJobFacts,
   notifyTargets,
   raise,
@@ -427,6 +437,46 @@ async function raiseForJobs(run: Run): Promise<void> {
   }
 }
 
+// ── 3b. Attribution notices (R2, R13) ───────────────────────────────────────
+
+/**
+ * Every attributed approval or accepted variance the named manager hasn't
+ * answered has had its notice: the decision raises it after commit, and this
+ * raises any that never were (a failed raise, or one made before the policies
+ * existed). A subject that has had a notice before is left alone, so a notice a
+ * person closed without answering isn't raised again every half hour.
+ */
+async function raiseAttributionNotices(run: Run): Promise<void> {
+  const list = run.deps.listUnansweredAttributions;
+  if (!list) return;
+  const unanswered = await list(run.connection);
+  if (unanswered.length === 0) return;
+  const latest = await run.deps.latestTimesBySubject(run.connection, ATTRIBUTION_SUBJECT_TYPE);
+  for (const { attributedToUserId, ref } of unanswered) {
+    const subjectId = attributionSubjectId(ref);
+    const policyKey = noticePolicy(ref.kind);
+    if (latest.has(latestKey(subjectId, policyKey))) continue;
+    if (!run.take()) return;
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would raise ${policyKey} on ${subjectId}`);
+      run.report.raised += 1;
+      continue;
+    }
+    await run.attempt(`raising ${policyKey} on ${subjectId}`, async () => {
+      const result = await run.deps.raise(run.connection, {
+        actor: SWEEP_ACTOR,
+        notify: run.notifyOptions(),
+        now: run.now,
+        policyKey,
+        subjectId,
+        subjectType: ATTRIBUTION_SUBJECT_TYPE,
+        userTargets: [attributedToUserId],
+      });
+      if (result.created) run.report.raised += 1;
+    });
+  }
+}
+
 // ── 4. Follow-up emails ──────────────────────────────────────────────────────
 
 /** The moment from which a new email counts as a follow-up on a row. */
@@ -576,6 +626,7 @@ export async function runSweep(
     ["sending scheduled reminders", sendScheduledReminders],
     ["asking deferred decisions again", reaskDeferred],
     ["raising for jobs", raiseForJobs],
+    ["raising attribution notices", raiseAttributionNotices],
     ["restarting on follow-up emails", restartOnFollowUps],
     ["retrying notifications", retryNotifications],
     ["checking health", checkHealth],

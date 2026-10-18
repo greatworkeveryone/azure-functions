@@ -11,6 +11,7 @@
 // and record the error rather than blocking the DB write.
 
 import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
+import { assertMayLeave, type EgressSubject } from "./test-data";
 
 interface TokenResponse {
   access_token: string;
@@ -62,6 +63,7 @@ export interface GraphAttachment {
 }
 
 export async function graphSendReply(
+  egress: EgressSubject,
   toAddress: string,
   replySubject: string,
   body: string,
@@ -69,6 +71,7 @@ export async function graphSendReply(
   attachments?: GraphAttachment[],
   ccAddresses?: string[],
 ): Promise<string> {
+  assertMayLeave("email", egress);
   const token = await getGraphToken();
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
@@ -124,13 +127,16 @@ export async function graphSendReply(
   return `graph-sent-${Date.now()}`;
 }
 
+/** `egress` is what the mail is about; a test record is refused (D9). */
 export async function graphSendMail(
+  egress: EgressSubject,
   toAddress: string | string[],
   subject: string,
   body: string,
   attachments?: GraphAttachment[],
   ccAddresses?: string[],
 ): Promise<void> {
+  assertMayLeave("email", egress);
   const token = await getGraphToken();
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {

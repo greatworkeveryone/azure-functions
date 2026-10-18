@@ -181,13 +181,13 @@ describe("director approval recipients", () => {
 
     const sent = await sendDirectorApprovalEmail({ amount: 4840, connection: {}, currency: "AUD", jobId: 9, stage: "quote" });
 
-    expect(graph.graphSendMail.mock.calls[0][0]).toEqual(["carlo@randazzo.properties", "Paolo@Randazzo.properties"]);
+    expect(graph.graphSendMail.mock.calls[0][1]).toEqual(["carlo@randazzo.properties", "Paolo@Randazzo.properties"]);
     expect(sent.sentTo).toEqual(["carlo@randazzo.properties", "Paolo@Randazzo.properties"]);
 
     jest.clearAllMocks();
     process.env.DEV_EMAIL_OVERRIDE = "staging@gwe.example";
     await sendDirectorApprovalEmail({ amount: 4840, connection: {}, currency: "AUD", jobId: 9, stage: "quote" });
-    expect(graph.graphSendMail.mock.calls[0][0]).toEqual(["staging@gwe.example"]);
+    expect(graph.graphSendMail.mock.calls[0][1]).toEqual(["staging@gwe.example"]);
   });
 
   it("refuses to send when there is neither a director nor a fallback", async () => {

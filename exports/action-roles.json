@@ -1,0 +1,600 @@
+{
+  "addQuoteContractor": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "approveInvoice": [
+    "accounts",
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "approveInvoiceAsDirector": [
+    "director"
+  ],
+  "approveOwnRentReview": [
+    "director"
+  ],
+  "approveProcedures": [
+    "admin",
+    "director"
+  ],
+  "approveQuote": [
+    "accounts",
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "approveQuoteAsDirector": [
+    "director"
+  ],
+  "approveQuoteAttributed": [
+    "facilities"
+  ],
+  "approveRentReview": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "approveTimesheets": [
+    "accounts_manager",
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "archiveAnyJob": [
+    "accounts_manager",
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "archiveAssets": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "archiveTenancy": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "askForDecision": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "bulkCreateKeys": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "checkinKeys": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "checkoutKeys": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "commenceRentReview": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "completeAnyNextStep": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "completeNextStep": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "completePurchaseOrder": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "createInvoice": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "createPurchaseOrder": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "createQuote": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "createTestData": [
+    "admin",
+    "director"
+  ],
+  "deleteAnyInspection": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "deleteInvoice": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "deleteTenancyRegisterRows": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "editAnyRentReview": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "editAssets": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "editInspections": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "editJobs": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "editKeys": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "editProcedures": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "editTenancy": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "hardDeleteTenancyRows": [
+    "admin"
+  ],
+  "manageAccessProfiles": [
+    "admin"
+  ],
+  "manageAssetTypes": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "manageDefectsPeriods": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "managePurchaseOrders": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "manageQuotes": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "manageServiceSchedules": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "manageTestData": [
+    "admin"
+  ],
+  "markInvoiceInMyob": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "markPurchaseOrderInMyob": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "mergeInspections": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "myobController": [
+    "cfo"
+  ],
+  "overrideRentReviewChecks": [
+    "director"
+  ],
+  "promoteEmail": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "raiseEscalation": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "ratifyScheduleChange": [
+    "director"
+  ],
+  "recordEmailOnJob": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "recordPayment": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "rejectInvoice": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "rejectScheduleChange": [
+    "director"
+  ],
+  "reopenJob": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "requestScheduleChange": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "resendDirectorEmail": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "respondToDecision": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "revertAnyInspection": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "revertRentReview": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "sendPurchaseOrder": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "setJobPathFlags": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "signOffTenancySchedule": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
+  "submitRentReview": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "syncBuildings": [
+    "admin"
+  ],
+  "syncWorkRequests": [
+    "admin"
+  ],
+  "unapproveQuote": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "unflagEmail": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "verifyAssets": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewAccessLog": [
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewAdmin": [
+    "admin"
+  ],
+  "viewAllEscalations": [
+    "admin",
+    "director"
+  ],
+  "viewAssets": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewDecisions": [
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewEscalations": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewInspections": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewInvoices": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewJobDecisionHistory": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewJobs": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewKeys": [
+    "admin",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewMaintenanceOverview": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewMyobControls": [
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewPayments": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewPayroll": [
+    "accounts_manager",
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
+  "viewPortfolioOccupancy": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewPurchaseOrders": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewQuotes": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewRentReviews": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewTeamEscalations": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "viewTenancy": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewTenancyDecisionHistory": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewTimesheets": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
+  ],
+  "viewUserManagement": [
+    "admin",
+    "director"
+  ],
+  "viewVacancies": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "waiveMarketRentReview": [
+    "director"
+  ],
+  "waiveRentReview": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ]
+}

@@ -3,6 +3,7 @@ import { closeConnection, createServiceRequestConnection, executeQuery } from ".
 import { resolveRecipient } from "../email-recipient";
 import { absoluteLink } from "../escalation/config";
 import { graphSendMail } from "../graph";
+import { NOT_A_RECORD } from "../test-data";
 import { formatDarwinDateTime } from "../ledger/darwinTime";
 import { BURST_DESCRIPTION } from "./anomaly";
 
@@ -106,7 +107,8 @@ export async function sendAnomalyReport(now: Date = new Date()): Promise<{ count
     if (!report) return { count: 0, recipients: 0, sent: false };
     const recipients = await anomalyReportRecipients(connection);
     if (recipients.length === 0) return { count: report.count, recipients: 0, sent: false };
-    await graphSendMail(recipients, report.subject, report.body);
+    // A report on sign-in patterns, not about a record.
+    await graphSendMail(NOT_A_RECORD, recipients, report.subject, report.body);
     return { count: report.count, recipients: recipients.length, sent: true };
   } finally {
     closeConnection(connection);

@@ -84,6 +84,53 @@ describe("the person who asked", () => {
   });
 });
 
+describe("admin", () => {
+  // Admin cannot be asked any more (roles.ts), so a request naming admin is one from
+  // before that, or written by hand. Admin approves nothing real (decision 4): it may
+  // answer only on a test job.
+  const askedAdmin = named([3, 7]);
+  const askedAdminByRole = roleWide("admin", [7]);
+
+  it("named on a real job, may not answer: refused with its own code and a plain reason", () => {
+    expect(responderStanding(askedAdmin, { roles: ["admin"], userId: 7 })).toEqual({
+      allowed: false,
+      code: "admin_test_jobs_only",
+      message: "Admin answers questions on test jobs only. This is a real job, so someone else has to answer it.",
+    });
+  });
+
+  it("a real job is the default: a responder who says nothing about the job gets the same refusal", () => {
+    expect(responderStanding(askedAdmin, { roles: ["admin"], testJob: false, userId: 7 })).toMatchObject({ allowed: false, code: "admin_test_jobs_only" });
+  });
+
+  it("put to the admin role on a real job, may not answer either", () => {
+    expect(responderStanding(askedAdminByRole, { roles: ["admin"], userId: 7 })).toMatchObject({ allowed: false, code: "admin_test_jobs_only" });
+  });
+
+  it("named on a test job, may answer, as one of the people named", () => {
+    expect(responderStanding(askedAdmin, { roles: ["admin"], testJob: true, userId: 7 })).toEqual({ allowed: true, via: "named" });
+    expect(responderStanding(askedAdminByRole, { roles: ["admin"], testJob: true, userId: 7 })).toEqual({ allowed: true, via: "role" });
+  });
+
+  it("a test job does not make admin everyone's stand-in: not named is still not named", () => {
+    expect(responderStanding(named([3]), { roles: ["admin"], testJob: true, userId: 7 })).toMatchObject({ allowed: false, code: "not_named" });
+  });
+
+  it("admin who asked the question is still told so, test job or not", () => {
+    expect(responderStanding(named([3], 7), { roles: ["admin"], testJob: true, userId: 7 })).toMatchObject({ allowed: false, code: "asker" });
+  });
+
+  it("a person who holds admin and a working role answers as that role does, as for money (adminRefusal)", () => {
+    expect(responderStanding(named([3, 5]), { roles: ["admin", "director"], userId: 5 })).toEqual({ allowed: true, via: "named" });
+  });
+
+  it("the test flag changes nothing for anyone else", () => {
+    expect(responderStanding(named([5]), { roles: ["director"], testJob: false, userId: 5 })).toEqual({ allowed: true, via: "named" });
+    expect(responderStanding(named([5]), { roles: ["director"], testJob: true, userId: 5 })).toEqual({ allowed: true, via: "named" });
+    expect(responderStanding(named([5]), { roles: ["director"], testJob: true, userId: 6 })).toMatchObject({ allowed: false, code: "not_named" });
+  });
+});
+
 describe("who may finish a next step", () => {
   const forAlana = { nextStepOwnerRole: null, nextStepOwnerUserId: 9 };
   const forRole = { nextStepOwnerRole: "accounts", nextStepOwnerUserId: null };

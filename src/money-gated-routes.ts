@@ -21,6 +21,7 @@ export interface MoneyGatedRoute {
 
 export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   { file: "src/functions/approval-limits.ts", label: "Change an approval limit", route: "setApprovalLimit" },
+  { file: "src/functions/approval-facts.ts", label: "Change the PO variance margin or cap", route: "setApprovalFact" },
   { file: "src/functions/payments.ts", label: "Record or change a payment", route: "upsertPayment" },
   { file: "src/functions/payments.ts", label: "Mark a payment paid", route: "markPaymentPaid" },
   { file: "src/functions/invoices.ts", label: "Director-approve an invoice", route: "directorApproveJobInvoice" },
@@ -33,7 +34,7 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   { file: "src/functions/waiveRentReview.ts", label: "Waive a rent review", route: "waiveRentReview" },
   { file: "src/functions/revertRentReview.ts", label: "Revert an applied rent review", route: "revertRentReview" },
   // WP26c: a director's decision on a pending schedule change (rent relief) changes what a tenant is billed.
-  { file: "src/functions/ratifyScheduleChange.ts", label: "Ratify a schedule change (rent relief)", route: "ratifyScheduleChange" },
+  { file: "src/functions/ratifyScheduleChange.ts", label: "Approve a schedule change (rent relief)", route: "ratifyScheduleChange" },
   { file: "src/functions/rejectScheduleChange.ts", label: "Reject a schedule change (rent relief)", route: "rejectScheduleChange" },
 ];
 

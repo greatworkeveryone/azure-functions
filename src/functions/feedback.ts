@@ -25,6 +25,7 @@ import {
   MAX_CUSTOM_TOPIC_CHARS,
 } from "../email/feedback-email";
 import { graphSendMail } from "../graph";
+import { NOT_A_RECORD } from "../test-data";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 import { isAllowedContentType } from "../upload-constants";
@@ -177,7 +178,8 @@ export async function handleSendFeedback(
     });
 
     try {
-      await graphSendMail(recipients, email.subject, email.body, photos.attachments);
+      // Feedback is about the app, not a record.
+      await graphSendMail(NOT_A_RECORD, recipients, email.subject, email.body, photos.attachments);
     } catch (error) {
       // errorResponse (the usual Sentry path) is bypassed here so the caller
       // gets a 502 rather than a 500 — capture explicitly or a Graph outage

@@ -294,7 +294,7 @@ export class ReviewWorld {
     if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.ScheduleChangeRequests c/.test(sql.trim())) {
       const states = Object.entries(p).filter(([k]) => k.startsWith("State")).map(([, v]) => v);
       return this.state.changes
-        .filter((c) => (p.TenantId === undefined || c.TenantId === p.TenantId) && (states.length === 0 || states.includes(c.State)))
+        .filter((c) => (p.FilterRequestId === undefined || c.RequestId === p.FilterRequestId) && (p.TenantId === undefined || c.TenantId === p.TenantId) && (states.length === 0 || states.includes(c.State)))
         .sort((a, b) => (b.RequestedAt as Date).getTime() - (a.RequestedAt as Date).getTime())
         .map((c) => this.changeView(c));
     }

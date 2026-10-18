@@ -25,6 +25,8 @@
 // that only starts in the review's period is a new charge, not a review, and is
 // left out. A row that only follows the rent has no note.
 
+import { addDaysIso } from "../darwinDate";
+import type { DatedCharge, RowAncillaries } from "../scheduleCharges";
 import type {
   CarparkRateStep,
   CarparkScheduleGroup,
@@ -121,26 +123,40 @@ export function miscFeeRunning(rows: readonly ScheduleRow[], fee: MiscFee): numb
  * Each row's car park and misc fee totals for a year, as the frontend's
  * schedules show them on that row: car parks at 12 times each group's rounded
  * monthly rate, misc fees at each fee's amount times its periods a year, to the
- * cent. Null where none has started on the row (or every fee has ended).
+ * cent. Null where none has started on the row (or every fee has ended). A car
+ * park group at $0 a month is no charge, as the frontend's schedule reads it.
+ *
+ * `dated` carries the same figures with each group's and fee's own dates, so the
+ * charge timeline charges them only on their days (WP26c review): a group from
+ * its commencedAt, a fee from its commencedAt to the day after its endsAt. The
+ * row a group or fee first shows on is the schedule's rule (activeInPeriod); the
+ * days inside that row it is charged for are its own.
  */
 export function ancillariesByRow(
   rows: readonly ScheduleRow[],
   carparkGroups: readonly CarparkScheduleGroup[],
   miscFees: readonly MiscFee[],
-): Array<{ carparks: number | null; miscFees: number | null }> {
+): RowAncillaries[] {
   return rows.map((_row, index) => {
     const through = rows.slice(0, index + 1);
+    const dated: { carparks: DatedCharge[]; miscFees: DatedCharge[] } = { carparks: [], miscFees: [] };
     let carparks: number | null = null;
     for (const group of carparkGroups) {
       const monthly = carparkRunning(through, group);
-      if (monthly !== null) carparks = r2((carparks ?? 0) + r2(monthly) * 12);
+      if (monthly === null || !(monthly > 0)) continue;
+      const annual = r2(r2(monthly) * 12);
+      carparks = r2((carparks ?? 0) + annual);
+      dated.carparks.push({ annual, from: group.commencedAt, to: null });
     }
     let fees: number | null = null;
     for (const fee of miscFees) {
       const amount = miscFeeRunning(through, fee);
-      if (amount !== null) fees = r2((fees ?? 0) + r2(amount * (PERIODS_PER_YEAR[fee.frequency] ?? 1)));
+      if (amount === null) continue;
+      const annual = r2(amount * (PERIODS_PER_YEAR[fee.frequency] ?? 1));
+      fees = r2((fees ?? 0) + annual);
+      dated.miscFees.push({ annual, from: fee.commencedAt, to: fee.endsAt ? addDaysIso(fee.endsAt, 1) : null });
     }
-    return { carparks, miscFees: fees };
+    return { carparks, dated, miscFees: fees };
   });
 }
 

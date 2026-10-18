@@ -426,22 +426,34 @@ describe("upsertScheduledRateStep", () => {
     expect(res.status).toBe(500);
   });
 
-  // WP26c: a ratchet exemption is a director's override, written by a review.
-  describe("a ratchet exemption (C9, D23)", () => {
+  // WP26c: a ratchet exemption is a director's override, written by a review. An
+  // edit keeps it; only a director takes it off, with a reason (the review's
+  // finding 1: an edit that dropped the field silently took the override off).
+  describe("a ratchet exemption (C9, D23, WP26c review)", () => {
+    const ledger = require("../ledger") as { record: jest.Mock };
+    const actorMock = require("../ledger/actor") as { resolveLedgerActor: jest.Mock };
+    const DIRECTOR = { kind: "user", name: "Dana Director", role: "director", userId: 3 };
     const exemption = { at: "2026-07-03T01:00:00.000Z", byName: "Dana Director", reason: "Agreed with the tenant" };
     const exemptRow = { effectiveFrom: "2026-07-01", id: STEP_ID, methodKind: "cpi", ratchetExempt: exemption, ratePercent: -2 };
+    const { ratchetExempt: _exemption, ...withoutIt } = exemptRow;
     const updates = () => db.executeQuery.mock.calls.filter(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+    const entries = () => ledger.record.mock.calls.map(([, entry]: [unknown, Record<string, any>]) => entry);
+    const storedSteps = () => JSON.parse(String((updates()[0][2] as Array<{ name: string; value: unknown }>).find((p) => p.name === "Value")?.value)) as Array<Record<string, unknown>>;
+    const stored = (steps: unknown[] = [exemptRow]) =>
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify(steps) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
-    it("can't be added by editing a row", async () => {
-      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([{ ...exemptRow, ratchetExempt: undefined }]) }]);
+    it("can't be added by editing a row, and the attempt is ledgered as denied", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([withoutIt]) }]);
       const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: exemptRow })), ctx);
       expect(res.status).toBe(403);
-      expect((res.jsonBody as { error: string }).error).toMatch(/director's override/);
+      expect((res.jsonBody as { error: string }).error).toMatch(/director's decision/);
       expect(updates()).toHaveLength(0);
       expect(db.rollbackTransaction).toHaveBeenCalled();
+      expect(entries()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "exemption_added", subject: { id: STEP_ID, type: "rate_step" }, tenantId: 1 })]);
     });
 
-    it("can't be changed by editing a row", async () => {
+    it("can't be changed by editing a row, not even by a director", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
       db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
       const res = await handlers.upsertScheduledRateStep(
         makeRequest(validStepEnvelope({ step: { ...exemptRow, ratchetExempt: { ...exemption, reason: "Something else" } } })),
@@ -449,20 +461,128 @@ describe("upsertScheduledRateStep", () => {
       );
       expect(res.status).toBe(403);
       expect(updates()).toHaveLength(0);
+      expect(entries()).toEqual([expect.objectContaining({ action: "denied", before: { attempted: "schedule.manual_edit", ratchetExempt: exemption }, ruleApplied: "exemption_changed" })]);
     });
 
-    it("rides along unchanged when the row is edited, and can be taken off", async () => {
-      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-      const kept = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: { ...exemptRow, note: "checked" } })), ctx);
-      expect(kept.status).toBe(200);
-      expect((kept.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toEqual(exemption);
+    it.each([
+      ["sends it back as stored", { ...exemptRow, note: "checked" }],
+      ["leaves it off the step (a screen that dropped the field)", { ...withoutIt, note: "checked" }],
+    ])("is kept, exactly as stored, when an editor's edit %s", async (_label, step) => {
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step })), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { steps: Array<{ note?: string; ratchetExempt?: unknown }> }).steps[0]).toMatchObject({ note: "checked", ratchetExempt: exemption });
+      expect(JSON.stringify(storedSteps()[0].ratchetExempt)).toBe(JSON.stringify(exemption));
+      expect(entries().map((entry) => entry.action)).toEqual(["schedule.manual_edit"]);
+    });
 
-      db.executeQuery.mockReset();
-      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-      const { ratchetExempt: _gone, ...withoutIt } = exemptRow;
-      const removed = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: withoutIt })), ctx);
-      expect(removed.status).toBe(200);
-      expect((removed.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toBeUndefined();
+    it("can't be removed by an editor: 403, ledgered as denied, and the row is unchanged", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "The tenant asked", step: withoutIt })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect((res.jsonBody as { error: string }).error).toBe(
+        "This row carries a director's override of the lease's ratchet. Only a director can remove it, with a reason; your edit wasn't saved.",
+      );
+      expect(updates()).toHaveLength(0);
+      // The edit rolled back; the one commit is the denied row's own small transaction, after it.
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeGreaterThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+      expect(entries()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          actor: expect.objectContaining({ role: "accounts" }),
+          before: { attempted: "schedule.ratchet_exemption_removed", ratchetExempt: exemption },
+          ruleApplied: "not_director",
+          subject: { id: STEP_ID, type: "rate_step" },
+        }),
+      ]);
+    });
+
+    it("is removed by a director, with the reason, ledgered with the exemption as it was", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "  The override was entered on the wrong lease  ", step: withoutIt })),
+        ctx,
+      );
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toBeUndefined();
+      expect(storedSteps()[0]).not.toHaveProperty("ratchetExempt");
+      const removed = entries().find((entry) => entry.action === "schedule.ratchet_exemption_removed");
+      expect(removed).toMatchObject({
+        actor: DIRECTOR,
+        after: { ratchetExempt: null, rowDeleted: false },
+        before: { effectiveFrom: "2026-07-01", ratchetExempt: exemption },
+        reason: "The override was entered on the wrong lease",
+        ruleApplied: "director_removed",
+        subject: { id: STEP_ID, type: "rate_step" },
+        tenantId: 1,
+      });
+      const order = (fn: jest.Mock) => fn.mock.invocationCallOrder.at(-1) as number;
+      expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+    });
+
+    it("isn't removed by a director whose edit leaves the field off without a reason", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: withoutIt })), ctx);
+      expect(res.status).toBe(200);
+      expect(storedSteps()[0].ratchetExempt).toEqual(exemption);
+    });
+
+    it("asks a director to leave the exemption off the row being removed, and has nothing to remove on a row without one", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const sent = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "x", step: exemptRow })), ctx);
+      expect(sent.status).toBe(400);
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([withoutIt]) }]);
+      const none = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "x", step: withoutIt })), ctx);
+      expect(none.status).toBe(400);
+      expect(updates()).toHaveLength(0);
+    });
+
+    it("isn't dropped by making the row a commencement row (403 for an editor)", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ step: { ...withoutIt, baseRentPerAnnum: 100000, methodKind: "commencement", ratePercent: 0 } })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect(updates()).toHaveLength(0);
+    });
+
+    describe("deleting the row", () => {
+      const del = (over: Record<string, unknown> = {}) =>
+        handlers.deleteScheduledRateStep(makeRequest({ BuildingId: 5, TenantId: 1, stepId: STEP_ID, ...over }), ctx);
+
+      it("is refused for an editor (403, ledgered as denied) and leaves the row", async () => {
+        db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+        const res = await del();
+        expect(res.status).toBe(403);
+        expect((res.jsonBody as { error: string }).error).toMatch(/the row wasn't deleted/);
+        expect(updates()).toHaveLength(0);
+        expect(entries()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "not_director" })]);
+      });
+
+      it("needs a director's reason, and is then ledgered as the exemption's removal", async () => {
+        actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+        db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+        expect((await del()).status).toBe(400);
+
+        actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+        stored([exemptRow]);
+        const res = await del({ RatchetExemptionRemovalReason: "Duplicate row" });
+        expect(res.status).toBe(200);
+        expect(entries().find((entry) => entry.action === "schedule.ratchet_exemption_removed")).toMatchObject({
+          after: { ratchetExempt: null, rowDeleted: true },
+          before: { ratchetExempt: exemption },
+          reason: "Duplicate row",
+        });
+      });
     });
   });
 });

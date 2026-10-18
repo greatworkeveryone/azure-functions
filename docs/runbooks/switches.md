@@ -13,6 +13,7 @@ then the real switch.
 | Setting | Default | What it does | Turn on when |
 | --- | --- | --- | --- |
 | `MYOB_WRITES_ENABLED` | off | Master switch for MYOB writes. Johanne's `MyobControls` row must also allow the operation, and the record must not be test data | Johanne signs off |
+| `ATTRIBUTED_APPROVAL_ENABLED` | off | When `"true"`, a plain facilities officer may approve a quote within their own approval limit by declaring they discussed it with a manager and naming one (facilities manager, accounts manager, CFO or director; never admin or whoever added the quote). The manager is told and can say "I didn't agree to this". Off: facilities can't approve quotes at all, and an attribution sent is ignored | Only after Connor lifts beta-sprint decisions 1 and 9, and after review 117's R3/D1 fixes ship |
 | `EMAIL_REPLY_DECISIONS_ENABLED` | off | Lets a director approve or decline by replying to an email | Leave off: decisions happen in the app |
 | `ESCALATION_SWEEP_ENABLED` · `_DRY_RUN` | off | The 30-minute sweep raises, moves up and ends escalations, and emails them. It also sends a decision request's scheduled reminders and moves an unanswered one up to the raiser's manager at its deadline (an Urgent one only if the raiser ticked "move up if no answer"; it is reminded at 24 hours either way, and an Emergency is never chased). Nothing is reminded or escalated while it is off (the first email, at ask time, does not need it) It also asks a deferred decision again on its day (once); in dry run it logs 'would ask job #N again' | After a dry run |
 | `ESCALATION_HOLIDAYS` | unset: no holidays | Darwin public holidays, `YYYY-MM-DD`, comma-separated. The SLA clocks and the decision-request tiers skip them (weekends are always skipped). A bad entry is ignored and logged | Keep the list current for the year |
@@ -120,6 +121,24 @@ Migration 099 (`099_schedule_change_requests.sql`, WP26c) is hand-applied like t
 rest. It is numbered below applied migrations, so the runner applies it out of order
 with a warning only. Apply it before deploying WP26c's backend: the register reads
 select its new columns.
+
+WP26c fixes (18 Oct 2026, both repos): deploy the backend before or with the
+frontend, never the pre-fix WP26c frontend (d088691) with the fixed backend,
+because Approve now sends the tenancy's schedule version (an older frontend gets
+400). Before go-live run this read-only check and fix any row it returns; such a
+tenancy cannot be approved until its reliefs are a JSON array or null:
+`SELECT TenantId FROM dbo.Tenants WHERE RentReliefs IS NOT NULL AND (ISJSON(RentReliefs) = 0 OR LEFT(LTRIM(RentReliefs),1) <> '[')`.
+A pending relief that runs past its lease's expiry is refused at approval
+(`outside_lease`); the director rejects it. Turn the `rentReviews` flag on last.
+
+Migration 117 (`117_quote_approval_attribution.sql`, attributed approval + R13
+variance facts) is hand-applied like the rest; it is numbered below applied
+migrations, so the runner applies it out of order with a warning only. Apply it
+before deploying the backend that carries it: without it, PO rises, PO sends and
+invoice approvals above the approved quote, setApprovalFact and the escalation
+sweep's attribution step all fail; plain quote approval keeps working through a
+column probe. `ATTRIBUTED_APPROVAL_ENABLED` stays off until Connor lifts
+decisions 1 and 9 (sprint board, decision 15).
 
 Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, before
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest

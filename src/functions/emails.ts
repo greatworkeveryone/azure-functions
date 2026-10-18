@@ -16,6 +16,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, verifiedIdentityFromRequest, unauthorizedResponse, errorResponse } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { generateReadSasUrl } from "../blob-storage";
 import { EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { GraphEmail } from "../graph";
@@ -39,6 +40,7 @@ import { parseMoneyField } from "../money";
 import { amountRefusal, jobMoneyRefusal, refusalResponse } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { linkDirectorReply } from "../email/director-reply-link";
+import { showTestParam } from "../test-data";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -139,6 +141,9 @@ export async function getEmails(
     );
   }
 
+  // Test emails (D9) only with the admin's Show test data on.
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
   const where = `WHERE ${whereParts.join(" AND ")}`;
 
   let connection;
@@ -345,7 +350,7 @@ export async function promoteEmailToQuote(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.promoteEmail.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -635,7 +640,7 @@ async function promoteEmailToJob(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.promoteEmail.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -725,7 +730,7 @@ export async function promoteEmailToInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.promoteEmail.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -834,11 +839,8 @@ export async function promoteEmailToInvoice(
   }
 }
 
-// ── Promote-roles ───────────────────────────────────────────────────────────
-// Mirrors promoteEmailToJob / promoteEmailToQuote / promoteEmailToInvoice
-// above and the matching capability in command-centre src/constants/roles.ts.
-// Keep all of them in step — the frontend gate is UX, this list is the control.
-const PROMOTE_EMAIL_ROLES = [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL] as const;
+// Promote and file-on-job roles: the who-can-do-what table (action-roles.ts:
+// promoteEmail, recordEmailOnJob), which the frontend reads too.
 
 const MAX_SQL_INT = 2147483647;
 const MAX_NOTE_LENGTH = 4000;
@@ -876,7 +878,7 @@ export async function promoteEmailToJobUpdate(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, PROMOTE_EMAIL_ROLES);
+  const denied = await requireRole(request, ACTION_ROLES.recordEmailOnJob.gate);
   if (denied) return denied;
 
   // CreatedBy comes from the verified token — never from the body.
@@ -1071,7 +1073,7 @@ export async function recordEmailQuoteDecision(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, PROMOTE_EMAIL_ROLES);
+  const denied = await requireRole(request, ACTION_ROLES.recordEmailOnJob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, {
       attempted: (body) => (body.Decision === "rejected" ? "quote.director_reject" : "quote.director_approve"),

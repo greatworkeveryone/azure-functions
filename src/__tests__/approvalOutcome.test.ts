@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
 import type { AuthorityFacts, AuthorityInput, Identity, RoleLimit, Subject } from "../approvalAuthority";
-import { approvalOutcome } from "../approvalOutcome";
+import { approvalOutcome, refusalStatus } from "../approvalOutcome";
 
 // What an approve click does (J1): approve on the caller's own authority, send
 // it up the ladder, send it to the director, or refuse. Admin approves test
@@ -116,10 +116,49 @@ describe("approvalOutcome", () => {
     expect(approvalOutcome(who("cfo"), item("quote", 100), noCfo, REAL)).toMatchObject({ kind: "refused", reason: "not_eligible" });
   });
 
-  it("refuses plain facilities on a quote until attributed approval ships", () => {
-    expect(approvalOutcome(who("facilities"), item("quote", 100), AFTER, REAL)).toMatchObject({
-      kind: "refused",
-      reason: "attribution_required",
+  describe("attributed approval (R2, Connor 13 Oct)", () => {
+    const manager = { displayName: "Mo Manager", email: "mo@example.com", roles: ["facilities_manager"], userId: 7 };
+
+    it("refuses plain facilities without an attribution, with a sentence that says what to do (422)", () => {
+      const outcome = approvalOutcome(who("facilities"), item("quote", 100), AFTER, REAL);
+      expect(outcome).toMatchObject({
+        kind: "refused",
+        message: "To approve this quote yourself, tick that you discussed it with a manager and name them.",
+        reason: "attribution_required",
+      });
+      expect(refusalStatus("attribution_required")).toBe(422);
+      expect(refusalStatus("attribution_invalid")).toBe(422);
+      expect(refusalStatus("not_eligible")).toBe(403);
+    });
+
+    it("approves within the officer's own row when the named manager could approve it themselves", () => {
+      const input = { ...item("quote", 4500), attribution: { attributedTo: manager } };
+      expect(approvalOutcome(who("facilities", 3), input, AFTER, REAL)).toMatchObject({
+        attributedTo: { displayName: "Mo Manager", userId: 7 },
+        basis: "attributed",
+        kind: "approved",
+      });
+    });
+
+    it("refuses a named person who couldn't approve it themselves, or the officer naming themselves", () => {
+      const staff = { attributedTo: { roles: ["facilities"], userId: 8 } };
+      expect(approvalOutcome(who("facilities", 3), { ...item("quote", 4500), attribution: staff }, AFTER, REAL)).toMatchObject({
+        message: "The manager you named can't approve this quote themselves. Name someone who can.",
+        reason: "attribution_invalid",
+      });
+      const self = { attributedTo: { ...manager, userId: 3 } };
+      expect(approvalOutcome(who("facilities", 3), { ...item("quote", 4500), attribution: self }, AFTER, REAL)).toMatchObject({
+        reason: "attribution_invalid",
+      });
+    });
+
+    it("above the officer's own row it waits for a manager, attribution or not", () => {
+      const input = { ...item("quote", 6000), attribution: { attributedTo: manager } };
+      expect(approvalOutcome(who("facilities", 3), input, AFTER, REAL)).toMatchObject({ kind: "awaiting_approval" });
+    });
+
+    it("an approval on the caller's own authority says so", () => {
+      expect(approvalOutcome(who("facilities_manager"), item("quote", 4000), AFTER, REAL)).toMatchObject({ basis: "own_authority" });
     });
   });
 

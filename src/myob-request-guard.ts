@@ -10,6 +10,9 @@
 //      OAuth token call is exempt, so a link can be made before controls exist.
 //   5. an update only to a record Floorplan created: the lookup is injected by
 //      the proposals pipeline (MyobProposals, sprint M3) and says no until then
+// Before all of these (D9): a call about a test record is refused, reads
+// included, and a company-file write must name the Floorplan record it is for
+// (myob-test-records.ts). Only the OAuth token call is exempt.
 // After that, myob-api-log.ts builds the caller's headers (which may refresh
 // the token) and adds company-file credentials (x-myobapi-cftoken) from
 // MYOB_CF_USER and MYOB_CF_PASSWORD unless the caller chose an approver's.
@@ -20,6 +23,15 @@ import { assertMyobControlsAllow } from "./myob-controls";
 import { MyobRequestRefusedError, MyobWritesDisabledError } from "./myob-errors";
 import { classifyMyobRequest, type MyobMethod, type MyobOperation } from "./myob-endpoints";
 import { checkMyobPeriod } from "./myob-period";
+import { lookupMyobTestRecord, type MyobRecordRef, type MyobTestRecordLookup } from "./myob-test-records";
+import { TestDataEgressError } from "./test-data";
+
+let testRecordLookup: MyobTestRecordLookup = lookupMyobTestRecord;
+
+/** For tests. Pass null to restore the database lookup. */
+export function setMyobTestRecordLookup(lookup: MyobTestRecordLookup | null): void {
+  testRecordLookup = lookup ?? lookupMyobTestRecord;
+}
 
 export interface FloorplanRecordQuery {
   companyFileId: string;
@@ -62,7 +74,7 @@ export interface GuardedRequest {
 }
 
 export async function guardMyobRequest(
-  input: { body?: unknown; method: MyobMethod; url: string },
+  input: { body?: unknown; correlationId?: string; method: MyobMethod; record?: MyobRecordRef; url: string },
   now: Date = new Date(),
 ): Promise<GuardedRequest> {
   const classified = classifyMyobRequest(input.method, input.url);
@@ -72,6 +84,11 @@ export async function guardMyobRequest(
   if (classified.kind === "oauth") return { companyFileId: null, operation: "oauth.token" };
 
   const { companyFileId, rule, uid } = classified;
+  const verdict = await testRecordLookup({ correlationId: input.correlationId ?? null, record: input.record ?? null });
+  if (verdict.isTest) throw new TestDataEgressError("myob");
+  if (rule.method !== "GET" && !verdict.named) {
+    throw new MyobRequestRefusedError("no_record", "A MYOB write must name the Floorplan record it is for");
+  }
   if (rule.dateRule) {
     const verdict = checkMyobPeriod(rule.dateRule, input.body, now);
     if (!verdict.ok) throw new MyobRequestRefusedError("outside_period", verdict.reason);
