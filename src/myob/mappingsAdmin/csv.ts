@@ -4,6 +4,8 @@
 // underscores, so a re-saved spreadsheet still reads. Exported cells that a
 // spreadsheet would run as a formula are prefixed with an apostrophe, and that
 // apostrophe is taken off again on import, so an export re-imports unchanged.
+// toCsv is also the Activity view's CSV writer (SPR-M4, activity/activityView.ts):
+// one writer, so both exports defuse formulas the same way.
 
 export const MAX_CSV_ROWS = 2000;
 

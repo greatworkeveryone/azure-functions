@@ -9,7 +9,7 @@ import { darwinDateKey } from "../../escalation/businessTime";
 import { callScope } from "../daily/callScope";
 import { redactUnregisteredFiles } from "../daily/redact";
 import { darwinStamp } from "../darwinClock";
-import { toCsv } from "./csvExport";
+import { toCsv } from "../mappingsAdmin/csv";
 
 export interface ActivityView {
   columns: { key: string; label: string }[];

@@ -1,5 +1,7 @@
 /// <reference types="jest" />
 
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { CsvError, parseCsv, toCsv } from "./csv";
 
 describe("parseCsv", () => {
@@ -38,5 +40,19 @@ describe("toCsv", () => {
     expect(toCsv(["a", "b"], [["x,y", 'say "hi"'], ["=SUM(A1)", "+1"], ["-2", "@cmd"]])).toBe(
       'a,b\r\n"x,y","say ""hi"""\r\n\'=SUM(A1),\'+1\r\n\'-2,\'@cmd\r\n',
     );
+  });
+});
+
+describe("one CSV writer for MYOB exports", () => {
+  const myobDir = join(__dirname, "..");
+  const files = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const path = join(dir, name);
+      return statSync(path).isDirectory() ? files(path) : /\.ts$/.test(name) && !/\.test\.ts$/.test(name) ? [path] : [];
+    });
+
+  it("defines toCsv only here, so the mappings and activity exports defuse formulas alike", () => {
+    const writers = files(myobDir).filter((path) => /function toCsv\b|export const toCsv\b/.test(readFileSync(path, "utf8")));
+    expect(writers.map((path) => relative(myobDir, path))).toEqual([join("mappingsAdmin", "csv.ts")]);
   });
 });
