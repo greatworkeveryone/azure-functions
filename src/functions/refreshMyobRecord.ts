@@ -10,7 +10,9 @@ import { checkRateLimit } from "../rateLimit";
 // when someone opens it. A record checked in the last 5 minutes isn't read
 // again; a person may ask 10 times a minute. Reads only, through the same
 // guards as the timer, and only while MYOB_READBACK_ENABLED=true (otherwise it
-// answers with what Floorplan last saw).
+// answers with what Floorplan last saw). Gated like the timer because it runs
+// whenever a record is opened, not on a deliberate click (decision 19; the
+// reconciliation's "Check against MYOB" is a click and isn't gated).
 
 const READERS = new Set(["admin", "director", "cfo", "accounts_manager", "facilities_manager"]);
 const FRESH_MS = 5 * 60_000;

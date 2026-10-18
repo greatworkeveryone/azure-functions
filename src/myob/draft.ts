@@ -3,12 +3,14 @@
 // preview a person sees and the payload that is checked again at the click,
 // so a record that changed in between is caught by the hash (decision 12).
 //
-//   create  a new Service Quote / Order, dated today in Darwin
+//   create  a new Service Quote / Order, dated today in Darwin; refused once
+//           Floorplan's create of it reached MYOB (use update)
 //   update  the Floorplan-created record, keeping its MYOB date and its
 //           creator's attribution; only when Floorplan holds a verified copy
 //           of it to compare with
 
 import type { Connection } from "tedious";
+import { baselineAccepted } from "./activity/acceptedBaseline";
 import { journalMemo, orderComment, updateMemo } from "./attribution";
 import { darwinDisplayDate, myobDocumentDate } from "./darwinClock";
 import { payloadHash, sha256Hex } from "./hash";
@@ -71,12 +73,26 @@ export async function buildDraft(connection: Connection, input: DraftInput): Pro
   let lastSeen: Record<string, unknown> | null = null;
   let creatorMemo: string | null = null;
   let date = myobDocumentDate(input.approver?.at ?? input.proposer.at);
-  if (isUpdate) {
-    const created = (await proposalsForSubject(connection, input.subjectType, input.subjectId)).find(
-      (row) => row.operation === kinds.create && row.state === "verified" && row.myobUid,
+  const history = await proposalsForSubject(connection, input.subjectType, input.subjectId);
+  if (!isUpdate) {
+    // A second create would carry a new correlation id, so it would slip past an accepted baseline (m4c review).
+    const inMyob = history.find(
+      (row) => row.operation === kinds.create && (input.proposalId == null || row.proposalId !== input.proposalId) && (row.state === "verified" || row.myobUid),
     );
+    if (inMyob) {
+      return refuse(409, `Floorplan already created this ${kinds.kind} in MYOB (${inMyob.myobNumber ?? facts.reference ?? "its number"}). Use Update in MYOB to change it.`);
+    }
+  }
+  if (isUpdate) {
+    const created = history.find((row) => row.operation === kinds.create && row.state === "verified" && row.myobUid);
     if (!created?.myobUid) return refuse(409, "Floorplan hasn't created this record in MYOB, so it can't update it");
     const seen = await latestVerifiedForUid(connection, created.companyFileId, created.myobUid);
+    if (seen && (await baselineAccepted(connection, seen.correlationId))) {
+      return refuse(
+        409,
+        "Johanne accepted MYOB's record as the baseline for this one, so Floorplan won't update it: an update would overwrite what she accepted. Change it in MYOB by hand.",
+      );
+    }
     target = { myobRowVersion: seen?.myobRowVersion ?? null, uid: created.myobUid };
     lastSeen = seen?.readBack ?? created.readBack ?? created.payload;
     date = String(lastSeen.Date ?? created.payload.Date);
