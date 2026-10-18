@@ -1,25 +1,32 @@
 // POST /api/ratifyScheduleChange   (PLAN WP26c, D23, D24)
 //
-//   { requestId, rowVersion, note? }
+//   { requestId, rowVersion, scheduleVersion, note? }
 //   200 { change: ScheduleChangeDto, forgone: { total, byCharge }, scheduleVersion }
 //
-// A director confers a pending change on the tenancy's schedule. In one
+// A director confers a pending change on the tenancy's schedule (people read it
+// as "approve"; the route, state and ledger code keep "ratify"). In one
 // transaction:
 //   1. the tenancy is locked (UPDLOCK), then the request (the same order every
 //      schedule change takes); rowVersion is the one the caller read, else
 //      409 stale with the request as it is now; it is still pending, else
 //      409 invalid_state
-//   2. the relief is checked against the schedule as it stands now
+//   2. scheduleVersion is the tenancy's as the director's page read it, else
+//      409 stale_schedule: a review applied or a row edited since then changes
+//      the relief's money, so the director sees the new figures first
+//   3. the relief is checked against the schedule as it stands now
 //      (scheduleChange/relief.ts): it may have moved since it was asked for
-//      (409 relief_overlap; 422 nothing_to_relieve, relief_too_large,
-//      not_a_reduction)
-//   3. the overlay is written onto the schedule (Tenants.RentReliefs, an overlay,
-//      never a row), ScheduleVersion + 1 (a review calculated before it is stale,
-//      C4), sign-off kept (D7: a ratified change is a decision on the verified
-//      schedule, not a manual edit of it; as WP26's APPLY keeps it)
-//   4. the request -> ratified, with who and when and the director's note
-//   5. schedule.change_ratified in the ledger: an exception, the reason (the
-//      director's note, else why it was asked for), before and after, and
+//      (409 relief_overlap; 422 outside_lease, nothing_to_relieve,
+//      relief_too_large, not_a_reduction)
+//   4. the overlay is appended to Tenants.RentReliefs (an overlay, never a row):
+//      every entry already there is kept byte for byte (store.ts appendRelief),
+//      and a column that isn't a JSON array is never written over (422
+//      unreadable_reliefs). ScheduleVersion + 1 (a review calculated before it is
+//      stale, C4), sign-off kept (D7: a ratified change is a decision on the
+//      verified schedule, not a manual edit of it; as WP26's APPLY keeps it)
+//   5. the request -> ratified, with who and when and the director's note
+//   6. schedule.change_ratified in the ledger: an exception, the reason (the
+//      director's note, else why it was asked for), before (the whole
+//      RentReliefs array as it was) and after, and
 //      financialImpact = the charge forgone over the relief's own days (positive
 //      = money forgone), how it was worked out in `computed`
 // A failure anywhere rolls all of it back. After the commit: the tenancy's
@@ -51,14 +58,17 @@ import {
   isDirector,
   readNote,
   readRequestId,
+  readScheduleVersion,
   recordChangeRefusal,
   refuseClosedTenancy,
   ScheduleChangeError,
   scheduleChangeErrorResponse,
   staleChange,
+  staleSchedule,
+  stateWords,
 } from "../scheduleChange/http";
 import { checkRelief, tenancySchedule } from "../scheduleChange/relief";
-import { changeForUpdate, loadChange, lockTenancyForChange, markDecided, writeReliefs } from "../scheduleChange/store";
+import { appendRelief, changeForUpdate, loadChange, lockTenancyForChange, markDecided, writeReliefs } from "../scheduleChange/store";
 import { CHANGE_DECISION_CODES, SCHEDULE_CHANGE_SUBJECT } from "../scheduleChange/types";
 import type { RentRelief } from "../scheduleCharges";
 import { scheduleSignOffFromRow } from "../scheduleSignOff";
@@ -78,6 +88,7 @@ export async function ratifyScheduleChange(request: HttpRequest, context: Invoca
     const body = await readJsonObject(request);
     const requestId = readRequestId(body.requestId);
     const rowVersion = readRowVersion(body.rowVersion);
+    const scheduleVersion = readScheduleVersion(body.scheduleVersion);
     const note = readNote(body.note);
 
     connection = await createRequestConnection(token);
@@ -92,7 +103,7 @@ export async function ratifyScheduleChange(request: HttpRequest, context: Invoca
         const seen = await loadChange(db, requestId);
         if (!seen) throw new ScheduleChangeError("not_found", "That schedule change doesn't exist");
         if (!isDirector(caller.roles)) {
-          const message = "Only a director can ratify a schedule change";
+          const message = "Only a director can approve a schedule change";
           throw new ScheduleChangeError("forbidden", message, {}, deniedChange(caller, seen, "schedule.change_ratified", "not_director", message));
         }
         const tenantId = Number(seen.TenantId);
@@ -102,30 +113,46 @@ export async function ratifyScheduleChange(request: HttpRequest, context: Invoca
         if (!row) throw new ScheduleChangeError("not_found", "That schedule change doesn't exist");
         if (rowVersionHex(row.Version) !== rowVersion) throw staleChange(row);
         if (row.State !== "pending") {
-          throw new ScheduleChangeError("invalid_state", `This change has been ${String(row.State)}, so it can't be ratified`, { state: row.State });
+          throw new ScheduleChangeError("invalid_state", `This change has been ${stateWords(row.State)}, so it can't be approved`, { state: row.State });
         }
         refuseClosedTenancy(tenancy);
+        const priorVersion = Number(tenancy.ScheduleVersion ?? 0);
+        if (priorVersion !== scheduleVersion) throw staleSchedule(tenancy, "approving");
         const relief = reliefOfRow(row);
-        if (!relief) throw new ScheduleChangeError("unreadable_change", "This change's details can't be read, so it can't be ratified. Reject it and ask again.");
+        if (!relief) throw new ScheduleChangeError("unreadable_change", "This change's details can't be read, so it can't be approved. Reject it and ask again.");
+
+        const ratifiedAt = new Date().toISOString();
+        const overlay: RentRelief = { ...relief, id: requestId, ratifiedAt, ratifiedByName: caller.actor.name, reason: String(row.Reason) };
+        const appended = appendRelief(tenancy.RentReliefs, { ...overlay });
+        if (!appended.ok && appended.duplicate) {
+          throw new ScheduleChangeError("invalid_state", "This relief is already on the schedule, so it can't be approved again");
+        }
+        if (!appended.ok) {
+          throw new ScheduleChangeError(
+            "unreadable_reliefs",
+            "The rent reliefs already stored on this tenancy can't be read, so nothing was changed. Ask an administrator to check the tenancy's record before approving this.",
+          );
+        }
 
         const schedule = tenancySchedule(tenancy, await totalOccupancySqm(db, tenantId));
         const check = checkRelief({ ...relief, id: requestId }, schedule, []);
         if (!check.ok) {
-          throw new ScheduleChangeError(check.refusal.code, `The schedule has changed since this was asked for. ${check.refusal.message}`, check.refusal.details ?? {});
+          const message =
+            check.refusal.code === "outside_lease"
+              ? `${check.refusal.message} Reject it, and ask again with dates inside the lease.`
+              : `The schedule has changed since this was asked for. ${check.refusal.message}`;
+          throw new ScheduleChangeError(check.refusal.code, message, check.refusal.details ?? {});
         }
 
-        const ratifiedAt = new Date().toISOString();
-        const overlay: RentRelief = { ...relief, id: requestId, ratifiedAt, ratifiedByName: caller.actor.name, reason: String(row.Reason) };
-        const priorVersion = Number(tenancy.ScheduleVersion ?? 0);
-        const scheduleVersion = await writeReliefs(db, {
+        const newVersion = await writeReliefs(db, {
           actorName: caller.actor.name,
           actorOid: oidFromToken(token) ?? "unknown",
-          reliefsJson: JSON.stringify([...schedule.ratified, overlay]),
+          reliefsJson: appended.json,
           tenantId,
         });
         const by = { name: caller.actor.name, userId: caller.actor.userId };
         if (!(await markDecided(db, requestId, { by, note, state: "ratified" }))) {
-          throw new ScheduleChangeError("invalid_state", "This change just moved on, so it wasn't ratified");
+          throw new ScheduleChangeError("invalid_state", "This change just moved on, so it wasn't approved");
         }
         const buildingId = Number(tenancy.BuildingId);
         const signOff = scheduleSignOffFromRow(tenancy);
@@ -135,16 +162,17 @@ export async function ratifyScheduleChange(request: HttpRequest, context: Invoca
           actor: caller.actor,
           after: {
             relief: overlay,
-            scheduleVersion,
+            scheduleVersion: newVersion,
             signOff: signOff ? { at: signOff.at, by: signOff.by, kept: true } : { signedOff: false },
             state: "ratified",
           },
-          before: { rentReliefs: schedule.ratified.map((other) => other.id), scheduleVersion: priorVersion, state: "pending" },
+          // The whole array as it was, every entry as stored (not only the ones this code reads).
+          before: { rentReliefs: appended.before, scheduleVersion: priorVersion, state: "pending" },
           buildingId,
           computed: {
             forgone: check.forgone,
             requestedBy: row.RequestedByName ?? null,
-            workedOn: "the schedule as it stood when ratified: a review applied later inside the relief changes the charge, not this figure",
+            workedOn: "the schedule as it stood when approved: a review applied later inside the relief changes the charge, not this figure",
           },
           correlationId,
           financialImpact: check.forgone.total,
@@ -155,7 +183,7 @@ export async function ratifyScheduleChange(request: HttpRequest, context: Invoca
         });
         const after = await loadChange(db, requestId);
         if (!after) throw new Error(`Schedule change ${requestId} vanished while being ratified`);
-        return { after, buildingId, forgone: check.forgone, scheduleVersion, tenantId };
+        return { after, buildingId, forgone: check.forgone, scheduleVersion: newVersion, tenantId };
       });
     } catch (error) {
       await recordChangeRefusal(db, error);

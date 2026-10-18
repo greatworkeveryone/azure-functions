@@ -15,6 +15,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
 import { graphSendMail } from "../graph";
@@ -61,6 +62,7 @@ import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import type { LedgerActor } from "../ledger/types";
+import { testRecordResponse } from "../test-data";
 
 const PO_COLUMNS = `
   PurchaseOrderID, JobID, PONumber, Seq, ContractorID, ContractorName,
@@ -79,7 +81,7 @@ async function getPurchaseOrders(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  const denied = await requireRole(request, ACTION_ROLES.viewPurchaseOrders.gate);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -158,7 +160,7 @@ export async function upsertPurchaseOrder(
 
   // Plain accounts staff create / edit POs alongside facilities managers —
   // approval/send-to-contractor is the gated step, drafting is not.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.createPurchaseOrder.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, CREATE_PO_TARGET);
     return denied;
@@ -575,7 +577,7 @@ async function previewPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.sendPurchaseOrder.gate);
   if (denied) return denied;
 
   let connection;
@@ -741,7 +743,7 @@ async function sendPurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.sendPurchaseOrder.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, {
       attempted: "po.send",
@@ -771,9 +773,11 @@ async function sendPurchaseOrder(
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
-              po.EstimatedCost, po.CostNotToExceed, po.SentAt
+              po.EstimatedCost, po.CostNotToExceed, po.SentAt,
+              CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
+         LEFT JOIN Jobs j ON j.JobID = po.JobID
         WHERE po.PurchaseOrderID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
     );
@@ -786,6 +790,9 @@ async function sendPurchaseOrder(
         jsonBody: { error: "Preview the PO (generate a PDF) before sending." },
       };
     }
+    // A test PO (or a PO on a test job) never reaches a contractor (D9).
+    const egress = { isTest: Boolean(contractorRows[0].IsTest) };
+    if (egress.isTest) return testRecordResponse();
     const recipient = resolveRecipient(contractorRows[0]?.EmailAddress);
     if (!recipient.address) {
       return { status: 400, jsonBody: { error: "Contractor has no email address." } };
@@ -823,6 +830,7 @@ async function sendPurchaseOrder(
     // arbitrary outside address.
     const ccAddresses = [identity.email];
     await graphSendMail(
+      egress,
       recipient.address,
       emailSubject,
       emailBody,
@@ -922,7 +930,7 @@ async function deletePurchaseOrder(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.managePurchaseOrders.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, DELETE_PO_TARGET);
     return denied;
@@ -1039,7 +1047,7 @@ async function markPurchaseOrderMyobCreated(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.markPurchaseOrderInMyob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, MARK_PO_MYOB_TARGET);
     return denied;
@@ -1178,7 +1186,7 @@ async function unmarkPurchaseOrderMyobCreated(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.markPurchaseOrderInMyob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNMARK_PO_MYOB_TARGET);
     return denied;
@@ -1328,7 +1336,7 @@ async function markPurchaseOrderComplete(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.completePurchaseOrder.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, COMPLETE_PO_TARGET);
     return denied;
@@ -1470,7 +1478,7 @@ async function unmarkPurchaseOrderComplete(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.managePurchaseOrders.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNCOMPLETE_PO_TARGET);
     return denied;

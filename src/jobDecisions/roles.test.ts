@@ -1,6 +1,5 @@
 /// <reference types="jest" />
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { ACTION_ROLES } from "../action-roles";
 import { ESCALATION_ROLES } from "../escalation/http";
 import { FLAG_ROLES } from "../jobTransitionGuard";
 import {
@@ -13,29 +12,20 @@ import {
   RESPOND_TO_DECISION_ROLES,
 } from "./roles";
 
-// The two job role lists are copies of the ones in functions/jobs.ts, which that
-// file does not export. They are read from its source so they cannot drift.
-const jobsSource = readFileSync(join(__dirname, "..", "functions", "jobs.ts"), "utf8");
-
-function rolesIn(name: string): string[] {
-  const block = jobsSource.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const;`));
-  if (!block) throw new Error(`${name} not found in jobs.ts`);
-  return [...block[1].matchAll(/AppRole\.([A-Z_]+)/g)].map((m) => m[1]);
-}
+// The two job role lists are copies of the job gates in the who-can-do-what
+// table (action-roles.ts: editJobs, viewJobs), which functions/jobs.ts reads.
 
 const names = (roles: readonly string[]): string[] => [...roles].sort();
 
 describe("who may ask for a decision, and who may read one", () => {
-  it("asking is whoever may create and edit jobs: EDIT_JOBS_ROLES in jobs.ts", () => {
-    expect(rolesIn("EDIT_JOBS_ROLES")).toHaveLength(6);
-    const AppRole = require("../auth").AppRole as Record<string, string>;
-    expect(names(ASK_FOR_DECISION_ROLES)).toEqual(names(rolesIn("EDIT_JOBS_ROLES").map((key) => AppRole[key])));
+  it("asking is whoever may create and edit jobs: editJobs in action-roles.ts", () => {
+    expect(ACTION_ROLES.editJobs.gate).toHaveLength(6);
+    expect(names(ASK_FOR_DECISION_ROLES)).toEqual(names(ACTION_ROLES.editJobs.gate));
   });
 
-  it("reading is whoever may read jobs: VIEW_JOBS_ROLES in jobs.ts", () => {
-    expect(rolesIn("VIEW_JOBS_ROLES")).toHaveLength(6);
-    const AppRole = require("../auth").AppRole as Record<string, string>;
-    expect(names(READ_DECISION_REQUEST_ROLES)).toEqual(names(rolesIn("VIEW_JOBS_ROLES").map((key) => AppRole[key])));
+  it("reading is whoever may read jobs: viewJobs in action-roles.ts", () => {
+    expect(ACTION_ROLES.viewJobs.gate).toHaveLength(6);
+    expect(names(READ_DECISION_REQUEST_ROLES)).toEqual(names(ACTION_ROLES.viewJobs.gate));
   });
 
   it("the baseline user role may do neither", () => {
@@ -45,23 +35,29 @@ describe("who may ask for a decision, and who may read one", () => {
 });
 
 describe("who can be asked", () => {
-  it("is whoever can open the escalation inbox, the CFO included, and never the baseline user", () => {
-    expect(names(DECISION_MAKER_ROLES)).toEqual(names(ESCALATION_ROLES));
+  it("is whoever can open the escalation inbox except admin, the CFO included, and never the baseline user", () => {
+    expect(names(DECISION_MAKER_ROLES)).toEqual(names(ESCALATION_ROLES.filter((role) => role !== "admin")));
     expect(DECISION_MAKER_ROLES).toContain("cfo");
     expect(DECISION_MAKER_ROLES).not.toContain("user");
+  });
+
+  it("never admin: IT oversight approves nothing real (decision 4, D20), whatever the inbox lets it open", () => {
+    expect(ESCALATION_ROLES).toContain("admin");
+    expect(DECISION_MAKER_ROLES).not.toContain("admin");
   });
 });
 
 describe("who may answer a decision request, and who may finish a next step (A2)", () => {
-  it("the gate is whoever can be asked: the roles that can open the escalation inbox, never the baseline user", () => {
-    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(DECISION_MAKER_ROLES));
+  it("the gate is whoever can open the escalation inbox, never the baseline user: whoever can be asked, and admin, who is stopped at the request (standing.ts) unless the job is a test job", () => {
     expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(names(RESPOND_TO_DECISION_ROLES)).toEqual(names([...DECISION_MAKER_ROLES, "admin"]));
     expect(RESPOND_TO_DECISION_ROLES).not.toContain("user");
     expect(names(COMPLETE_NEXT_STEP_ROLES)).toEqual(names(RESPOND_TO_DECISION_ROLES));
   });
 
-  it("a next step may be handed to whoever can open the escalation inbox, where it lands", () => {
+  it("a next step may be handed to whoever can open the escalation inbox, where it lands, admin included: doing a step approves nothing", () => {
     expect(names(NEXT_STEP_OWNER_ROLES)).toEqual(names(ESCALATION_ROLES));
+    expect(NEXT_STEP_OWNER_ROLES).toContain("admin");
     expect(NEXT_STEP_OWNER_ROLES).not.toContain("user");
   });
 

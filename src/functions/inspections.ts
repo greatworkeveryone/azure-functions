@@ -31,6 +31,7 @@ import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { isDevOverrideEnabled } from "../jwt";
 import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 
@@ -136,6 +137,8 @@ interface InspectionApi {
   levels: InspectionApiLevel[];
   mergedFromIds?: number[];
   mergedIntoId?: number;
+  /** A test record (D9). Omitted when false. */
+  isTest?: boolean;
   revision: number;
   status: "complete" | "draft" | "merged";
   title?: string;
@@ -164,7 +167,7 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
     `SELECT i.Id, i.BuildingId, b.BuildingName, i.Title, i.Status, i.Revision,
             i.CreatedAt, i.CreatedById, i.CreatedByName,
             i.LastModifiedAt, i.CompletedAt, i.CompletedById, i.CompletedByName,
-            i.MergedIntoId
+            i.MergedIntoId, i.IsTest
      FROM dbo.Inspections i
      JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
      WHERE i.Id = @Id`,
@@ -315,6 +318,7 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
     };
   }
   if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
+  if (i.IsTest === true || i.IsTest === 1) out.isTest = true;
   if (mergeSourceRows.length > 0) {
     out.mergedFromIds = mergeSourceRows.map((r) => r.SourceInspectionId as number);
   }
@@ -371,11 +375,12 @@ export async function getInspections(
       `SELECT i.Id, i.BuildingId, b.BuildingName, i.Title, i.Status, i.Revision,
               i.CreatedAt, i.CreatedById, i.CreatedByName,
               i.LastModifiedAt, i.CompletedAt, i.CompletedById, i.CompletedByName,
-              i.MergedIntoId
+              i.MergedIntoId, i.IsTest
        FROM dbo.Inspections i
        JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
+       WHERE (i.IsTest = 0 OR @ShowTest = 1)
        ORDER BY i.Id DESC`,
-      [],
+      [await showTestParam(request)],
     );
 
     // Pull structural counts for the list view. The aggregates GROUP BY
@@ -486,6 +491,7 @@ export async function getInspections(
           };
         }
         if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
+        if (i.IsTest === true || i.IsTest === 1) out.isTest = true;
         return out;
       });
 
@@ -554,13 +560,17 @@ async function createInspection(
     // Audit identity comes from the verified token, not unverified JWT claims.
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
+    // D9: admins and directors may create a test inspection; an admin's "[TEST]" title does too.
+    const testFlag = await testFlagForCreate(request, body?.IsTest, Title);
+    if ("error" in testFlag) return testFlag.error;
     connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO dbo.Inspections (BuildingId, Title, CreatedById, CreatedByName)
+      `INSERT INTO dbo.Inspections (BuildingId, Title, CreatedById, CreatedByName, IsTest)
        OUTPUT INSERTED.Id
-       VALUES (@BuildingId, @Title, @CreatedById, @CreatedByName)`,
+       VALUES (@BuildingId, @Title, @CreatedById, @CreatedByName, @IsTest)`,
       [
+        { name: "IsTest",        type: TYPES.Bit,       value: testFlag.isTest },
         { name: "BuildingId",    type: TYPES.Int,       value: BuildingId },
         { name: "Title",         type: TYPES.NVarChar,  value: Title ?? null },
         { name: "CreatedById",   type: TYPES.NVarChar,  value: caller.id },
@@ -1676,6 +1686,7 @@ export async function raiseJobsFromInspection(
     // Hydrate inspection state from the DB — never trust the client for the
     // text/level/room fields that go onto a real Job.
     const inspection = await loadInspection(connection, inspectionId);
+    const inspectionIsTest = inspection?.isTest === true;
     if (!inspection) {
       return { status: 404, jsonBody: { error: "Inspection not found" } };
     }
@@ -1758,16 +1769,18 @@ export async function raiseJobsFromInspection(
              BuildingID, Title, Description, AssignedTo, Status, AwaitingRole,
              CreationMethod, CreatedBy,
              SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
-             LevelName, ExactLocation, [Type], SubType, Priority
+             LevelName, ExactLocation, [Type], SubType, Priority, IsTest
            )
            OUTPUT INSERTED.JobID
            VALUES (
              @BuildingID, @Title, @Description, @AssignedTo, 'New', 'facilities',
              'inspection', @CreatedBy,
              @SourceInspectionId, @SourceInspectionRoomId, @SourceInspectionPointId,
-             @LevelName, @ExactLocation, @JobType, @SubType, @Priority
+             @LevelName, @ExactLocation, @JobType, @SubType, @Priority, @IsTest
            )`,
           [
+            // A job raised from a test inspection is a test job (D9).
+            { name: "IsTest", type: TYPES.Bit, value: inspectionIsTest },
             { name: "BuildingID",              type: TYPES.Int,      value: inspection.buildingId },
             { name: "Title",                   type: TYPES.NVarChar, value: title },
             { name: "Description",             type: TYPES.NVarChar, value: description },

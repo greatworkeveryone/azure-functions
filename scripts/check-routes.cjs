@@ -99,6 +99,19 @@ function createAnalyzer() {
   return { load };
 }
 
+/** A top-level const's initializer by name, in this module or the one it is imported from. */
+function constOf(analyzer, file, name) {
+  const mod = analyzer.load(file);
+  if (mod.consts.has(name)) return { file, node: mod.consts.get(name) };
+  if (mod.imports.has(name)) {
+    const imp = mod.imports.get(name);
+    const target = resolveModule(file, imp.spec);
+    const other = target && analyzer.load(target);
+    if (other && other.consts.has(imp.exported)) return { file: target, node: other.consts.get(imp.exported) };
+  }
+  return null;
+}
+
 /**
  * Role names from a requireRole() allowed-roles argument, following constants,
  * spreads and parameters (a helper such as authorize(request, roles) passes the
@@ -123,6 +136,30 @@ function rolesOf(analyzer, file, arg, bindings = new Map(), depth = 0) {
       const target = resolveModule(file, imp.spec);
       const other = target && analyzer.load(target);
       if (other && other.consts.has(imp.exported)) return rolesOf(analyzer, target, other.consts.get(imp.exported), new Map(), depth + 1);
+    }
+    return ["?"];
+  }
+  // A gate read from a table, e.g. ACTION_ROLES.createQuote.gate (src/action-roles.ts):
+  // follow the base constant into its object literal, property by property.
+  if (ts.isPropertyAccessExpression(node)) {
+    const path = [];
+    let base = node;
+    while (ts.isPropertyAccessExpression(base)) {
+      path.unshift(base.name.text);
+      base = base.expression;
+    }
+    if (ts.isIdentifier(base)) {
+      const found = constOf(analyzer, file, base.text);
+      let value = found && found.node;
+      for (const key of path) {
+        while (value && (ts.isAsExpression(value) || ts.isParenthesizedExpression(value) || (ts.isSatisfiesExpression && ts.isSatisfiesExpression(value)))) {
+          value = value.expression;
+        }
+        if (!value || !ts.isObjectLiteralExpression(value)) { value = null; break; }
+        const prop = value.properties.find((p) => ts.isPropertyAssignment(p) && p.name.getText() === key);
+        value = prop ? prop.initializer : null;
+      }
+      if (value) return rolesOf(analyzer, found.file, value, new Map(), depth + 1);
     }
     return ["?"];
   }

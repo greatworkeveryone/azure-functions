@@ -1,12 +1,15 @@
-// GET /api/getScheduleChanges?tenantId=&state=
+// GET /api/getScheduleChanges?requestId=&tenantId=&state=
 //
 // Schedule change requests (PLAN WP26c), newest first. Filters combine with
 // AND; give at least one:
+//   requestId one request (the director's page, /tenancy/changes/{requestId}):
+//             read by its key, so an old link never depends on the list's limit
 //   tenantId  one tenancy's requests, every state (the schedule panel's history)
 //   state     one state, or several: state=pending,ratified or state=pending&state=ratified
 // 200 { asOf, changes: ScheduleChangeDto[], pendingChanges: { count, items }, truncated? }:
-// pendingChanges are everything awaiting a decision for the tenancy named, else
-// every tenancy (reviews awaiting approval included).
+// pendingChanges are everything awaiting a decision for the tenancy named (with
+// requestId, the request's own tenancy; none when there is no such request),
+// else every tenancy (reviews awaiting approval included).
 //
 // Gate: the roles that may read a tenancy (scheduleChange/http.ts CHANGE_VIEW_ROLES).
 
@@ -22,8 +25,15 @@ import { CHANGE_LIST_LIMIT, type ChangeFilters, loadChanges } from "../scheduleC
 import { SCHEDULE_CHANGE_STATES, type ScheduleChangeState } from "../scheduleChange/types";
 
 const INT_MAX = 2_147_483_647;
+const REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
 function readFilters(query: URLSearchParams): ChangeFilters {
+  const rawRequestId = query.get("requestId");
+  let requestId: string | undefined;
+  if (rawRequestId !== null && rawRequestId.trim() !== "") {
+    requestId = rawRequestId.trim();
+    if (!REQUEST_ID_RE.test(requestId)) throw new RentReviewError("bad_request", "requestId must be a schedule change's id");
+  }
   const raw = query.get("tenantId");
   let tenantId: number | undefined;
   if (raw !== null && raw.trim() !== "") {
@@ -38,8 +48,10 @@ function readFilters(query: URLSearchParams): ChangeFilters {
   const unknown = requested.find((value) => !(SCHEDULE_CHANGE_STATES as readonly string[]).includes(value));
   if (unknown !== undefined) throw new RentReviewError("bad_request", `state "${unknown}" isn't one of ${SCHEDULE_CHANGE_STATES.join(", ")}`);
   const states = requested.length > 0 ? ([...new Set(requested)] as ScheduleChangeState[]) : undefined;
-  if (tenantId === undefined && states === undefined) throw new RentReviewError("bad_request", "Give a tenantId or a state to list schedule changes for");
-  return { states, tenantId };
+  if (requestId === undefined && tenantId === undefined && states === undefined) {
+    throw new RentReviewError("bad_request", "Give a requestId, a tenantId or a state to list schedule changes for");
+  }
+  return { requestId, states, tenantId };
 }
 
 export async function getScheduleChanges(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -53,7 +65,9 @@ export async function getScheduleChanges(request: HttpRequest, context: Invocati
     const filters = readFilters(request.query);
     connection = await createRequestConnection(token);
     const rows = await loadChanges(connection, filters);
-    const pending = await loadPendingChanges(connection, filters.tenantId !== undefined ? { tenantId: filters.tenantId } : { all: true }, "full");
+    // One request: the warnings of its own tenancy only, never the whole portfolio's.
+    const scope = filters.requestId !== undefined ? (rows[0] ? Number(rows[0].TenantId) : null) : (filters.tenantId ?? "all");
+    const pending = scope === null ? [] : await loadPendingChanges(connection, scope === "all" ? { all: true } : { tenantId: scope }, "full");
     return {
       jsonBody: {
         asOf: todayInDarwin(),

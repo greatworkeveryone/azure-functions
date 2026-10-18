@@ -9,6 +9,7 @@ import {
 } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { escapeLikePattern, validateSearchQuery } from "../searchUtils";
+import { showTestParam } from "../test-data";
 
 export type SearchResultItem = {
   id: number;
@@ -24,7 +25,7 @@ export type SearchResponse = {
   buildings: SearchResultItem[];
 };
 
-type QueryParams = { likeParam: string; prefixParam: string };
+type QueryParams = { likeParam: string; prefixParam: string; showTest: { name: string; type: typeof TYPES.Bit; value: boolean } };
 
 const TENANTS_SQL = `
   SELECT TOP 5
@@ -36,6 +37,7 @@ const TENANTS_SQL = `
   WHERE (t.LegalName  LIKE @q ESCAPE '\\'
      OR t.TradingName  LIKE @q ESCAPE '\\')
     AND t.ArchivedAt IS NULL
+    AND (t.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN t.LegalName LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     t.LegalName
@@ -43,11 +45,12 @@ const TENANTS_SQL = `
 
 async function queryTenants(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, TENANTS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -65,6 +68,7 @@ const JOBS_SQL = `
   FROM dbo.Jobs j
   LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
   WHERE j.Title LIKE @q ESCAPE '\\'
+    AND (j.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN j.Title LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     j.Title
@@ -72,11 +76,12 @@ const JOBS_SQL = `
 
 async function queryJobs(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, JOBS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -93,9 +98,10 @@ const KEYS_SQL = `
     CONCAT(k.Level, ' · ', b.BuildingName) AS subtitle
   FROM dbo.[Keys] k
   LEFT JOIN dbo.Buildings b ON b.Id = k.BuildingId
-  WHERE k.KeyNumber  LIKE @q ESCAPE '\\'
+  WHERE (k.KeyNumber  LIKE @q ESCAPE '\\'
      OR k.Description LIKE @q ESCAPE '\\'
-     OR k.Level       LIKE @q ESCAPE '\\'
+     OR k.Level       LIKE @q ESCAPE '\\')
+    AND (k.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN k.KeyNumber LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     k.KeyNumber
@@ -103,11 +109,12 @@ const KEYS_SQL = `
 
 async function queryKeys(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, KEYS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -173,6 +180,7 @@ export async function search(
   const params: QueryParams = {
     likeParam: `%${escaped}%`,
     prefixParam: `${escaped}%`,
+    showTest: await showTestParam(request),
   };
 
   let conn;

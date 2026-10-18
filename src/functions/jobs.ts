@@ -19,6 +19,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { checkRateLimit } from "../rateLimit";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
 import { todayInDarwin } from "../darwinDate";
@@ -45,39 +46,13 @@ import {
 import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
+import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
-// Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
-// `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
-// users get the OR with Job.CreatedBy === caller.name (handled inline).
-const ARCHIVE_ANY_JOB_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS_APPROVAL,
-];
-
-// Anyone who can create or edit jobs. Facilities team owns this day-to-day;
-// approval tiers and admin retain ability to fix things.
-const EDIT_JOBS_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS,
-  AppRole.ACCOUNTS_APPROVAL,
-] as const;
-
-// Anyone who can read jobs. Same set for now — read access is gated only to
-// keep unauthorised tenants/contractors out, not internal staff.
-const VIEW_JOBS_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS,
-  AppRole.ACCOUNTS_APPROVAL,
-] as const;
+// Who may edit, read and archive jobs is in the who-can-do-what table
+// (action-roles.ts: editJobs, viewJobs, archiveAnyJob). Plain "facilities"
+// users archive only the jobs they created (handled inline in archiveJob).
 
 // ── Column lists ─────────────────────────────────────────────────────────────
 // Keep one source of truth so SELECT shapes match what the frontend expects.
@@ -99,16 +74,11 @@ const JOB_COLUMNS = `
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
-  IsArchived, ArchivedAt, ArchivedBy,
+  IsArchived, ArchivedAt, ArchivedBy, IsTest,
   CreatedAt, CreatedBy, LastModifiedDate,
-  -- Count of items on this job currently waiting on director sign-off.
-  -- Drives the "Director needed" filter on the Jobs screen. Covers BOTH
-  -- invoices at stage-1 'approved' (awaiting director) and quotes parked
-  -- in 'awaiting_director' after the submitter routed them up.
-  ((SELECT COUNT(*) FROM JobInvoices ji
-      WHERE ji.JobID = Jobs.JobID AND ji.Status = 'approved')
-   + (SELECT COUNT(*) FROM Quotes q
-       WHERE q.JobID = Jobs.JobID AND q.Status = 'awaiting_director')) AS DirectorNeededCount
+  -- What the job's DirectorNeededCount is worked out from (directorNeeded.ts:
+  -- quotes awaiting the director, and stage-1 invoices whose amount needs one).
+  ${DIRECTOR_NEEDED_COLUMNS}
 `;
 
 const JOB_EVENT_COLUMNS = `
@@ -419,7 +389,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const buildingId = request.query.get("buildingId");
@@ -439,6 +409,9 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     whereParts.push("BuildingID = @BuildingID");
     params.push({ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) });
   }
+  // D9: test jobs only with the admin's Show test data on (counts follow).
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
 
   let connection;
   try {
@@ -458,7 +431,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     );
 
     const eventsByJob = await fetchEventsForJobs(connection, jobs.map((j) => j.JobID as number));
-    const payload = jobs.map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
+    const payload = (await withDirectorNeeded(connection, jobs)).map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
 
     // Total is only meaningful when paginating; otherwise count = payload.length.
     let total = payload.length;
@@ -507,7 +480,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const jobId = Number(request.query.get("jobId"));
@@ -559,7 +532,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
     }));
     return {
       status: 200,
-      jsonBody: { job: { ...rows[0], Events: events, PlannerTasks: plannerTasks } },
+      jsonBody: { job: { ...(await withDirectorNeeded(connection, rows))[0], Events: events, PlannerTasks: plannerTasks } },
     };
   } catch (error: any) {
     context.error("getJob failed:", error.message);
@@ -577,7 +550,7 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
 
   // Identity for audit columns (CreatedById, UpdatedBy) must come from the
@@ -709,21 +682,26 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
       // ownership compare on archive/unarchive trusts these, so they must
       // not come from the (forgeable) request body.
       fields.CreatedBy = identity.name;
+      // D9: admins and directors may create a test job; an admin's "[TEST]" title does too.
+      const testFlag = await testFlagForCreate(request, (body as Record<string, unknown>).IsTest, fields.Title as string | null | undefined);
+      if ("error" in testFlag) return testFlag.error;
       const filteredParams = params.filter((p) => p.name !== "CreatedBy");
       filteredParams.push({ name: "CreatedBy", type: TYPES.NVarChar, value: identity.name });
       // Stamp StatusSince at creation (WP18a) so the escalation age clock has a
       // starting point for the New state; SYSUTCDATETIME() is inlined (no param)
       // exactly like LastModifiedDate on the UPDATE path.
       const cols = Object.keys(fields);
-      const insertCols = [...cols, "CreatedById", "StatusSince"].join(", ");
+      const insertCols = [...cols, "CreatedById", "StatusSince", "IsTest"].join(", ");
       const insertVals = [
         ...cols.map((c) => `@${c}`),
         "@CreatedById",
         "SYSUTCDATETIME()",
+        "@IsTest",
       ].join(", ");
       const insertParams: SqlParam[] = [
         ...filteredParams,
         { name: "CreatedById", type: TYPES.NVarChar, value: identity.oid },
+        { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
       ];
 
       await beginTransaction(connection);
@@ -1018,7 +996,7 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
     return {
       status: 200,
       jsonBody: {
-        job: { ...stored[0], Events: events },
+        job: { ...(await withDirectorNeeded(connection, stored))[0], Events: events },
         ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
       },
     };
@@ -1043,7 +1021,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate. Per-job ownership scoping for plain `facilities`
   // users happens further down once we know the job's CreatedById.
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
   // Identity must come from the verified token — the ownership check below
   // compares it against the stored CreatedById, so an unverified value would
@@ -1062,7 +1040,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   }
 
   const userRoles = await rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const canArchiveAny = userRoles.some((r) => (ACTION_ROLES.archiveAnyJob.gate as readonly string[]).includes(r));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
@@ -1161,7 +1139,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate; per-job ownership scoping happens below.
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
   // Identity must come from the verified token — see archiveJob for rationale.
   const identity = await verifiedIdentityFromRequest(request);
@@ -1178,7 +1156,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   }
 
   const userRoles = await rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const canArchiveAny = userRoles.some((r) => (ACTION_ROLES.archiveAnyJob.gate as readonly string[]).includes(r));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
@@ -1272,7 +1250,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
 
   // CreatedBy on the JobEvents row must come from the verified token. The
@@ -1637,7 +1615,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
-    return { status: 200, jsonBody: { event: eventRow[0], job: jobRow[0] } };
+    return { status: 200, jsonBody: { event: eventRow[0], job: (await withDirectorNeeded(connection, jobRow))[0] } };
   } catch (error: any) {
     context.error("addJobEvent failed:", error.message);
     return errorResponse("Add event failed", error.message);
@@ -1660,7 +1638,7 @@ async function getJobPacketPdf(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const jobIdStr = request.params.jobId;

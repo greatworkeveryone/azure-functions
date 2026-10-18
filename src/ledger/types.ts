@@ -24,8 +24,10 @@ export type LedgerSubjectType =
   | "defects_period"
   | "escalation"
   | "incentive"
+  | "inspection"
   | "invoice"
   | "job"
+  | "key"
   | "lease_event"
   | "misc_fee"
   | "myob_control"
@@ -39,7 +41,8 @@ export type LedgerSubjectType =
   | "rent_review"
   | "schedule_change"
   | "service_schedule"
-  | "tenancy";
+  | "tenancy"
+  | "vacancy";
 
 export type LedgerActor =
   /** A signed-in person; `role` is their AppUsers.Role when they decided. */

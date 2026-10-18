@@ -3,6 +3,7 @@ import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { getGraphToken } from "./graph";
 import { PLANNER_SYNC_DISABLED_MESSAGE, plannerSyncEnabled } from "./plannerFlag";
 import type { TriggerType } from "./plannerHelpers";
+import { assertMayLeave, type EgressSubject } from "./test-data";
 
 // Every Graph call below is behind PLANNER_SYNC_ENABLED (see plannerFlag.ts).
 // The orchestrators (reconcilers, timer, resolveActivePlannerTasks) check it first
@@ -89,6 +90,8 @@ export async function graphGetGroupMembers(groupId: string): Promise<string[]> {
 }
 
 export interface CreatePlannerTaskParams {
+  /** What the task is about; a test record never reaches Planner (D9). */
+  egress: EgressSubject;
   planId: string;
   bucketId: string;
   title: string;
@@ -101,6 +104,7 @@ export async function graphCreatePlannerTask(
   params: CreatePlannerTaskParams,
 ): Promise<string> {
   requirePlannerSyncEnabled("graphCreatePlannerTask");
+  assertMayLeave("planner", params.egress);
   const token = await getGraphToken();
   const { planId, bucketId, title, dueDate, assigneeIds, description } = params;
 

@@ -19,6 +19,7 @@ import {
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { fetchInvoices, MyInvoice } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, rolesForRequest, verifiedIdentityFromRequest } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { resolveActivePlannerTasks } from "../planner";
@@ -47,6 +48,7 @@ import { sendDirectorRequest } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
+import { TestDataEgressError, testRecordResponse } from "../test-data";
 
 // Approval limits and the director gate live in the approval-authority core
 // (src/approvalAuthority.ts, J1); ApprovalLimit rows in approval-limits-db.ts.
@@ -188,7 +190,7 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  const denied = await requireRole(request, ACTION_ROLES.viewInvoices.gate);
   if (denied) return denied;
 
   let connection;
@@ -310,7 +312,7 @@ async function getJobInvoices(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  const denied = await requireRole(request, ACTION_ROLES.viewInvoices.gate);
   if (denied) return denied;
 
   const jobId = request.query.get("jobId");
@@ -356,7 +358,7 @@ export async function upsertJobInvoice(
   // restricting create/edit to manager-only forced extra hand-offs without
   // changing the control surface. Facilities managers also need to attach
   // invoices that land in their inbox before accounts has seen them.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.createInvoice.gate);
   if (denied) return denied;
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -815,9 +817,6 @@ function invoiceRefusal(refusal: MoneyRefusal, invoiceStatus: string | null): In
   };
 }
 
-/** Who may press Approve on an invoice: every role the authority core lets approve one (J1). */
-const APPROVE_INVOICE_ROLES = SUBJECT_ELIGIBLE_ROLES.invoice as readonly AppRole[];
-
 async function approveInvoiceInTransaction(
   connection: Connection,
   input: { actor: LedgerActor; approvedBy: string; correlationId: string; email: string; invoiceId: number; userRoles: string[] },
@@ -956,7 +955,7 @@ async function approveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, APPROVE_INVOICE_ROLES);
+  const denied = await requireRole(request, ACTION_ROLES.approveInvoice.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, APPROVE_INVOICE_TARGET);
     return denied;
@@ -1081,7 +1080,7 @@ async function directorApproveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  const denied = await requireRole(request, ACTION_ROLES.approveInvoiceAsDirector.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, DIRECTOR_APPROVE_INVOICE_TARGET);
     return denied;
@@ -1262,7 +1261,7 @@ async function undoDirectorApproveJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.DIRECTOR]);
+  const denied = await requireRole(request, ACTION_ROLES.approveInvoiceAsDirector.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNDO_DIRECTOR_APPROVE_INVOICE_TARGET);
     return denied;
@@ -1461,7 +1460,7 @@ async function rejectJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.rejectInvoice.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, REJECT_INVOICE_TARGET);
     return denied;
@@ -1605,7 +1604,7 @@ async function markJobInvoiceMyobCreated(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.markInvoiceInMyob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, MARK_INVOICE_MYOB_TARGET);
     return denied;
@@ -1777,7 +1776,7 @@ async function unmarkJobInvoiceMyobCreated(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.markInvoiceInMyob.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, UNMARK_INVOICE_MYOB_TARGET);
     return denied;
@@ -1937,7 +1936,7 @@ async function deleteJobInvoice(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.ACCOUNTS_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.deleteInvoice.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, DELETE_INVOICE_TARGET);
     return denied;
@@ -2058,7 +2057,7 @@ async function resendDirectorInvoiceEmail(
   // means a stalled approval can only be self-chased. Open this to the
   // workflow participants (accounts + facilities) so they can re-trigger
   // the email when the director hasn't acted.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES]);
+  const denied = await requireRole(request, ACTION_ROLES.resendDirectorEmail.gate);
   if (denied) {
     await recordRoleRefusal(request, token, denied, RESEND_DIRECTOR_INVOICE_TARGET);
     return denied;
@@ -2115,6 +2114,7 @@ async function resendDirectorInvoiceEmail(
     );
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {
+    if (error instanceof TestDataEgressError) return testRecordResponse();
     context.error("resendDirectorInvoiceEmail failed:", error.message);
     return errorResponse("Resend director invoice email failed", error.message);
   } finally {

@@ -155,7 +155,8 @@ describe("getReviewsDue", () => {
     const [, sql, params] = db.executeQuery.mock.calls[0] as [unknown, string, unknown[]];
     expect(sql).toContain("NextReviewDate");
     expect(sql).not.toContain("WHERE BuildingId = @BuildingId");
-    expect(params).toEqual([]);
+    // Only the Show test data toggle (D9), off.
+    expect(params).toEqual([expect.objectContaining({ name: "ShowTest", value: false })]);
   });
 
   it("filters by buildingId when supplied", async () => {
@@ -175,7 +176,7 @@ describe("getReviewsDue", () => {
       Array<{ name: string; value: unknown }>,
     ];
     expect(sql).toContain("WHERE BuildingId = @BuildingId");
-    expect(params).toHaveLength(1);
+    expect(params).toHaveLength(2);
     expect(params[0].name).toBe("BuildingId");
     expect(params[0].value).toBe(9);
   });

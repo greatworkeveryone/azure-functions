@@ -345,6 +345,15 @@ describe("who it is asked of the second time", () => {
     expect(reaskMakers(original({ assignmentMode: "role", decisionMakers: { role: "director", userIds: [DEE.userId] } }), USERS).userIds).toEqual([DEE.userId, ELI.userId]);
     expect(reaskMakers(original({ decisionMakers: { role: null, userIds: [CAM.userId, 99] } }), USERS).userIds).toEqual([CAM.userId]);
   });
+
+  it("reaskMakers: an admin a deferred request named (from before admin could not be asked) is not asked again, and a request to nobody else comes back as a 422", () => {
+    const ADA = user(7, "Ada", "admin");
+    const directory = [...USERS, ADA];
+    expect(reaskMakers(original({ decisionMakers: { role: null, userIds: [ADA.userId, DEE.userId] } }), directory).userIds).toEqual([DEE.userId]);
+    expect(() => reaskMakers(original({ decisionMakers: { role: null, userIds: [ADA.userId] } }), directory)).toThrow(
+      expect.objectContaining({ code: "decision_maker_unknown", status: 422 }),
+    );
+  });
 });
 
 describe("exactly once", () => {

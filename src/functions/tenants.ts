@@ -14,6 +14,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { deleteTenancyDraft, TENANCY_DELETE_ROLES } from "../tenancy-records";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { invalidateTenant, invalidateTenantAndBuilding } from "../tenant-register-cache";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 interface CallerRef { id: string; name: string }
 
@@ -62,6 +63,9 @@ async function getTenants(
     whereParts.push("t.TenantId = @TenantId");
     params.push({ name: "TenantId", type: TYPES.Int, value: Number(tenantId) });
   }
+  // Test tenancies (D9) only with the admin's Show test data on.
+  whereParts.push("(t.IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
   const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
   let connection;
@@ -127,16 +131,20 @@ async function upsertTenant(
       if (typeof BuildingID !== "number") {
         return { status: 400, jsonBody: { error: "BuildingID (number) required" } };
       }
+      // D9: admins and directors may create a test tenancy; an admin's "[TEST]" name does too.
+      const testFlag = await testFlagForCreate(request, body?.IsTest, TenantName);
+      if ("error" in testFlag) return testFlag.error;
       const inserted = await executeQuery(
         connection,
         `INSERT INTO dbo.Tenants (
             BuildingId, LegalName, MyobId, RentBasis, ReviewType, Status,
-            CreatedById, CreatedByName, UpdatedById, UpdatedByName
+            CreatedById, CreatedByName, UpdatedById, UpdatedByName, IsTest
          )
          OUTPUT INSERTED.TenantId
          VALUES (@BuildingId, @LegalName, @MyobId, 'fixedAnnual', 'none', 'current',
-                 @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName)`,
+                 @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName, @IsTest)`,
         [
+          { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
           { name: "BuildingId", type: TYPES.Int, value: BuildingID },
           { name: "LegalName", type: TYPES.NVarChar, value: TenantName.trim() },
           { name: "MyobId", type: TYPES.NVarChar, value: ThirdPartyTenantID ?? null },

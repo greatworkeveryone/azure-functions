@@ -329,6 +329,24 @@ export async function verifiedRequestClaims(request: HttpRequest): Promise<Recor
  *     call site can gate on `[AppRole.USER]` to mean "any authenticated app
  *     user" without enumerating every operational role.
  */
+/**
+ * Whether these roles pass a requireRole gate on `allowed`, by the hierarchy
+ * described on requireRole. Pure, so the who-can-do-what table
+ * (action-roles.ts) works out each action's roles by the same rule.
+ */
+export function rolesPassGate(roles: readonly string[], allowed: readonly AppRole[]): boolean {
+  if (roles.includes(AppRole.ADMIN)) return true;
+  // Baseline tier: any assigned, active role satisfies a [USER] gate.
+  if (allowed.includes(AppRole.USER) && roles.length > 0) return true;
+  if (roles.includes(AppRole.DIRECTOR) && allowed.some((r) => r !== AppRole.ADMIN)) return true;
+  if (roles.includes(AppRole.CFO) && (allowed.includes(AppRole.ACCOUNTS_APPROVAL) || allowed.includes(AppRole.ACCOUNTS))) {
+    return true;
+  }
+  if (roles.includes(AppRole.FACILITIES_APPROVAL) && allowed.includes(AppRole.FACILITIES)) return true;
+  if (roles.includes(AppRole.ACCOUNTS_APPROVAL) && allowed.includes(AppRole.ACCOUNTS)) return true;
+  return roles.some((r) => allowed.includes(r as AppRole));
+}
+
 export async function requireRole(
   request: HttpRequest,
   allowed: readonly AppRole[],
@@ -349,32 +367,7 @@ export async function requireRole(
   const bearer = extractToken(request);
   noteAccess(request, bearer ? oidFromToken(bearer) : null, roles);
 
-  if (roles.includes(AppRole.ADMIN)) return null;
-
-  // Baseline tier: any assigned, active role satisfies a [USER] gate.
-  if (allowed.includes(AppRole.USER) && roles.length > 0) return null;
-
-  if (
-    roles.includes(AppRole.DIRECTOR) &&
-    allowed.some((r) => r !== AppRole.ADMIN)
-  ) return null;
-
-  if (
-    roles.includes(AppRole.CFO) &&
-    (allowed.includes(AppRole.ACCOUNTS_APPROVAL) || allowed.includes(AppRole.ACCOUNTS))
-  ) return null;
-
-  if (
-    roles.includes(AppRole.FACILITIES_APPROVAL) &&
-    allowed.includes(AppRole.FACILITIES)
-  ) return null;
-
-  if (
-    roles.includes(AppRole.ACCOUNTS_APPROVAL) &&
-    allowed.includes(AppRole.ACCOUNTS)
-  ) return null;
-
-  if (roles.some((r) => allowed.includes(r as AppRole))) return null;
+  if (rolesPassGate(roles, allowed)) return null;
 
   return forbiddenResponse(
     `Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`,

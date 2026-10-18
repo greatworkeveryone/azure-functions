@@ -121,6 +121,15 @@ rest. It is numbered below applied migrations, so the runner applies it out of o
 with a warning only. Apply it before deploying WP26c's backend: the register reads
 select its new columns.
 
+WP26c fixes (18 Oct 2026, both repos): deploy the backend before or with the
+frontend, never the pre-fix WP26c frontend (d088691) with the fixed backend,
+because Approve now sends the tenancy's schedule version (an older frontend gets
+400). Before go-live run this read-only check and fix any row it returns; such a
+tenancy cannot be approved until its reliefs are a JSON array or null:
+`SELECT TenantId FROM dbo.Tenants WHERE RentReliefs IS NOT NULL AND (ISJSON(RentReliefs) = 0 OR LEFT(LTRIM(RentReliefs),1) <> '[')`.
+A pending relief that runs past its lease's expiry is refused at approval
+(`outside_lease`); the director rejects it. Turn the `rentReviews` flag on last.
+
 Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, before
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest
 tolerates a database without it.

@@ -14,10 +14,11 @@ import { rejectScheduleChange } from "../functions/rejectScheduleChange";
 import { requestScheduleChange } from "../functions/requestScheduleChange";
 import { withdrawScheduleChange } from "../functions/withdrawScheduleChange";
 import { addDaysIso, daysBetweenIso } from "../darwinDate";
+import { formatDisplayDate } from "../digest/format";
 import { arrearsFor } from "../rentReview/arrears";
 import { parseReliefs, type RentRelief } from "../scheduleCharges";
 import { getRequest, postRequest } from "./fixtures/rentReviewFakes";
-import { PEOPLE, REVIEW_DATE, seed, TODAY, type Person } from "./fixtures/rentReviewScenario";
+import { COMMENCED, PEOPLE, REVIEW_DATE, seed, TODAY, type Person } from "./fixtures/rentReviewScenario";
 import { ReviewWorld, useWorld } from "./fixtures/rentReviewWorld";
 
 jest.mock("../db", () => ({
@@ -178,12 +179,11 @@ describe("requestScheduleChange", () => {
     const res = await ask();
     expect(res.status).toBe(409);
     expect(bodyOf(res)).toMatchObject({ code: "relief_overlap", overlaps: { requestId: "old-relief", state: "ratified" } });
-    expect(bodyOf(res).error).toMatch(/already ratified/);
+    expect(bodyOf(res).error).toMatch(/already approved for/);
   });
 
   it.each([
     ["a charge the tenancy hasn't got", { relief: { ...RELIEF, scope: ["ahac"] } }, "nothing_to_relieve", /no after-hours air-conditioning/],
-    ["a day before the schedule starts", { relief: { ...RELIEF, from: "2000-01-01", to: "2000-02-01" } }, "nothing_to_relieve", /charges no rent on 01\/01\/2000/],
     ["more off than the rent", { relief: { ...RELIEF, kind: "amount", value: RENT + 1 } }, "relief_too_large", /more than the rent/],
     ["a fixed rent that isn't lower", { relief: { ...RELIEF, kind: "fixed_rent", value: RENT } }, "not_a_reduction", /isn't below/],
   ])("refuses %s (422)", async (_label, over, code, message) => {
@@ -192,6 +192,53 @@ describe("requestScheduleChange", () => {
     expect(bodyOf(res)).toMatchObject({ code });
     expect(bodyOf(res).error).toMatch(message);
     expect(world.state.changes).toHaveLength(0);
+  });
+
+  it("refuses a day before the schedule starts when the lease's commencement isn't recorded (422 nothing_to_relieve)", async () => {
+    world.tenant(7).Commencement = null;
+    const res = await ask({ relief: { ...RELIEF, from: "2000-01-01", to: "2000-02-01" } });
+    expect(res.status).toBe(422);
+    expect(bodyOf(res)).toMatchObject({ code: "nothing_to_relieve" });
+    expect(bodyOf(res).error).toMatch(/charges no rent on 01\/01\/2000/);
+  });
+
+  // WP26c review, finding 6. Holdover (a tenancy staying on past its expiry) is
+  // refused too until Connor decides whether it can carry a relief.
+  describe("a relief outside the lease's dates (422 outside_lease)", () => {
+    const expiry = () => String(world.tenant(7).Expiry);
+
+    it("refuses one that runs past the lease's expiry, in plain words, and keeps nothing", async () => {
+      const to = addDaysIso(expiry(), 1);
+      const res = await ask({ relief: { ...RELIEF, to } });
+      expect(res.status).toBe(422);
+      expect(bodyOf(res)).toMatchObject({ code: "outside_lease", leaseExpiry: expiry() });
+      expect(bodyOf(res).error).toBe(
+        `This relief runs to ${formatDisplayDate(to)}, after the lease ends on ${formatDisplayDate(expiry())}. A relief has to end by the lease's last day.`,
+      );
+      expect(world.state.changes).toHaveLength(0);
+      expect(world.state.ledger).toHaveLength(0);
+    });
+
+    it("takes one that ends on the lease's last day", async () => {
+      expect((await ask({ relief: { ...RELIEF, to: expiry() } })).status).toBe(201);
+    });
+
+    it("refuses one that starts before the lease commences", async () => {
+      const from = addDaysIso(COMMENCED, -1);
+      const res = await ask({ relief: { ...RELIEF, from, to: addDaysIso(COMMENCED, 30) } });
+      expect(res.status).toBe(422);
+      expect(bodyOf(res)).toMatchObject({ code: "outside_lease", leaseCommencement: COMMENCED });
+      expect(bodyOf(res).error).toBe(
+        `This relief starts on ${formatDisplayDate(from)}, before the lease starts on ${formatDisplayDate(COMMENCED)}. A relief has to start on or after the lease's first day.`,
+      );
+    });
+
+    it("refuses a tenancy holding over: any relief after its expiry", async () => {
+      world.tenant(7).Expiry = DAY(5);
+      const res = await ask();
+      expect(res.status).toBe(422);
+      expect(bodyOf(res)).toMatchObject({ code: "outside_lease" });
+    });
   });
 
   it("takes an amount off the rent or a fixed rent below it", async () => {
@@ -226,7 +273,7 @@ describe("requestScheduleChange", () => {
 
 describe("ratifyScheduleChange", () => {
   const ratify = (requestId: string, over: Record<string, unknown> = {}, person: Person = PEOPLE.dee) =>
-    call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), ...over }, person);
+    call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), scheduleVersion: Number(world.tenant(7).ScheduleVersion), ...over }, person);
 
   it("writes the relief onto the schedule in one transaction, keeps the sign-off and ledgers the charge forgone", async () => {
     const requestId = await asked();
@@ -280,7 +327,7 @@ describe("ratifyScheduleChange", () => {
     const requestId = await asked();
     const res = await ratify(requestId, {}, PEOPLE.ada);
     expect(res.status).toBe(403);
-    expect(bodyOf(res)).toMatchObject({ code: "forbidden" });
+    expect(bodyOf(res)).toMatchObject({ code: "forbidden", error: "Only a director can approve a schedule change" });
     expect(world.change(requestId).State).toBe("pending");
     expect(world.tenant(7).RentReliefs ?? null).toBeNull();
     expect(ledgerOf("denied")).toEqual([expect.objectContaining({ ActorName: "Ada Admin", RuleApplied: "not_director", SubjectId: requestId, SubjectType: "schedule_change" })]);
@@ -297,9 +344,9 @@ describe("ratifyScheduleChange", () => {
   it("can't ratify twice", async () => {
     const requestId = await asked();
     expect((await ratify(requestId)).status).toBe(200);
-    const again = await ratify(requestId);
+    const again = await ratify(requestId, { rowVersion: versionOfChange(requestId) });
     expect(again.status).toBe(409);
-    expect(bodyOf(again)).toMatchObject({ code: "invalid_state" });
+    expect(bodyOf(again)).toMatchObject({ code: "invalid_state", error: "This change has been approved, so it can't be approved" });
     expect(parseReliefs(String(world.tenant(7).RentReliefs))).toHaveLength(1);
   });
 
@@ -326,7 +373,96 @@ describe("ratifyScheduleChange", () => {
   });
 
   it("is a 404 for a request that doesn't exist", async () => {
-    expect((await call(ratifyScheduleChange, { requestId: "nope", rowVersion: "0000000000000001" }, PEOPLE.dee)).status).toBe(404);
+    expect((await call(ratifyScheduleChange, { requestId: "nope", rowVersion: "0000000000000001", scheduleVersion: 4 }, PEOPLE.dee)).status).toBe(404);
+  });
+
+  // WP26c review, finding 5: the director's figures are the schedule's as their page read it.
+  it("is a 409 stale_schedule when the schedule moved since the director's page read it, and changes nothing", async () => {
+    const requestId = await asked();
+    const seenVersion = Number(world.tenant(7).ScheduleVersion);
+    // A row edited, or a review applied, after the page loaded: the version moves, the request's doesn't.
+    Object.assign(world.tenant(7), { ScheduleVersion: seenVersion + 1, UpdatedByName: "Bo Manager" });
+    const res = await ratify(requestId, { scheduleVersion: seenVersion });
+    expect(res.status).toBe(409);
+    expect(bodyOf(res)).toEqual({
+      code: "stale_schedule",
+      error: "This tenancy's schedule was changed by Bo Manager since you opened it. Reload it and check the figures before approving.",
+      scheduleVersion: seenVersion + 1,
+    });
+    expect(world.change(requestId).State).toBe("pending");
+    expect(world.tenant(7).RentReliefs ?? null).toBeNull();
+    expect(ledgerOf("schedule.change_ratified")).toHaveLength(0);
+    expect((await ratify(requestId)).status).toBe(200);
+  });
+
+  it("needs the scheduleVersion the director's page read", async () => {
+    const requestId = await asked();
+    const res = await ratify(requestId, { scheduleVersion: undefined });
+    expect(res.status).toBe(400);
+    expect(bodyOf(res).error).toMatch(/scheduleVersion is required/);
+    expect(world.change(requestId).State).toBe("pending");
+  });
+
+  it("refuses a relief that now runs past the lease's expiry (outside_lease), so the director rejects it", async () => {
+    const requestId = await asked();
+    world.tenant(7).Expiry = DAY(50);
+    const res = await ratify(requestId);
+    expect(res.status).toBe(422);
+    expect(bodyOf(res)).toMatchObject({ code: "outside_lease" });
+    expect(bodyOf(res).error).toBe(
+      `This relief runs to ${formatDisplayDate(RELIEF.to)}, after the lease ends on ${formatDisplayDate(DAY(50))}. A relief has to end by the lease's last day. Reject it, and ask again with dates inside the lease.`,
+    );
+    expect(world.change(requestId).State).toBe("pending");
+  });
+
+  // WP26c review, finding 4 (database-safety rule 7): ratifying appends to the
+  // stored array; it never rebuilds it from what today's code can read.
+  describe("Tenants.RentReliefs is appended to, never rebuilt", () => {
+    const unknownField = { endedEarlyOn: DAY(220), from: DAY(200), id: "old-unknown", kind: "percent", scope: ["rent"], to: DAY(230), value: 10 };
+    const rejectedToday = { from: DAY(300), id: "old-rejected", kind: "rebate", scope: ["rent"], to: DAY(330), value: 5 };
+    const raw = `[\n  ${JSON.stringify(unknownField)},\n  ${JSON.stringify(rejectedToday)}\n]\n`;
+
+    it("keeps an entry with a field it doesn't know and one today's rules reject, byte for byte, and ledgers the whole array as it was", async () => {
+      expect(parseReliefs(raw).map((relief) => relief.id)).toEqual(["old-unknown"]);
+      world.tenant(7).RentReliefs = raw;
+      const requestId = await asked();
+      expect((await ratify(requestId)).status).toBe(200);
+
+      const stored = String(world.tenant(7).RentReliefs);
+      expect(stored.startsWith(raw.slice(0, raw.lastIndexOf("]")))).toBe(true);
+      expect(stored.endsWith("]\n")).toBe(true);
+      const entries = JSON.parse(stored) as Array<Record<string, unknown>>;
+      expect(entries).toHaveLength(3);
+      expect(entries[0]).toEqual(unknownField);
+      expect(entries[1]).toEqual(rejectedToday);
+      expect(entries[2]).toMatchObject({ ...RELIEF, id: requestId, ratifiedByName: "Dee Director" });
+      expect(ledgerOf("schedule.change_ratified")[0].before).toEqual({ rentReliefs: [unknownField, rejectedToday], scheduleVersion: 4, state: "pending" });
+
+      // A later ratification keeps all three as they are now.
+      const second = await asked({ relief: { ...RELIEF, from: DAY(400), to: DAY(430) }, scheduleVersion: Number(world.tenant(7).ScheduleVersion) });
+      expect((await ratify(second)).status).toBe(200);
+      const after = String(world.tenant(7).RentReliefs);
+      expect(after.startsWith(stored.slice(0, stored.lastIndexOf("]")))).toBe(true);
+      expect((JSON.parse(after) as unknown[]).slice(0, 3)).toEqual(entries);
+    });
+
+    it.each([
+      ["an object", '{"id":"x"}'],
+      ["text that isn't JSON", "[{"],
+      ["a JSON string", '"[]"'],
+    ])("refuses (422) when the column holds %s, and writes nothing over it", async (_label, value) => {
+      world.tenant(7).RentReliefs = value;
+      const requestId = await asked();
+      const res = await ratify(requestId);
+      expect(res.status).toBe(422);
+      expect(bodyOf(res)).toEqual({
+        code: "unreadable_reliefs",
+        error: "The rent reliefs already stored on this tenancy can't be read, so nothing was changed. Ask an administrator to check the tenancy's record before approving this.",
+      });
+      expect(world.tenant(7).RentReliefs).toBe(value);
+      expect(world.tenant(7).ScheduleVersion).toBe(4);
+      expect(world.change(requestId).State).toBe("pending");
+    });
   });
 });
 
@@ -369,6 +505,23 @@ describe("rejectScheduleChange", () => {
     expect((await reject(requestId)).status).toBe(200);
     expect(bodyOf(await reject(requestId))).toMatchObject({ code: "invalid_state" });
   });
+
+  it("says an approved change has been approved", async () => {
+    const requestId = await asked();
+    expect((await call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), scheduleVersion: 4 }, PEOPLE.dee)).status).toBe(200);
+    expect(bodyOf(await reject(requestId))).toMatchObject({ code: "invalid_state", error: "This change has been approved, so it can't be rejected" });
+  });
+
+  it("rolls everything back when the ledger write fails: the request stays pending and nothing else moves", async () => {
+    const requestId = await asked();
+    const picture = world.picture();
+    world.failLedger = (row) => row.Action === "schedule.change_rejected";
+    const res = await reject(requestId);
+    expect(res.status).toBe(500);
+    expect(world.picture()).toBe(picture);
+    expect(world.change(requestId)).toMatchObject({ DecidedByName: null, State: "pending" });
+    expect(escalation.settleRatification).not.toHaveBeenCalled();
+  });
 });
 
 describe("withdrawScheduleChange", () => {
@@ -400,8 +553,19 @@ describe("withdrawScheduleChange", () => {
     const requestId = await asked();
     expect(bodyOf(await withdraw(requestId, { reason: undefined }))).toMatchObject({ code: "reason_required" });
     expect(bodyOf(await withdraw(requestId, { rowVersion: "0000000000000001" }))).toMatchObject({ code: "stale" });
-    expect((await call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId) }, PEOPLE.dee)).status).toBe(200);
-    expect(bodyOf(await withdraw(requestId))).toMatchObject({ code: "invalid_state" });
+    expect((await call(ratifyScheduleChange, { requestId, rowVersion: versionOfChange(requestId), scheduleVersion: 4 }, PEOPLE.dee)).status).toBe(200);
+    expect(bodyOf(await withdraw(requestId))).toMatchObject({ code: "invalid_state", error: "This change has been approved, so it can't be withdrawn" });
+  });
+
+  it("rolls everything back when the ledger write fails: the request stays pending and nothing else moves", async () => {
+    const requestId = await asked();
+    const picture = world.picture();
+    world.failLedger = (row) => row.Action === "schedule.change_withdrawn";
+    const res = await withdraw(requestId);
+    expect(res.status).toBe(500);
+    expect(world.picture()).toBe(picture);
+    expect(world.change(requestId)).toMatchObject({ DecidedByName: null, State: "pending" });
+    expect(escalation.settleRatification).not.toHaveBeenCalled();
   });
 });
 
@@ -420,13 +584,33 @@ describe("getScheduleChanges", () => {
   });
 
   it.each([
-    [{}, /Give a tenantId or a state/],
+    [{}, /Give a requestId, a tenantId or a state/],
+    [{ requestId: "not an id!" }, /requestId must be/],
     [{ state: "lost" }, /isn't one of/],
     [{ tenantId: "x" }, /whole number/],
   ])("refuses %p", async (query, message) => {
     const res = await getScheduleChanges(getRequest(query as Record<string, string>), ctx);
     expect(res.status).toBe(400);
     expect(bodyOf(res).error).toMatch(message);
+  });
+
+  // WP26c review, finding 13: the director's page reads one request by its key.
+  it("reads one request by requestId, with only its own tenancy's warnings", async () => {
+    const first = await asked();
+    const second = await asked({ relief: { ...RELIEF, from: DAY(200), to: DAY(230) } });
+    db.executeQuery.mockClear();
+    const one = await getScheduleChanges(getRequest({ requestId: first }), ctx);
+    expect(one.status).toBe(200);
+    expect(bodyOf(one).changes.map((change: { requestId: string }) => change.requestId)).toEqual([first]);
+    expect(bodyOf(one).pendingChanges.items.map((item: { requestId: string }) => item.requestId).sort()).toEqual([first, second].sort());
+    const sql = db.executeQuery.mock.calls.map(([, text]: [unknown, string]) => text);
+    expect(sql.find((text) => /FROM dbo\.ScheduleChangeRequests c\s+INNER JOIN/.test(text) && /TOP \(@Limit\)/.test(text))).toMatch(/WHERE c\.RequestId = @FilterRequestId/);
+    expect(sql.filter((text) => /WHERE c\.State = N'pending'/.test(text)).every((text) => /AND c\.TenantId = @TenantId/.test(text))).toBe(true);
+
+    const none = await getScheduleChanges(getRequest({ requestId: "no-such-request" }), ctx);
+    expect(bodyOf(none)).toMatchObject({ changes: [], pendingChanges: { count: 0, items: [] } });
+    const combined = await getScheduleChanges(getRequest({ requestId: first, state: "ratified" }), ctx);
+    expect(bodyOf(combined).changes).toEqual([]);
   });
 
   it("is for the roles that may read a tenancy", async () => {

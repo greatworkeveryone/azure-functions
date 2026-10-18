@@ -36,13 +36,15 @@ export type ScheduleChangeErrorCode =
   | "not_a_reduction"
   | "not_found"
   | "nothing_to_relieve"
+  | "outside_lease"
   | "relief_overlap"
   | "relief_too_large"
   | "stale"
   | "stale_schedule"
   | "tenancy_archived"
   | "tenancy_vacated"
-  | "unreadable_change";
+  | "unreadable_change"
+  | "unreadable_reliefs";
 
 const STATUS: Record<ScheduleChangeErrorCode, number> = {
   forbidden: 403,
@@ -52,6 +54,7 @@ const STATUS: Record<ScheduleChangeErrorCode, number> = {
   not_a_reduction: 422,
   not_found: 404,
   nothing_to_relieve: 422,
+  outside_lease: 422,
   relief_overlap: 409,
   relief_too_large: 422,
   stale: 409,
@@ -59,6 +62,7 @@ const STATUS: Record<ScheduleChangeErrorCode, number> = {
   tenancy_archived: 422,
   tenancy_vacated: 422,
   unreadable_change: 422,
+  unreadable_reliefs: 422,
 };
 
 export class ScheduleChangeError extends Error {
@@ -89,12 +93,17 @@ export function refuseClosedTenancy(row: SqlRow): void {
   }
 }
 
-/** The 409 for a change asked for against a schedule that has moved since it was read. */
-export function staleSchedule(tenancy: SqlRow): ScheduleChangeError {
+/** The 409 for a change asked for, or approved, against a schedule that has moved since it was read. */
+export function staleSchedule(tenancy: SqlRow, before: "approving" | "asking again" = "asking again"): ScheduleChangeError {
   const who = typeof tenancy.UpdatedByName === "string" && tenancy.UpdatedByName.trim() !== "" ? tenancy.UpdatedByName.trim() : "someone else";
-  return new ScheduleChangeError("stale_schedule", `This tenancy's schedule was changed by ${who} since you opened it. Reload it and check the figures before asking again.`, {
+  return new ScheduleChangeError("stale_schedule", `This tenancy's schedule was changed by ${who} since you opened it. Reload it and check the figures before ${before}.`, {
     scheduleVersion: Number(tenancy.ScheduleVersion ?? 0),
   });
+}
+
+/** A request's state as people read it: a ratified change was approved by a director. */
+export function stateWords(state: unknown): string {
+  return state === "ratified" ? "approved" : String(state);
 }
 
 /** The 409 for a decision made on a stale read: the current request rides along. */
