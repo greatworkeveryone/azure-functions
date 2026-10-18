@@ -131,6 +131,15 @@ tenancy cannot be approved until its reliefs are a JSON array or null:
 A pending relief that runs past its lease's expiry is refused at approval
 (`outside_lease`); the director rejects it. Turn the `rentReviews` flag on last.
 
+Migration 117 (`117_quote_approval_attribution.sql`, attributed approval + R13
+variance facts) is hand-applied like the rest; it is numbered below applied
+migrations, so the runner applies it out of order with a warning only. Apply it
+before deploying the backend that carries it: without it, PO rises, PO sends and
+invoice approvals above the approved quote, setApprovalFact and the escalation
+sweep's attribution step all fail; plain quote approval keeps working through a
+column probe. `ATTRIBUTED_APPROVAL_ENABLED` stays off until Connor lifts
+decisions 1 and 9 (sprint board, decision 15).
+
 Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, before
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest
 tolerates a database without it.
