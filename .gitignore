@@ -51,6 +51,7 @@ out/
 
 # Azure Functions local settings (contains secrets)
 local.settings.json
+.review-local/
 
 # dotenv environment variable files
 .env
