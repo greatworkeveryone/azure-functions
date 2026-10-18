@@ -85,7 +85,7 @@ export async function linkDirectorReply(conn: Connection, args: LinkDirectorRepl
       code: "EMAIL_REPLY_DECISIONS_DISABLED",
       error: "Decisions are made in Floorplan. The reply is now on the job — open it to approve or reject.",
       jobId,
-      jobUrl: base ? jobLink(base, jobId) : null,
+      jobUrl: base ? jobLink(base, jobId, { step: "quotes" }) : null,
       linked: true,
     },
   };

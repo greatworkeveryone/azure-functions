@@ -124,7 +124,7 @@ export async function plannerSyncTimer(
          COALESCE(b.BuildingName, '') AS BuildingName,
          (SELECT TOP 1 Level + ' / ' + Area
           FROM dbo.TenantOccupancies
-          WHERE TenantId = t.TenantId
+          WHERE TenantId = t.TenantId AND ArchivedAt IS NULL
           ORDER BY Level, Area) AS FirstOccupancy,
          CONVERT(VARCHAR(10), t.Expiry, 120) AS Expiry,
          t.OptionNoticeMonths,

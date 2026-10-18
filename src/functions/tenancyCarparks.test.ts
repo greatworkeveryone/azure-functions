@@ -443,49 +443,7 @@ describe("upsertCarparksBulk", () => {
 
 // ── deleteCarpark ───────────────────────────────────────────────────────────
 
-describe("deleteCarpark", () => {
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 400 when CarparkId is missing", async () => {
-    const res = await handlers.deleteCarpark(makeRequest({}), ctx);
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/CarparkId required/);
-  });
-
-  it("returns 400 when CarparkId is not a string", async () => {
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: 5 }), ctx);
-    expect(res.status).toBe(400);
-  });
-
-  it("deletes a carpark on the happy path", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { deleted: boolean; carparkId: string };
-    expect(body.deleted).toBe(true);
-    expect(body.carparkId).toBe(VALID_CARPARK_ID);
-    const deleteCall = db.executeQuery.mock.calls.find(
-      ([, sql]: [unknown, string]) => sql.includes("DELETE FROM dbo.Carparks"),
-    );
-    expect(deleteCall).toBeDefined();
-  });
-
-  it("returns 500 when DB throws", async () => {
-    db.executeQuery.mockRejectedValueOnce(new Error("locked"));
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(500);
-  });
-});
+// deleteCarpark is gone: areas and car parks are archived, never deleted (D10, tenancyPartsArchive.test.ts).
 
 // ── upsertCarparkScheduleGroup ──────────────────────────────────────────────
 

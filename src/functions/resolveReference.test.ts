@@ -123,7 +123,7 @@ describe("resolveReference — exact matches", () => {
     expect(res.status).toBe(200);
     expect(res.jsonBody).toEqual({
       exact: [
-        { type: "purchaseOrder", id: 9, jobId: 42, number: "66Sm261013", matchedOn: "PONumber", href: "/jobs?jobId=42" },
+        { type: "purchaseOrder", id: 9, jobId: 42, number: "66Sm261013", matchedOn: "PONumber", href: "/jobs?jobId=42&step=po&poId=9" },
       ],
       decoded: [],
       truncated: false,
@@ -135,7 +135,7 @@ describe("resolveReference — exact matches", () => {
     arrange({ invoices: [{ JobInvoiceID: 5, JobID: 7, InvoiceNumber: "261012-IV-7-AC-1", SupplierInvoiceNumber: "INV-9" }] });
     const res = await resolveReference(makeRequest("261012-IV-7-AC-1"), ctx);
     expect(res.jsonBody.exact).toEqual([
-      { type: "invoice", id: 5, jobId: 7, number: "261012-IV-7-AC-1", matchedOn: "InvoiceNumber", href: "/jobs?jobId=7" },
+      { type: "invoice", id: 5, jobId: 7, number: "261012-IV-7-AC-1", matchedOn: "InvoiceNumber", href: "/jobs?jobId=7&step=invoices&invoiceId=5" },
     ]);
   });
 
@@ -143,7 +143,7 @@ describe("resolveReference — exact matches", () => {
     arrange({ invoices: [{ JobInvoiceID: 5, JobID: 7, InvoiceNumber: "261012-IV-7-AC-1", SupplierInvoiceNumber: "INV-0041/A" }] });
     const res = await resolveReference(makeRequest("INV-0041/A"), ctx);
     expect(res.jsonBody.exact).toEqual([
-      { type: "invoice", id: 5, jobId: 7, number: "INV-0041/A", matchedOn: "SupplierInvoiceNumber", href: "/jobs?jobId=7" },
+      { type: "invoice", id: 5, jobId: 7, number: "INV-0041/A", matchedOn: "SupplierInvoiceNumber", href: "/jobs?jobId=7&step=invoices&invoiceId=5" },
     ]);
   });
 
@@ -151,7 +151,7 @@ describe("resolveReference — exact matches", () => {
     arrange({ quotes: [{ QuoteID: 3, JobID: 8, QuoteNumber: "260419-QT-8-CR-1" }] });
     const res = await resolveReference(makeRequest("260419-QT-8-CR-1"), ctx);
     expect(res.jsonBody.exact).toEqual([
-      { type: "quote", id: 3, jobId: 8, number: "260419-QT-8-CR-1", matchedOn: "QuoteNumber", href: "/jobs?jobId=8" },
+      { type: "quote", id: 3, jobId: 8, number: "260419-QT-8-CR-1", matchedOn: "QuoteNumber", href: "/jobs?jobId=8&step=quotes&quoteId=3" },
     ]);
   });
 
@@ -207,7 +207,7 @@ describe("resolveReference — decoding legacy references", () => {
       period: { kind: "day", from: "2026-10-13", to: "2026-10-13" },
     });
     expect(entry.matches).toEqual([
-      { type: "purchaseOrder", id: 9, jobId: 42, buildingId: 100, label: "260419-PO-42-ACM-7", createdAt: "2026-10-13T01:00:00.000Z", href: "/jobs?jobId=42" },
+      { type: "purchaseOrder", id: 9, jobId: 42, buildingId: 100, label: "260419-PO-42-ACM-7", createdAt: "2026-10-13T01:00:00.000Z", href: "/jobs?jobId=42&step=po&poId=9" },
       { type: "job", id: 43, jobId: 43, buildingId: 100, label: "Leaking tap", createdAt: "2026-10-13T02:00:00.000Z", href: "/jobs?jobId=43" },
     ]);
 

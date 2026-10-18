@@ -15,6 +15,7 @@ export type LedgerSubjectType =
   | "approval_limit"
   | "billing_hold"
   | "billing_run"
+  | "carpark"
   | "carpark_group"
   | "comm_sequence"
   | "comm_template"

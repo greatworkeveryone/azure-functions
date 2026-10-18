@@ -292,6 +292,7 @@ describe("the money decision codes", () => {
   const plain = [
     "invoice.approve",
     "invoice.director_approve",
+    "invoice.director_reject",
     "invoice.director_request_sent",
     "invoice.myob_created",
     "invoice.reject",

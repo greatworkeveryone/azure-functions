@@ -8,7 +8,7 @@ import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { executeQuery, type SqlRow } from "./db";
 import { loadJobForMoney } from "./moneyJob-db";
-import { jobMoneyRefusal } from "./moneyRules";
+import { declineReasonRefusal, jobMoneyRefusal } from "./moneyRules";
 
 export const QUOTE_COLUMNS = `
   QuoteID, JobID, QuoteNumber, Seq, ContractorID, ContractorName,
@@ -37,6 +37,9 @@ export interface QuoteRejectionInput {
   /** Statuses the caller allows a reject from; anything else is a 409. */
   expectedStatuses: readonly string[];
   note?: string | null;
+  /** J6: from these statuses the note is the decline's reason and is required
+   *  (moneyRules.declineReasonRefusal). The in-app reject passes awaiting_director. */
+  reasonRequiredFrom?: readonly string[];
   sourceEmailId?: number;
   sourceEmailAddress?: string | null;
 }
@@ -162,7 +165,7 @@ export async function rejectQuote(
   connection: Connection,
   input: QuoteRejectionInput,
 ): Promise<QuoteDecisionOutcome> {
-  const { quoteId, rejectedBy, expectedStatuses, note, sourceEmailId, sourceEmailAddress } = input;
+  const { quoteId, rejectedBy, expectedStatuses, note, reasonRequiredFrom = [], sourceEmailId, sourceEmailAddress } = input;
   const rows = await executeQuery(
     connection,
     "SELECT JobID, QuoteNumber, Status FROM Quotes WHERE QuoteID = @Id",
@@ -179,6 +182,14 @@ export async function rejectQuote(
       status: 409,
       error: `Quote is ${status || "in an unknown state"} — it can only be rejected while ${expectedStatuses.join(" or ")}`,
     };
+  }
+  const reasonMissing = declineReasonRefusal(
+    reasonRequiredFrom.includes(status),
+    note && note.trim().length > 0 ? note.trim() : null,
+    "quote",
+  );
+  if (reasonMissing) {
+    return { code: reasonMissing.code, error: reasonMissing.message, jobId, ok: false, status: 422 };
   }
 
   const updated = await executeQuery(

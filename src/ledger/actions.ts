@@ -29,6 +29,10 @@ export const LEDGER_ACTIONS = {
   "invoice.approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.delete": { exception: true, reasonRequired: false, subjects: ["invoice"] },
   "invoice.director_approve": { exception: false, reasonRequired: false, subjects: ["invoice"] },
+  // J6: a director declining an invoice that waited on them. rejectJobInvoice
+  // refuses it without a reason (moneyRules.declineReasonRefusal), as rejectQuote
+  // does for quote.director_reject; the registry keeps money codes reason-free.
+  "invoice.director_reject": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.director_request_failed": { exception: true, reasonRequired: false, subjects: ["invoice"] },
   "invoice.director_request_sent": { exception: false, reasonRequired: false, subjects: ["invoice"] },
   "invoice.myob_created": { exception: false, reasonRequired: false, subjects: ["invoice"] },
@@ -104,6 +108,11 @@ export const LEDGER_ACTIONS = {
 
   // Register and schedule writes (WP23a, WP23b)
   "occupancy.reassign": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  // Areas and car parks are archived, never deleted (D10). Each needs a reason.
+  "occupancy.archive": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  "occupancy.unarchive": { exception: true, reasonRequired: true, subjects: ["occupancy"] },
+  "carpark.archive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
+  "carpark.unarchive": { exception: true, reasonRequired: true, subjects: ["carpark"] },
   "schedule.manual_edit": {
     exception: false,
     reasonRequired: false,

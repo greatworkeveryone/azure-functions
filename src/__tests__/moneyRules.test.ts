@@ -4,9 +4,12 @@ import {
   amountRefusal,
   approvableRefusal,
   creatorRefusal,
+  declineReasonRefusal,
   jobMoneyRefusal,
   purchaseOrderCostRefusal,
   purchaseOrderQuoteRefusal,
+  REJECT_REASON_MAX,
+  rejectReason,
   samePerson,
 } from "../moneyRules";
 
@@ -102,5 +105,27 @@ describe("purchase orders", () => {
     expect(purchaseOrderCostRefusal(0, 4500, true)?.code).toBe("amount_invalid");
     expect(purchaseOrderCostRefusal(undefined, undefined, false)).toBeNull();
     expect(purchaseOrderCostRefusal(null, undefined, false)?.code).toBe("amount_invalid");
+  });
+});
+
+describe("declining at the director stage needs a reason (J6)", () => {
+  it("refuses a decline of something waiting on a director without a reason, naming the record", () => {
+    expect(declineReasonRefusal(true, null, "quote")).toEqual({
+      code: "reason_required",
+      message: "Say why you're declining this quote. The reason is recorded on the job for whoever raised it.",
+      status: 422,
+    });
+    expect(declineReasonRefusal(true, null, "invoice")?.message).toContain("this invoice");
+  });
+
+  it("lets it through with a reason, and lets any rejection before the director stage through without one", () => {
+    expect(declineReasonRefusal(true, "Too dear", "quote")).toBeNull();
+    expect(declineReasonRefusal(false, null, "invoice")).toBeNull();
+  });
+
+  it("reads a reason from a body: trimmed, cut to length, and nothing for blanks or non-strings", () => {
+    expect(rejectReason("  Too dear  ")).toBe("Too dear");
+    expect(rejectReason("x".repeat(REJECT_REASON_MAX + 50))).toHaveLength(REJECT_REASON_MAX);
+    for (const blank of ["", "   ", undefined, null, 42, {}]) expect(rejectReason(blank)).toBeNull();
   });
 });

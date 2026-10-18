@@ -1,6 +1,7 @@
 /// <reference types="jest" />
 import type { AuthorityFacts } from "../approvalAuthority";
 import type { EscalationRow } from "../escalation/types";
+import "../escalation/adapters";
 import { deriveItems, pickLines } from "./items";
 import type { DigestFacts, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
 
@@ -118,9 +119,32 @@ describe("escalations targeting them", () => {
     expect(lines(USERS.facilitiesManager, f)).toEqual(["Urgent: Flooded basement", "Calm one"]);
   });
 
-  it("links to the escalations inbox for anything that is not a job", () => {
+  it("links to the escalations inbox for system health, which has no record of its own", () => {
     const f = facts({ escalations: [escalation({ subjectId: "all", subjectType: "system", summary: "Settings are missing" })] });
     expect(paths(USERS.facilitiesManager, f)).toEqual(["/escalations"]);
+  });
+
+  it("links to the record an escalation names, not the inbox (J6)", () => {
+    const f = facts({
+      escalations: [
+        escalation({ escalationId: 1, subjectId: "3", subjectType: "defects_period", summary: "Defects period ends" }),
+        escalation({ escalationId: 2, subjectId: "21", subjectType: "service_schedule", summary: "Service overdue" }),
+        escalation({ escalationId: 3, subjectId: "req-1", subjectType: "schedule_change", summary: "Rent relief" }),
+        escalation({ escalationId: 4, policyKey: "job.invoice_waiting", subjectId: "12", summary: "Invoice waiting" }),
+      ],
+    });
+    expect(paths(USERS.facilitiesManager, f).sort()).toEqual([
+      "/jobs?jobId=12&step=invoices",
+      "/maintenance?defectsPeriodId=3",
+      "/maintenance?scheduleId=21",
+      "/tenancy/changes/req-1",
+    ]);
+  });
+
+  it("opens a decision request on the job's decision, naming it (J6)", () => {
+    const context = { decision: { assignmentMode: "role", question: "Repair or replace?", requestId: 77, tier: "routine" } };
+    const f = facts({ escalations: [escalation({ context, parentEscalationId: 9, policyKey: "job.decision_pending" })] });
+    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=12&step=decision&decisionRequestId=77#decision"]);
   });
 
   it("keeps a long summary to one line", () => {
@@ -203,7 +227,12 @@ describe("approvals waiting for a role they hold", () => {
     const [line] = lines(USERS.facilitiesManager, f);
     expect(line).toBe("Approve quote: Job #20 · Replace pump · Tower A");
     expect(line).not.toMatch(/\d,\d{3}|\$/);
-    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=20"]);
+    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=20&step=quotes&quoteId=7"]);
+  });
+
+  it("opens an invoice on the invoices step, naming it (J6)", () => {
+    const f = facts({ waitingApprovals: [approval({ amount: 100, id: 8, subject: "invoice" })] });
+    expect(paths(USERS.accounts, f)).toEqual(["/jobs?jobId=20&step=invoices&invoiceId=8"]);
   });
 
   it("says invoice for an invoice", () => {
@@ -273,7 +302,7 @@ describe("Admin / Accounts jobs are not on the contractor and money lines (plan 
       dueJobs: [dueJob({ jobId: 31, kind: "admin" }), dueJob({ jobId: 32, kind: "maintenance" })],
       waitingApprovals: [approval({ id: 1, jobId: 21, jobKind: "admin" }), approval({ id: 2, jobId: 22, jobKind: "maintenance" })],
     });
-    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=22"]);
+    expect(paths(USERS.facilitiesManager, f)).toEqual(["/jobs?jobId=22&step=quotes&quoteId=2"]);
     expect(paths(USERS.facilities, f)).toEqual(["/jobs?jobId=32"]);
   });
 

@@ -27,9 +27,14 @@ export interface SubjectSummary {
 /** Enough of an escalation to ask whether its problem still exists. */
 export type ConditionRef = Pick<EscalationRow, "policyKey" | "subjectId" | "subjectType">;
 
+/** Enough of an escalation to say which step of its subject a link opens on. */
+export type LinkRef = Pick<EscalationRow, "context" | "policyKey">;
+
 export interface EscalationAdapter {
-  /** The in-app path that opens the subject, e.g. "/jobs?jobId=12". Relative. */
-  deepLink(subjectId: string): string;
+  /** The in-app path that opens the subject, e.g. "/jobs?jobId=12". Relative.
+   *  Given the row, it names the step the escalation is about (J6), e.g.
+   *  "/jobs?jobId=12&step=invoices" for a waiting invoice. */
+  deepLink(subjectId: string, row?: LinkRef): string;
   /** Attention escalations only: does the problem still exist? The sweep ends
    *  the escalation (condition_cleared) when this turns false. */
   isConditionActive(connection: Connection, ref: ConditionRef, now: Date): Promise<boolean>;

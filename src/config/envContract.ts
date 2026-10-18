@@ -26,7 +26,7 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   required("AzureWebJobsStorage", "File uploads and downloads fail; timers and queues cannot run."),
   required("GRAPH_SENDER_EMAIL", "Every outgoing email (POs, director approvals, notifications) fails."),
   required("ORG_EMAIL_DOMAINS", "No internal email counts as authenticated, so emailed decisions are refused."),
-  required("APP_BASE_URL", "Director emails go out without the job link; Planner sync stops early."),
+  required("APP_BASE_URL", "Director, escalation and digest emails go out without links to the job."),
   required("MYBUILDINGS_API_URL", "Building and work-request sync fail on first use."),
   required("MYBUILDINGS_BEARER_TOKEN", "Building and work-request sync fail on first use."),
   required("DIRECTOR_APPROVAL_THRESHOLD", "Director sign-off gate (expected 50000 once migration 121 is applied). Unset or invalid: the gate is derived from the highest non-director limit, which moves whenever a limit is edited on the Roles page."),

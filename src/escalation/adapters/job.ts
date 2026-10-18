@@ -1,5 +1,6 @@
 // The job adapter (WP20): describes a job to the engine, says when a job's
-// problem has cleared, links to /jobs?jobId=, and keeps Jobs.EscalatedAt in
+// problem has cleared, links to /jobs?jobId= at the step the escalation is about
+// (J6, jobEscalationLink.ts), and keeps Jobs.EscalatedAt in
 // step for the dashboard. A next step (jobs plan A2, policy job.next_step) is not a
 // rule over the job's own facts: it holds while the job is live and a decision on it
 // has handed on a step that is not yet done.
@@ -8,6 +9,7 @@ import { TYPES } from "tedious";
 import { executeQuery } from "../../db";
 import { holidaysFromEnv } from "../businessTime";
 import { DECISION_PENDING_POLICY, isNextStepPolicy, NEXT_STEP_POLICY } from "../decisionRows";
+import { jobEscalationPath } from "../jobEscalationLink";
 import { normaliseRole, ROLES } from "../roles";
 import { jobConditionActive } from "./jobRules";
 import { hasOpenNextStep, loadJobFacts } from "./jobFacts";
@@ -36,7 +38,7 @@ export function jobLabel(job: { buildingName?: string | null; jobId: number; tit
 export const jobAdapter: EscalationAdapter = {
   subjectType: "job",
 
-  deepLink: (subjectId) => `/jobs?jobId=${encodeURIComponent(subjectId)}`,
+  deepLink: (subjectId, row) => jobEscalationPath(subjectId, row),
 
   async isConditionActive(connection, ref, now) {
     const jobId = Number(ref.subjectId);
@@ -77,6 +79,13 @@ export const jobAdapter: EscalationAdapter = {
   // A decision request that has only just been asked is not an escalation yet, so
   // it does not flag the job; once it has been moved up (it has a parent) it does.
   // The same goes for a next step that has only just been handed on.
+  //
+  // J6: the flag says someone was told. It is stamped only once an email about an
+  // open escalation on the job has gone (Escalations.LastNotifiedAt, written by the
+  // notifier after a send succeeds, which then runs this again), with the time it
+  // went. An escalation whose email is pending, failed or had nobody to go to
+  // leaves the job unflagged. A stamp already set stays while the job is still
+  // escalated, so moving up a level doesn't reset it.
   async onChange(connection, escalation) {
     const jobId = Number(escalation.subjectId);
     if (!Number.isInteger(jobId)) return;
@@ -87,7 +96,11 @@ export const jobAdapter: EscalationAdapter = {
              WHEN EXISTS (SELECT 1 FROM dbo.Escalations e
                           WHERE e.SubjectType = 'job' AND e.SubjectId = @SubjectId AND e.Status = 'open'
                             AND (e.PolicyKey NOT IN (@DecisionPolicy, @NextStepPolicy) OR e.ParentEscalationId IS NOT NULL))
-             THEN COALESCE(EscalatedAt, SYSUTCDATETIME())
+             THEN COALESCE(EscalatedAt,
+                    (SELECT MIN(d.LastNotifiedAt) FROM dbo.Escalations d
+                      WHERE d.SubjectType = 'job' AND d.SubjectId = @SubjectId AND d.Status = 'open'
+                        AND d.LastNotifiedAt IS NOT NULL
+                        AND (d.PolicyKey NOT IN (@DecisionPolicy, @NextStepPolicy) OR d.ParentEscalationId IS NOT NULL)))
              ELSE NULL
            END
        WHERE JobID = @JobID`,

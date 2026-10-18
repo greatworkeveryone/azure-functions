@@ -394,6 +394,7 @@ describe("rejectQuote", () => {
     { match: /SELECT\s+QuoteID, JobID/, rows: [quote()] },
   ];
   const reject = () => rejectQuote(makeRequest({ QuoteID: 7 }), ctx);
+  const decline = (Reason: unknown = "Too dear for a like-for-like swap") => rejectQuote(makeRequest({ QuoteID: 7, Reason }), ctx);
 
   it("a plain rejection from pending: one quote.reject row, from pending to rejected", async () => {
     auth.rolesForRequest.mockResolvedValue(["accounts"]);
@@ -419,26 +420,64 @@ describe("rejectQuote", () => {
     });
   });
 
-  it("a director turning down a quote that was waiting for them: quote.director_reject", async () => {
+  it("a director declining a quote that was waiting for them: quote.director_reject, with the reason (J6)", async () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
     mockSql(routes("awaiting_director"));
 
-    await reject();
+    const res = await decline();
 
+    expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({
       action: "quote.director_reject",
       actorRole: "director",
       before: { status: "awaiting_director" },
+      reason: "Too dear for a like-for-like swap",
     });
+    const event = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO JobEvents/.test(String(c[1])));
+    expect(event?.[2]).toEqual(expect.arrayContaining([{ name: "Text", type: expect.anything(), value: "Rejected quote QT-9-1 — Too dear for a like-for-like swap" }]));
   });
 
-  it("anyone else rejecting a quote that was waiting for the director: still a plain quote.reject", async () => {
+  it.each([{}, { Reason: "" }, { Reason: "   " }, { Reason: 42 }])("declining a quote that waits on a director without a reason (%p) is refused, ledgered, and changes nothing (J6)", async (extra) => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    mockSql(routes("awaiting_director"));
+
+    const res = await rejectQuote(makeRequest({ QuoteID: 7, ...extra }), ctx);
+
+    expect(res).toEqual({
+      jsonBody: { code: "reason_required", error: "Say why you're declining this quote. The reason is recorded on the job for whoever raised it." },
+      status: 422,
+    });
+    expect(orderOf(/UPDATE Quotes SET Status = 'rejected'/)).toBe(-1);
+    expect(orderOf(/INSERT INTO JobEvents/)).toBe(-1);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ action: "denied", before: { attempted: "quote.director_reject" }, ruleApplied: "reason_required" }),
+    ]);
+  });
+
+  it("anyone else rejecting a quote that was waiting for the director: a plain quote.reject, and the reason is still required", async () => {
     auth.rolesForRequest.mockResolvedValue(["accounts"]);
     mockSql(routes("awaiting_director"));
 
-    await reject();
+    expect((await reject()).status).toBe(422);
+    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "denied", before: { attempted: "quote.reject" } });
 
-    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "quote.reject", before: { status: "awaiting_director" } });
+    jest.clearAllMocks();
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    mockSql(routes("awaiting_director"));
+    await decline();
+
+    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "quote.reject", before: { status: "awaiting_director" }, reason: "Too dear for a like-for-like swap" });
+  });
+
+  it("a rejection from pending may carry a reason, and records it", async () => {
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    mockSql(routes("pending"));
+
+    await decline("Missing the asbestos survey");
+
+    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "quote.reject", reason: "Missing the asbestos survey" });
   });
 
   it("a director rejecting a pending quote is not the director gate: quote.reject", async () => {
@@ -468,7 +507,7 @@ describe("rejectQuote", () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
     mockSql([...routes("awaiting_director"), LEDGER_FAILS]);
 
-    const res = await reject();
+    const res = await decline();
 
     expect(res.status).toBe(500);
     expect(db.commitTransaction).not.toHaveBeenCalled();

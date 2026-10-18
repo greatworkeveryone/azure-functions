@@ -209,7 +209,7 @@ export async function lockTenancyForReview(connection: Connection, tenantId: num
 export async function totalOccupancySqm(connection: Connection, tenantId: number): Promise<number> {
   const rows = await executeQuery(
     connection,
-    `SELECT COALESCE(SUM(SizeSqm), 0) AS Sqm FROM dbo.TenantOccupancies WHERE TenantId = @TenantId`,
+    `SELECT COALESCE(SUM(SizeSqm), 0) AS Sqm FROM dbo.TenantOccupancies WHERE TenantId = @TenantId AND ArchivedAt IS NULL`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   const sqm = Number(rows[0]?.Sqm ?? 0);
