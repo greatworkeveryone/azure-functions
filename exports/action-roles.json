@@ -222,6 +222,15 @@
     "director",
     "facilities_manager"
   ],
+  "editRegisterDocuments": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "editTenancy": [
     "accounts",
     "accounts_manager",
@@ -473,6 +482,16 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "viewDocumentation": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
   ],
   "viewEscalations": [
     "accounts",

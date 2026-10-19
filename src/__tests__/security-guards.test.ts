@@ -22,7 +22,7 @@ const sourceFiles = (dir: string): string[] =>
 // requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
 // alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
 // requireProcedureApprover (src/procedureAccess.ts) is the same for publishProcedure.
-const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller|withMajorEvent)\s*(?:<[^>]*>)?\s*\(/;
+const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller|withMajorEvent|withDocumentRegister)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {
@@ -153,3 +153,14 @@ describe("Major Events shared gate", () => {
     expect(source.indexOf("if (!auth.ok) return auth.response")).toBeLessThan(operation);
   });
 });
+
+ describe("Documentation shared gate", () => {
+  it("verifies identity and role before opening the database or dispatching an operation", () => {
+    const source=read(join(FUNCTIONS,"document-register.ts"));
+    const start=source.indexOf("async function withDocumentRegister(");
+    const gate=source.slice(start,source.indexOf("export async function getDocumentRegister",start));
+    expect(gate.indexOf("await authorizeWrite(")).toBeGreaterThan(-1);
+    expect(gate.indexOf("if (!auth.ok) return auth.response")).toBeLessThan(gate.indexOf("await createRequestConnection("));
+    expect(gate.indexOf("if (!auth.ok) return auth.response")).toBeLessThan(gate.indexOf("await work("));
+  });
+ });

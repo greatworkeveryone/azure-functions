@@ -58,12 +58,15 @@ export const VACANCY_SHAPE = uuidLeafUnder("vacancy image", "(?:\\d+|\\d+\\/slot
 /** Everything the server mints into the `wr-attachments` container. */
 export const MAJOR_EVENT_DOCUMENT_SHAPE = uuidLeafUnder("major event document", "major-events\\/[1-9][0-9]*");
 
+export const REGISTER_DOCUMENT_SHAPE = uuidLeafUnder("register document", "documentation");
+
 export const WR_ATTACHMENTS_SHAPES: readonly BlobNameShape[] = [
   ATTACHMENT_SHAPE,
   INSPECTION_PHOTO_SHAPE,
   EMAIL_ATTACHMENT_SHAPE,
   PO_PDF_SHAPE,
   MAJOR_EVENT_DOCUMENT_SHAPE,
+  REGISTER_DOCUMENT_SHAPE,
 ];
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;

@@ -198,6 +198,47 @@ async function seed() {
         await add('MajorEventDocuments','DocumentId',`event-${event.EventId}-document`, { EventId: event.EventId, FileName: 'DEMO-initial-briefing.pdf', BlobName: blobName, ContentType: 'application/pdf', SizeBytes: props.contentLength, UploadedBy: 'Fictional demo pack' });
       }
     }
+    for (const role of Object.values(require('../dist/auth').AppRole)) await query("IF NOT EXISTS (SELECT 1 FROM dbo.FeatureFlags WHERE FeatureKey='documentation' AND RoleName=@Role) INSERT dbo.FeatureFlags (FeatureKey,RoleName,Visibility,UpdatedBy) VALUES ('documentation',@Role,'enabled','local-review')", { Role: role });
+    if (!process.argv.includes('--without-evidence')) {
+      const { BlobServiceClient } = require('@azure/storage-blob');
+      const { createRegisterEvidence } = require('./lib/review-register-pdf.cjs');
+      const storage = BlobServiceClient.fromConnectionString('UseDevelopmentStorage=true').getContainerClient('wr-attachments');
+      const samples = [
+        ['mechanical', 'Mechanical / air conditioning', 'Air-conditioning service certificate', 'certificate', -240, 18, 12],
+        ['fire', 'Fire / life safety', 'Fire systems inspection certificate', 'certificate', -390, -25, -30],
+        ['evacuation', 'Evacuation', 'Emergency evacuation plan', 'plan', -180, null, 25],
+        ['telecom', 'Telecommunications', 'Structured cabling test report', 'report', -60, 305, 120],
+        ['plumbing', 'Plumbing / hydraulic', 'Backflow prevention test certificate', 'certificate', -355, 10, null],
+        ['electrical', 'Electrical', 'Electrical safety inspection certificate', 'certificate', -50, 315, 180],
+        ['manual', 'Building / structural', 'Building access and plant manual', 'manual', -60, null, null],
+      ];
+      for (let index=0;index<samples.length;index++) {
+        const [key,category,title,kind,issued,expiry,review] = samples[index];
+        const building = buildings[index % buildings.length];
+        const metadata = { Title:`[DEMO] ${title}`, Kind:kind, ServiceCategory:category, BuildingId:building.BuildingID, TenantId:null, IssuedOn:day(issued), ExpiresOn:expiry===null?null:day(expiry), ReviewDue:review===null?null:day(review), OwnerName:fm.DisplayName, Notes:'Fictional demonstration record. Dates illustrate expiry tracking only; they do not establish a statutory certification interval.' };
+        const hash=require('node:crypto').createHash('sha256').update(`${PACK}-register-${key}`).digest('hex').slice(0,32);
+        const uuid=`${hash.slice(0,8)}-${hash.slice(8,12)}-${hash.slice(12,16)}-${hash.slice(16,20)}-${hash.slice(20)}`;
+        const blobName=`documentation/${uuid}.pdf`;
+        const blob=storage.getBlockBlobClient(blobName);
+        const pdf=await createRegisterEvidence({ ...metadata, BuildingName:building.BuildingName });
+        if (!await blob.exists()) await blob.uploadData(pdf,{blobHTTPHeaders:{blobContentType:'application/pdf'}});
+        const props=await blob.getProperties();
+        const documentId=await add('RegisterDocuments','DocumentId',`register-${key}`,{...metadata,FileName:`DEMO-${key}.pdf`,BlobName:blobName,ContentType:'application/pdf',SizeBytes:props.contentLength,CreatedBy:'Fictional demo pack',CreatedByOid:PACK});
+        await add('RegisterDocumentAudit','AuditId',`register-${key}-audit`,{DocumentId:documentId,Action:'created',SnapshotJson:JSON.stringify(metadata),ActorName:'Fictional demo pack',ActorOid:PACK});
+      }
+      const tenants=await query("SELECT TOP(3) t.TenantId,t.LegalName,t.BuildingId,t.Expiry,b.BuildingName FROM dbo.Tenants t JOIN dbo.Buildings b ON b.BuildingID=t.BuildingId JOIN dbo.ReviewDemoRecords r ON r.TableName='Tenants' AND r.RecordId=CAST(t.TenantId AS NVARCHAR(100)) AND r.Pack=@Pack WHERE t.Expiry IS NOT NULL AND t.Status<>'vacated' ORDER BY t.Expiry,t.TenantId",{Pack:PACK});
+      for (const tenant of tenants) {
+        const hash=require('node:crypto').createHash('sha256').update(`${PACK}-lease-${tenant.TenantId}`).digest('hex').slice(0,32);
+        const uuid=`${hash.slice(0,8)}-${hash.slice(8,12)}-${hash.slice(12,16)}-${hash.slice(16,20)}-${hash.slice(20)}`;
+        const blobName=`tenancy-${tenant.TenantId}/${uuid}.pdf`;
+        const pdf=await createRegisterEvidence({Title:`[DEMO] Lease evidence — ${tenant.LegalName}`,BuildingName:tenant.BuildingName,OwnerName:am.DisplayName,IssuedOn:day(-90),ExpiresOn:tenant.Expiry?new Date(tenant.Expiry).toISOString().slice(0,10):null,Notes:'Fictional lease evidence for navigation and permissions testing. This is not a lease or legal agreement.'});
+        const blob=storage.getBlockBlobClient(blobName);
+        if (!await blob.exists()) await blob.uploadData(pdf,{blobHTTPHeaders:{blobContentType:'application/pdf'}});
+        const props=await blob.getProperties();
+        const attachment=await add('Attachments','Id',`lease-${tenant.TenantId}`,{JobID:null,BlobName:blobName,OriginalName:`DEMO-lease-${tenant.TenantId}.pdf`,Extension:'pdf',ContentType:'application/pdf',SizeBytes:props.contentLength,UploadedBy:PACK});
+        await add('TenancyAttachments','AttachmentID',`lease-${tenant.TenantId}-link`,{TenantId:tenant.TenantId,AttachmentID:attachment,AttachedBy:PACK});
+      }
+    }
     const [integrity] = await query(`SELECT (SELECT COUNT(*) FROM dbo.JobAssets a JOIN dbo.Jobs j ON j.JobID=a.JobId JOIN dbo.Assets x ON x.AssetId=a.AssetId WHERE j.CreatedById=@Pack AND j.BuildingID<>x.BuildingId) AS WrongBuildingAssetLinks,(SELECT COUNT(*) FROM dbo.Jobs j JOIN dbo.Quotes q ON q.QuoteID=j.ApprovedQuoteID WHERE j.CreatedById=@Pack AND q.JobID<>j.JobID) AS WrongQuoteLinks,(SELECT COUNT(*) FROM dbo.Jobs j JOIN dbo.Tenants t ON t.TenantId=j.TenantID WHERE j.CreatedById=@Pack AND t.BuildingId<>j.BuildingID) AS WrongTenancyLinks`, { Pack: PACK });
     if (Object.values(integrity).some(value => value !== 0)) throw new Error('Demo relationship integrity check failed.');
     report.integrity = integrity;

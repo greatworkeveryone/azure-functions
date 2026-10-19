@@ -1,0 +1,11 @@
+# Documentation Register local review — 19 October 2026
+
+On `codex/integrated-review`; migration **154_documentation_register.sql** is applied only to `localhost/floorplan_review`. The frontend is wired to four new guarded routes: discovery, original upload, metadata edit and source-checked download. This is a local review checkpoint; nothing was pushed/deployed and no external service was called.
+
+Source permissions remain in force: procedures use the existing audience/version reader; tenancy attachments require tenancy access and retain test-data filtering; event metadata obeys the stored event audience. New operational evidence uses asset-reader roles; tenancy-linked evidence additionally requires tenancy access and an active linked tenancy. Verified identity, rate limits, fixed blob-name shapes and original attachment downloads apply. Metadata edits require ownership/management, fixed scope and an optimistic revision, and atomically audit before/after values. No money approval permissions changed.
+
+Compile and changed-file lint passed. Scoped documentation, role and security suites passed; 313 routes accounted for (308 gated, five intentionally public). Roles JSON is byte-identical to the frontend. Running API checks cover all eight roles, anonymous 401, facilities tenancy 403, hidden test leases, original-byte equality after metadata editing, stale revision 409 and scope-change 400. Detailed frontend review evidence and non-additive test counts are in the frontend `.harness/NAVIGATION-DOCUMENTATION-2026-10-19.md`.
+
+`local-review prepare` applies the migration and enables Documentation locally. Run `node scripts/local-review.cjs demo` with Azurite running for original fictional certificate and tenancy PDFs. The seed is additive and registry-keyed; existing edited examples are preserved. Originals use the loopback `wr-attachments` container. No cloud settings or credentials are read.
+
+Current boundary: PDF/JPEG/PNG/WebP originals up to 10 MB; explicit dates, no invented compliance schedules; at most 2,000 discovery records per source (incomplete results flagged). Bulk migration/OCR/automatic renewals/certificate replacement chains are future work. Controlled procedure versions remain in their original workflow.
