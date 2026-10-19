@@ -2,7 +2,7 @@
 // handler stays about the database. Manual buildings are the ones not managed
 // in myBuildings: BuildingID <= 0 (migration 093).
 
-export const BUILDING_CATEGORIES = ["commercial", "residence"] as const;
+export const BUILDING_CATEGORIES = ["commercial", "residence", "development"] as const;
 export type BuildingCategory = (typeof BUILDING_CATEGORIES)[number];
 
 export const MAX_BUILDING_NAME = 255;
@@ -52,7 +52,7 @@ export function parseManualBuildingInput(body: Record<string, unknown>): ParsedM
   }
 
   if (body.category !== undefined) {
-    if (!isBuildingCategory(body.category)) return fail("category must be commercial or residence");
+    if (!isBuildingCategory(body.category)) return fail("category must be commercial, residence or development");
     value.category = body.category;
   }
 

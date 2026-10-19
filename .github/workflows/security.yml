@@ -3,11 +3,14 @@ name: Security
 # The repo has no `main`; these are the branches that exist and ship.
 on:
   push:
-    branches: [dev/launch-readiness, develop-c, master]
+    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
   pull_request:
-    branches: [dev/launch-readiness, develop-c, master]
+    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
   schedule:
     - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   npm-audit:
@@ -21,14 +24,9 @@ jobs:
           cache: "npm"
       - name: Install with scripts ignored
         run: npm ci --ignore-scripts
-      # Reported but non-blocking. The outstanding high (brace-expansion, via
-      # exceljs -> archiver -> minimatch) is unreachable: exceljs only requires
-      # archiver from its streaming writer, which this repo never uses. See the
-      # exceljs exception in CLAUDE.md before relaxing this further.
-      - name: Audit production dependencies (high — informational)
-        continue-on-error: true
+      # Runtime brace-expansion is patched. High/critical findings now block;
+      # moderate compatibility upgrades remain tracked in the review report.
+      - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
-      - name: Audit production dependencies (critical — blocking)
-        run: npm audit --omit=dev --audit-level=critical
       - name: Verify registry signatures
         run: npm audit signatures

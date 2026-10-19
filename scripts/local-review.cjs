@@ -83,19 +83,10 @@ async function prepare() {
   const db = require("../dist/db");
   const { runMigrations } = require("../dist/migrate");
   await runMigrations(db.createLocalConnection, console.log, { target: { server: "localhost", database, source: "local-review" } });
+  const portfolio = path.join(state, "buildings-source.json");
+  run(process.execPath, ["scripts/import-review-buildings.cjs", ...(fs.existsSync(portfolio) ? [portfolio] : [])]);
   const connection = await db.createLocalConnection();
   try {
-    await db.executeBatch(connection, `
-      IF NOT EXISTS (SELECT 1 FROM dbo.Buildings WHERE BuildingID=950001)
-        INSERT INTO dbo.Buildings (BuildingID,BuildingName,BuildingCode,ReferenceCode,BuildingAddress,Region,Active)
-        VALUES (950001,'Local review building','REV','REV','Synthetic review data','Local review',1);
-      IF NOT EXISTS (SELECT 1 FROM dbo.Tenants WHERE BuildingId=950001 AND LegalName='Local review tenant')
-        INSERT INTO dbo.Tenants (BuildingId,LegalName,TradingName,CreatedById,CreatedByName,UpdatedById,UpdatedByName)
-        VALUES (950001,'Local review tenant','Local review tenant','local-review','Local review','local-review','Local review');
-      IF NOT EXISTS (SELECT 1 FROM dbo.Keys WHERE KeyNumber='REVIEW-01')
-        INSERT INTO dbo.Keys (BuildingId,Level,KeyNumber,Description,StorageLocation)
-        SELECT BuildingID,'Ground','REVIEW-01','Local review sample key','Review key cabinet' FROM dbo.Buildings WHERE BuildingID=950001;
-    `);
     const inspectionSeed = fs.readFileSync(path.join(root, "migrations/seeding/086_seed_inspections.sql"), "utf8");
     for (const batch of inspectionSeed.split(/^\s*GO\s*$/mi).filter(value => value.trim())) await db.executeBatch(connection, batch);
     const { loadSeedEntries, runSeed } = require("../dist/proceduresSeed");
@@ -146,24 +137,24 @@ async function prepare() {
     }
     console.log("Enabled all module flags in the local database; role permissions still apply.");
   } finally { connection.close(); }
-  const portfolio = path.join(state, "buildings-source.json");
-  run(process.execPath, ["scripts/import-review-buildings.cjs", ...(fs.existsSync(portfolio) ? [portfolio] : [])]);
+  run(process.execPath, ["scripts/seed-review-demo.cjs", "--without-evidence"]);
   prepareRuntime();
-  console.log("Next: local-review.cjs storage and local-review.cjs api in separate terminals, then the frontend npm run dev.");
+  console.log("Next: start local-review.cjs storage; run local-review.cjs demo to attach sample PDFs; start local-review.cjs api and the frontend npm run dev in separate terminals.");
 }
 
 async function main() {
   fs.mkdirSync(path.join(state, "logs"), { recursive: true, mode: 0o700 });
   if (command === "prepare") return prepare();
-  if (command === "storage") return run("azurite", ["--silent", "--location", path.join(state, "storage"), "--blobHost", "127.0.0.1", "--queueHost", "127.0.0.1", "--tableHost", "127.0.0.1"]);
+  if (command === "demo") return run(process.execPath, ["scripts/seed-review-demo.cjs"]);
+  if (command === "storage") return run("azurite", ["--silent", "--skipApiVersionCheck", "--location", path.join(state, "storage"), "--blobHost", "127.0.0.1", "--queueHost", "127.0.0.1", "--tableHost", "127.0.0.1"]);
   if (command === "api") {
     if (process.versions.node.split(".")[0] !== "22") throw new Error("Use Node 22 for the review API (nvm use 22), then run this command again.");
     if (!fs.existsSync(path.join(runtime, "local.settings.json"))) throw new Error("Run prepare first.");
     return run(path.join(root, "node_modules/.bin/func"), ["start", "--script-root", runtime, "--port", "7071"], {
-      env: { PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, NODE_ENV: "development", FUNCTIONS_CORE_TOOLS_TELEMETRY_OPTOUT: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1" },
+      env: { Kestrel__Endpoints__LocalReview__Url: "http://localhost:7071", PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, NODE_ENV: "development", FUNCTIONS_CORE_TOOLS_TELEMETRY_OPTOUT: "1", DOTNET_CLI_TELEMETRY_OPTOUT: "1" },
     });
   }
-  throw new Error("Usage: node scripts/local-review.cjs prepare [--email you@example.com] | storage | api");
+  throw new Error("Usage: node scripts/local-review.cjs prepare [--email you@example.com] | demo | storage | api");
 }
 
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

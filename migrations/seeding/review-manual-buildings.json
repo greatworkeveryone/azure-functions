@@ -1,0 +1,96 @@
+[
+  {
+    "BuildingID": -1,
+    "BuildingName": "25 Temira Crescent",
+    "BuildingAddress": "25 Temira Crescent",
+    "Category": "residence",
+    "OwnerName": "Paolo & Kirstin",
+    "Levels": [
+      "Ground Floor",
+      "Level 1"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -2,
+    "BuildingName": "23 Temira Crescent",
+    "BuildingAddress": "23 Temira Crescent",
+    "Category": "residence",
+    "OwnerName": "Paolo & Kirstin",
+    "Levels": [
+      "Ground Floor",
+      "Level 1",
+      "Level 2"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -3,
+    "BuildingName": "13 Seale St, Fannie Bay",
+    "BuildingAddress": "13 Seale St, Fannie Bay",
+    "Category": "residence",
+    "OwnerName": "Carlo & Maria",
+    "Levels": [
+      "Lower Ground",
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -4,
+    "BuildingName": "24 Gunbar St",
+    "BuildingAddress": "24 Gunbar St",
+    "Category": "residence",
+    "OwnerName": "Paolo & Kirstin",
+    "Levels": [
+      "Lower Ground",
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -5,
+    "BuildingName": "2 Godfrey Crt",
+    "BuildingAddress": "2 Godfrey Crt",
+    "Category": "residence",
+    "OwnerName": "Giovanna",
+    "Levels": [
+      "Lower Ground",
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -6,
+    "BuildingName": "27 Lambell Tce",
+    "BuildingAddress": "27 Lambell Tce",
+    "Category": "residence",
+    "OwnerName": "Carlo & Maria",
+    "Levels": [
+      "Ground Floor",
+      "Level -1",
+      "Level -2"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -7,
+    "BuildingName": "Melville St Flats",
+    "BuildingAddress": "7 Melville St, The Gardens NT 0820",
+    "Region": "Darwin",
+    "Category": "commercial",
+    "Levels": [
+      "Ground Floor",
+      "Level 1"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": -8,
+    "BuildingName": "Old Red Cross Site",
+    "BuildingAddress": "19 Schultz St",
+    "Category": "development",
+    "Levels": [],
+    "Active": true
+  }
+]

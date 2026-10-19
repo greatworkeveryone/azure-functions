@@ -53,7 +53,7 @@ export const PO_PDF_SHAPE: BlobNameShape = { label: "purchase-order PDF", patter
 export const KEY_PHOTO_SHAPE = uuidLeafUnder("key photo", "keys");
 
 /** Vacancy images, vacancy slot images and building hero images in the `vacancies` container. */
-export const VACANCY_SHAPE = uuidLeafUnder("vacancy image", "(?:\\d+|\\d+\\/slots|building-hero\\/\\d+)");
+export const VACANCY_SHAPE = uuidLeafUnder("vacancy image", "(?:\\d+|\\d+\\/slots|building-hero\\/-?\\d+)");
 
 /** Everything the server mints into the `wr-attachments` container. */
 export const WR_ATTACHMENTS_SHAPES: readonly BlobNameShape[] = [

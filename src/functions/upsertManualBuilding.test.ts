@@ -196,7 +196,14 @@ describe("upsertManualBuilding: validation", () => {
   it("says in plain words which category values are allowed", async () => {
     const response = await upsertManualBuilding(post({ category: "villa", name: "A" }), context);
 
-    expect((response.jsonBody as { error: string }).error).toBe("category must be commercial or residence");
+    expect((response.jsonBody as { error: string }).error).toBe("category must be commercial, residence or development");
+  });
+
+  it("accepts the development-site category through the normal admin write path", async () => {
+    routeCreate();
+    const response = await upsertManualBuilding(post({ category: "development", name: "Old Red Cross Site", address: "19 Schultz St" }), context);
+    expect(response.status).toBe(200);
+    expect(db.executeQuery).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("INSERT INTO dbo.Buildings"), expect.arrayContaining([expect.objectContaining({ name: "Category", value: "development" })]));
   });
 
   it("accepts an owner of exactly 200 characters and a name of exactly 255", async () => {
