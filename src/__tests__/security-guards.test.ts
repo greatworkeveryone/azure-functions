@@ -22,7 +22,7 @@ const sourceFiles = (dir: string): string[] =>
 // requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
 // alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
 // requireProcedureApprover (src/procedureAccess.ts) is the same for publishProcedure.
-const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller)\s*(?:<[^>]*>)?\s*\(/;
+const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller|withMajorEvent)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {
@@ -140,5 +140,16 @@ describe("blob access goes through checked helpers", () => {
       .filter((file) => /getBlockBlobClient\(|getContainerClient\(|BlobServiceClient\b|generateBlobSASQueryParameters\(/.test(read(file)))
       .map((file) => relative(SRC, file));
     expect(direct).toEqual([]);
+  });
+});
+
+
+describe("Major Events shared gate", () => {
+  it("checks verified identity and exact capabilities before calling any operation", () => {
+    const source = read(join(FUNCTIONS, "major-events.ts"));
+    const operation = source.indexOf("const result = await operation(");
+    expect(source.indexOf("await authorizeWrite(request, capability.gate)")).toBeLessThan(operation);
+    expect(source.indexOf("capability.gate.some(allowed => allowed === role)")).toBeLessThan(operation);
+    expect(source.indexOf("if (!auth.ok) return auth.response")).toBeLessThan(operation);
   });
 });

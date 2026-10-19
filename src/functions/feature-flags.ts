@@ -27,7 +27,7 @@ const VISIBILITIES = ["enabled", "preview", "hidden"] as const;
 const ROLE_NAMES: readonly string[] = Object.values(AppRole);
 const FEATURE_KEYS = [
   "activity", "assets", "decisionJobs", "escalations", "finance", "incoming", "inspections", "jobs",
-  "keys", "maintenance", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule",
+  "keys", "maintenance", "majorEvents", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule",
   "tenancyVacancies", "timesheets",
 ] as const;
 

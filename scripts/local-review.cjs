@@ -95,7 +95,7 @@ async function prepare() {
     const report = await runSeed(connection, entries, { apply: true, log: console.log });
     if (report.failed) throw new Error("Procedure seed failed.");
     const { TYPES } = require("tedious");
-    const features = ["activity", "assets", "decisionJobs", "escalations", "finance", "incoming", "inspections", "jobs", "keys", "maintenance", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule", "tenancyVacancies", "timesheets"];
+    const features = ["activity", "assets", "decisionJobs", "escalations", "finance", "incoming", "inspections", "jobs", "keys", "maintenance", "majorEvents", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule", "tenancyVacancies", "timesheets"];
     const roles = Object.values(require("../dist/auth").AppRole);
     await db.executeQuery(connection, `MERGE dbo.FeatureFlags AS t
       USING (SELECT f.[value] AS FeatureKey, r.[value] AS RoleName FROM OPENJSON(@Features) f CROSS JOIN OPENJSON(@Roles) r) s

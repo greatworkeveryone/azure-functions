@@ -128,6 +128,31 @@ async function seed() {
         if (newKeys.has(`${prefix}-vacant-tenant`)) await query('UPDATE dbo.Vacancies SET TenancyId=@Tenant WHERE Id=@Id AND TenancyId IS NULL', { Tenant: vacantTenant, Id: vacancyId });
       }
     }
+    for (const role of Object.values(require('../dist/auth').AppRole)) await query("IF NOT EXISTS (SELECT 1 FROM dbo.FeatureFlags WHERE FeatureKey='majorEvents' AND RoleName=@Role) INSERT dbo.FeatureFlags (FeatureKey,RoleName,Visibility,UpdatedBy) VALUES ('majorEvents',@Role,'enabled','local-review')", { Role: role });
+    // Major Events are conspicuously fictional, additive and rerunnable. No mail is sent.
+    const allEventBuildings = await query("SELECT BuildingID,BuildingName FROM dbo.Buildings WHERE Active=1");
+    const eventBuilding = name => { const b = allEventBuildings.find(b => b.BuildingName.includes(name)); if (!b) throw new Error(`Missing event demo building ${name}`); return b.BuildingID; };
+    const eventScenarios = [
+      ['cyclone', 'Cyclone readiness exercise', 'operational', 'cyclone', [eventBuilding('Daly'), eventBuilding('Melville')], fm.DisplayName, 'Exercise only: secure roof access, check drainage and prepare a tenant notice before the wet season. No real weather warning.', false],
+      ['shutdown', 'Melville electrical shutdown', 'operational', 'shutdown', [eventBuilding('Melville')], fm.DisplayName, 'Fictional planned switchboard isolation. Confirm contractor access and tenant notice before the demonstration shutdown.', false],
+      ['finance', 'Insurance renewal review', 'financial', 'financial', [eventBuilding('Daly')], user('cfo').DisplayName, 'Fictional coordination record for policy documents and renewal options. Any expenditure must go through the existing job approval flow.', false],
+      ['project', 'Melville refurbishment planning', 'operational', 'major_works', [eventBuilding('Melville')], fm.DisplayName, 'Fictional refurbishment project: coordinate scope, contractor access and evidence. Budget approval remains on jobs.', false],
+      ['cyber', 'IT recovery exercise', 'financial', 'other', [eventBuilding('Daly')], user('cfo').DisplayName, 'Fictional exercise: isolate affected systems, preserve records and coordinate restoration. No real security incident occurred.', false],
+      ['development', 'Old Red Cross site planning', 'operational', 'major_works', [eventBuilding('Red Cross')], fm.DisplayName, 'Fictional development project briefing for reviewing scope and action ownership. No actual development commitment.', false],
+      ['flood', 'Stormwater response recap', 'operational', 'flood', [eventBuilding('Daly')], fm.DisplayName, 'Fictional completed response: drainage checked and access restored. Use this record to review the handover pack.', true],
+    ];
+    for (const [slug,title,domain,eventType,buildingIds,owner,brief,closed] of eventScenarios) {
+      const plan = { buildingIds, jobIds: [], actions: [
+        { id: 'access', title: 'Confirm contractor access and safe work area', owner: fm.DisplayName, due: `${day(1)}T08:00:00.000Z`, done: true },
+        { id: 'notice', title: 'Confirm next steps and record the handover', owner: 'Review Facilities', due: `${day(2)}T08:00:00.000Z`, done: closed },
+      ] };
+      const event = await add('MajorEvents','EventId',`event-${slug}`, { Title: `[DEMO] ${title}`, Domain: domain, EventType: eventType, EventKind: slug === 'cyber' ? 'it_failure' : slug === 'development' ? 'development' : slug === 'project' ? 'refurbishment' : eventType, EventClass: ['project','development'].includes(slug) ? 'project' : ['shutdown','flood'].includes(slug) ? 'minor' : 'major', Audience: domain === 'financial' ? 'managers' : 'operational_staff', Status: closed ? 'closed' : 'active', OwnerName: owner, StartsAt: `${day(-1)}T08:00:00.000Z`, EndsAt: `${day(3)}T08:00:00.000Z`, Brief: brief, PlanJson: JSON.stringify(plan), CreatedBy: 'Fictional demo pack', CreatedByOid: PACK, ...(closed ? { ClosedAt: `${day(0)}T08:00:00.000Z`, ClosedBy: owner } : {}) });
+      // Classify only untouched seed-owned rows from the first review; never overwrite an edited plan.
+      await query("UPDATE dbo.MajorEvents SET EventClass=@Class WHERE EventId=@Event AND CreatedByOid=@Pack AND Revision=1", { Class: ['project','development'].includes(slug) ? 'project' : ['shutdown','flood'].includes(slug) ? 'minor' : 'major', Event: event, Pack: PACK });
+      await add('MajorEventEntries','EntryId',`event-${slug}-created`, { EventId: event, EntryType: 'created', Body: JSON.stringify(plan), ActorName: owner, ActorOid: PACK });
+      await add('MajorEventEntries','EntryId',`event-${slug}-update`, { EventId: event, EntryType: 'update', BuildingId: buildingIds[0], Area: 'Ground / common areas', Body: 'DEMO: site access checked; contractor coordination is recorded here rather than in a separate chat.', ActorName: 'Review Facilities', ActorOid: PACK });
+      if (closed) await add('MajorEventEntries','EntryId',`event-${slug}-closed`, { EventId: event, EntryType: 'closed', Body: 'DEMO: All exercise actions complete. No real incident occurred.', ActorName: owner, ActorOid: PACK });
+    }
     const data = Object.fromEntries(['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].map((d, i) => [d, i < 5 ? [{ startTime: '08:30', endTime: '17:00', breakMinutes: 30, comment: 'Demo inspections and contractor coordination' }] : []]));
     const monday = new Date(); monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7 - 7);
     for (const role of ['facilities','accounts']) { const u = user(role); await add('Timesheets','TimesheetID',`timesheet-${role}`, { UserID: u.UserID, UserDisplayName: u.DisplayName, WeekStartDate: monday.toISOString().slice(0, 10), Role: role, Data: JSON.stringify(data), ReadyForApproval: true, CreatedBy: PACK }); }
@@ -155,6 +180,23 @@ async function seed() {
       await add(record.kind === 'quote' ? 'QuoteAttachments' : 'JobInvoiceAttachments', record.kind === 'quote' ? 'QuoteID' : 'JobInvoiceID', `${docKey}-link`, { [record.kind === 'quote' ? 'QuoteID' : 'JobInvoiceID']: record.Id, AttachmentID: attachmentId, AttachedBy: PACK });
       if (newKeys.has(docKey)) await query(record.kind === 'quote' ? 'UPDATE dbo.Quotes SET QuotePDFBlobName=@Blob WHERE QuoteID=@Id AND QuotePDFBlobName IS NULL' : 'UPDATE dbo.JobInvoices SET InvoicePDFBlobName=@Blob WHERE JobInvoiceID=@Id AND InvoicePDFBlobName IS NULL', { Blob: blobName, Id: record.Id });
     }
+    }
+    if (!process.argv.includes('--without-evidence')) {
+      const { BlobServiceClient } = require('@azure/storage-blob');
+      const { majorEventPack } = require('../dist/majorEventPack');
+      const eventToApi = e => ({ id: e.EventId, title: e.Title, domain: e.Domain, status: e.Status, brief: e.Brief, ownerName: e.OwnerName, startsAt: new Date(e.StartsAt).toISOString(), endsAt: e.EndsAt ? new Date(e.EndsAt).toISOString() : null, plan: JSON.parse(e.PlanJson) });
+      const storage = BlobServiceClient.fromConnectionString('UseDevelopmentStorage=true').getContainerClient('wr-attachments');
+      const events = await query("SELECT e.* FROM dbo.MajorEvents e JOIN dbo.ReviewDemoRecords r ON r.TableName='MajorEvents' AND r.RecordId=CAST(e.EventId AS NVARCHAR(100)) AND r.Pack=@Pack", { Pack: PACK });
+      for (const event of events) {
+        const hash = require('node:crypto').createHash('sha256').update(`${PACK}-event-${event.EventId}`).digest('hex').slice(0,32);
+        const uuid = `${hash.slice(0,8)}-${hash.slice(8,12)}-${hash.slice(12,16)}-${hash.slice(16,20)}-${hash.slice(20)}`;
+        const blobName = `major-events/${event.EventId}/${uuid}.pdf`;
+        const blob = storage.getBlockBlobClient(blobName);
+        const pdf = await majorEventPack(eventToApi(event), [], buildings, []);
+        if (!await blob.exists()) await blob.uploadData(pdf, { blobHTTPHeaders: { blobContentType: 'application/pdf' } });
+        const props = await blob.getProperties();
+        await add('MajorEventDocuments','DocumentId',`event-${event.EventId}-document`, { EventId: event.EventId, FileName: 'DEMO-initial-briefing.pdf', BlobName: blobName, ContentType: 'application/pdf', SizeBytes: props.contentLength, UploadedBy: 'Fictional demo pack' });
+      }
     }
     const [integrity] = await query(`SELECT (SELECT COUNT(*) FROM dbo.JobAssets a JOIN dbo.Jobs j ON j.JobID=a.JobId JOIN dbo.Assets x ON x.AssetId=a.AssetId WHERE j.CreatedById=@Pack AND j.BuildingID<>x.BuildingId) AS WrongBuildingAssetLinks,(SELECT COUNT(*) FROM dbo.Jobs j JOIN dbo.Quotes q ON q.QuoteID=j.ApprovedQuoteID WHERE j.CreatedById=@Pack AND q.JobID<>j.JobID) AS WrongQuoteLinks,(SELECT COUNT(*) FROM dbo.Jobs j JOIN dbo.Tenants t ON t.TenantId=j.TenantID WHERE j.CreatedById=@Pack AND t.BuildingId<>j.BuildingID) AS WrongTenancyLinks`, { Pack: PACK });
     if (Object.values(integrity).some(value => value !== 0)) throw new Error('Demo relationship integrity check failed.');

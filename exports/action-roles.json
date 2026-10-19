@@ -246,6 +246,19 @@
     "director",
     "facilities_manager"
   ],
+  "manageFinancialEvents": [
+    "cfo",
+    "director"
+  ],
+  "manageMajorEvents": [
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "manageOperationalEvents": [
+    "director",
+    "facilities_manager"
+  ],
   "manageProcedureEndorsement": [
     "cfo",
     "director"
@@ -515,6 +528,15 @@
     "facilities_manager"
   ],
   "viewMaintenanceOverview": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewMajorEvents": [
     "accounts",
     "accounts_manager",
     "admin",

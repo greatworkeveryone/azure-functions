@@ -20,6 +20,7 @@
 // "must pass" list, but the sweep accepts them past the gate. Such an action is
 // offered to them through a capability of its own (approveQuoteAttributed).
 
+import { EVENT_READ_ROLES, OPERATIONAL_EVENT_MANAGERS, FINANCIAL_EVENT_MANAGERS } from "./majorEvents";
 import { AppRole, rolesPassGate } from "./auth";
 import { ATTRIBUTED_APPROVAL_ROLES, SUBJECT_ELIGIBLE_ROLES } from "./approvalAuthority";
 import {
@@ -60,6 +61,10 @@ const REVIEW_APPROVERS: readonly AppRole[] = [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRE
 const ADMIN_TEST_ONLY = "admin acts on test records only (beta sprint decision 4), and a screen doesn't know whether a record is one";
 
 export const ACTION_ROLES = {
+  viewMajorEvents: { gate: EVENT_READ_ROLES, match: "exact", routes: ["getMajorEvents", "getMajorEvent", "addMajorEventEntry", "uploadMajorEventDocument", "getMajorEventDocument", "exportMajorEventPack"], why: "Operational event coordination for operational staff; each event further restricts reads and contributions to its selected audience, always including its management authority." },
+  manageOperationalEvents: { gate: OPERATIONAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only facilities managers and directors create, plan and close operational events; admin has no implicit override." },
+  manageFinancialEvents: { gate: FINANCIAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only CFO/directors create, plan and close financial events; an event grants no financial approval authority." },
+  manageMajorEvents: { gate: [A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer event management gate; the stored event domain further restricts facilities managers to operational and CFO to financial events." },
   addQuoteContractor: {
     gate: [A.ACCOUNTS, A.FACILITIES],
     routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent"],
