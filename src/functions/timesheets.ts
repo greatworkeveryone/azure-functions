@@ -18,6 +18,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { validateTimesheetData } from "../timesheetData";
 import { checkRateLimit } from "../rateLimit";
 
 const TIMESHEET_UPSERT_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
@@ -188,6 +189,9 @@ async function upsertTimesheet(
       return { status: 400, jsonBody: { error: "weekStart and data are required" } };
     }
 
+    const dataError = validateTimesheetData(data);
+    if (dataError) return { status: 400, jsonBody: { error: dataError } };
+
     const targetUserId: string = userId ?? callerOid;
     const targetDisplayName: string = userDisplayName ?? callerName;
 
@@ -334,7 +338,7 @@ async function submitTimesheetForApproval(
 
     const rows = await executeQuery(
       connection,
-      "SELECT UserID, Approved, ReadyForApproval FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      "SELECT UserID, Approved, ReadyForApproval, Data FROM dbo.Timesheets WHERE TimesheetID = @Id",
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Timesheet not found" } };
@@ -347,6 +351,13 @@ async function submitTimesheetForApproval(
     }
     if (row.Approved) {
       return { status: 400, jsonBody: { error: "Timesheet is already approved — unapprove first" } };
+    }
+
+    if (submit) {
+      let data: unknown;
+      try { data = typeof row.Data === "string" ? JSON.parse(row.Data) : row.Data; } catch { return { status: 400, jsonBody: { error: "Timesheet entries are unreadable" } }; }
+      const invalid = validateTimesheetData(data, true);
+      if (invalid) return { status: 400, jsonBody: { error: invalid } };
     }
 
     await executeQuery(
@@ -415,7 +426,7 @@ async function approveTimesheet(
 
     const rows = await executeQuery(
       connection,
-      "SELECT UserID, Role, SentToMyobDate FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      "SELECT UserID, Role, SentToMyobDate, Data FROM dbo.Timesheets WHERE TimesheetID = @Id",
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Timesheet not found" } };
@@ -429,6 +440,13 @@ async function approveTimesheet(
     const managed = managedRoles(roles);
     if (!managed.includes(row.Role as TimesheetRole) && !roles.includes(AppRole.ADMIN)) {
       return forbiddenResponse(`You manage ${managed.join(", ")} timesheets; this is ${row.Role}`);
+    }
+
+    if (approve) {
+      let data: unknown;
+      try { data = typeof row.Data === "string" ? JSON.parse(row.Data) : row.Data; } catch { return { status: 400, jsonBody: { error: "Timesheet entries are unreadable" } }; }
+      const invalid = validateTimesheetData(data, true);
+      if (invalid) return { status: 400, jsonBody: { error: invalid } };
     }
 
     if (!approve && row.SentToMyobDate) {
