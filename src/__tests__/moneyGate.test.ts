@@ -58,11 +58,13 @@ beforeEach(() => {
   jest.spyOn(console, "warn").mockImplementation(() => {});
   process.env.MONEY_ALLOWED_CIDRS = "203.0.113.0/28, 2001:db8::/48";
   delete process.env.MONEY_STEP_UP_MINUTES;
+  delete process.env.MONEY_STEP_UP_ENFORCED;
   _setMoneyGateHealthForTests(null);
 });
 afterEach(() => {
   jest.restoreAllMocks();
   delete process.env.MONEY_ALLOWED_CIDRS;
+  delete process.env.MONEY_STEP_UP_ENFORCED;
 });
 
 describe("moneyGateConfig", () => {
@@ -244,6 +246,100 @@ describe("requireMoneyContext — warn-only (MONEY_ALLOWED_CIDRS unset)", () => 
     await requireMoneyContext(makeRequest(FRESH_MFA));
     await flush();
     expect(escalation.raise).not.toHaveBeenCalled();
+  });
+});
+
+describe("MONEY_STEP_UP_ENFORCED", () => {
+  const STALE = { ...FRESH_MFA, iat: NOW - 20 * 60 };
+  const NO_MFA = { ...FRESH_MFA, amr: ["pwd"] };
+
+  it("is on only for the exact string \"true\"", () => {
+    expect(moneyGateConfig({ MONEY_STEP_UP_ENFORCED: "true" }).stepUpEnforced).toBe(true);
+    for (const value of ["TRUE", "True", "1", "yes", "on", " true", "true ", "", undefined]) {
+      expect(moneyGateConfig({ MONEY_STEP_UP_ENFORCED: value }).stepUpEnforced).toBe(false);
+    }
+  });
+
+  describe("with MONEY_ALLOWED_CIDRS unset and the switch on", () => {
+    beforeEach(() => {
+      delete process.env.MONEY_ALLOWED_CIDRS;
+      process.env.MONEY_STEP_UP_ENFORCED = "true";
+    });
+
+    it("does not check the network: any address with a fresh MFA sign-in is allowed", async () => {
+      expect(await requireMoneyContext(makeRequest(FRESH_MFA, HOME))).toBeNull();
+      expect(await requireMoneyContext(makeRequest(FRESH_MFA, null))).toBeNull();
+      expect(access.noteMoneyAction.mock.calls[0][2]).toEqual({ failures: [], label: "Mark a payment paid", mode: "step_up", outcome: "allowed", route: "markPaymentPaid" });
+    });
+
+    it("never reports network_refused, even with every other condition failing", async () => {
+      const config = moneyGateConfig({ MONEY_STEP_UP_ENFORCED: "true" });
+      expect(evaluateMoneyGate({ address: HOME, claims: { amr: ["pwd"], iat: NOW - 3600 }, config, nowSeconds: NOW }).failures).toEqual(["step_up_stale", "step_up_mfa"]);
+    });
+
+    it("refuses a stale sign-in with the same 428 step_up_required as enforce mode", async () => {
+      const res = await requireMoneyContext(makeRequest(STALE, HOME));
+      expect(res).toEqual({
+        jsonBody: { code: "step_up_required", error: expect.any(String), maxAgeMinutes: 10, reason: "stale_sign_in" },
+        status: 428,
+      });
+      expect(access.noteMoneyAction.mock.calls[0][2]).toMatchObject({ failures: ["step_up_stale"], mode: "step_up", outcome: "step_up_stale" });
+    });
+
+    it("refuses a sign-in without MFA with 428 mfa_missing", async () => {
+      const res = await requireMoneyContext(makeRequest(NO_MFA));
+      expect(res?.status).toBe(428);
+      expect(res?.jsonBody).toMatchObject({ code: "step_up_required", reason: "mfa_missing" });
+    });
+
+    it("still answers 401 without a token", async () => {
+      expect((await requireMoneyContext(makeRequest(null)))?.status).toBe(401);
+    });
+
+    it("says on system.health that money actions are not network-restricted but step-up is enforced", async () => {
+      _setMoneyGateHealthForTests(true);
+      await requireMoneyContext(makeRequest(FRESH_MFA));
+      await flush();
+      await flush();
+      expect(escalation.raise).toHaveBeenCalledTimes(1);
+      expect(escalation.raise.mock.calls[0][1].summary).toMatch(/not network-restricted.*step-up is enforced/);
+    });
+
+    it("honours MONEY_STEP_UP_MINUTES", async () => {
+      process.env.MONEY_STEP_UP_MINUTES = "30";
+      expect(await requireMoneyContext(makeRequest(STALE))).toBeNull();
+    });
+  });
+
+  it("stays warn-only for \"TRUE\", \"1\" and other near-misses with the list unset", async () => {
+    delete process.env.MONEY_ALLOWED_CIDRS;
+    for (const value of ["TRUE", "1", "yes", "false", ""]) {
+      process.env.MONEY_STEP_UP_ENFORCED = value;
+      access.noteMoneyAction.mockClear();
+      expect(await requireMoneyContext(makeRequest({ ...NO_MFA, iat: NOW - 3600 }, HOME))).toBeNull();
+      expect(access.noteMoneyAction.mock.calls[0][2]).toMatchObject({
+        failures: ["network_refused", "step_up_stale", "step_up_mfa"],
+        mode: "warn",
+        outcome: "allowed_warn_only",
+      });
+    }
+  });
+
+  it("is today's warn-only behaviour with the list unset and the switch off", async () => {
+    delete process.env.MONEY_ALLOWED_CIDRS;
+    expect(await requireMoneyContext(makeRequest(STALE, HOME))).toBeNull();
+    expect(await requireMoneyContext(makeRequest(null))).toBeNull();
+    expect(console.warn).toHaveBeenCalledWith("[money-gate] warn-only: markPaymentPaid would be refused (network_refused, step_up_stale)");
+  });
+
+  it("changes nothing when the list is set: the network is still checked first", async () => {
+    process.env.MONEY_STEP_UP_ENFORCED = "true";
+    expect(await requireMoneyContext(makeRequest(FRESH_MFA))).toBeNull();
+    const offNetwork = await requireMoneyContext(makeRequest(STALE, HOME));
+    expect(offNetwork?.status).toBe(403);
+    expect(offNetwork?.jsonBody).toMatchObject({ code: "money_network_required" });
+    expect((await requireMoneyContext(makeRequest(STALE)))?.status).toBe(428);
+    expect(access.noteMoneyAction.mock.calls[0][2]).toMatchObject({ mode: "enforce" });
   });
 });
 

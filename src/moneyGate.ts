@@ -23,6 +23,11 @@ import { MONEY_GATED_ROUTES } from "./money-gated-routes";
 // With MONEY_ALLOWED_CIDRS unset the gate is in warn mode: every condition is
 // still evaluated and logged, nothing is refused, and system.health tells admin
 // the gate is open. That keeps staging (and production until O7 lands) working.
+// MONEY_STEP_UP_ENFORCED="true" (exactly that string) makes conditions 2 and 3
+// binding even with MONEY_ALLOWED_CIDRS unset: the network is then not checked
+// (condition 1 is ignored, and health says money actions are not
+// network-restricted) but a stale sign-in or missing MFA is refused with the
+// same 428 as in enforce mode. With the list set the switch changes nothing.
 // An entry the gate cannot use — unreadable, or wider than /8 (IPv4) or /32
 // (IPv6), such as 0.0.0.0/0, which would be no network check at all — is
 // ignored and also raises system.health; with nothing usable left, every money
@@ -47,8 +52,13 @@ export interface MoneyGateConfig {
   /** Entries that could not be read (ignored, logged). */
   invalid: string[];
   mode: "enforce" | "warn";
+  /** MONEY_STEP_UP_ENFORCED is exactly "true". */
+  stepUpEnforced: boolean;
   stepUpMinutes: number;
 }
+
+/** No network list, but step-up is enforced: the network is not checked, sign-in age and MFA are. */
+const stepUpOnly = (config: MoneyGateConfig): boolean => config.mode === "warn" && config.stepUpEnforced;
 
 function addEntry(list: BlockList, raw: string): boolean {
   const [address, prefixText, extra] = raw.split("/");
@@ -82,6 +92,7 @@ export function moneyGateConfig(env: NodeJS.ProcessEnv = process.env): MoneyGate
     // Set but unreadable still means "enforce": refusing everything is safer
     // than silently opening the gate because of a typo.
     mode: raw === "" ? "warn" : "enforce",
+    stepUpEnforced: env.MONEY_STEP_UP_ENFORCED === "true",
     stepUpMinutes: Number.isInteger(minutes) && minutes >= 1 && minutes <= 60 ? minutes : DEFAULT_STEP_UP_MINUTES,
   };
 }
@@ -105,7 +116,7 @@ export function evaluateMoneyGate(input: GateInput): { failures: GateOutcome[]; 
   const { claims, config, nowSeconds } = input;
   if (!claims) return { failures: ["unauthenticated"], outcome: "unauthenticated" };
   const failures: GateOutcome[] = [];
-  if (!isAllowedNetwork(input.address, config)) failures.push("network_refused");
+  if (!stepUpOnly(config) && !isAllowedNetwork(input.address, config)) failures.push("network_refused");
 
   const authTime = typeof claims.auth_time === "number" ? claims.auth_time : typeof claims.iat === "number" ? claims.iat : null;
   const age = authTime === null ? Infinity : nowSeconds - authTime;
@@ -189,9 +200,10 @@ export async function requireMoneyContext(request: HttpRequest, user?: MoneyGate
   });
   const route = routeOf(request);
   const oid = user?.oid ?? (typeof claims?.oid === "string" ? claims.oid : null);
-  const recorded = config.mode === "warn" && outcome !== "allowed" && outcome !== "unauthenticated" ? "allowed_warn_only" : outcome;
+  const warnOnly = config.mode === "warn" && !config.stepUpEnforced;
+  const recorded = warnOnly && outcome !== "allowed" && outcome !== "unauthenticated" ? "allowed_warn_only" : outcome;
   const label = MONEY_GATED_ROUTES.find((entry) => entry.route === route)?.label ?? null;
-  if (oid) noteMoneyAction(request, oid, { failures, label, mode: config.mode, outcome: recorded, route });
+  if (oid) noteMoneyAction(request, oid, { failures, label, mode: stepUpOnly(config) ? "step_up" : config.mode, outcome: recorded, route });
 
   if (config.mode === "enforce" && (config.invalid.length > 0 || config.entries === 0)) {
     console.warn(`[money-gate] ignored unusable MONEY_ALLOWED_CIDRS entries: ${config.invalid.join(", ") || "(none usable)"}`);
@@ -202,11 +214,17 @@ export async function requireMoneyContext(request: HttpRequest, user?: MoneyGate
     );
   }
 
-  // Warn mode never refuses: requireRole has already decided who the caller is.
   if (config.mode === "warn") {
-    raiseGateHealthOnce("Money actions are not network-restricted: MONEY_ALLOWED_CIDRS is not set");
-    if (failures.length > 0) console.warn(`[money-gate] warn-only: ${route} would be refused (${failures.join(", ")})`);
-    return null;
+    raiseGateHealthOnce(
+      config.stepUpEnforced
+        ? "Money actions are not network-restricted (MONEY_ALLOWED_CIDRS is not set), but step-up is enforced: a stale sign-in or missing MFA is refused"
+        : "Money actions are not network-restricted: MONEY_ALLOWED_CIDRS is not set",
+    );
+    // Warn mode never refuses: requireRole has already decided who the caller is.
+    if (!config.stepUpEnforced) {
+      if (failures.length > 0) console.warn(`[money-gate] warn-only: ${route} would be refused (${failures.join(", ")})`);
+      return null;
+    }
   }
 
   if (outcome === "allowed") return null;
