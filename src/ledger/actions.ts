@@ -91,6 +91,8 @@ export const LEDGER_ACTIONS = {
   // Raised later by the manager who was named (WP20).
   "quote.attribution_disputed": { exception: true, reasonRequired: true, subjects: ["quote"] },
   "user.role_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  // Deactivating or reactivating an account changes who can sign in, so it is recorded like a role change.
+  "user.activation_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   // R13 variance margin and the Admin facts beside the limits (WP43a-2). A rise
   // within the margin rests on a named manager and needs the editor's rationale;
   // the manager's dispute and a director's override of the check (decision 17)

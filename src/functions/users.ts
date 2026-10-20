@@ -145,6 +145,11 @@ export async function upsertAppUser(
     const body = (await request.json()) as UpsertAppUserBody;
     const { userId, role, isActive } = body ?? {};
 
+    // The activation ledger row compares this value, so a string like "false" must not reach it.
+    if (isActive !== undefined && isActive !== null && typeof isActive !== "boolean") {
+      return { status: 400, jsonBody: { error: "isActive must be true or false" } };
+    }
+
     if (role !== undefined && role !== null) {
       if (!VALID_ROLES.has(role as AppRole)) {
         return { status: 400, jsonBody: { error: `Invalid role: ${role}` } };
@@ -186,7 +191,7 @@ export async function upsertAppUser(
 
       const oldRows = await executeQuery(
         connection,
-        `SELECT Role, Email, EntraOid FROM dbo.AppUsers WHERE UserID = @UserID`,
+        `SELECT Role, Email, EntraOid, IsActive FROM dbo.AppUsers WHERE UserID = @UserID`,
         [{ name: "UserID", type: TYPES.Int, value: userId }],
       );
       if (oldRows.length === 0) {
@@ -195,6 +200,7 @@ export async function upsertAppUser(
       const oldRole       = (oldRows[0].Role     as string | null | undefined) ?? null;
       const targetEmail   = (oldRows[0].Email    as string | undefined) ?? "";
       const targetOid     = (oldRows[0].EntraOid as string | null | undefined) ?? null;
+      const oldActive     = oldRows[0].IsActive !== false;
 
       if (oldRole === AppRole.ADMIN && !callerIsAdmin) {
         return {
@@ -209,9 +215,12 @@ export async function upsertAppUser(
 
       // The role the UPDATE leaves in place (an omitted role is written as NULL).
       const newRole = role ?? null;
+      // An edit that omits isActive leaves the account as it is; defaulting to
+      // true here used to reactivate a deactivated account on every role change.
+      const newActive = isActive ?? oldActive;
 
-      // The role change, its UserRoleAudit row and its ledger row commit or roll
-      // back together: no ledger row, no decision.
+      // The role or activation change, its UserRoleAudit row and its ledger rows
+      // commit or roll back together: no ledger row, no decision.
       await beginTransaction(connection);
       try {
         await executeQuery(
@@ -223,7 +232,7 @@ export async function upsertAppUser(
           [
             { name: "UserID",   type: TYPES.Int,      value: userId },
             { name: "Role",     type: TYPES.NVarChar, value: newRole },
-            { name: "IsActive", type: TYPES.Bit,      value: isActive ?? true },
+            { name: "IsActive", type: TYPES.Bit,      value: newActive },
           ],
         );
 
@@ -249,6 +258,16 @@ export async function upsertAppUser(
             actor: ledgerActor,
             after: { role: newRole },
             before: { role: oldRole },
+            subject: { id: userId, type: "app_user" },
+          });
+        }
+        // UserRoleAudit stays role-only; activation changes live in the ledger.
+        if (newActive !== oldActive) {
+          await record(connection, {
+            action: "user.activation_change",
+            actor: ledgerActor,
+            after: { isActive: newActive },
+            before: { isActive: oldActive },
             subject: { id: userId, type: "app_user" },
           });
         }

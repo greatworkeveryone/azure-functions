@@ -372,18 +372,137 @@ describe("upsertAppUser decision ledger (WP19b)", () => {
     });
   });
 
-  it("writes no ledger row when the role is unchanged (an isActive-only edit)", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
-      .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid" }])
-      .mockResolvedValueOnce([]); // UPDATE
+  describe("changing activation", () => {
+    const updateParam = (name: string) => paramValue(callsMatching("UPDATE dbo.AppUsers")[0], name);
+    const activationRows = () => callsMatching("INSERT INTO dbo.DecisionLedger").filter((c) => paramValue(c, "Action") === "user.activation_change");
 
-    const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+    it("ledgers a deactivation with no role change, and writes no role audit row", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid", IsActive: true }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockResolvedValueOnce([]); // ledger
 
-    expect(res.status).toBe(200);
-    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
-    expect(callsMatching("INSERT INTO dbo.UserRoleAudit")).toHaveLength(0);
-    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+
+      expect(res.status).toBe(200);
+      expect(updateParam("IsActive")).toBe(false);
+      expect(callsMatching("INSERT INTO dbo.UserRoleAudit")).toHaveLength(0);
+      const [ledger] = callsMatching("INSERT INTO dbo.DecisionLedger");
+      expect(paramValue(ledger, "Action")).toBe("user.activation_change");
+      expect(paramValue(ledger, "SubjectType")).toBe("app_user");
+      expect(paramValue(ledger, "SubjectId")).toBe("7");
+      expect(paramValue(ledger, "ActorName")).toBe("Test User");
+      expect(paramValue(ledger, "ActorUserId")).toBe(3);
+      expect(paramValue(ledger, "IsException")).toBe(true);
+      expect(JSON.parse(paramValue(ledger, "Before") as string)).toEqual({ isActive: true });
+      expect(JSON.parse(paramValue(ledger, "After") as string)).toEqual({ isActive: false });
+      const begun = db.beginTransaction.mock.invocationCallOrder[0];
+      const committed = db.commitTransaction.mock.invocationCallOrder[0];
+      const [at] = orderOf("INSERT INTO dbo.DecisionLedger");
+      expect(at).toBeGreaterThan(begun);
+      expect(at).toBeLessThan(committed);
+    });
+
+    it("ledgers a reactivation", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid", IsActive: false }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: true }), ctx);
+
+      const [ledger] = activationRows();
+      expect(JSON.parse(paramValue(ledger, "Before") as string)).toEqual({ isActive: false });
+      expect(JSON.parse(paramValue(ledger, "After") as string)).toEqual({ isActive: true });
+    });
+
+    it("keeps a deactivated account deactivated when an edit omits isActive, and ledgers only the role", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid", IsActive: false }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockResolvedValueOnce([]) // audit
+        .mockResolvedValueOnce([]); // ledger
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities" }), ctx);
+
+      expect(res.status).toBe(200);
+      expect(updateParam("IsActive")).toBe(false);
+      expect(activationRows()).toHaveLength(0);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(1);
+    });
+
+    it("keeps an active account active when an edit omits isActive", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid", IsActive: true }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      await upsertAppUser(makeRequest({ userId: 7, role: "facilities" }), ctx);
+
+      expect(updateParam("IsActive")).toBe(true);
+      expect(activationRows()).toHaveLength(0);
+    });
+
+    it("writes both ledger rows, in one transaction, when role and activation both change", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "user", Email: "x@co.com", EntraOid: "target-oid", IsActive: true }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockResolvedValueOnce([]) // audit
+        .mockResolvedValueOnce([]) // role ledger
+        .mockResolvedValueOnce([]); // activation ledger
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+
+      expect(res.status).toBe(200);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger").map((c) => paramValue(c, "Action"))).toEqual(["user.role_change", "user.activation_change"]);
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+      expect(db.rollbackTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rolls the deactivation back when the ledger write fails: no ledger row, no decision", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid", IsActive: true }])
+        .mockResolvedValueOnce([]) // UPDATE
+        .mockRejectedValueOnce(new Error("ledger unavailable")); // ledger INSERT
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+
+      expect(res.status).toBe(500);
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).not.toHaveBeenCalled();
+      const [updateAt] = orderOf("UPDATE dbo.AppUsers");
+      expect(updateAt).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
+      expect(updateAt).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+    });
+
+    it("writes no ledger row when neither role nor activation changes", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid", IsActive: false }])
+        .mockResolvedValueOnce([]); // UPDATE
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: false }), ctx);
+
+      expect(res.status).toBe(200);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+      expect(callsMatching("INSERT INTO dbo.UserRoleAudit")).toHaveLength(0);
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a non-boolean isActive before touching the database", async () => {
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "facilities", isActive: "false" }), ctx);
+
+      expect(res.status).toBe(400);
+      expect(callsMatching("UPDATE dbo.AppUsers")).toHaveLength(0);
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+    });
   });
 
   it("ledgers clearing a role (null) as a change", async () => {
