@@ -26,3 +26,9 @@ describe("event validation", () => {
     expect(canReadEvent([AppRole.ACCOUNTS], "financial", "accounts_managers")).toBe(false);
   });
 });
+
+it("preserves a planned disruption explicitly without inferring it from magnitude or dates", () => {
+  expect(parseEventInput({ ...input, plan: { ...input.plan, timing: "planned" } }).plan.timing).toBe("planned");
+  expect(parseEventInput(input).plan.timing).toBeUndefined();
+  expect(() => parseEventInput({ ...input, plan: { ...input.plan, timing: "unknown" } })).toThrow();
+});

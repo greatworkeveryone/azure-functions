@@ -142,7 +142,7 @@ async function seed() {
       ['flood', 'Stormwater response recap', 'operational', 'flood', [eventBuilding('Daly')], fm.DisplayName, 'Fictional completed response: drainage checked and access restored. Use this record to review the handover pack.', true],
     ];
     for (const [slug,title,domain,eventType,buildingIds,owner,brief,closed] of eventScenarios) {
-      const plan = { buildingIds, jobIds: [], actions: [
+      const plan = { buildingIds, jobIds: [], ...(slug === 'shutdown' ? { timing: 'planned' } : {}), actions: [
         { id: 'access', title: 'Confirm contractor access and safe work area', owner: fm.DisplayName, due: `${day(1)}T08:00:00.000Z`, done: true },
         { id: 'notice', title: 'Confirm next steps and record the handover', owner: 'Review Facilities', due: `${day(2)}T08:00:00.000Z`, done: closed },
       ] };

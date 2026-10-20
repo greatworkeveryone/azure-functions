@@ -15,6 +15,7 @@ export function canReadEvent(roles: readonly string[], domain: EventDomain, audi
   return roles.some(role => allowed.includes(role));
 }
 export interface EventPlan {
+  timing?: "incident" | "planned";
   buildingIds: number[];
   jobIds: number[];
   actions: { id: string; title: string; owner: string; due: string | null; done: boolean }[];
@@ -52,6 +53,7 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
   if (endsAt && endsAt < startsAt) throw new Error("End must be after start");
   const plan = body.plan as Partial<EventPlan> | undefined;
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("Event plan is required");
+  if (plan.timing !== undefined && plan.timing !== "incident" && plan.timing !== "planned") throw new Error("Choose incident or planned disruption");
   const buildingIds = ids(plan.buildingIds, "Buildings", 100, true);
   if (!buildingIds.length) throw new Error("Choose at least one affected building");
   const jobIds = ids(plan.jobIds, "Jobs", 100);
@@ -64,7 +66,7 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
     return { id, title: text(a.title, "Action", 300), owner: text(a.owner, "Action owner", 160), due: date(a.due, "Action due", true), done: a.done };
   });
   if (new Set(actions.map(a => a.id)).size !== actions.length) throw new Error("Action IDs must be unique");
-  return { eventClass: eventClass as EventInput["eventClass"], audience: audience as EventAudience, title: text(body.title, "Title", 160), domain: body.domain, eventType, ownerName: text(body.ownerName, "Event lead", 160), startsAt, endsAt, brief: text(body.brief, "Brief", 6000), plan: { buildingIds, jobIds, actions } };
+  return { eventClass: eventClass as EventInput["eventClass"], audience: audience as EventAudience, title: text(body.title, "Title", 160), domain: body.domain, eventType, ownerName: text(body.ownerName, "Event lead", 160), startsAt, endsAt, brief: text(body.brief, "Brief", 6000), plan: { buildingIds, jobIds, actions, ...(plan.timing ? { timing: plan.timing } : {}) } };
 }
 export function parseEventEntry(body: Record<string, unknown>): { type: string; body: string; buildingId: number | null; area: string | null } {
   const type = text(body.type, "Update type", 24);
