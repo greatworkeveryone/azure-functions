@@ -24,6 +24,8 @@ export interface OverviewService {
   isContract: boolean;
   jobId: number | null;
   jobStatus: string | null;
+  /** The last time this schedule was serviced: a done job or a manager's record. A one-off job linked to the asset counts for the asset, not here. */
+  lastDone: { date: string; jobId: number | null } | null;
   name: string;
   /** 0 = the next due date (the one with a real status); later ones are previews. */
   occurrence: number;
@@ -115,6 +117,15 @@ const MAX_OCCURRENCES = 26;
 const HISTORY_LIMIT = 10;
 const isOpenJob = (run: OverviewRun | undefined): run is OverviewRun =>
   Boolean(run && run.jobId !== null && !run.jobArchived && run.jobStatus !== "Done");
+const isDoneRun = (run: OverviewRun): boolean => run.outcome === "recorded" || (run.outcome === "job_created" && run.jobStatus === "Done");
+const doneDate = (run: OverviewRun): string => (run.completedAt ? run.completedAt.slice(0, 10) : run.dueDate);
+
+function lastDoneFor(scheduleId: number, runs: OverviewRun[]): OverviewService["lastDone"] {
+  const [latest] = runs
+    .filter((run) => run.serviceScheduleId === scheduleId && !run.jobArchived && isDoneRun(run))
+    .sort((a, b) => doneDate(b).localeCompare(doneDate(a)));
+  return latest ? { date: doneDate(latest), jobId: latest.jobId } : null;
+}
 
 function servicesFor(schedule: ScheduleApi, runs: OverviewRun[], today: string, until: string): OverviewService[] {
   const current = runs.find((run) => run.serviceScheduleId === schedule.serviceScheduleId && run.dueDate === schedule.nextDue);
@@ -127,6 +138,7 @@ function servicesFor(schedule: ScheduleApi, runs: OverviewRun[], today: string, 
     intervalCount: schedule.intervalCount,
     intervalUnit: schedule.intervalUnit,
     isContract: schedule.isContract,
+    lastDone: lastDoneFor(schedule.serviceScheduleId, runs),
     name: schedule.name,
     serviceScheduleId: schedule.serviceScheduleId,
     urgent: schedule.urgent,
@@ -158,9 +170,9 @@ function historyFor(schedules: ScheduleApi[], assetId: number | null, runs: Over
   const fromRuns: OverviewHistoryItem[] = runs
     .filter((run) => ids.has(run.serviceScheduleId) && !run.jobArchived)
     .map((run): OverviewHistoryItem => {
-      const done = run.outcome === "recorded" || (run.outcome === "job_created" && run.jobStatus === "Done");
+      const done = isDoneRun(run);
       return {
-        date: done && run.completedAt ? run.completedAt.slice(0, 10) : run.dueDate,
+        date: done ? doneDate(run) : run.dueDate,
         jobId: run.jobId,
         jobStatus: run.jobStatus,
         jobTitle: run.jobTitle,

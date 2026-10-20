@@ -89,6 +89,8 @@ describe("assembleOverview", () => {
     });
     const [asset] = overview.buildings[0].assets;
     expect(asset.lastServiced).toEqual({ date: "2026-08-02", jobId: 300 });
+    // The linked one-off job counts for the asset; the schedule's own last service is its run.
+    expect(asset.services[0].lastDone).toEqual({ date: "2026-04-30", jobId: 400 });
     expect(asset.history.map((h) => [h.date, h.outcome, h.jobId, h.source])).toEqual([
       ["2026-10-28", "open", 500, "schedule"],
       ["2026-08-02", "done", 300, "linked_job"],
@@ -106,6 +108,7 @@ describe("assembleOverview", () => {
     });
     const [asset] = overview.buildings[0].assets;
     expect(asset.lastServiced).toEqual({ date: "2026-05-02", jobId: null });
+    expect(asset.services[0].lastDone).toEqual({ date: "2026-05-02", jobId: null });
     expect(asset.history.map((h) => [h.date, h.outcome, h.note])).toEqual([
       ["2026-05-02", "done", "Contractor's own visit"],
       ["2025-10-28", "skipped", "Building closed"],
