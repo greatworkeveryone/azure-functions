@@ -10,7 +10,7 @@ jest.mock("./getBuildings", () => ({ clearBuildingsCache: jest.fn() }));
 import "./buildingGallery";
 
 const handlers = new Map(jest.mocked(app.http).mock.calls.map(([name, options]) => [name, options.handler!]));
-const ctx = { log: jest.fn() } as unknown as InvocationContext;
+const ctx = { log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const oldName = "building-hero/-7/11111111-1111-4111-8111-111111111111.jpg";
 const newName = "building-hero/-7/22222222-2222-4222-8222-222222222222.jpg";
 const url = (name: string) => `https://example.blob.core.windows.net/vacancies/${name}`;
@@ -28,11 +28,24 @@ it("keeps the old image when the replacement upload fails", async () => {
   expect((await call("uploadBuildingHeroImage", upload()))?.status).toBe(500);
   expect(deletePublicBlob).not.toHaveBeenCalled();
 });
-it("keeps the old image and cleans up the new upload when SQL fails", async () => {
-  jest.mocked(executeQuery).mockResolvedValueOnce([{ HeroImageUrl: url(oldName) }]).mockRejectedValueOnce(new Error("SQL unavailable"));
+it("keeps the old image and cleans up the new upload when SQL fails and nothing references it", async () => {
+  jest.mocked(executeQuery).mockResolvedValueOnce([{ HeroImageUrl: url(oldName) }]).mockRejectedValueOnce(new Error("SQL unavailable")).mockResolvedValueOnce([]);
   expect((await call("uploadBuildingHeroImage", upload()))?.status).toBe(500);
+  expect(jest.mocked(executeQuery).mock.calls[2][2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Url", value: url(newName) })]));
   expect(deletePublicBlob).toHaveBeenCalledTimes(1);
   expect(deletePublicBlob).toHaveBeenCalledWith(newName);
+});
+it("keeps the new upload when the UPDATE committed but its acknowledgement was lost", async () => {
+  jest.mocked(executeQuery).mockResolvedValueOnce([{ HeroImageUrl: url(oldName) }]).mockRejectedValueOnce(new Error("connection reset")).mockResolvedValueOnce([{ BuildingID: -7 }]);
+  expect((await call("uploadBuildingHeroImage", upload()))?.status).toBe(500);
+  expect(deletePublicBlob).not.toHaveBeenCalled();
+  expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining(newName));
+});
+it("keeps the new upload when the reference check itself fails", async () => {
+  jest.mocked(executeQuery).mockResolvedValueOnce([{ HeroImageUrl: url(oldName) }]).mockRejectedValueOnce(new Error("connection reset")).mockRejectedValueOnce(new Error("connection closed"));
+  expect((await call("uploadBuildingHeroImage", upload()))?.status).toBe(500);
+  expect(deletePublicBlob).not.toHaveBeenCalled();
+  expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("reference check failed"));
 });
 it("supports negative manual building IDs and removes only the correctly scoped old image after SQL succeeds", async () => {
   await call("uploadBuildingHeroImage", upload());

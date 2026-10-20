@@ -99,7 +99,11 @@ export async function uploadRegisterDocument(req: HttpRequest,ctx: InvocationCon
    const rows=await executeQuery(s.connection,`INSERT dbo.RegisterDocuments (Title,Kind,ServiceCategory,BuildingId,TenantId,IssuedOn,ExpiresOn,ReviewDue,OwnerName,Notes,FileName,BlobName,ContentType,SizeBytes,CreatedBy,CreatedByOid) OUTPUT INSERTED.DocumentId VALUES (@Title,@Kind,@Category,@Building,@Tenant,@Issue,@Expiry,@Review,@Owner,@Notes,@File,@Blob,@Type,@Size,@Name,@Oid)`,[...params(input),str('File',fileName),str('Blob',uploaded.blobName),str('Type',file.type),int('Size',bytes.length),str('Name',s.caller.name),str('Oid',s.caller.oid)]);
    const id=Number(rows[0].DocumentId);await audit(s,id,'created',input);return txOk({documentId:id});
   });committed=result.ok;return result.ok?{status:201,jsonBody:result.value}:result.response;
- }finally{if(blob&&!committed)await deleteBlob(blob).catch(()=>undefined);}
+ }finally{if(blob&&!committed){
+  // COMMIT may have succeeded with its acknowledgement lost: delete only when a fresh read proves no row references the file (an orphan is harmless, a deleted referenced file is data loss).
+  const referenced=await executeQuery(s.connection,'SELECT DocumentId FROM dbo.RegisterDocuments WHERE BlobName=@Blob',[str('Blob',blob)]).then(r=>r.length>0,()=>null);
+  if(referenced===false)await deleteBlob(blob).catch(()=>undefined);else ctx.warn(`uploadRegisterDocument kept ${blob}: ${referenced?'a document row references it':'reference check failed'}`);
+ }}
  }); }
 export async function updateRegisterDocument(req: HttpRequest,ctx: InvocationContext): Promise<HttpResponseInit> { return withDocumentRegister(req,ctx,true,async(request,s)=>{
  const body=await readJsonBody(request); const id=idOf(String(body?.documentId ?? ''));

@@ -82,8 +82,14 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // removeAttachment, the linkRooms fold), invisible to the FROM-only count
   // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.
   "src/functions/inspections.ts": { deleteBlob: 1, deleteFrom: 6, deleteOther: 4 },
+  // Removes only the blob this same request just uploaded (fresh randomUUID key) when the register insert did not commit,
+  // and only after a fresh read finds no RegisterDocuments row referencing it.
+  "src/functions/document-register.ts": { deleteBlob: 1 },
   "src/functions/invoices.ts": { deleteFrom: 1 },
   "src/functions/jobRequestedContractors.ts": { deleteFrom: 1 },
+  // Removes only the blob this same request just uploaded (fresh randomUUID key under major-events/<id>/) when the document insert
+  // did not commit, and only after a fresh read finds no MajorEventDocuments row referencing it.
+  "src/functions/major-events.ts": { deleteBlob: 1 },
   "src/functions/purchaseOrders.ts": { deleteBlob: 1, deleteFrom: 1 },
   "src/functions/quotes.ts": { deleteFrom: 1 },
   // src/functions/tenancy.ts deletes nothing: areas and car parks are archived

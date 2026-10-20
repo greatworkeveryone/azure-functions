@@ -189,7 +189,12 @@ export const uploadMajorEventDocument = async (request: HttpRequest, context: In
     committed = result.ok;
     return result.ok ? { status: 201, jsonBody: result.value } : result.response;
   } finally {
-    if (blobName && !committed) await deleteBlob(blobName).catch(() => undefined);
+    if (blobName && !committed) {
+      // COMMIT may have succeeded with its acknowledgement lost: delete only when a fresh read proves no row references the file (an orphan is harmless, a deleted referenced file is data loss).
+      const referenced = await executeQuery(s.connection, "SELECT DocumentId FROM dbo.MajorEventDocuments WHERE BlobName=@Blob", [str("Blob", blobName)]).then((r) => r.length > 0, () => null);
+      if (referenced === false) await deleteBlob(blobName).catch(() => undefined);
+      else context.warn(`uploadMajorEventDocument kept ${blobName}: ${referenced ? "a document row references it" : "reference check failed"}`);
+    }
   }
 })(request, context);
 export const getMajorEventDocument = async (request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> => withMajorEvent("getMajorEventDocument", false, async (req, s) => {

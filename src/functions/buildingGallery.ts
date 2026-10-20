@@ -84,7 +84,17 @@ async function handleUploadBuildingHeroImage(
         ],
       );
     } catch (error) {
-      await deletePublicBlob(blobName).catch(() => undefined);
+      // The UPDATE may have committed with its acknowledgement lost: delete only when a fresh read proves the new URL is not saved (an orphan is harmless, a deleted referenced image is data loss).
+      const saved = await executeQuery(
+        connection,
+        `SELECT BuildingID FROM dbo.Buildings WHERE BuildingID = @BuildingId AND HeroImageUrl = @Url`,
+        [
+          { name: "BuildingId", type: TYPES.Int, value: buildingId },
+          { name: "Url", type: TYPES.NVarChar, value: url },
+        ],
+      ).then((rows) => rows.length > 0, () => null);
+      if (saved === false) await deletePublicBlob(blobName).catch(() => undefined);
+      else context.warn(`uploadBuildingHeroImage kept ${blobName}: ${saved ? "the building row references it" : "reference check failed"}`);
       throw error;
     }
     if (oldBlobName) await deletePublicBlob(oldBlobName).catch(() => undefined);

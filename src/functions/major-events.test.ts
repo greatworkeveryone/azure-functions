@@ -1,6 +1,6 @@
 import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
-import { executeQuery, rollbackTransaction } from "../db";
+import { commitTransaction, executeQuery, rollbackTransaction } from "../db";
 import { getMajorEvents, getMajorEvent, createMajorEvent, updateMajorEvent, closeMajorEvent, addMajorEventEntry, getMajorEventDocument } from "./major-events";
 jest.mock("@azure/functions", () => ({ ...jest.requireActual("@azure/functions"), app: { http: jest.fn() } }));
 let roles: string[] = [];
@@ -9,7 +9,7 @@ jest.mock("../db", () => ({ createRequestConnection: jest.fn(async () => ({})), 
 jest.mock("../rateLimit", () => ({ checkRateLimit: () => ({ allowed: true }) }));
 jest.mock("../blob-storage", () => ({ downloadBlob: jest.fn(), uploadBlob: jest.fn(), deleteBlob: jest.fn() }));
 const db = jest.mocked(executeQuery);
-const context = { error: jest.fn() } as unknown as InvocationContext;
+const context = { error: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const input = { title: "Cyclone", domain: "operational", eventType: "cyclone", ownerName: "Team lead", startsAt: "2026-10-19T08:00:00Z", endsAt: null, brief: "Secure roof access", plan: { buildingIds: [33532], jobIds: [], actions: [] } };
 let row: Record<string, unknown>;
 const req = (body: unknown = {}, query = "") => new HttpRequest({ method: "POST", url: `http://localhost/api/test${query}`, headers: { "Content-Type": "application/json" }, body: { string: JSON.stringify(body) } });
@@ -68,6 +68,40 @@ it("removes only the new uploaded blob if the event closes during upload", async
   const { uploadMajorEventDocument } = await import('./major-events');
   expect((await uploadMajorEventDocument(request, context)).status).toBe(409);
   expect(deleteBlob).toHaveBeenCalledWith('major-events/1/11111111-1111-4111-8111-111111111111.pdf');
+});
+describe("upload cleanup only deletes a file no row references", () => {
+  const BLOB = "major-events/1/11111111-1111-4111-8111-111111111111.pdf";
+  const uploadRequest = () => ({ formData: async () => new Map<string, unknown>([["eventId", "1"], ["file", { type: "application/pdf", name: "evidence.pdf", size: 9, arrayBuffer: async () => Buffer.from("%PDF-test") }]]) }) as unknown as HttpRequest;
+  const isRefCheck = (sql: string) => /FROM dbo.MajorEventDocuments WHERE BlobName=@Blob/.test(sql);
+  beforeEach(() => {
+    const { uploadBlob, deleteBlob } = jest.requireMock("../blob-storage");
+    uploadBlob.mockResolvedValue({ blobName: BLOB });
+    deleteBlob.mockResolvedValue(undefined);
+  });
+  it("deletes the new file when the insert failed and no row references it", async () => {
+    const { deleteBlob } = jest.requireMock("../blob-storage");
+    db.mockImplementation(async (_c, sql) => { if (/INSERT INTO dbo.MajorEventDocuments/.test(sql)) throw new Error("insert failed"); return /FROM dbo.MajorEvents/.test(sql) ? [row] : []; });
+    const { uploadMajorEventDocument } = await import("./major-events");
+    expect((await uploadMajorEventDocument(uploadRequest(), context)).status).toBe(500);
+    expect(deleteBlob).toHaveBeenCalledWith(BLOB);
+  });
+  it("keeps the file when COMMIT succeeded but its acknowledgement was lost", async () => {
+    const { deleteBlob } = jest.requireMock("../blob-storage");
+    db.mockImplementation(async (_c, sql) => isRefCheck(sql) ? [{ DocumentId: 9 }] : /FROM dbo.MajorEvents/.test(sql) ? [row] : []);
+    jest.mocked(commitTransaction).mockRejectedValueOnce(new Error("connection reset"));
+    const { uploadMajorEventDocument } = await import("./major-events");
+    expect((await uploadMajorEventDocument(uploadRequest(), context)).status).toBe(500);
+    expect(deleteBlob).not.toHaveBeenCalled();
+    expect(context.warn).toHaveBeenCalledWith(expect.stringContaining(BLOB));
+  });
+  it("keeps the file when the reference check itself fails", async () => {
+    const { deleteBlob } = jest.requireMock("../blob-storage");
+    db.mockImplementation(async (_c, sql) => { if (/INSERT INTO dbo.MajorEventDocuments/.test(sql)) throw new Error("insert failed"); if (isRefCheck(sql)) throw new Error("connection closed"); return /FROM dbo.MajorEvents/.test(sql) ? [row] : []; });
+    const { uploadMajorEventDocument } = await import("./major-events");
+    expect((await uploadMajorEventDocument(uploadRequest(), context)).status).toBe(500);
+    expect(deleteBlob).not.toHaveBeenCalled();
+    expect(context.warn).toHaveBeenCalledWith(expect.stringContaining("reference check failed"));
+  });
 });
 it("rejects a document pointer outside the event's storage namespace before download", async () => {
   const { downloadBlob } = jest.requireMock('../blob-storage');
