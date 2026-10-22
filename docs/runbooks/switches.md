@@ -80,6 +80,9 @@ preview: set it to enabled for director, cfo and admin once migration 159
 (`159_tenancy_lease_type.sql`, additive: `Tenants.LeaseType`) is applied and the
 backend with `getTenancySchedule` is deployed. No app setting. It reads
 commercial buildings only (residences never appear) and writes nothing. Before
+enabling it, check every family residence is marked `residence` in Buildings:
+migration 150 marks only 25 and 23 Temira Crescent and 13 Seale St, so 24 Gunbar
+St, 2 Godfrey Ct and 27 Lambell Tce would otherwise report as commercial. Before
 the CFO's first run, set each tenancy's lease type and each fee's category in the
 register, or the summary groups those charges as "Rent" and "Other charges"; the
 report's Data gaps panel lists what is missing.
