@@ -75,6 +75,14 @@ enter the current periods. Service schedules (add, edit, import, mark serviced
 or skip) are managed by the same three roles.
 Rent reviews (`rentReviews`) shows the review screens; the generator and the CPI
 timer behind it need their settings above, and migration 101.
+Tenancy Schedule report (`tenancyScheduleReport`, Tools → Reports) ships in
+preview: set it to enabled for director, cfo and admin once migration 159
+(`159_tenancy_lease_type.sql`, additive: `Tenants.LeaseType`) is applied and the
+backend with `getTenancySchedule` is deployed. No app setting. It reads
+commercial buildings only (residences never appear) and writes nothing. Before
+the CFO's first run, set each tenancy's lease type and each fee's category in the
+register, or the summary groups those charges as "Rent" and "Other charges"; the
+report's Data gaps panel lists what is missing.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the

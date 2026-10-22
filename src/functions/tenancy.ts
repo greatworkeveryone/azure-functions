@@ -78,7 +78,7 @@ import {
   validateDeleteStepEnvelope,
   validateUpsertFeeEnvelope,
   validateUpsertGroupEnvelope,
-  validateUpsertStepEnvelope,
+  validateUpsertStepEnvelope, onlyCategoryChanged
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
 import { isLeaseType, LEASE_TYPE_ERROR, type LeaseType } from "../chargeCategories";
@@ -3581,6 +3581,7 @@ async function upsertMiscFeeHandler(
         const next = upsertMiscFee(existing, fee);
         return {
           column: "MiscFees",
+          keepsSignOff: onlyCategoryChanged(before, fee),
           kind: "write",
           ledgerEntries: [
             { action: "schedule.manual_edit", after: fee, before, subject: { id: fee.id, type: "misc_fee" } },

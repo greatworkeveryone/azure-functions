@@ -11,7 +11,8 @@ import {
   NOT_FOUND,
 } from "../scheduledRateStepLogic";
 
-import type { ScheduledRateStep } from "../scheduledRateStepLogic";
+import type { MiscFee, ScheduledRateStep } from "../scheduledRateStepLogic";
+import { onlyCategoryChanged } from "../scheduledRateStepLogic";
 
 const validId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
@@ -391,5 +392,21 @@ describe("computeScheduleRows — lease terms (mirrored in FE scheduleReview tes
     const steps = [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 110, 100)];
     assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01").annual, 110000);
     assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01", { cpiCapPercent: 4 }).annual, 104000);
+  });
+});
+
+describe("onlyCategoryChanged", () => {
+  const FEE: MiscFee = { baseAmount: 500, commencedAt: "2024-07-01", frequency: "monthly", id: "f1", note: "Cage 4", title: "Storage cage" };
+
+  it("is true when only the category moved, whatever the key order", () => {
+    expect(onlyCategoryChanged({ ...FEE }, { title: "Storage cage", id: "f1", category: "other", frequency: "monthly", commencedAt: "2024-07-01", baseAmount: 500, note: "Cage 4" })).toBe(true);
+    expect(onlyCategoryChanged({ ...FEE, category: "cleaning" }, { ...FEE, category: undefined })).toBe(true);
+  });
+
+  it("is false for a new fee, an unchanged category, or any other change alongside it", () => {
+    expect(onlyCategoryChanged(null, { ...FEE, category: "cleaning" })).toBe(false);
+    expect(onlyCategoryChanged({ ...FEE, category: "cleaning" }, { ...FEE, category: "cleaning" })).toBe(false);
+    expect(onlyCategoryChanged({ ...FEE }, { ...FEE, baseAmount: 550, category: "cleaning" })).toBe(false);
+    expect(onlyCategoryChanged({ ...FEE }, { ...FEE, category: "cleaning", rateSteps: [{ effectiveFrom: "2025-07-01", id: "r1", ratePercent: 3 }] })).toBe(false);
   });
 });

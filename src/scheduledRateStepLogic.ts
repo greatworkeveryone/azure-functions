@@ -1105,6 +1105,20 @@ export function parseMiscFees(raw: string | null | undefined): MiscFee[] {
   }
 }
 
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(canonical)
+    : value !== null && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)]))
+      : value;
+
+/** True when `after` is `before` with only its category changed: a label, so the schedule's figures and its sign-off stand. */
+export function onlyCategoryChanged(before: MiscFee | null, after: MiscFee): boolean {
+  if (!before || (before.category ?? null) === (after.category ?? null)) return false;
+  const strip = (fee: MiscFee) => canonical({ ...fee, category: undefined });
+  return JSON.stringify(strip(before)) === JSON.stringify(strip(after));
+}
+
 export function upsertMiscFee(existing: MiscFee[], incoming: MiscFee): MiscFee[] {
   const idx = existing.findIndex((f) => f.id === incoming.id);
   if (idx === -1) return [...existing, incoming];
