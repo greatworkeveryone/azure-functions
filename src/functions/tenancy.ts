@@ -81,6 +81,7 @@ import {
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
+import { isLeaseType, LEASE_TYPE_ERROR, type LeaseType } from "../chargeCategories";
 import { hasLeaseEventWithin } from "../tenancyLeaseEvents";
 import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
@@ -290,6 +291,8 @@ interface RegisterTenantApi {
   infoSheetVersion: number;
   /** m078 — lease document administration (execution dates, licences, etc.). */
   leaseAdministration: LeaseAdministration;
+  /** m159 (TS3): what kind of lease this is, for the Tenancy Schedule's rent label; null = not set. A label, not a figure. */
+  leaseType: LeaseType | null;
   /** WP26c: changes awaiting a director (relief requests, reviews awaiting approval),
    *  on every read; absent from a write's response, which reads the row alone. */
   pendingChanges?: PendingChanges;
@@ -578,6 +581,7 @@ function tenantRowToApi(
     infoSheetSections: parseInfoSheetSections(row.InfoSheetSections as string | null | undefined),
     infoSheetVersion: Number(row.InfoSheetVersion ?? 0),
     leaseAdministration: parseLeaseAdministration(row.LeaseAdministration as string | null | undefined),
+    leaseType: isLeaseType(row.LeaseType) ? row.LeaseType : null,
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
     lastReviewDate: toIsoDate(row.LastReviewDate),
@@ -706,6 +710,7 @@ const TENANT_COLUMNS = `
   InfoSheetSections,
   InfoSheetVersion,
   LeaseAdministration,
+  LeaseType,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
@@ -1053,7 +1058,7 @@ async function upsertRegisterTenant(
       return { status: 400, jsonBody: { error: "LegalName cannot be empty" } };
     }
 
-    const invalidTerm = invalidTermValue(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
+    const invalidTerm = invalidTermValue(body) ?? invalidLeaseType(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
     if (invalidTerm) return invalidTerm;
 
     connection = await createRequestConnection(token);
@@ -1081,7 +1086,7 @@ async function upsertRegisterTenant(
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
-            LeaseAdministration,
+            LeaseAdministration, LeaseType,
             CreatedById, CreatedByName, UpdatedById, UpdatedByName, IsTest
          )
          OUTPUT INSERTED.TenantId
@@ -1099,7 +1104,7 @@ async function upsertRegisterTenant(
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
-            @LeaseAdministration,
+            @LeaseAdministration, @LeaseType,
             @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName, @IsTest
          )`,
         [
@@ -1198,6 +1203,9 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
   InformationSheetReference: TYPES.NVarChar,
   LastReviewDate: TYPES.Date,
   LastReviewIncreasePercent: TYPES.Decimal,
+  // m159 (TS3): null clears it; invalidLeaseType has already refused a value off the list.
+  // Not a schedule term: it changes no figure, so no ledger entry or ScheduleVersion bump.
+  LeaseType: TYPES.NVarChar,
   LegalName: TYPES.NVarChar,
   Lot: TYPES.NVarChar,
   MyobId: TYPES.NVarChar,
@@ -1281,6 +1289,13 @@ function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
     }
   }
   return null;
+}
+
+/** 400 for a LeaseType off the list (TS3). Absent leaves it unchanged, null clears it. */
+function invalidLeaseType(body: Record<string, any>): HttpResponseInit | null {
+  const value = body.LeaseType;
+  if (value === undefined || value === null || isLeaseType(value)) return null;
+  return { status: 400, jsonBody: { error: LEASE_TYPE_ERROR } };
 }
 
 /** 400 when the CPI floor would sit above the cap once this write applies. */
@@ -1628,6 +1643,7 @@ function buildTenantParams(
       type: TYPES.NVarChar,
       value: v("BusinessTenanciesAct"),
     },
+    { name: "LeaseType", type: TYPES.NVarChar, value: v("LeaseType") },
     { name: "CreatedById", type: TYPES.NVarChar, value: caller.id },
     { name: "CreatedByName", type: TYPES.NVarChar, value: caller.name },
     { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },

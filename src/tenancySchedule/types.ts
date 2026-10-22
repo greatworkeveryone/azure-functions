@@ -1,6 +1,7 @@
 // The Tenancy Schedule report's wire shape (command-centre .harness/TENANCY-SCHEDULE-REPORT-2026-10-22.md,
-// "Contract (TS1-TS2)"). The frontend mirrors these types in src/types/; change both.
+// "Contract (TS1-TS2)" and "TS3 contract (T11)"). The frontend mirrors these types in src/types/; change both.
 
+import type { LeaseType } from "../chargeCategories";
 import type { PendingChangeItem, PendingChanges } from "../scheduleChange/pending";
 
 export interface TenancyScheduleUnit {
@@ -21,9 +22,16 @@ export type TenancyScheduleChargeKind = "ahac" | "carparkGroup" | "miscFee" | "r
 export interface TenancyScheduleCharge extends TenancyScheduleMoney {
   /** carparkGroup only: the group's bay count. */
   bays: number | null;
+  /**
+   * The summary group (TS3, T11): the rent line's lease type label ("Rent" when
+   * unset or other), "After-hours A/C", "Car bay rent" for car park groups and
+   * carBayRent fees, a fee's category label ("Other charges" when it has none),
+   * "Rent relief".
+   */
+  category: string;
   effectiveFrom: string | null;
   kind: TenancyScheduleChargeKind;
-  /** "Rent", "After-hours A/C", a fee's title, a group's label, "Rent relief". */
+  /** The lease type's label for the rent line ("Rent" when unset or other), "After-hours A/C", a fee's title, a group's label, "Rent relief". */
   label: string;
 }
 
@@ -51,6 +59,8 @@ export interface TenancyScheduleLease {
   contact: { email: string | null; name: string | null; phone: string | null } | null;
   expiry: string | null;
   leaseCode: string | null;
+  /** Tenants.LeaseType (m159); null = not set, which the Data gaps panel counts. */
+  leaseType: LeaseType | null;
   legalName: string;
   notes: TenancyScheduleNoteSection[];
   nlaSqm: number;
@@ -73,7 +83,7 @@ export interface TenancyScheduleVacancy {
   units: TenancyScheduleUnit[];
 }
 
-export type TenancyScheduleGapKind = "noContact" | "noExpiry" | "noOccupancy" | "scheduleNotSignedOff";
+export type TenancyScheduleGapKind = "noContact" | "noExpiry" | "noLeaseType" | "noOccupancy" | "scheduleNotSignedOff";
 
 export interface TenancyScheduleGap {
   kinds: TenancyScheduleGapKind[];
@@ -81,6 +91,7 @@ export interface TenancyScheduleGap {
   tenantId: number;
 }
 
+/** One summary group (TS3): `label` is the charge category; `kind` is the first kind in the group (rent, ahac, miscFee, carparkGroup, relief), as a group can mix kinds. */
 export interface TenancyScheduleSummaryLine extends TenancyScheduleMoney {
   kind: TenancyScheduleChargeKind;
   label: string;

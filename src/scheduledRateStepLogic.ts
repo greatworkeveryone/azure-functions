@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { FEE_CATEGORY_ERROR, type FeeCategory, isFeeCategory } from "./chargeCategories";
 import { addDaysIso, isIsoDate } from "./darwinDate";
 
 export type RentScheduleMethodKind =
@@ -952,11 +953,17 @@ export interface MiscFee {
   commencedAt: string;
   endsAt?: string;
   note?: string;
+  /**
+   * TS3 (T11): what kind of charge this is, for the Tenancy Schedule's summary.
+   * A label only, inside the MiscFees JSON: it changes no figure. Absent =
+   * uncategorised, which the report shows as "Other charges".
+   */
+  category?: FeeCategory;
   rateSteps?: MiscFeeRateStep[];
 }
 
 const FEE_ALLOWED_KEYS: ReadonlySet<string> = new Set([
-  "id", "title", "frequency", "baseAmount", "commencedAt", "endsAt", "note", "rateSteps",
+  "id", "title", "frequency", "baseAmount", "commencedAt", "endsAt", "note", "category", "rateSteps",
 ]);
 
 const FEE_RATE_STEP_ALLOWED_KEYS: ReadonlySet<string> = new Set([
@@ -999,7 +1006,7 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
   for (const key of Object.keys(raw)) {
     if (!FEE_ALLOWED_KEYS.has(key)) return { ok: false, error: `Unknown key on fee: ${key}` };
   }
-  const { id, title, frequency, baseAmount, commencedAt, endsAt, note } = raw;
+  const { id, title, frequency, baseAmount, commencedAt, endsAt, note, category } = raw;
   if (!isUuidShaped(id)) return { ok: false, error: "fee.id must be a UUID-shaped string" };
   if (typeof title !== "string" || title.trim().length === 0) return { ok: false, error: "fee.title must be a non-empty string" };
   if (title.length > 200) return { ok: false, error: "fee.title must be ≤200 chars" };
@@ -1008,6 +1015,8 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
   if (typeof commencedAt !== "string" || !ISO_DATE_RE.test(commencedAt)) return { ok: false, error: "fee.commencedAt must be an ISO date string (YYYY-MM-DD)" };
   if (endsAt !== undefined && (typeof endsAt !== "string" || !ISO_DATE_RE.test(endsAt))) return { ok: false, error: "fee.endsAt must be an ISO date string (YYYY-MM-DD) if provided" };
   if (note !== undefined && typeof note !== "string") return { ok: false, error: "fee.note must be a string" };
+  // null puts the fee back to uncategorised; anything else must be on the list.
+  if (category !== undefined && category !== null && !isFeeCategory(category)) return { ok: false, error: FEE_CATEGORY_ERROR };
 
   const { rateSteps } = raw;
   let validatedSteps: MiscFeeRateStep[] | undefined;
@@ -1031,6 +1040,7 @@ export function validateMiscFee(raw: unknown): { ok: true; fee: MiscFee } | Step
       commencedAt,
       ...(endsAt !== undefined && { endsAt }),
       ...(note !== undefined && { note: (note as string).trim() }),
+      ...(isFeeCategory(category) && { category }),
       ...(validatedSteps !== undefined && { rateSteps: validatedSteps }),
     },
   };
@@ -1082,6 +1092,7 @@ export function parseMiscFees(raw: string | null | undefined): MiscFee[] {
         commencedAt: f.commencedAt as string,
         ...(typeof f.endsAt === "string" && { endsAt: f.endsAt }),
         ...(typeof f.note === "string" && f.note.length > 0 && { note: f.note }),
+        ...(isFeeCategory(f.category) && { category: f.category }),
         ...(Array.isArray(f.rateSteps) && f.rateSteps.length > 0 && {
           rateSteps: (f.rateSteps as unknown[]).filter(
             (s): s is MiscFeeRateStep =>

@@ -8,6 +8,7 @@
 // the functions ancillariesByRow itself sums), and "Rent relief" is the
 // difference to what is charged. The engine's output is read, never changed.
 
+import { feeCategoryLabel, type LeaseType, leaseTypeLabel } from "../chargeCategories";
 import { ancillariesByRow, carparkRunning, miscFeeRunning, PERIODS_PER_YEAR } from "../rentReview/cascade";
 import { type Charges, chargedOn, computeCharges, type RentRelief } from "../scheduleCharges";
 import {
@@ -33,9 +34,16 @@ export const money = (annual: number, nlaSqm: number): TenancyScheduleMoney => (
   perSqm: nlaSqm > 0 ? r2(annual / nlaSqm) : null,
 });
 
+/** Car park groups are always this category, as are fees filed under carBayRent. */
+export const CAR_BAY_RENT = "Car bay rent";
+export const AFTER_HOURS_AC = "After-hours A/C";
+export const RENT_RELIEF = "Rent relief";
+
 export interface ChargeLine {
   annual: number;
   bays: number | null;
+  /** The summary group (see TenancyScheduleCharge.category). */
+  category: string;
   effectiveFrom: string | null;
   kind: TenancyScheduleChargeKind;
   label: string;
@@ -46,6 +54,8 @@ export interface LeaseScheduleInput {
   fallbackAnnual: number;
   fees: readonly MiscFee[];
   groups: readonly CarparkScheduleGroup[];
+  /** Labels the rent line; a label only, never a figure. */
+  leaseType: LeaseType | null;
   nlaSqm: number;
   reliefs: readonly RentRelief[];
   steps: ScheduledRateStep[];
@@ -70,16 +80,17 @@ export function leaseCharges(input: LeaseScheduleInput, asOf: string): LeaseChar
     reliefs: input.reliefs,
   });
   const period = chargedOn(schedule, asOf);
+  const rentLabel = leaseTypeLabel(input.leaseType);
   if (!period) {
     // The schedule hasn't started (or its rent is unknown): nothing is charged yet.
-    return { lines: [{ annual: 0, bays: null, effectiveFrom: rows[0]?.step.effectiveFrom ?? null, kind: "rent", label: "Rent" }], rows };
+    return { lines: [{ annual: 0, bays: null, category: rentLabel, effectiveFrom: rows[0]?.step.effectiveFrom ?? null, kind: "rent", label: rentLabel }], rows };
   }
 
   const index = period.stepId === null ? -1 : rows.findIndex((row) => row.step.id === period.stepId);
   const rowFrom = index >= 0 ? rows[index].step.effectiveFrom : input.commencement;
-  const lines: ChargeLine[] = [{ annual: period.lease.rent ?? 0, bays: null, effectiveFrom: rowFrom, kind: "rent", label: "Rent" }];
+  const lines: ChargeLine[] = [{ annual: period.lease.rent ?? 0, bays: null, category: rentLabel, effectiveFrom: rowFrom, kind: "rent", label: rentLabel }];
   if ((period.lease.ahac ?? 0) > 0) {
-    lines.push({ annual: period.lease.ahac ?? 0, bays: null, effectiveFrom: rowFrom, kind: "ahac", label: "After-hours A/C" });
+    lines.push({ annual: period.lease.ahac ?? 0, bays: null, category: AFTER_HOURS_AC, effectiveFrom: rowFrom, kind: "ahac", label: AFTER_HOURS_AC });
   }
 
   // The base rent (index -1) carries no fees or car parks, as computeCharges has it.
@@ -90,7 +101,16 @@ export function leaseCharges(input: LeaseScheduleInput, asOf: string): LeaseChar
       const amount = miscFeeRunning(through, fee);
       if (amount === null) continue;
       const annual = r2(amount * (PERIODS_PER_YEAR[fee.frequency] ?? 1));
-      if (annual > 0) lines.push({ annual, bays: null, effectiveFrom: later(rowFrom, fee.commencedAt), kind: "miscFee", label: fee.title.trim() || "Fee" });
+      if (annual > 0) {
+        lines.push({
+          annual,
+          bays: null,
+          category: feeCategoryLabel(fee.category),
+          effectiveFrom: later(rowFrom, fee.commencedAt),
+          kind: "miscFee",
+          label: fee.title.trim() || "Fee",
+        });
+      }
     }
     for (const group of input.groups) {
       if (group.commencedAt > asOf) continue;
@@ -99,6 +119,7 @@ export function leaseCharges(input: LeaseScheduleInput, asOf: string): LeaseChar
       lines.push({
         annual: r2(r2(monthly) * 12),
         bays: group.carparkIds.length,
+        category: CAR_BAY_RENT,
         effectiveFrom: later(rowFrom, group.commencedAt),
         kind: "carparkGroup",
         label: group.label.trim() || "Car parks",
@@ -109,7 +130,7 @@ export function leaseCharges(input: LeaseScheduleInput, asOf: string): LeaseChar
   const relieved = r2(sum(period.charged) - sum(period.lease));
   if (relieved !== 0) {
     const from = input.reliefs.filter((relief) => period.reliefIds.includes(relief.id)).map((relief) => relief.from).sort()[0] ?? null;
-    lines.push({ annual: relieved, bays: null, effectiveFrom: from, kind: "relief", label: "Rent relief" });
+    lines.push({ annual: relieved, bays: null, category: RENT_RELIEF, effectiveFrom: from, kind: "relief", label: RENT_RELIEF });
   }
   return { lines, rows };
 }

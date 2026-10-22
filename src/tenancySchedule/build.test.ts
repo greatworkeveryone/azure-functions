@@ -229,7 +229,7 @@ describe("charges reconcile with the engine's chargedOn", () => {
 
   it("charges the stored base rent for a tenancy with no schedule rows, from its commencement", () => {
     const l = lease(build(), 15);
-    expect(l.charges).toEqual([{ annual: 40000, bays: null, effectiveFrom: "2027-01-01", kind: "rent", label: "Rent", monthly: 3333.33, perSqm: 400 }]);
+    expect(l.charges).toEqual([{ annual: 40000, bays: null, category: "Rent", effectiveFrom: "2027-01-01", kind: "rent", label: "Rent", monthly: 3333.33, perSqm: 400 }]);
     expect(l.status).toBe("pending");
   });
 
@@ -399,13 +399,13 @@ describe("vacancies, bays and sort order", () => {
 });
 
 describe("summary", () => {
-  it("groups by kind, with fees by trimmed case-insensitive title and perSqm over total NLA", () => {
+  it("groups by category (uncategorised fees are Other charges) with perSqm over total NLA", () => {
     const { byLabel, total } = zeta(build()).summary;
     expect(byLabel.map((x) => [x.kind, x.label, x.annual])).toEqual([
       ["rent", "Rent", 124800 + 50000 + 40000],
+      ["carparkGroup", "Car bay rent", 3744],
       ["ahac", "After-hours A/C", 6240],
-      ["miscFee", "Storage cage", 6240 + 2400],
-      ["carparkGroup", "Car parks", 3744],
+      ["miscFee", "Other charges", 6240 + 2400],
       ["relief", "Rent relief", -12480],
     ]);
     expect(byLabel[0]).toMatchObject({ monthly: 17900, perSqm: 358 });
@@ -435,13 +435,17 @@ describe("summary", () => {
 });
 
 describe("gaps and pending changes", () => {
-  it("lists tenancies missing an expiry, an occupancy, a contact or a sign-off", () => {
+  it("lists tenancies missing an expiry, an occupancy, a contact, a lease type or a sign-off", () => {
     const r = build();
     expect(zeta(r).gaps).toEqual([
-      { kinds: ["noContact", "scheduleNotSignedOff"], name: "Bright Ltd", tenantId: 12 },
-      { kinds: ["noExpiry", "noContact", "scheduleNotSignedOff"], name: "Evolve Ltd", tenantId: 15 },
+      { kinds: ["noLeaseType"], name: "Acme Coffee", tenantId: 11 },
+      { kinds: ["noContact", "noLeaseType", "scheduleNotSignedOff"], name: "Bright Ltd", tenantId: 12 },
+      { kinds: ["noExpiry", "noContact", "noLeaseType", "scheduleNotSignedOff"], name: "Evolve Ltd", tenantId: 15 },
     ]);
-    expect(r.buildings[0].gaps).toEqual([{ kinds: ["noOccupancy"], name: "No Units Pty", tenantId: 22 }]);
+    expect(r.buildings[0].gaps).toEqual([
+      { kinds: ["noLeaseType"], name: "Fresh Co", tenantId: 21 },
+      { kinds: ["noOccupancy", "noLeaseType"], name: "No Units Pty", tenantId: 22 },
+    ]);
   });
 
   it("carries each tenancy's pending changes and the counts", () => {
@@ -466,6 +470,107 @@ describe("gaps and pending changes", () => {
     expect(r.generatedAt).toBe(GENERATED);
     expect(zeta(r)).toMatchObject({ address: "1 Zeta St, Darwin", buildingId: 1, name: "Zeta House", referenceCode: "ZH" });
     expect(r.buildings[0]).toMatchObject({ address: null, referenceCode: null });
+  });
+});
+
+describe("lease type and charge categories (TS3)", () => {
+  const FEE_POWER = { baseAmount: 100, category: "electricity", commencedAt: "2024-07-01", frequency: "monthly", id: id(911), title: "Power recharge" };
+  const FEE_BAY = { baseAmount: 200, category: "carBayRent", commencedAt: "2024-07-01", frequency: "monthly", id: id(912), title: "Extra bay (Level 1)" };
+  const rowsOf = (...rows: Record<string, unknown>[]): TenancyScheduleData => data({ tenants: rows as TenancyScheduleData["tenants"] });
+  // Acme with a lease type, an uncategorised fee (Storage cage), a categorised one and a carBayRent one, plus its car park group.
+  const A2 = tenant({ ...A, LeaseType: "office", MiscFees: json([FEE_STORAGE, FEE_POWER, FEE_BAY]) });
+  const built = () => lease(build(ASOF, rowsOf(A2)), 11);
+
+  it.each([
+    ["retail", "Retail rent"],
+    ["office", "Office rent"],
+    ["licence", "Licence fee"],
+    ["casualMallLicence", "Casual mall licence fee"],
+    ["carParkOnly", "Car bay rent"],
+    ["other", "Rent"],
+  ])("labels a %s lease's rent line %p, in its label and its category", (leaseType, label) => {
+    const l = lease(build(ASOF, rowsOf(tenant({ ...B, LeaseType: leaseType }))), 12);
+    expect(l.leaseType).toBe(leaseType);
+    expect(l.charges[0]).toMatchObject({ category: label, kind: "rent", label });
+  });
+
+  it("calls the rent line Rent when no type is set, and reads a stored value off the list as unset", () => {
+    expect(lease(build(), 12)).toMatchObject({ leaseType: null, charges: [expect.objectContaining({ category: "Rent", label: "Rent" }), expect.anything()] });
+    const off = lease(build(ASOF, rowsOf(tenant({ ...B, LeaseType: "freehold" }))), 12);
+    expect(off.leaseType).toBeNull();
+    expect(off.charges[0].label).toBe("Rent");
+  });
+
+  it("labels the zero rent line before the schedule starts by lease type too", () => {
+    const l = lease(build("2024-06-01", rowsOf(A2)), 11);
+    expect(l.charges).toEqual([expect.objectContaining({ annual: 0, category: "Office rent", kind: "rent", label: "Office rent" })]);
+  });
+
+  it("gives each charge its category: fees by category with the title as the label, car parks and carBayRent fees Car bay rent", () => {
+    expect(built().charges.map((c) => [c.kind, c.label, c.category, c.annual])).toEqual([
+      ["rent", "Office rent", "Office rent", 124800],
+      ["ahac", "After-hours A/C", "After-hours A/C", 6240],
+      ["miscFee", "Storage cage", "Other charges", 6240],
+      ["miscFee", "Power recharge", "Electricity", 1248],
+      ["miscFee", "Extra bay (Level 1)", "Car bay rent", 2496],
+      ["carparkGroup", "Basement bays", "Car bay rent", 3744],
+      ["relief", "Rent relief", "Rent relief", -12480],
+    ]);
+  });
+
+  it("groups the summary by category: a categorised fee, an uncategorised fee under Other charges, carBayRent with the car park groups", () => {
+    const { byLabel, total } = zeta(build(ASOF, rowsOf(A2))).summary;
+    expect(byLabel.map((x) => [x.kind, x.label, x.annual])).toEqual([
+      ["rent", "Office rent", 124800],
+      ["miscFee", "Car bay rent", 2496 + 3744],
+      ["ahac", "After-hours A/C", 6240],
+      ["miscFee", "Electricity", 1248],
+      ["miscFee", "Other charges", 6240],
+      ["relief", "Rent relief", -12480],
+    ]);
+    expect(Math.round(byLabel.reduce((t, x) => t + x.annual, 0) * 100) / 100).toBe(total.annual);
+    expect(byLabel[0]).toMatchObject({ monthly: 10400, perSqm: 624 });
+  });
+
+  it("merges a licence lease's rent with Licence fee fees, and keeps retail, office and plain rent as separate lines in order", () => {
+    const licenceFee = { baseAmount: 1000, category: "licenceFee", commencedAt: "2020-01-01", frequency: "annual", id: id(913), title: "Kiosk licence" };
+    const rows = [
+      tenant({ ...B, LeaseType: "licence", MiscFees: json([licenceFee]) }),
+      tenant({ ...F, BuildingId: 1, LeaseType: "retail", TenantId: 31 }),
+      tenant({ ...F, BuildingId: 1, LeaseType: "office", TenantId: 32 }),
+      tenant({ ...F, BuildingId: 1, TenantId: 33 }),
+    ];
+    const { byLabel } = zeta(build(ASOF, rowsOf(...rows))).summary;
+    expect(byLabel.map((x) => [x.label, x.annual])).toEqual([
+      ["Rent", 60000],
+      ["Retail rent", 60000],
+      ["Office rent", 60000],
+      ["Licence fee", 50000 + 1000],
+    ]);
+  });
+
+  it("flags a lease with no lease type as a gap, and not a vacancy or a vacated tenancy", () => {
+    const r = build();
+    const withType = build(ASOF, rowsOf(tenant({ ...B, LeaseType: "retail" })));
+    expect(zeta(r).gaps.filter((g) => g.kinds.includes("noLeaseType")).map((g) => g.tenantId)).toEqual([11, 12, 15]);
+    expect(zeta(withType).gaps.some((g) => g.kinds.includes("noLeaseType"))).toBe(false);
+    expect(zeta(r).vacancies.map((v) => v.tenantId)).toEqual([13, 14]);
+    expect(zeta(r).gaps.map((g) => g.tenantId)).not.toContain(13);
+    expect(zeta(r).gaps.map((g) => g.tenantId)).not.toContain(14);
+  });
+
+  it("changes no figure: the lease total equals the engine's charged figure, and the same lease with no labels, on every date", () => {
+    const plain = tenant({ ...A2, LeaseType: null, MiscFees: json([FEE_STORAGE, { ...FEE_POWER, category: undefined }, { ...FEE_BAY, category: undefined }]) });
+    for (const asOf of ["2024-06-01", "2025-07-01", "2026-09-01", ASOF, "2028-07-01", "2029-01-01"]) {
+      const total = lease(build(asOf, rowsOf(A2)), 11).total.annual;
+      expect(total).toBe(engineTotal(A2, 200, asOf).charged);
+      expect(total).toBe(lease(build(asOf, rowsOf(plain)), 11).total.annual);
+    }
+  });
+
+  it("keeps a review's applies-to naming Rent and the fee titles", () => {
+    const l = lease(build("2025-06-30", rowsOf(A2)), 11);
+    expect(l.reviews[0].appliesTo).toEqual(expect.arrayContaining(["Rent", "Storage cage", "Power recharge", "Extra bay (Level 1)"]));
   });
 });
 

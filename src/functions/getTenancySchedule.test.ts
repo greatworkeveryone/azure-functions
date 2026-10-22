@@ -217,6 +217,28 @@ describe("test and archived records", () => {
   });
 });
 
+describe("lease type (TS3)", () => {
+  it("reads Tenants.LeaseType, labels the rent line by it and flags a lease without one", async () => {
+    query.mockImplementation(async (_c, sql) => {
+      if (sql.includes("dbo.ScheduleChangeRequests") || sql.includes("dbo.RentReviews")) return [];
+      const from = /FROM dbo\.(\w+)/.exec(sql)?.[1];
+      if (from === "Buildings") return [BUILDINGS[1]] as never;
+      if (from === "TenantOccupancies") return OCCUPANCIES;
+      if (from === "Tenants") return [tenantRow(1, 3, { LeaseType: "office" }), tenantRow(2, 3, { LeaseType: null })];
+      return [];
+    });
+    const r = await getTenancySchedule(request("?buildingId=3"), ctx);
+    expect(r.status).toBe(200);
+    const tenantsSql = query.mock.calls.map(([, sql]) => sql).find((sql) => /FROM dbo\.Tenants t\b/.test(sql) && sql.includes("t.IdNo"));
+    expect(tenantsSql).toContain("t.LeaseType");
+    const [typed, untyped] = body(r).buildings[0].leases;
+    expect(typed).toMatchObject({ leaseType: "office", charges: [{ category: "Office rent", kind: "rent", label: "Office rent" }] });
+    expect(untyped).toMatchObject({ leaseType: null, charges: [{ category: "Rent", label: "Rent" }] });
+    expect(body(r).buildings[0].gaps.filter((g: { kinds: string[] }) => g.kinds.includes("noLeaseType")).map((g: { tenantId: number }) => g.tenantId)).toEqual([2]);
+    expect(body(r).buildings[0].summary.byLabel.map((x: { label: string }) => x.label)).toEqual(["Rent", "Office rent"]);
+  });
+});
+
 describe("failure", () => {
   it("returns a 500 without the raw error and still closes the connection", async () => {
     query.mockRejectedValue(new Error("boom with secret detail"));

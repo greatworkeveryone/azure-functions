@@ -1,7 +1,8 @@
 // Loaded rows + an as-of date -> the Tenancy Schedule report. Pure: no database,
 // no clock (the caller gives `generatedAt`). The contract is in
-// command-centre .harness/TENANCY-SCHEDULE-REPORT-2026-10-22.md ("Contract (TS1-TS2)").
+// command-centre .harness/TENANCY-SCHEDULE-REPORT-2026-10-22.md ("Contract (TS1-TS2)", "TS3 contract (T11)").
 
+import { isLeaseType } from "../chargeCategories";
 import { addDaysIso, addMonthsClamped } from "../darwinDate";
 import type { SqlRow } from "../db";
 import { parseInfoSheetSections } from "../infoSheetLogic";
@@ -105,12 +106,14 @@ function buildLease({ bays, occupancies, pending, row }: LeaseParts, asOf: strin
   const expiry = sqlDateToIso(row.Expiry);
   const fees = parseMiscFees(text(row.MiscFees));
   const groups = parseGroups(text(row.CarparkScheduleGroups));
+  const leaseType = isLeaseType(row.LeaseType) ? row.LeaseType : null;
   const { lines, rows } = leaseCharges(
     {
       commencement,
       fallbackAnnual: num(row.RentPerAnnum) ?? 0,
       fees,
       groups,
+      leaseType,
       nlaSqm,
       reliefs: parseReliefs(text(row.RentReliefs)),
       steps: parseSteps(text(row.ScheduledRateSteps)),
@@ -118,7 +121,14 @@ function buildLease({ bays, occupancies, pending, row }: LeaseParts, asOf: strin
     },
     asOf,
   );
-  const charges: TenancyScheduleCharge[] = lines.map((line) => ({ ...money(line.annual, nlaSqm), bays: line.bays, effectiveFrom: line.effectiveFrom, kind: line.kind, label: line.label }));
+  const charges: TenancyScheduleCharge[] = lines.map((line) => ({
+    ...money(line.annual, nlaSqm),
+    bays: line.bays,
+    category: line.category,
+    effectiveFrom: line.effectiveFrom,
+    kind: line.kind,
+    label: line.label,
+  }));
   const storedTerm = num(row.TermMonths);
   return {
     charges,
@@ -126,6 +136,7 @@ function buildLease({ bays, occupancies, pending, row }: LeaseParts, asOf: strin
     contact: contactOf(row),
     expiry,
     leaseCode: text(row.IdNo),
+    leaseType,
     legalName: String(row.LegalName ?? "").trim(),
     nlaSqm,
     notes: notesOf(row.InfoSheetSections),
@@ -167,6 +178,7 @@ function gapsOf(leases: readonly TenancyScheduleLease[]): TenancyScheduleGap[] {
     if (lease.expiry === null) kinds.push("noExpiry");
     if (lease.nlaSqm <= 0) kinds.push("noOccupancy");
     if (lease.contact === null) kinds.push("noContact");
+    if (lease.leaseType === null) kinds.push("noLeaseType");
     if (!lease.scheduleSignedOff) kinds.push("scheduleNotSignedOff");
     return kinds.length > 0 ? [{ kinds, name: lease.tradingName ?? lease.legalName, tenantId: lease.tenantId }] : [];
   });
