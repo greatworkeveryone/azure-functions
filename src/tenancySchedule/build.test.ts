@@ -309,8 +309,8 @@ describe("lease fields", () => {
 describe("reviews", () => {
   it("lists schedule rows after the date, within the term, with method, description and what reviews", () => {
     expect(lease(build(), 11).reviews).toEqual([
-      { appliesTo: ["Rent", "After-hours A/C"], date: "2027-07-01", description: "CPI Darwin", method: "cpi", pending: true },
-      { appliesTo: ["Rent", "Storage cage", "After-hours A/C"], date: "2028-07-01", description: "Fixed 3%", method: "fixed", pending: false },
+      { appliesTo: ["Rent", "Storage cage", "Basement bays", "After-hours A/C"], date: "2027-07-01", description: "CPI Darwin", method: "cpi", pending: true },
+      { appliesTo: ["Rent", "Storage cage", "Basement bays", "After-hours A/C"], date: "2028-07-01", description: "Fixed 3%", method: "fixed", pending: false },
     ]);
   });
 
@@ -329,10 +329,23 @@ describe("reviews", () => {
     });
     const reviews = lease(build(ASOF, data({ tenants: [row] as TenancyScheduleData["tenants"] })), 11).reviews;
     expect(reviews.map((r) => [r.method, r.description, r.appliesTo])).toEqual([
-      ["market", "Market review", ["Rent"]],
-      ["other", "Reset to turnover", ["Rent"]],
-      ["fixed", "Fixed review", ["Rent"]],
+      ["market", "Market review", ["Rent", "Basement bays"]],
+      ["other", "Reset to turnover", ["Rent", "Basement bays"]],
+      ["fixed", "Fixed review", ["Rent", "Basement bays"]],
     ]);
+  });
+
+  it("on a settled review lists what follows the rent's factor, and leaves out a fee whose figure doesn't change", () => {
+    const flat = { baseAmount: 200, commencedAt: "2024-07-01", frequency: "monthly", id: id(903), rateSteps: [{ effectiveFrom: "2027-07-01", id: id(954), newAmount: 200 }], title: "Locker" };
+    const row = tenant({
+      ...A,
+      MiscFees: json([FEE_STORAGE, flat]),
+      RentReliefs: null,
+      ScheduledRateSteps: json([commencement("2024-07-01", 120000, 200, 6000), review("2027-07-01", "fixed", 4)]),
+    });
+    const [only] = lease(build(ASOF, data({ tenants: [row] as TenancyScheduleData["tenants"] })), 11).reviews;
+    expect(only).toMatchObject({ date: "2027-07-01", description: "Fixed 4%" });
+    expect(only.appliesTo).toEqual(["Rent", "Storage cage", "Basement bays", "After-hours A/C"]);
   });
 
   it("lists a car park group with a step on the date", () => {

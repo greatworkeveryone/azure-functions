@@ -143,19 +143,37 @@ export interface ReviewInput {
   rows: readonly ScheduleRow[];
 }
 
-/** The schedule rows after `asOf` and within the term: the date, how it reviews, and what it reviews. */
+/**
+ * Running before the review and changed by it: fees and groups that follow the
+ * rent move without a step of their own. A pending row (or one after it) has no
+ * figures yet, so everything running before it is listed: each reviews on the
+ * rent's date, by its own step or the rent's factor.
+ */
+const changesOn = <T>(running: (rows: readonly ScheduleRow[], item: T) => number | null, rows: readonly ScheduleRow[], index: number, item: T): boolean => {
+  const before = running(rows.slice(0, index), item);
+  if (before === null) return false;
+  if (rows[index].pending) return true;
+  const after = running(rows.slice(0, index + 1), item);
+  return after !== null && r2(before) !== r2(after);
+};
+
+const ahacOf = (row: ScheduleRow | undefined): number => row?.ahacAnnual ?? 0;
+
+/** The schedule rows after `asOf` and within the term: the date, how it reviews, and every charge whose figure changes on it. */
 export function futureReviews(input: ReviewInput): TenancyScheduleReview[] {
-  const hasAhac = input.rows.some((row) => (row.ahacAnnual ?? 0) > 0);
   return input.rows
-    .filter((row) => row.step.methodKind !== "commencement" && row.step.effectiveFrom > input.asOf)
-    .filter((row) => input.expiry === null || row.step.effectiveFrom <= input.expiry)
-    .map((row): TenancyScheduleReview => {
+    .map((row, index) => ({ index, row }))
+    .filter(({ row }) => row.step.methodKind !== "commencement" && row.step.effectiveFrom > input.asOf)
+    .filter(({ row }) => input.expiry === null || row.step.effectiveFrom <= input.expiry)
+    .map(({ index, row }): TenancyScheduleReview => {
       const date = row.step.effectiveFrom;
       const method = methodOf(row);
-      const fees = input.fees.filter((fee) => (!fee.endsAt || date <= fee.endsAt) && fee.rateSteps?.some((step) => step.effectiveFrom === date));
-      const groups = input.groups.filter((group) => group.rateSteps?.some((step) => step.effectiveFrom === date));
+      const fees = input.fees.filter((fee) => (!fee.endsAt || date <= fee.endsAt) && changesOn(miscFeeRunning, input.rows, index, fee));
+      const groups = input.groups.filter((group) => changesOn(carparkRunning, input.rows, index, group));
+      const ahacBefore = input.rows.slice(0, index).reduce((last, prior) => (prior.pending ? last : ahacOf(prior)), 0);
+      const ahacChanges = ahacBefore > 0 && (row.pending || r2(ahacOf(row)) !== r2(ahacBefore));
       return {
-        appliesTo: ["Rent", ...fees.map((fee) => fee.title.trim() || "Fee"), ...groups.map((group) => group.label.trim() || "Car parks"), ...(hasAhac ? ["After-hours A/C"] : [])],
+        appliesTo: ["Rent", ...fees.map((fee) => fee.title.trim() || "Fee"), ...groups.map((group) => group.label.trim() || "Car parks"), ...(ahacChanges ? ["After-hours A/C"] : [])],
         date,
         description: describe(row, method, input.cpiRegion),
         method,
