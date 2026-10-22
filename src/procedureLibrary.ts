@@ -5,7 +5,17 @@
 
 import { AppRole } from "./auth";
 
-export const BLOCK_KINDS = ["heading", "image", "list", "paragraph", "table", "checklist", "steps", "decision", "diagram"];
+export const BLOCK_KINDS = [
+  "heading",
+  "image",
+  "list",
+  "paragraph",
+  "table",
+  "checklist",
+  "steps",
+  "decision",
+  "diagram",
+];
 export const KNOWN_AUDIENCES: string[] = ["all", ...Object.values(AppRole)];
 export const REVIEW_INTERVALS = [0, 3, 6, 12, 24];
 export const MAX_BLOCKS_BYTES = 512 * 1024;
@@ -22,17 +32,35 @@ export function validateBlocks(blocks: unknown): string | null {
     const b = block as Record<string, unknown>;
     const kind = b.kind;
     if (typeof kind !== "string" || !BLOCK_KINDS.includes(kind)) return `unknown block kind: ${String(kind)}`;
-    if (typeof b.id !== "string" || !b.id || b.id.length > 200 || ids.has(b.id)) return "each block needs a unique string id";
+    if (typeof b.id !== "string" || !b.id || b.id.length > 200 || ids.has(b.id))
+      return "each block needs a unique string id";
     ids.add(b.id);
     if ((kind === "heading" || kind === "paragraph") && !text(b.text)) return "Text must be a string";
     if (kind === "heading" && b.level !== 2 && b.level !== 3) return "Heading level must be 2 or 3";
-    if (["list", "checklist", "steps", "diagram"].includes(kind) && !list(b.items)) return "Items must be a list of text";
+    if (["list", "checklist", "steps", "diagram"].includes(kind) && !list(b.items))
+      return "Items must be a list of text";
     if (kind === "list" && typeof b.ordered !== "boolean") return "List style is required";
-    if (kind === "decision" && ![b.question,b.yes,b.no].every(text)) return "Response guide needs a question and yes/no instructions";
-    if (kind === "table" && (!list(b.header) || !Array.isArray(b.rows) || b.rows.length > 500 || !b.rows.every(row => list(row) && row.length === (b.header as string[]).length))) return "Table rows must match its header";
+    if (kind === "decision" && ![b.question, b.yes, b.no].every(text))
+      return "Response guide needs a question and yes/no instructions";
+    if (
+      kind === "table" &&
+      (!list(b.header) ||
+        !Array.isArray(b.rows) ||
+        b.rows.length > 500 ||
+        !b.rows.every((row) => list(row) && row.length === (b.header as string[]).length))
+    )
+      return "Table rows must match its header";
     if (kind === "image") {
-      if (!text(b.url) || !text(b.alt) || (b.caption !== undefined && !text(b.caption))) return "Image needs a URL and description";
-      if (b.url) { try { if (!["https:","http:"].includes(new URL(b.url as string).protocol)) return "Use an HTTP(S) image URL"; } catch { return "Use a valid image URL"; } }
+      if (!text(b.url) || !text(b.alt) || (b.caption !== undefined && !text(b.caption)))
+        return "Image needs a URL and description";
+      if (b.url) {
+        try {
+          if (!["https:", "http:"].includes(new URL(b.url as string).protocol))
+            return "Use an HTTP(S) image URL";
+        } catch {
+          return "Use a valid image URL";
+        }
+      }
     }
   }
   return null;
@@ -70,7 +98,10 @@ export function approvalRequestOf(row: Record<string, unknown>): { approvalReque
     approvalRequest: {
       at: toIsoDateTime(row.ApprovalRequestedAt),
       by: String(row.ApprovalRequestedBy ?? ""),
-      from: { name: String(row.ApprovalRequestedFromName ?? ""), userId: Number(row.ApprovalRequestedFromUserId) },
+      from: {
+        name: String(row.ApprovalRequestedFromName ?? ""),
+        userId: Number(row.ApprovalRequestedFromUserId),
+      },
     },
   };
 }

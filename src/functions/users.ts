@@ -213,8 +213,8 @@ export async function upsertAppUser(
         return { status: 403, jsonBody: { error: "Cannot edit your own account" } };
       }
 
-      // The role the UPDATE leaves in place (an omitted role is written as NULL).
-      const newRole = role ?? null;
+      // An omitted role leaves the stored role as it is (it used to be written as NULL).
+      const newRole = role === undefined ? oldRole : role;
       // An edit that omits isActive leaves the account as it is; defaulting to
       // true here used to reactivate a deactivated account on every role change.
       const newActive = isActive ?? oldActive;

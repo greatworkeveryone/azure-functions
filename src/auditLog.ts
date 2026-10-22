@@ -1,9 +1,28 @@
-import { AppRole } from './auth';
-export const AUDIT_READ_ROLES = [AppRole.FACILITIES_APPROVAL,AppRole.CFO,AppRole.DIRECTOR] as const;
-export const AUDIT_AREAS = ['facilities','documents','inspections','events','people','administration','finance'] as const;
+import { AppRole } from "./auth";
+export const AUDIT_READ_ROLES = [AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] as const;
+export const AUDIT_AREAS = [
+  "facilities",
+  "documents",
+  "inspections",
+  "events",
+  "people",
+  "administration",
+  "finance",
+] as const;
 // A positive list: a new or unclassified ledger action is never exposed to Facilities.
-export const OPERATIONAL_AUDIT_ACTIONS = ['job.reopen','job.defects_override','service_schedule.archive','service_schedule.create','service_schedule.mark_serviced','service_schedule.restore','service_schedule.skip_due','service_schedule.update'] as const;
-export function fullAuditAccess(roles:readonly string[]):boolean{return roles.some(role=>['admin','cfo','director'].includes(role));}
+export const OPERATIONAL_AUDIT_ACTIONS = [
+  "job.reopen",
+  "job.defects_override",
+  "service_schedule.archive",
+  "service_schedule.create",
+  "service_schedule.mark_serviced",
+  "service_schedule.restore",
+  "service_schedule.skip_due",
+  "service_schedule.update",
+] as const;
+export function fullAuditAccess(roles: readonly string[]): boolean {
+  return roles.some((role) => ["admin", "cfo", "director"].includes(role));
+}
 // Only audit metadata is selected. Snapshots, reasons, free-text bodies, tokens,
 // lease terms, payroll details and financial amounts never enter this projection.
 export const AUDIT_UNION_SQL = `
@@ -34,4 +53,5 @@ export const AUDIT_UNION_SQL = `
  UNION ALL
  SELECT CONCAT('key:',a.Id),a.CheckedOutAt,a.CheckedOutBy,'key.checked_out','facilities','key_checkout',CONVERT(NVARCHAR(128),a.Id),NULL,NULL FROM dbo.KeyCheckoutBatches a
 `;
-export const AUDIT_COLUMNS = 'AuditKey,OccurredAt,ActorName,Action,Area,SubjectType,SubjectId,BuildingId,JobId';
+export const AUDIT_COLUMNS =
+  "AuditKey,OccurredAt,ActorName,Action,Area,SubjectType,SubjectId,BuildingId,JobId";

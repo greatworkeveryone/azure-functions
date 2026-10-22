@@ -1,7 +1,50 @@
-import { eligibleManager,leaveApprovers,parseLeave,parseReporting } from './leavePolicy';
-const staff=[{id:1,name:'Staff',role:'facilities',oid:'staff'},{id:2,name:'Manager',role:'facilities_manager',oid:'manager'},{id:3,name:'CFO',role:'cfo',oid:'cfo'},{id:4,name:'Director',role:'director',oid:'director'},{id:5,name:'Accounts manager',role:'accounts_manager',oid:'accounts'}];
-it('uses team managers and seniors by default, excluding self',()=>{expect(leaveApprovers(staff[0],staff,[]).map(p=>p.id)).toEqual([2,3,4]);expect(leaveApprovers(staff[1],staff,[]).map(p=>p.id)).toEqual([3,4]);expect(eligibleManager(staff[2],staff[2])).toBe(false);});
-it('uses the named active manager exclusively and fails closed when they disappear',()=>{expect(leaveApprovers(staff[0],staff,[{userId:1,managerId:2}]).map(p=>p.id)).toEqual([2]);expect(leaveApprovers(staff[0],staff.slice(2),[{userId:1,managerId:2}])).toEqual([]);});
-it('rejects cycles, duplicates, self-routing and unqualified managers',()=>{for(const links of [[{userId:3,managerId:4},{userId:4,managerId:3}],[{userId:1,managerId:2},{userId:1,managerId:3}],[{userId:1,managerId:1}],[{userId:2,managerId:5}]])expect(()=>parseReporting({links},staff)).toThrow();});
-it('accepts explicit dates/hours without inferring working days or leave balances',()=>{expect(parseLeave({kind:'annual_leave',startDate:'2026-12-01',endDate:'2026-12-02',hours:7.1})).toMatchObject({hours:7.1,note:''});});
-it.each([{startDate:'2026-02-30'},{endDate:'2026-11-30'},{hours:0},{hours:49},{hours:0.001},{kind:'paid_by_myob'},{note:'x'.repeat(501)}])('rejects invalid dates, hours, kinds and long notes %j',patch=>{expect(()=>parseLeave({kind:'annual_leave',startDate:'2026-12-01',endDate:'2026-12-02',hours:8,...patch})).toThrow();});
+import { eligibleManager, leaveApprovers, parseLeave, parseReporting } from "./leavePolicy";
+const staff = [
+  { id: 1, name: "Staff", role: "facilities", oid: "staff" },
+  { id: 2, name: "Manager", role: "facilities_manager", oid: "manager" },
+  { id: 3, name: "CFO", role: "cfo", oid: "cfo" },
+  { id: 4, name: "Director", role: "director", oid: "director" },
+  { id: 5, name: "Accounts manager", role: "accounts_manager", oid: "accounts" },
+];
+it("uses team managers and seniors by default, excluding self", () => {
+  expect(leaveApprovers(staff[0], staff, []).map((p) => p.id)).toEqual([2, 3, 4]);
+  expect(leaveApprovers(staff[1], staff, []).map((p) => p.id)).toEqual([3, 4]);
+  expect(eligibleManager(staff[2], staff[2])).toBe(false);
+});
+it("uses the named active manager exclusively and fails closed when they disappear", () => {
+  expect(leaveApprovers(staff[0], staff, [{ userId: 1, managerId: 2 }]).map((p) => p.id)).toEqual([2]);
+  expect(leaveApprovers(staff[0], staff.slice(2), [{ userId: 1, managerId: 2 }])).toEqual([]);
+});
+it("rejects cycles, duplicates, self-routing and unqualified managers", () => {
+  for (const links of [
+    [
+      { userId: 3, managerId: 4 },
+      { userId: 4, managerId: 3 },
+    ],
+    [
+      { userId: 1, managerId: 2 },
+      { userId: 1, managerId: 3 },
+    ],
+    [{ userId: 1, managerId: 1 }],
+    [{ userId: 2, managerId: 5 }],
+  ])
+    expect(() => parseReporting({ links }, staff)).toThrow();
+});
+it("accepts explicit dates/hours without inferring working days or leave balances", () => {
+  expect(
+    parseLeave({ kind: "annual_leave", startDate: "2026-12-01", endDate: "2026-12-02", hours: 7.1 }),
+  ).toMatchObject({ hours: 7.1, note: "" });
+});
+it.each([
+  { startDate: "2026-02-30" },
+  { endDate: "2026-11-30" },
+  { hours: 0 },
+  { hours: 49 },
+  { hours: 0.001 },
+  { kind: "paid_by_myob" },
+  { note: "x".repeat(501) },
+])("rejects invalid dates, hours, kinds and long notes %j", (patch) => {
+  expect(() =>
+    parseLeave({ kind: "annual_leave", startDate: "2026-12-01", endDate: "2026-12-02", hours: 8, ...patch }),
+  ).toThrow();
+});
