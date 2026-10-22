@@ -22,6 +22,8 @@ jest.mock("../auth", () => ({
   requireRole: jest.fn().mockResolvedValue(null),
   verifiedIdentityFromRequest: jest.fn().mockResolvedValue({ email: "ann@rp", name: "Ann Accounts", oid: "ann-oid" }),
 }));
+// Migration 136 is applied here: the portfolio figures take their commercial-only SQL (portfolioOccupancy.residences.test.ts covers the probe).
+jest.mock("../buildingCategoryColumn", () => ({ buildingCategoryColumnExists: jest.fn().mockResolvedValue(true), resetBuildingCategoryColumnProbe: jest.fn() }));
 jest.mock("../db", () => ({
   beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),

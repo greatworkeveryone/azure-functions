@@ -23,6 +23,8 @@ jest.mock("@azure/functions", () => {
   bag.__pendingHandlers = bag.__pendingHandlers ?? {};
   return { ...actual, app: { ...actual.app, http: (name: string, opts: { handler: unknown }) => ((bag.__pendingHandlers as Record<string, unknown>)[name] = opts.handler), timer: () => undefined } };
 });
+// Migration 136 is applied here: the portfolio figures take their commercial-only SQL (portfolioOccupancy.residences.test.ts covers the probe).
+jest.mock("../buildingCategoryColumn", () => ({ buildingCategoryColumnExists: jest.fn().mockResolvedValue(true), resetBuildingCategoryColumnProbe: jest.fn() }));
 jest.mock("../db", () => ({ closeConnection: jest.fn(), createRequestConnection: jest.fn(), executeQuery: jest.fn() }));
 jest.mock("../tenant-register-cache", () => ({
   getCachedTenantDetail: jest.fn().mockReturnValue(null),

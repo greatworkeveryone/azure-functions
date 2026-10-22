@@ -13,11 +13,18 @@ import { join, relative } from "node:path";
 // buildings only, because residences are the family's own houses (Connor,
 // 22 Oct 2026; TENANCY-SCHEDULE-REPORT decision T10). That governs what a report
 // totals, never what can be raised against a residence, so it is listed here by
-// file and nothing operational joins it.
+// file, each with its reason, and nothing operational joins it. The jobs, keys,
+// inspections, maintenance and tenancy-register reads, the Next 90 days feed and the
+// rent-review queue stay unfiltered.
 
 const SRC = join(__dirname, "..");
 const ALLOWED = new Set(["functions/getBuildings.ts", "functions/upsertManualBuilding.ts", "manualBuildingInput.ts"]);
-const COMPANY_REPORTING = new Set(["tenancySchedule/load.ts"]);
+const COMPANY_REPORTING_REASONS: Record<string, string> = {
+  "portfolioOccupancy.ts": "the portfolio occupancy, rent, WALE and tenant figures the Overview and dashboard total",
+  "scheduleChange/pending.ts": "the `commercial` scope: the pending-changes count that rides on those company figures",
+  "tenancySchedule/load.ts": "the Tenancy Schedule report's reads",
+};
+const COMPANY_REPORTING = new Set(Object.keys(COMPANY_REPORTING_REASONS));
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
