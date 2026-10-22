@@ -272,6 +272,7 @@ export function buildTenancySchedule({ asOf, data, generatedAt }: BuildInput): T
       );
     });
 
+  const reported = new Set(built.map((entry) => entry.building.buildingId));
   const leases = built.flatMap((entry) => entry.building.leases);
   const bays = built.reduce(
     (total, entry) => ({
@@ -286,7 +287,8 @@ export function buildTenancySchedule({ asOf, data, generatedAt }: BuildInput): T
     asOf,
     buildings: built.map((entry) => entry.building),
     generatedAt,
-    pendingChanges: pendingChangesOf(data.pending),
+    // Only the buildings reported: the pending loader's "all" scope also sees residences.
+    pendingChanges: pendingChangesOf(data.pending.filter((item) => item.buildingId !== null && reported.has(item.buildingId))),
     portfolio: summarise({
       bays,
       leases,

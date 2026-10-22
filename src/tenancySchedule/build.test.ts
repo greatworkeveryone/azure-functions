@@ -454,6 +454,12 @@ describe("gaps and pending changes", () => {
     expect(r.pendingChanges).toEqual({ count: 2, items: [pendingReview, pendingRelief] });
   });
 
+  it("leaves out pending changes for a building it doesn't report (a residence)", () => {
+    const residence: PendingChangeItem = { ...pendingRelief, buildingId: -5, requestId: "rel-home", tenantId: 77 };
+    const r = build(ASOF, data({ pending: [pendingReview, pendingRelief, residence] }));
+    expect(r.pendingChanges).toEqual({ count: 2, items: [pendingReview, pendingRelief] });
+  });
+
   it("echoes the dates and the building header", () => {
     const r = build();
     expect(r.asOf).toBe(ASOF);

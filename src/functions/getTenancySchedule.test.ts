@@ -57,10 +57,12 @@ const OCCUPANCIES = [
 function seed(buildings: unknown[] = BUILDINGS) {
   query.mockImplementation(async (_c, sql) => {
     if (sql.includes("dbo.ScheduleChangeRequests") || sql.includes("dbo.RentReviews")) return [];
-    if (sql.includes("FROM dbo.Buildings")) return buildings as never;
-    if (sql.includes("FROM dbo.TenantOccupancies")) return OCCUPANCIES;
-    if (sql.includes("FROM dbo.Carparks")) return [];
-    if (sql.includes("FROM dbo.Tenants")) return TENANTS;
+    // Route on each read's first FROM: later ones are subqueries (the commercial-building filter).
+    const from = /FROM dbo\.(\w+)/.exec(sql)?.[1];
+    if (from === "Buildings") return buildings as never;
+    if (from === "TenantOccupancies") return OCCUPANCIES;
+    if (from === "Carparks") return [];
+    if (from === "Tenants") return TENANTS;
     return [];
   });
 }
@@ -200,6 +202,13 @@ describe("test and archived records", () => {
     const carparks = scoped(/dbo\.Carparks/);
     expect(carparks).toHaveLength(1);
     expect(carparks[0][1]).toContain("ArchivedAt IS NULL");
+  });
+
+  it("reads commercial buildings only: residences and development sites stay out of company reporting", async () => {
+    await getTenancySchedule(request("?buildingId=all"), ctx);
+    const reads = scoped(/FROM dbo\.(Buildings|Tenants|TenantOccupancies|Carparks)\b/);
+    expect(reads.length).toBe(4);
+    for (const [, sql] of reads) expect(sql).toMatch(/Category = N'commercial'/);
   });
 
   it("only reads: no statement writes", async () => {

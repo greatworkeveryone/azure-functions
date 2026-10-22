@@ -11,13 +11,20 @@ import type { TenancyScheduleData } from "./build";
 
 export type TenancyScheduleScope = { all: true } | { buildingId: number };
 
+// Company reporting covers commercial buildings only: residences are the family's
+// own houses (Connor, 22 Oct 2026), and development sites aren't let. Selected
+// positively, so a new category stays out until someone decides it belongs.
+const COMMERCIAL_TENANT = "EXISTS (SELECT 1 FROM dbo.Buildings cb WHERE cb.BuildingID = t.BuildingId AND cb.Category = N'commercial')";
+const COMMERCIAL_CARPARK = "EXISTS (SELECT 1 FROM dbo.Buildings cb WHERE cb.BuildingID = c.BuildingId AND cb.Category = N'commercial')";
+
 // @BuildingId is NULL for "all buildings". Archived and test tenancies are left
 // out (test ones unless the admin's Show test data switch is on), as in the register.
-const TENANT_SCOPE = "t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (@BuildingId IS NULL OR t.BuildingId = @BuildingId)";
+const TENANT_SCOPE = `t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (@BuildingId IS NULL OR t.BuildingId = @BuildingId) AND ${COMMERCIAL_TENANT}`;
 
 const BUILDINGS_SQL = `SELECT b.BuildingID, b.BuildingName, b.BuildingAddress, b.ReferenceCode
   FROM dbo.Buildings b
  WHERE (@BuildingId IS NULL OR b.BuildingID = @BuildingId)
+   AND b.Category = N'commercial'
    AND (@BuildingId IS NOT NULL OR (b.Active = 1 AND EXISTS (
          SELECT 1 FROM dbo.Tenants t WHERE t.BuildingId = b.BuildingID AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1))))
  ORDER BY b.BuildingName, b.BuildingID`;
@@ -40,7 +47,7 @@ const OCCUPANCIES_SQL = `SELECT o.OccupancyId, o.TenantId, o.BuildingId, o.Level
 
 const CARPARKS_SQL = `SELECT c.CarparkId, c.BuildingId, c.AllocationKind, c.TenantId
   FROM dbo.Carparks c
- WHERE c.ArchivedAt IS NULL AND (@BuildingId IS NULL OR c.BuildingId = @BuildingId)`;
+ WHERE c.ArchivedAt IS NULL AND (@BuildingId IS NULL OR c.BuildingId = @BuildingId) AND ${COMMERCIAL_CARPARK}`;
 
 export async function loadTenancyScheduleData(
   connection: Connection,
