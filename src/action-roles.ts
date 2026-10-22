@@ -596,6 +596,11 @@ export const ACTION_ROLES = {
     routes: [],
     why: "A tenancy's Decision history (historyRoles.ts TENANCY_READ).",
   },
+  viewTenancySchedule: {
+    gate: [A.DIRECTOR, A.CFO],
+    routes: ["getTenancySchedule"],
+    why: "The Tenancy Schedule report: every lease's rent, contacts and notes (TENANCY-SCHEDULE-REPORT decision 5).",
+  },
   viewTimesheets: {
     gate: [A.USER],
     routes: ["getTimesheet"],

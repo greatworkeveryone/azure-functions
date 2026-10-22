@@ -679,6 +679,11 @@
     "cfo",
     "director"
   ],
+  "viewTenancySchedule": [
+    "admin",
+    "cfo",
+    "director"
+  ],
   "viewTimesheets": [
     "accounts",
     "accounts_manager",
