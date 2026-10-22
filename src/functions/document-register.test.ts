@@ -50,3 +50,26 @@ describe('upload cleanup only deletes a file no row references',()=>{
   expect(deleteBlob).not.toHaveBeenCalled();expect(context.warn).toHaveBeenCalledWith(expect.stringContaining('reference check failed'));
  });
 });
+
+it('links an existing original to a contractor without uploading or rewriting its file',async()=>{
+ roles=[AppRole.DIRECTOR];
+ query.mockImplementation(async(_c,sql)=>sql.includes('FROM dbo.RegisterDocuments d')?[{DocumentId:1,TenantId:null,BuildingId:-7,Revision:1,CreatedByOid:'other',ContractorId:null}]:sql.includes('FROM dbo.Contractors')?[{ContractorID:7}]:[]);
+ const result=await updateRegisterDocument(req({documentId:1,revision:1,title:'Public liability',kind:'certificate',category:'Insurance',contractorId:7,insuranceType:'Public liability',buildingId:-7,tenantId:null,ownerName:'Facilities'}),context);
+ expect(result.status).toBe(200);expect(uploadBlob).not.toHaveBeenCalled();expect(deleteBlob).not.toHaveBeenCalled();
+ const update=query.mock.calls.find(([,sql])=>sql.startsWith('UPDATE dbo.RegisterDocuments'))!;
+ expect(update[1]).not.toMatch(/BlobName|FileName/);expect(update[1]).toContain('ContractorId=@Contractor');expect(update[2]).toEqual(expect.arrayContaining([expect.objectContaining({name:'Contractor',value:7})]));
+});
+it('does not let a metadata edit move an existing certificate to another contractor',async()=>{
+ roles=[AppRole.DIRECTOR];query.mockResolvedValue([{DocumentId:1,TenantId:null,BuildingId:-7,Revision:1,ContractorId:7,InsuranceType:'Public liability'}]);
+ expect((await updateRegisterDocument(req({documentId:1,revision:1,title:'Public liability',kind:'certificate',category:'Insurance',contractorId:8,insuranceType:'Public liability',buildingId:-7,tenantId:null,ownerName:'Facilities'}),context)).status).toBe(400);
+ expect(query.mock.calls.some(([,sql])=>sql.startsWith('UPDATE'))).toBe(false);
+});
+
+it('indexes only the source-authorized published version when a newer draft exists',async()=>{
+ const {getProcedures}=await import('./getProcedures');
+ jest.mocked(getProcedures).mockResolvedValueOnce({status:200,jsonBody:{procedures:[{slug:'safe',category:'General',versions:[{title:'Pending rewrite',status:'draft',blocks:[{kind:'paragraph',text:'DRAFT ONLY SECRET'}]},{title:'Published guide',summary:'Approved instructions',status:'published',blocks:[{kind:'paragraph',text:'Inspect the exit'},{kind:'image',alt:'Exit sign',url:'https://private-image.test/token'}]}]}]}});
+ const result=await getDocumentRegister(req(),context);
+ const text=JSON.stringify(result.jsonBody);
+ expect(text).toContain('Inspect the exit');expect(text).toContain('Exit sign');
+ expect(text).not.toContain('DRAFT ONLY SECRET');expect(text).not.toContain('private-image.test');
+});

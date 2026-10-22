@@ -2,7 +2,7 @@ import { AppRole } from "./auth";
 export const DOCUMENT_SERVICE_CATEGORIES = ['Mechanical / air conditioning','Fire / life safety','Evacuation','Telecommunications','Plumbing / hydraulic','Electrical','Building / structural','Environmental','Insurance','General'] as const;
 export const DOCUMENT_KINDS = ['certificate','report','plan','manual','policy','other'] as const;
 export const DOCUMENT_MANAGERS = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.CFO, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
-export interface RegisteredDocumentInput { title: string; kind: string; category: string; buildingId: number | null; tenantId: number | null; issuedOn: string | null; expiresOn: string | null; reviewDue: string | null; ownerName: string; notes: string }
+export interface RegisteredDocumentInput { contractorId: number | null; insuranceType: string | null; title: string; kind: string; category: string; buildingId: number | null; tenantId: number | null; issuedOn: string | null; expiresOn: string | null; reviewDue: string | null; ownerName: string; notes: string }
 function text(value: unknown, label: string, max: number, optional = false): string {
  if (optional && (value === null || value === undefined || value === '')) return '';
  if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw new Error(`${label} is required (maximum ${max} characters)`);
@@ -19,6 +19,10 @@ export function parseDocumentInput(body: Record<string,unknown>): RegisteredDocu
   if (typeof value !== 'number' || !Number.isInteger(value) || value === 0 || Math.abs(value) > 2147483647 || (!negative && value < 0)) throw new Error('Invalid building or tenancy');
   return value;
  };
+ const contractorId = id(body.contractorId,false);
+ const insuranceType = text(body.insuranceType,'Insurance type',100,true) || null;
+ if (contractorId !== null && (!insuranceType || body.kind !== 'certificate' || body.category !== 'Insurance' || body.tenantId)) throw new Error('A certificate of currency requires an insurance type, Insurance category and no tenancy');
+ if (contractorId === null && insuranceType) throw new Error('Choose a contractor for the insurance certificate');
  const kind = text(body.kind, 'Document type', 24);
  const category = text(body.category, 'Service category', 100);
  if (!(DOCUMENT_KINDS as readonly string[]).includes(kind) || !(DOCUMENT_SERVICE_CATEGORIES as readonly string[]).includes(category)) throw new Error('Choose a known document type and service category');
@@ -26,7 +30,7 @@ export function parseDocumentInput(body: Record<string,unknown>): RegisteredDocu
  if (issuedOn && expiresOn && expiresOn < issuedOn) throw new Error('Expiry cannot precede issue');
  const buildingId = id(body.buildingId,true), tenantId = id(body.tenantId,false);
  if (tenantId && !buildingId) throw new Error('Choose the tenancy building');
- return { title: text(body.title,'Title',200), kind, category, buildingId, tenantId, issuedOn, expiresOn, reviewDue, ownerName: text(body.ownerName,'Responsible person',160), notes: text(body.notes,'Notes',6000,true) };
+ return { contractorId, insuranceType, title: text(body.title,'Title',200), kind, category, buildingId, tenantId, issuedOn, expiresOn, reviewDue, ownerName: text(body.ownerName,'Responsible person',160), notes: text(body.notes,'Notes',6000,true) };
 }
 export function documentDateStatus(expiresOn: string | null, reviewDue: string | null, today: string): 'expired'|'due'|'current'|'undated' {
  if (expiresOn && expiresOn < today) return 'expired';

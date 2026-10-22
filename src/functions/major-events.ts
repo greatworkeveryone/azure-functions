@@ -4,7 +4,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { AppRole, errorResponse, forbiddenResponse, rolesForRequest } from "../auth";
 import { authorizeWrite, badRequest, conflict, inTransaction, notFound, readJsonBody, txFail, txOk, type Caller } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery, type SqlParam, type SqlRow } from "../db";
-import { canManageEvent, canReadEvent, parseEventEntry, parseEventInput, type EventDomain, type EventInput, type EventPlan } from "../majorEvents";
+import { canManageEvent, canPlanEvent, canReadEvent, parseEventEntry, parseEventInput, type EventDomain, type EventInput, type EventPlan } from "../majorEvents";
 import { checkRateLimit } from "../rateLimit";
 import { deleteBlob, downloadBlob, uploadBlob } from "../blob-storage";
 import { assertBlobName, MAJOR_EVENT_DOCUMENT_SHAPE } from "../blob-names";
@@ -76,7 +76,7 @@ function withMajorEvent(name: string, manage: boolean, operation: Operation) {
 export const getMajorEvents = async (request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> => withMajorEvent("getMajorEvents", false, async (req, s) => {
   const eventClass = req.query.get("eventClass");
   if (eventClass && !["minor","major","project"].includes(eventClass)) return badRequest("Invalid event class");
-  const rows = await executeQuery(s.connection, `SELECT TOP (200) ${COLS} FROM dbo.MajorEvents WHERE (@Class IS NULL OR EventClass=@Class) AND ((Domain='operational' AND @Operational=1) OR (Domain='financial' AND @Financial=1) OR Audience='operational_staff' OR (Audience='accounts_managers' AND @AccountsManager=1) OR (Audience='accounts_team' AND @AccountsTeam=1)) ORDER BY CASE WHEN Status='active' THEN 0 ELSE 1 END, UpdatedAt DESC`, [str("Class", eventClass), { name: "Financial", type: TYPES.Bit, value: canManageEvent(s.roles, "financial") }, { name: "Operational", type: TYPES.Bit, value: canManageEvent(s.roles, "operational") }, { name: "AccountsManager", type: TYPES.Bit, value: s.roles.some(role => ["accounts_manager","cfo","director"].includes(role)) }, { name: "AccountsTeam", type: TYPES.Bit, value: s.roles.some(role => ["accounts","accounts_manager","cfo","director"].includes(role)) }]);
+  const rows = await executeQuery(s.connection, `SELECT TOP (200) ${COLS} FROM dbo.MajorEvents WHERE (@Class IS NULL OR EventClass=@Class) AND ((Domain='operational' AND @Operational=1) OR (Domain='financial' AND @Financial=1) OR Audience='operational_staff' OR (Audience='accounts_managers' AND @AccountsManager=1) OR (Audience='accounts_team' AND @AccountsTeam=1)) ORDER BY CASE WHEN Status='active' THEN 0 ELSE 1 END, UpdatedAt DESC`, [str("Class", eventClass), { name: "Financial", type: TYPES.Bit, value: canPlanEvent(s.roles, "financial") }, { name: "Operational", type: TYPES.Bit, value: canPlanEvent(s.roles, "operational") }, { name: "AccountsManager", type: TYPES.Bit, value: s.roles.some(role => ["accounts_manager","cfo","director"].includes(role)) }, { name: "AccountsTeam", type: TYPES.Bit, value: s.roles.some(role => ["accounts","accounts_manager","cfo","director"].includes(role)) }]);
   return { status: 200, jsonBody: { events: rows.map(eventToApi), limit: 200 } };
 })(request, context);
 export const getMajorEvent = async (request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> => withMajorEvent("getMajorEvent", false, async (req, s) => {
@@ -90,7 +90,7 @@ export const createMajorEvent = async (request: HttpRequest, context: Invocation
   const body = await readJsonBody(req);
   let input: EventInput;
   try { input = parseEventInput(body ?? {}); } catch (e) { return badRequest((e as Error).message); }
-  if (!canManageEvent(s.roles, input.domain)) return forbiddenResponse("This event needs the appropriate manager or director");
+  if (!canPlanEvent(s.roles, input.domain)) return forbiddenResponse("This event needs the appropriate manager or director");
   const result = await inTransaction(s.connection, async () => {
     const invalid = await validateLinks(s.connection, input, s.roles);
     if (invalid) return txFail(badRequest(invalid));
@@ -110,7 +110,7 @@ export const updateMajorEvent = async (request: HttpRequest, context: Invocation
   const result = await inTransaction(s.connection, async () => {
     const row = await eventRow(s.connection, id, true);
     if (!row || !canReadEvent(s.roles, row.Domain, row.Audience)) return txFail(notFound("Event not found"));
-    if (!canManageEvent(s.roles, row.Domain)) return txFail(forbiddenResponse("Only this event's management authority can change its plan"));
+    if (!canPlanEvent(s.roles, row.Domain)) return txFail(forbiddenResponse("Only an admin or this event's management authority can change its plan"));
     if (row.Domain !== input.domain || (row.Audience && row.Audience !== input.audience)) return txFail(badRequest("Event authority and audience cannot be changed in a plan edit; create a separate event"));
     if (row.Status !== "active" || row.Revision !== body!.revision) return txFail(conflict("Event changed or closed; refresh before saving"));
     const invalid = await validateLinks(s.connection, input, s.roles);

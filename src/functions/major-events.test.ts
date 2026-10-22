@@ -18,11 +18,11 @@ beforeEach(() => {
   row = { EventId: 1, Title: "Cyclone", Domain: "operational", EventType: "cyclone", Status: "active", OwnerName: "Lead", StartsAt: new Date(), Brief: "Secure", PlanJson: JSON.stringify(input.plan), Revision: 1 };
   db.mockImplementation(async (_c, sql) => /FROM dbo.MajorEvents/.test(sql) ? [row] : /FROM dbo.Buildings/.test(sql) ? [{ BuildingID: 33532 }] : /OUTPUT INSERTED.EventId/.test(sql) ? [{ EventId: 1 }] : []);
 });
-it("admin cannot create or close real events even though the generic gate allows admin", async () => {
+it("admin may create event plans but cannot close them", async () => {
   roles = [AppRole.ADMIN];
-  expect((await createMajorEvent(req(input),context)).status).toBe(403);
+  expect((await createMajorEvent(req(input),context)).status).toBe(201);
   expect((await closeMajorEvent(req({ eventId: 1, revision: 1, reason: "Done" }),context)).status).toBe(403);
-  expect(db).not.toHaveBeenCalled();
+  expect(db.mock.calls.some(([,sql])=>sql.startsWith("UPDATE"))).toBe(false);
 });
 it("CFO cannot declare an operational event; FM cannot declare financial", async () => {
   roles = [AppRole.CFO]; expect((await createMajorEvent(req(input),context)).status).toBe(403);
@@ -108,4 +108,29 @@ it("rejects a document pointer outside the event's storage namespace before down
   db.mockImplementation(async (_c, sql) => /FROM dbo.MajorEvents/.test(sql) ? [row] : /FROM dbo.MajorEventDocuments/.test(sql) ? [{ FileName: 'private.pdf', BlobName: 'major-events/2/11111111-1111-4111-8111-111111111111.pdf' }] : []);
   expect((await getMajorEventDocument(req({}, '?eventId=1&documentId=1'), context)).status).toBe(404);
   expect(downloadBlob).not.toHaveBeenCalled();
+});
+
+it("persists area membership and exclusions in the existing plan JSON and audit record",async()=>{
+ const areas=[{key:"greater-darwin",buildingIds:[33532,-7]}];
+ db.mockImplementation(async(_c,sql,params)=>{
+  if(/INSERT INTO dbo.MajorEvents/.test(sql)){
+   row.PlanJson=params?.find(param=>param.name==="Plan")?.value;
+   return [{EventId:1}];
+  }
+  return /FROM dbo.MajorEvents/.test(sql)?[row]:/FROM dbo.Buildings/.test(sql)?[{BuildingID:33532}]:[];
+ });
+ const result=await createMajorEvent(req({...input,plan:{...input.plan,areas}}),context);
+ expect(result.status).toBe(201);
+ expect(result.jsonBody).toMatchObject({event:{plan:{buildingIds:[33532],areas}}});
+ expect(db.mock.calls.find(([,sql])=>/INSERT INTO dbo.MajorEventEntries/.test(sql))?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({name:"Body",value:expect.stringContaining('"areas"')})]));
+ const reopened=await getMajorEvent(req({},"?eventId=1"),context);
+ expect(reopened.jsonBody).toMatchObject({event:{plan:{buildingIds:[33532],areas}}});
+});
+
+it.each(["operational","financial"])("admin may edit a %s plan without changing authority or audience",async domain=>{
+ roles=[AppRole.ADMIN];row.Domain=domain;row.Audience="managers";
+ const result=await updateMajorEvent(req({...input,domain,audience:"managers",eventId:1,revision:1}),context);
+ expect(result.status).toBe(200);
+ expect(db.mock.calls.some(([,sql])=>sql.startsWith("UPDATE dbo.MajorEvents SET Title"))).toBe(true);
+ expect((await closeMajorEvent(req({eventId:1,revision:1,reason:"Done"}),context)).status).toBe(403);
 });

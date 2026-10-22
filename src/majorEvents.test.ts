@@ -1,11 +1,11 @@
-import { canManageEvent, canReadEvent, parseEventInput, parseEventEntry } from "./majorEvents";
+import { canManageEvent, canPlanEvent, canReadEvent, parseEventInput, parseEventEntry } from "./majorEvents";
 import { AppRole } from "./auth";
 const input = { title: "Cyclone preparation", domain: "operational", eventType: "cyclone", ownerName: "FM", startsAt: "2026-10-19T08:00:00Z", endsAt: null, brief: "Secure the portfolio", plan: { buildingIds: [-7,33532], jobIds: [], actions: [{ id: "secure", title: "Secure roof access", owner: "Team A", due: null, done: false }] } };
 describe("event authority", () => {
   test.each(Object.values(AppRole))("%s operational create/close is exact", role => expect(canManageEvent([role], "operational")).toBe(["facilities_manager","director"].includes(role)));
   test.each(Object.values(AppRole))("%s financial create/close/read is exact", role => {
     expect(canManageEvent([role], "financial")).toBe(["cfo","director"].includes(role));
-    expect(canReadEvent([role], "financial")).toBe(["cfo","director"].includes(role));
+    expect(canReadEvent([role], "financial")).toBe(["admin","cfo","director"].includes(role));
   });
 });
 describe("event validation", () => {
@@ -31,4 +31,21 @@ it("preserves a planned disruption explicitly without inferring it from magnitud
   expect(parseEventInput({ ...input, plan: { ...input.plan, timing: "planned" } }).plan.timing).toBe("planned");
   expect(parseEventInput(input).plan.timing).toBeUndefined();
   expect(() => parseEventInput({ ...input, plan: { ...input.plan, timing: "unknown" } })).toThrow();
+});
+
+describe("event area snapshots",()=>{
+ const area={key:"greater-darwin",buildingIds:[-7,33532]};
+ it("preserves a bounded snapshot with explicit exclusions while leaving legacy inputs unchanged",()=>{
+  const plan=parseEventInput({...input,plan:{...input.plan,buildingIds:[33532],areas:[area]}}).plan;
+  expect(plan.areas).toEqual([area]);expect(plan.buildingIds).toEqual([33532]);
+  expect(parseEventInput(input).plan.areas).toBeUndefined();
+ });
+ test.each([{areas:[{...area,key:"invented"}]},{areas:[area,area]},{areas:[{...area,buildingIds:[]}]},{areas:[{...area,buildingIds:[1.5]}]},{areas:[{...area,buildingIds:[99]}]}])("rejects invalid, overlapping or empty area metadata %j",({areas})=>{
+  expect(()=>parseEventInput({...input,plan:{...input.plan,areas}})).toThrow();
+ });
+});
+
+it.each(["operational","financial"] as const)("admin may plan %s events without receiving closure authority",domain=>{
+ expect(canPlanEvent([AppRole.ADMIN],domain)).toBe(true);
+ expect(canManageEvent([AppRole.ADMIN],domain)).toBe(false);
 });

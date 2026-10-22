@@ -10,6 +10,7 @@ import { DOCUMENT_MANAGERS, documentDateStatus, parseDocumentInput, type Registe
 import { deleteBlob, downloadBlob, uploadBlob } from '../blob-storage';
 import { assertBlobName, REGISTER_DOCUMENT_SHAPE, WR_ATTACHMENTS_SHAPES } from '../blob-names';
 import { showTestData } from '../test-data';
+import { procedureSearchText } from '../procedureSearchText';
 import { getProcedures } from './getProcedures';
 import { checkRateLimit } from '../rateLimit';
 
@@ -18,9 +19,9 @@ const str = (name: string,value: unknown): SqlParam => ({ name,type:TYPES.NVarCh
 const int = (name: string,value: number | null): SqlParam => ({ name,type:TYPES.Int,value });
 const iso = (value: unknown) => value ? new Date(value as string).toISOString().slice(0,10) : null;
 const idOf = (value: unknown) => typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value) && Number(value) <= 2147483647 ? Number(value) : null;
-const COLS = 'd.DocumentId,d.Title,d.Kind,d.ServiceCategory,d.BuildingId,d.TenantId,d.IssuedOn,d.ExpiresOn,d.ReviewDue,d.OwnerName,d.Notes,d.FileName,d.BlobName,d.ContentType,d.SizeBytes,d.Revision,d.CreatedAt,d.CreatedBy,d.CreatedByOid,d.UpdatedAt,d.ArchivedAt';
+const COLS = 'd.ContractorId,d.InsuranceType,d.DocumentId,d.Title,d.Kind,d.ServiceCategory,d.BuildingId,d.TenantId,d.IssuedOn,d.ExpiresOn,d.ReviewDue,d.OwnerName,d.Notes,d.FileName,d.BlobName,d.ContentType,d.SizeBytes,d.Revision,d.CreatedAt,d.CreatedBy,d.CreatedByOid,d.UpdatedAt,d.ArchivedAt';
 interface State { connection: Connection; roles: string[]; caller: Caller; showTest: boolean }
-interface RegisterItem { id: string; source: string; sourceId: string; title: string; kind: string; category: string; buildingIds: number[]; tenantId: number | null; tenantName: string | null; issuedOn: string | null; expiresOn: string | null; reviewDue: string | null; dateBasis: string; ownerName: string; href: string; canEdit: boolean; status: string; notes?: string; revision?: number; fileName?: string }
+interface RegisterItem { searchText?: string; contractorId?: number | null; insuranceType?: string | null; id: string; source: string; sourceId: string; title: string; kind: string; category: string; buildingIds: number[]; tenantId: number | null; tenantName: string | null; issuedOn: string | null; expiresOn: string | null; reviewDue: string | null; dateBasis: string; ownerName: string; href: string; canEdit: boolean; status: string; notes?: string; revision?: number; fileName?: string }
 const canTenancy = (s: State) => rolesPassGate(s.roles,TENANCY_ROLES);
 const canOperational = (s: State) => rolesPassGate(s.roles,VIEW_ASSETS_ROLES);
 const canEdit = (s: State,r: SqlRow) => r.CreatedByOid === s.caller.oid || s.roles.some(role => DOCUMENT_MANAGERS.some(allowed => allowed === role));
@@ -30,9 +31,10 @@ async function rowFor(s: State,id: number,lock = false) {
 }
 function readable(s: State,r: SqlRow) { return canOperational(s) && !r.ArchivedAt && (!r.TenantId || (canTenancy(s) && !r.TenantArchivedAt && (!r.TenantIsTest || s.showTest))); }
 function registerItem(s: State,r: SqlRow): RegisterItem {
- return { id:`register:${r.DocumentId}`,source:'register',sourceId:String(r.DocumentId),title:r.Title,kind:r.Kind,category:r.ServiceCategory,buildingIds:r.BuildingId === null ? [] : [Number(r.BuildingId)],tenantId:r.TenantId ?? null,tenantName:r.TenantName ?? null,issuedOn:iso(r.IssuedOn),expiresOn:iso(r.ExpiresOn),reviewDue:iso(r.ReviewDue),dateBasis:'Document expiry / review',ownerName:r.OwnerName,href:`/documentation?documentId=${r.DocumentId}`,canEdit:canEdit(s,r),status:'recorded',notes:r.Notes,revision:r.Revision,fileName:r.FileName };
+ return { contractorId:r.ContractorId??null,insuranceType:r.InsuranceType??null,id:`register:${r.DocumentId}`,source:'register',sourceId:String(r.DocumentId),title:r.Title,kind:r.Kind,category:r.ServiceCategory,buildingIds:r.BuildingId === null ? [] : [Number(r.BuildingId)],tenantId:r.TenantId ?? null,tenantName:r.TenantName ?? null,issuedOn:iso(r.IssuedOn),expiresOn:iso(r.ExpiresOn),reviewDue:iso(r.ReviewDue),dateBasis:'Document expiry / review',ownerName:r.OwnerName,href:`/documentation?documentId=${r.DocumentId}`,canEdit:canEdit(s,r),status:'recorded',notes:r.Notes,revision:r.Revision,fileName:r.FileName };
 }
 async function validateScope(s: State,v: RegisteredDocumentInput): Promise<string | null> {
+ if(v.contractorId !== null && !(await executeQuery(s.connection,'SELECT ContractorID FROM dbo.Contractors WHERE ContractorID=@Id',[int('Id',v.contractorId)])).length) return 'Contractor is unavailable';
  if (v.buildingId !== null && !(await executeQuery(s.connection,'SELECT BuildingID FROM dbo.Buildings WHERE BuildingID=@Id AND Active=1',[int('Id',v.buildingId)])).length) return 'Building is missing or inactive';
  if (v.tenantId) {
   if (!canTenancy(s)) return 'Your role cannot attach documents to a tenancy';
@@ -41,7 +43,7 @@ async function validateScope(s: State,v: RegisteredDocumentInput): Promise<strin
  }
  return null;
 }
-function params(v: RegisteredDocumentInput): SqlParam[] { return [str('Title',v.title),str('Kind',v.kind),str('Category',v.category),int('Building',v.buildingId),int('Tenant',v.tenantId),str('Issue',v.issuedOn),str('Expiry',v.expiresOn),str('Review',v.reviewDue),str('Owner',v.ownerName),str('Notes',v.notes)]; }
+function params(v: RegisteredDocumentInput): SqlParam[] { return [int('Contractor',v.contractorId),str('Insurance',v.insuranceType),str('Title',v.title),str('Kind',v.kind),str('Category',v.category),int('Building',v.buildingId),int('Tenant',v.tenantId),str('Issue',v.issuedOn),str('Expiry',v.expiresOn),str('Review',v.reviewDue),str('Owner',v.ownerName),str('Notes',v.notes)]; }
 async function audit(s: State,id: number,action: string,snapshot: unknown) { await executeQuery(s.connection,'INSERT dbo.RegisterDocumentAudit (DocumentId,Action,SnapshotJson,ActorName,ActorOid) VALUES (@Id,@Action,@Snapshot,@Name,@Oid)',[int('Id',id),str('Action',action),str('Snapshot',JSON.stringify(snapshot)),str('Name',s.caller.name),str('Oid',s.caller.oid)]); }
 type Work = (request: HttpRequest,state: State,context: InvocationContext) => Promise<HttpResponseInit>;
 async function withDocumentRegister(request: HttpRequest,context: InvocationContext,write: boolean,work: Work): Promise<HttpResponseInit> {
@@ -61,12 +63,12 @@ export async function getDocumentRegister(req: HttpRequest,ctx: InvocationContex
   const rows = await executeQuery(s.connection,`SELECT TOP(2000) ${COLS},t.LegalName AS TenantName,t.IsTest AS TenantIsTest,t.ArchivedAt AS TenantArchivedAt FROM dbo.RegisterDocuments d LEFT JOIN dbo.Tenants t ON t.TenantId=d.TenantId WHERE d.ArchivedAt IS NULL AND (d.TenantId IS NULL OR (@Tenancy=1 AND t.ArchivedAt IS NULL AND (t.IsTest=0 OR @ShowTest=1))) ORDER BY d.UpdatedAt DESC`,[{name:'Tenancy',type:TYPES.Bit,value:canTenancy(s)},{name:'ShowTest',type:TYPES.Bit,value:s.showTest}]);
   items.push(...rows.filter(r=>readable(s,r)).map(r=>registerItem(s,r))); truncated ||= rows.length===2000;
  }
- // Reuse the source reader's audience, draft and endorsement rules, then return metadata only.
+ // Reuse source audience/draft rules; search only the chosen visible procedure version.
  const procedures = await getProcedures(request,context);
  if (procedures.status !== 200) return procedures;
- for (const p of (procedures.jsonBody as {procedures: {slug:string;category:string;owner?:string;versions:{title:string;status:string;reviewDue?:string;publishedAt?:string;createdAt?:string}[]}[]}).procedures) {
+ for (const p of (procedures.jsonBody as {procedures: {slug:string;category:string;owner?:string;versions:{blocks?:unknown;summary?:string;title:string;status:string;reviewDue?:string;publishedAt?:string;createdAt?:string}[]}[]}).procedures) {
   const v=p.versions.find(v=>v.status==='published') ?? p.versions.find(v=>v.status==='draft'); if(!v) continue;
-  items.push({id:`procedure:${p.slug}`,source:'procedure',sourceId:p.slug,title:v.title,kind:'procedure',category:p.category,buildingIds:[],tenantId:null,tenantName:null,issuedOn:iso(v.publishedAt ?? v.createdAt),expiresOn:null,reviewDue:v.reviewDue ?? null,dateBasis:'Procedure review',ownerName:p.owner ?? '',href:`/procedures/${encodeURIComponent(p.slug)}`,canEdit:false,status:v.status==='draft' ? 'unendorsed' : 'endorsed'});
+  items.push({id:`procedure:${p.slug}`,source:'procedure',sourceId:p.slug,title:v.title,searchText:`${v.summary ?? ""} ${procedureSearchText(v.blocks)}`,kind:'procedure',category:p.category,buildingIds:[],tenantId:null,tenantName:null,issuedOn:iso(v.publishedAt ?? v.createdAt),expiresOn:null,reviewDue:v.reviewDue ?? null,dateBasis:'Procedure review',ownerName:p.owner ?? '',href:`/procedures/${encodeURIComponent(p.slug)}`,canEdit:false,status:v.status==='draft' ? 'unendorsed' : 'endorsed'});
  }
  if(canTenancy(s)) {
   const rows=await executeQuery(s.connection,`SELECT TOP(2000) a.Id,a.OriginalName,a.UploadedAt,t.TenantId,t.LegalName,t.BuildingId,t.Expiry FROM dbo.TenancyAttachments ta JOIN dbo.Attachments a ON a.Id=ta.AttachmentID JOIN dbo.Tenants t ON t.TenantId=ta.TenantId WHERE a.ArchivedAt IS NULL AND t.ArchivedAt IS NULL AND (t.IsTest=0 OR @ShowTest=1) ORDER BY a.UploadedAt DESC`,[{name:'ShowTest',type:TYPES.Bit,value:s.showTest}]); truncated ||= rows.length===2000;
@@ -96,7 +98,7 @@ export async function uploadRegisterDocument(req: HttpRequest,ctx: InvocationCon
   const uploaded=await uploadBlob(bytes,fileName,file.type,'documentation');blob=uploaded.blobName;
   const result=await inTransaction(s.connection,async()=>{
    const invalid=await validateScope(s,input);if(invalid)return txFail(badRequest(invalid));
-   const rows=await executeQuery(s.connection,`INSERT dbo.RegisterDocuments (Title,Kind,ServiceCategory,BuildingId,TenantId,IssuedOn,ExpiresOn,ReviewDue,OwnerName,Notes,FileName,BlobName,ContentType,SizeBytes,CreatedBy,CreatedByOid) OUTPUT INSERTED.DocumentId VALUES (@Title,@Kind,@Category,@Building,@Tenant,@Issue,@Expiry,@Review,@Owner,@Notes,@File,@Blob,@Type,@Size,@Name,@Oid)`,[...params(input),str('File',fileName),str('Blob',uploaded.blobName),str('Type',file.type),int('Size',bytes.length),str('Name',s.caller.name),str('Oid',s.caller.oid)]);
+   const rows=await executeQuery(s.connection,`INSERT dbo.RegisterDocuments (ContractorId,InsuranceType,Title,Kind,ServiceCategory,BuildingId,TenantId,IssuedOn,ExpiresOn,ReviewDue,OwnerName,Notes,FileName,BlobName,ContentType,SizeBytes,CreatedBy,CreatedByOid) OUTPUT INSERTED.DocumentId VALUES (@Contractor,@Insurance,@Title,@Kind,@Category,@Building,@Tenant,@Issue,@Expiry,@Review,@Owner,@Notes,@File,@Blob,@Type,@Size,@Name,@Oid)`,[...params(input),str('File',fileName),str('Blob',uploaded.blobName),str('Type',file.type),int('Size',bytes.length),str('Name',s.caller.name),str('Oid',s.caller.oid)]);
    const id=Number(rows[0].DocumentId);await audit(s,id,'created',input);return txOk({documentId:id});
   });committed=result.ok;return result.ok?{status:201,jsonBody:result.value}:result.response;
  }finally{if(blob&&!committed){
@@ -113,10 +115,17 @@ export async function updateRegisterDocument(req: HttpRequest,ctx: InvocationCon
   const row=await rowFor(s,id,true);if(!row||!readable(s,row))return txFail(notFound('Document not found'));
   if(!canEdit(s,row))return txFail(forbiddenResponse('Only the uploader or a manager may edit document metadata'));
   if(row.Revision!==body!.revision)return txFail(conflict('Document changed; refresh before editing'));
+  try{input=parseDocumentInput({...body,contractorId:body!.contractorId===undefined?(row.ContractorId??null):body!.contractorId,insuranceType:body!.insuranceType===undefined?(row.InsuranceType??null):body!.insuranceType});}catch(e){return txFail(badRequest((e as Error).message));}
+  if((row.ContractorId??null)!==input.contractorId){
+   // An existing unlinked certificate may be attached without duplicating its
+   // original file. Existing contractor links cannot be moved or removed.
+   if(row.ContractorId||!input.contractorId||row.TenantId)return txFail(badRequest('An existing contractor link cannot change'));
+   if(!(await executeQuery(s.connection,'SELECT ContractorID FROM dbo.Contractors WHERE ContractorID=@Id',[int('Id',input.contractorId)])).length)return txFail(badRequest('Contractor is unavailable'));
+  }
   // Ownership/scope is fixed on upload so a metadata edit cannot expose a private tenancy file.
   if(row.BuildingId!==input.buildingId||row.TenantId!==input.tenantId)return txFail(badRequest('Building and tenancy scope cannot change in a metadata edit'));
-  await executeQuery(s.connection,'UPDATE dbo.RegisterDocuments SET Title=@Title,Kind=@Kind,ServiceCategory=@Category,IssuedOn=@Issue,ExpiresOn=@Expiry,ReviewDue=@Review,OwnerName=@Owner,Notes=@Notes,Revision=Revision+1,UpdatedAt=SYSUTCDATETIME() WHERE DocumentId=@Id',[int('Id',id),...params(input)]);
-  await audit(s,id,'metadata_changed',{before:{title:row.Title,kind:row.Kind,category:row.ServiceCategory,issuedOn:iso(row.IssuedOn),expiresOn:iso(row.ExpiresOn),reviewDue:iso(row.ReviewDue),ownerName:row.OwnerName,notes:row.Notes},after:input});return txOk({saved:true});
+  await executeQuery(s.connection,'UPDATE dbo.RegisterDocuments SET Title=@Title,Kind=@Kind,ServiceCategory=@Category,IssuedOn=@Issue,ExpiresOn=@Expiry,ReviewDue=@Review,OwnerName=@Owner,Notes=@Notes,ContractorId=@Contractor,InsuranceType=@Insurance,Revision=Revision+1,UpdatedAt=SYSUTCDATETIME() WHERE DocumentId=@Id',[int('Id',id),...params(input)]);
+  await audit(s,id,'metadata_changed',{before:{contractorId:row.ContractorId??null,insuranceType:row.InsuranceType??null,title:row.Title,kind:row.Kind,category:row.ServiceCategory,issuedOn:iso(row.IssuedOn),expiresOn:iso(row.ExpiresOn),reviewDue:iso(row.ReviewDue),ownerName:row.OwnerName,notes:row.Notes},after:input});return txOk({saved:true});
  });return result.ok?{status:200,jsonBody:result.value}:result.response;
  }); }
 export async function downloadRegisterDocument(req: HttpRequest,ctx: InvocationContext): Promise<HttpResponseInit> {return withDocumentRegister(req,ctx,false,async(request,s)=>{

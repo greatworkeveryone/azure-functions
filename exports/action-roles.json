@@ -194,6 +194,11 @@
     "facilities",
     "facilities_manager"
   ],
+  "editBuildingRegister": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "editInspections": [
     "admin",
     "director",
@@ -256,15 +261,18 @@
     "facilities_manager"
   ],
   "manageFinancialEvents": [
+    "admin",
     "cfo",
     "director"
   ],
   "manageMajorEvents": [
+    "admin",
     "cfo",
     "director",
     "facilities_manager"
   ],
   "manageOperationalEvents": [
+    "admin",
     "director",
     "facilities_manager"
   ],
@@ -291,6 +299,11 @@
     "admin",
     "director",
     "facilities_manager"
+  ],
+  "manageStaffReporting": [
+    "admin",
+    "cfo",
+    "director"
   ],
   "manageTestData": [
     "admin"
@@ -478,6 +491,21 @@
     "facilities",
     "facilities_manager"
   ],
+  "viewAuditLog": [
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "viewBuildingRegister": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "viewDecisions": [
     "admin",
     "cfo",
@@ -545,6 +573,16 @@
     "director",
     "facilities",
     "facilities_manager"
+  ],
+  "viewLeave": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
   ],
   "viewMaintenanceOverview": [
     "accounts",

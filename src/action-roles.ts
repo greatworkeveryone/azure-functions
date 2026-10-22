@@ -64,9 +64,9 @@ export const ACTION_ROLES = {
   viewDocumentation: { gate: [A.USER], routes: ["getDocumentRegister", "downloadRegisterDocument"], why: "Unified metadata discovery; each source retains its own role/audience and test-data filters. User-only readers see procedures only." },
   editRegisterDocuments: { gate: VIEW_ASSETS_ROLES, routes: ["uploadRegisterDocument", "updateRegisterDocument"], why: "Record original operational documents. Metadata updates require ownership or management; tenancy scope additionally requires tenancy access." },
   viewMajorEvents: { gate: EVENT_READ_ROLES, match: "exact", routes: ["getMajorEvents", "getMajorEvent", "addMajorEventEntry", "uploadMajorEventDocument", "getMajorEventDocument", "exportMajorEventPack"], why: "Operational event coordination for operational staff; each event further restricts reads and contributions to its selected audience, always including its management authority." },
-  manageOperationalEvents: { gate: OPERATIONAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only facilities managers and directors create, plan and close operational events; admin has no implicit override." },
-  manageFinancialEvents: { gate: FINANCIAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only CFO/directors create, plan and close financial events; an event grants no financial approval authority." },
-  manageMajorEvents: { gate: [A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer event management gate; the stored event domain further restricts facilities managers to operational and CFO to financial events." },
+  manageOperationalEvents: { gate: [A.ADMIN, ...OPERATIONAL_EVENT_MANAGERS], match: "exact", routes: [], why: "Admin, facilities managers and directors create/edit operational event plans; only facilities managers/directors close them." },
+  manageFinancialEvents: { gate: [A.ADMIN, ...FINANCIAL_EVENT_MANAGERS], match: "exact", routes: [], why: "Admin and CFO/directors create/edit financial event plans; only CFO/directors close them. No money approval authority is granted." },
+  manageMajorEvents: { gate: [A.ADMIN, A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer gate for planning/closure. Admin may create/edit plans; closure retains domain-specific Facilities Manager or CFO/director authority." },
   addQuoteContractor: {
     gate: [A.ACCOUNTS, A.FACILITIES],
     routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent"],
@@ -309,7 +309,7 @@ export const ACTION_ROLES = {
   },
   manageServiceSchedules: {
     gate: MANAGE_SERVICE_SCHEDULES_ROLES,
-    routes: ["upsertServiceSchedule", "archiveServiceSchedule", "importServiceSchedules"],
+    routes: ["saveMaintenanceCoverage", "saveContractorCoverage", "upsertServiceSchedule", "archiveServiceSchedule", "importServiceSchedules"],
     why: "Add, edit, archive and import service schedules.",
   },
   manageTestData: {
@@ -487,11 +487,24 @@ export const ACTION_ROLES = {
     routes: [],
     why: "Every escalation in the business (ALL_ESCALATION_ROLES, getEscalations?view=all).",
   },
+  viewLeave: { gate: [A.USER], routes: ["getLeaveRequests", "createLeaveRequest", "decideLeaveRequest"], why: "Own leave and server-filtered review queue; per-record authority is enforced." },
+  manageStaffReporting: { gate: [A.CFO,A.DIRECTOR], routes: ["getStaffReporting", "saveStaffReporting"], why: "CFO reporting controls for leave routing; no money or timesheet authority changes." },
+  viewBuildingRegister: {
+    gate: VIEW_ASSETS_ROLES,
+    routes: ["getBuildingRegister"],
+    why: "Read building, lot and contact details; existing operational-reader roles.",
+  },
+  editBuildingRegister: {
+    gate: MANAGE_ASSET_TYPES_ROLES,
+    routes: ["saveBuildingRegister"],
+    why: "Maintain building/lot facts and contacts; existing property-manager roles (admin, director and facilities manager).",
+  },
   viewAssets: {
     gate: VIEW_ASSETS_ROLES,
     routes: ["getAssets", "getAsset", "getLocations", "getAssetTypes"],
     why: "Read the asset register.",
   },
+  viewAuditLog: { gate: [A.FACILITIES_APPROVAL,A.CFO,A.DIRECTOR], routes: ["getAuditLog"], why: "Cross-application audit: Facilities managers receive operational metadata only; CFO/director/admin receive all recorded areas." },
   viewDecisions: {
     gate: [A.DIRECTOR, A.CFO],
     routes: ["getDecisions"],
@@ -529,7 +542,7 @@ export const ACTION_ROLES = {
   },
   viewMaintenanceOverview: {
     gate: VIEW_FACILITIES_ROLES,
-    routes: ["getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules"],
+    routes: ["getMaintenanceCoverage", "getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules"],
     why: "Defects periods, service schedules and the maintenance overview.",
   },
   viewMyobControls: {

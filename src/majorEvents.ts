@@ -7,16 +7,21 @@ export const FINANCIAL_EVENT_MANAGERS = [AppRole.CFO, AppRole.DIRECTOR] as const
 export function canManageEvent(roles: readonly string[], domain: EventDomain): boolean {
   return roles.some(role => (domain === "financial" ? FINANCIAL_EVENT_MANAGERS : OPERATIONAL_EVENT_MANAGERS).some(allowed => allowed === role));
 }
+/** Admin may create/edit plans (Connor, 22 October); closure retains domain authority. */
+export function canPlanEvent(roles:readonly string[],domain:EventDomain):boolean {
+ return roles.includes(AppRole.ADMIN)||canManageEvent(roles,domain);
+}
 export type EventAudience = "managers" | "accounts_managers" | "accounts_team" | "operational_staff";
 export const EVENT_KINDS = ["cyclone", "flood", "shutdown", "major_works", "financial", "other", "utility_failure", "local_damage", "cyber_incident", "it_failure", "records_corruption", "fraud", "data_breach", "development", "refurbishment"] as const;
 export function canReadEvent(roles: readonly string[], domain: EventDomain, audience: EventAudience = domain === "financial" ? "managers" : "operational_staff"): boolean {
-  if (canManageEvent(roles, domain)) return true;
+  if (canPlanEvent(roles, domain)) return true;
   const allowed: readonly string[] = audience === "operational_staff" ? EVENT_READ_ROLES : audience === "accounts_team" ? [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] : audience === "accounts_managers" ? [AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] : [];
   return roles.some(role => allowed.includes(role));
 }
 export interface EventPlan {
   timing?: "incident" | "planned";
   buildingIds: number[];
+  areas?: {key:string;buildingIds:number[]}[];
   jobIds: number[];
   actions: { id: string; title: string; owner: string; due: string | null; done: boolean }[];
 }
@@ -56,6 +61,21 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
   if (plan.timing !== undefined && plan.timing !== "incident" && plan.timing !== "planned") throw new Error("Choose incident or planned disruption");
   const buildingIds = ids(plan.buildingIds, "Buildings", 100, true);
   if (!buildingIds.length) throw new Error("Choose at least one affected building");
+  let areas: EventPlan["areas"];
+  if (plan.areas !== undefined) {
+    const allowed = ["greater-darwin", "darwin-city", "darwin-suburbs", "darwin-industrial", "palmerston", "darwin-rural", "katherine"];
+    if (!Array.isArray(plan.areas) || plan.areas.length > allowed.length) throw new Error("Choose valid event areas");
+    areas = plan.areas.map((area: unknown) => {
+      if (!area || typeof area !== "object" || Array.isArray(area)) throw new Error("Invalid event area");
+      const a = area as Record<string, unknown>;
+      if (typeof a.key !== "string" || !allowed.includes(a.key)) throw new Error("Unknown event area");
+      const members = ids(a.buildingIds, "Area buildings", 100, true);
+      if (!members.length || !members.some(id => buildingIds.includes(id))) throw new Error("Each event area needs an affected building");
+      return { key:a.key, buildingIds:members };
+    });
+    const members=areas.flatMap(area=>area.buildingIds);
+    if (new Set(areas.map(area=>area.key)).size!==areas.length || new Set(members).size!==members.length || members.length>100) throw new Error("Event areas must not overlap or repeat");
+  }
   const jobIds = ids(plan.jobIds, "Jobs", 100);
   if (!Array.isArray(plan.actions) || plan.actions.length > 100) throw new Error("Use up to 100 actions");
   const actions = plan.actions.map((action: unknown) => {
@@ -66,7 +86,7 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
     return { id, title: text(a.title, "Action", 300), owner: text(a.owner, "Action owner", 160), due: date(a.due, "Action due", true), done: a.done };
   });
   if (new Set(actions.map(a => a.id)).size !== actions.length) throw new Error("Action IDs must be unique");
-  return { eventClass: eventClass as EventInput["eventClass"], audience: audience as EventAudience, title: text(body.title, "Title", 160), domain: body.domain, eventType, ownerName: text(body.ownerName, "Event lead", 160), startsAt, endsAt, brief: text(body.brief, "Brief", 6000), plan: { buildingIds, jobIds, actions, ...(plan.timing ? { timing: plan.timing } : {}) } };
+  return { eventClass: eventClass as EventInput["eventClass"], audience: audience as EventAudience, title: text(body.title, "Title", 160), domain: body.domain, eventType, ownerName: text(body.ownerName, "Event lead", 160), startsAt, endsAt, brief: text(body.brief, "Brief", 6000), plan: { buildingIds, jobIds, actions, ...(areas?.length ? { areas } : {}), ...(plan.timing ? { timing: plan.timing } : {}) } };
 }
 export function parseEventEntry(body: Record<string, unknown>): { type: string; body: string; buildingId: number | null; area: string | null } {
   const type = text(body.type, "Update type", 24);
