@@ -1,4 +1,5 @@
 import { AppRole } from "./auth";
+import { canReadEvent, type EventAudience } from "./majorEvents";
 export const AUDIT_READ_ROLES = [AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR] as const;
 export const AUDIT_AREAS = [
   "facilities",
@@ -20,6 +21,16 @@ export const OPERATIONAL_AUDIT_ACTIONS = [
   "service_schedule.skip_due",
   "service_schedule.update",
 ] as const;
+export const EVENT_AUDIENCES: readonly EventAudience[] = [
+  "managers",
+  "accounts_managers",
+  "accounts_team",
+  "operational_staff",
+];
+// Same predicate as the event screens use, so audit metadata never outlives an event's Audience.
+export function readableOperationalAudiences(roles: readonly string[]): EventAudience[] {
+  return EVENT_AUDIENCES.filter((audience) => canReadEvent(roles, "operational", audience));
+}
 export function fullAuditAccess(roles: readonly string[]): boolean {
   return roles.some((role) => ["admin", "cfo", "director"].includes(role));
 }
@@ -49,7 +60,7 @@ export const AUDIT_UNION_SQL = `
  UNION ALL
  SELECT CONCAT('inspection:',o.OpId),o.AppliedAt,'Not recorded',CONCAT('inspection.',o.OpType),'inspections','inspection',CONVERT(NVARCHAR(128),o.InspectionId),i.BuildingId,NULL FROM dbo.InspectionOperationLog o JOIN dbo.Inspections i ON i.Id=o.InspectionId
  UNION ALL
- SELECT CONCAT('event:',a.EntryId),a.CreatedAt,a.ActorName,CONCAT('event.',a.EntryType),'events','event',CONVERT(NVARCHAR(128),a.EventId),a.BuildingId,NULL FROM dbo.MajorEventEntries a JOIN dbo.MajorEvents e ON e.EventId=a.EventId WHERE @Full=1 OR e.Domain='operational'
+ SELECT CONCAT('event:',a.EntryId),a.CreatedAt,a.ActorName,CONCAT('event.',a.EntryType),'events','event',CONVERT(NVARCHAR(128),a.EventId),a.BuildingId,NULL FROM dbo.MajorEventEntries a JOIN dbo.MajorEvents e ON e.EventId=a.EventId WHERE @Full=1 OR (e.Domain='operational' AND e.Audience IN (SELECT [value] FROM OPENJSON(@EventAudiences)))
  UNION ALL
  SELECT CONCAT('key:',a.Id),a.CheckedOutAt,a.CheckedOutBy,'key.checked_out','facilities','key_checkout',CONVERT(NVARCHAR(128),a.Id),NULL,NULL FROM dbo.KeyCheckoutBatches a
 `;

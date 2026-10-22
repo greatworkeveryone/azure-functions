@@ -29,24 +29,29 @@ export function leaveApprovers(
   links: ReportingLink[],
 ): StaffMember[] {
   const assigned = links.find((link) => link.userId === subject.id);
-  return staff.filter(
-    (person) => eligibleManager(subject, person) && (!assigned || assigned.managerId === person.id),
-  );
+  const eligible = staff.filter((person) => eligibleManager(subject, person));
+  const named = assigned ? eligible.filter((person) => person.id === assigned.managerId) : eligible;
+  // A deactivated or no longer eligible assigned manager must not leave requests with no decider.
+  return named.length ? named : eligible;
 }
 export function parseReporting(body: Record<string, unknown>, staff: StaffMember[]): ReportingLink[] {
   if (!Array.isArray(body.links) || body.links.length > 500)
     throw new Error("Provide at most 500 reporting relationships");
-  const links: ReportingLink[] = body.links.map((raw: unknown) => {
+  const parsed: ReportingLink[] = body.links.map((raw: unknown) => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid reporting relationship");
     const { userId, managerId } = raw as ReportingLink;
     if (!Number.isInteger(userId) || !Number.isInteger(managerId))
       throw new Error("Choose active staff members");
-    const subject = staff.find((person) => person.id === userId),
-      manager = staff.find((person) => person.id === managerId);
-    if (!subject || !manager || !eligibleManager(subject, manager))
-      throw new Error("Choose a qualified manager; managers report to CFO or directors");
     return { userId, managerId };
   });
+  const active = new Set(staff.map((person) => person.id));
+  const links = parsed.filter((link) => active.has(link.userId) && active.has(link.managerId));
+  for (const link of links) {
+    const subject = staff.find((person) => person.id === link.userId)!,
+      manager = staff.find((person) => person.id === link.managerId)!;
+    if (!eligibleManager(subject, manager))
+      throw new Error("Choose a qualified manager; managers report to CFO or directors");
+  }
   if (new Set(links.map((link) => link.userId)).size !== links.length)
     throw new Error("Each person can have one reporting manager");
   for (const link of links) {
@@ -59,6 +64,12 @@ export function parseReporting(body: Record<string, unknown>, staff: StaffMember
     }
   }
   return links;
+}
+/** Links naming staff who are no longer active; saving drops them. */
+export function droppedReportingLinks(links: ReportingLink[], kept: ReportingLink[]): ReportingLink[] {
+  return links.filter(
+    (link) => !kept.some((k) => k.userId === link.userId && k.managerId === link.managerId),
+  );
 }
 export const LEAVE_KINDS = ["annual_leave", "personal_leave", "unpaid_leave", "other_leave"] as const;
 export function validRevision(value: unknown): value is number {

@@ -1,19 +1,54 @@
-import { eligibleManager, leaveApprovers, parseLeave, parseReporting } from "./leavePolicy";
+import {
+  droppedReportingLinks,
+  eligibleManager,
+  leaveApprovers,
+  parseLeave,
+  parseReporting,
+} from "./leavePolicy";
 const staff = [
   { id: 1, name: "Staff", role: "facilities", oid: "staff" },
   { id: 2, name: "Manager", role: "facilities_manager", oid: "manager" },
   { id: 3, name: "CFO", role: "cfo", oid: "cfo" },
   { id: 4, name: "Director", role: "director", oid: "director" },
-  { id: 5, name: "Accounts manager", role: "accounts_manager", oid: "accounts" },
+  {
+    id: 5,
+    name: "Accounts manager",
+    role: "accounts_manager",
+    oid: "accounts",
+  },
 ];
 it("uses team managers and seniors by default, excluding self", () => {
   expect(leaveApprovers(staff[0], staff, []).map((p) => p.id)).toEqual([2, 3, 4]);
   expect(leaveApprovers(staff[1], staff, []).map((p) => p.id)).toEqual([3, 4]);
   expect(eligibleManager(staff[2], staff[2])).toBe(false);
 });
-it("uses the named active manager exclusively and fails closed when they disappear", () => {
+it("uses the named active manager exclusively, else falls back to team approvers", () => {
   expect(leaveApprovers(staff[0], staff, [{ userId: 1, managerId: 2 }]).map((p) => p.id)).toEqual([2]);
-  expect(leaveApprovers(staff[0], staff.slice(2), [{ userId: 1, managerId: 2 }])).toEqual([]);
+  expect(leaveApprovers(staff[0], staff.slice(2), [{ userId: 1, managerId: 2 }]).map((p) => p.id)).toEqual([
+    3, 4,
+  ]);
+  expect(leaveApprovers(staff[0], staff, [{ userId: 1, managerId: 5 }]).map((p) => p.id)).toEqual([2, 3, 4]);
+});
+it("drops reporting links to inactive staff instead of throwing", () => {
+  const links = [
+    { userId: 1, managerId: 2 },
+    { userId: 1, managerId: 99 },
+  ];
+  expect(parseReporting({ links: [links[0]] }, staff)).toEqual([links[0]]);
+  expect(
+    parseReporting(
+      {
+        links: [
+          { userId: 98, managerId: 3 },
+          { userId: 1, managerId: 3 },
+        ],
+      },
+      staff,
+    ),
+  ).toEqual([{ userId: 1, managerId: 3 }]);
+  const kept = parseReporting({ links: [links[1]] }, staff);
+  expect(kept).toEqual([]);
+  expect(droppedReportingLinks([links[1]], kept)).toEqual([links[1]]);
 });
 it("rejects cycles, duplicates, self-routing and unqualified managers", () => {
   for (const links of [
@@ -32,7 +67,12 @@ it("rejects cycles, duplicates, self-routing and unqualified managers", () => {
 });
 it("accepts explicit dates/hours without inferring working days or leave balances", () => {
   expect(
-    parseLeave({ kind: "annual_leave", startDate: "2026-12-01", endDate: "2026-12-02", hours: 7.1 }),
+    parseLeave({
+      kind: "annual_leave",
+      startDate: "2026-12-01",
+      endDate: "2026-12-02",
+      hours: 7.1,
+    }),
   ).toMatchObject({ hours: 7.1, note: "" });
 });
 it.each([
@@ -45,6 +85,12 @@ it.each([
   { note: "x".repeat(501) },
 ])("rejects invalid dates, hours, kinds and long notes %j", (patch) => {
   expect(() =>
-    parseLeave({ kind: "annual_leave", startDate: "2026-12-01", endDate: "2026-12-02", hours: 8, ...patch }),
+    parseLeave({
+      kind: "annual_leave",
+      startDate: "2026-12-01",
+      endDate: "2026-12-02",
+      hours: 8,
+      ...patch,
+    }),
   ).toThrow();
 });

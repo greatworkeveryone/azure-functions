@@ -9,7 +9,8 @@ import {
   txFail,
   txOk,
 } from "../assetRegisterSupport";
-import { REPORTING_ROLES, parseReporting, validRevision } from "../leavePolicy";
+import type { ReportingLink } from "../leavePolicy";
+import { REPORTING_ROLES, droppedReportingLinks, parseReporting, validRevision } from "../leavePolicy";
 import { loadPeople, peopleAudit } from "../peopleWorkflow";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 export async function saveStaffReporting(
@@ -45,15 +46,27 @@ export async function saveStaffReporting(
           { name: "Actor", type: TYPES.NVarChar, value: auth.caller.name },
         ],
       );
-      await peopleAudit(conn, auth.caller, "reporting", 1, "change", before.links, { links, revision });
+      const dropped = droppedReportingLinks(body.links as ReportingLink[], links);
+      await peopleAudit(conn, auth.caller, "reporting", 1, "change", before.links, {
+        links,
+        revision,
+        ...(dropped.length ? { droppedInactiveLinks: dropped } : {}),
+      });
       return txOk({ saved: true, revision });
     });
     return result.ok ? { status: 200, jsonBody: result.value } : result.response;
   } catch (error) {
     context.error("Reporting save failed", error);
-    return { status: 500, jsonBody: { error: "Could not save the reporting structure" } };
+    return {
+      status: 500,
+      jsonBody: { error: "Could not save the reporting structure" },
+    };
   } finally {
     if (connection) closeConnection(connection);
   }
 }
-app.http("saveStaffReporting", { methods: ["POST"], authLevel: "anonymous", handler: saveStaffReporting });
+app.http("saveStaffReporting", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: saveStaffReporting,
+});

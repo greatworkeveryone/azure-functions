@@ -147,6 +147,25 @@ it("saves valid reporting with a verified audit and rejects stale revisions", as
     { links: [{ userId: 1, managerId: 2 }], revision: 3 },
   );
 });
+it("saves around links to deactivated staff and records the dropped links in the audit", async () => {
+  actor = "cfo";
+  roles = [AppRole.CFO];
+  const stale = { userId: 1, managerId: 99 };
+  const response = await saveStaffReporting(
+    req({ links: [{ userId: 3, managerId: 4 }, stale], revision: 2 }),
+    context,
+  );
+  expect(response.status).toBe(200);
+  expect(audit).toHaveBeenCalledWith(
+    expect.anything(),
+    { oid: "cfo", name: "Verified actor" },
+    "reporting",
+    1,
+    "change",
+    expect.anything(),
+    { links: [{ userId: 3, managerId: 4 }], revision: 3, droppedInactiveLinks: [stale] },
+  );
+});
 it("rolls reporting back when its audit cannot be written", async () => {
   actor = "cfo";
   roles = [AppRole.CFO];

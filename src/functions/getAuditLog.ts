@@ -9,6 +9,7 @@ import {
   AUDIT_UNION_SQL,
   OPERATIONAL_AUDIT_ACTIONS,
   fullAuditAccess,
+  readableOperationalAudiences,
 } from "../auditLog";
 import { darwinDayStartUtc, darwinNextDayStartUtc, parseDarwinDate } from "../ledger/darwinTime";
 import { closeConnection, createRequestConnection, executeQuery, type SqlParam } from "../db";
@@ -19,7 +20,8 @@ export async function getAuditLog(
 ): Promise<HttpResponseInit> {
   const auth = await authorize(request, AUDIT_READ_ROLES);
   if (!auth.ok) return auth.response;
-  const full = fullAuditAccess(await rolesForRequest(request));
+  const roles = await rolesForRequest(request),
+    full = fullAuditAccess(roles);
   const page = Number(request.query.get("page") ?? 1),
     area = request.query.get("area") ?? "",
     search = (request.query.get("search") ?? "").trim(),
@@ -45,7 +47,16 @@ export async function getAuditLog(
     return badRequest("Choose valid dates in order");
   const params: SqlParam[] = [
     { name: "Full", type: TYPES.Bit, value: full },
-    { name: "OperationalActions", type: TYPES.NVarChar, value: JSON.stringify(OPERATIONAL_AUDIT_ACTIONS) },
+    {
+      name: "OperationalActions",
+      type: TYPES.NVarChar,
+      value: JSON.stringify(OPERATIONAL_AUDIT_ACTIONS),
+    },
+    {
+      name: "EventAudiences",
+      type: TYPES.NVarChar,
+      value: JSON.stringify(readableOperationalAudiences(roles)),
+    },
     await showTestParam(request),
     { name: "Offset", type: TYPES.Int, value: (page - 1) * 50 },
   ];
@@ -60,11 +71,19 @@ export async function getAuditLog(
   }
   if (fromDay) {
     predicates.push("OccurredAt>=@From");
-    params.push({ name: "From", type: TYPES.DateTime2, value: darwinDayStartUtc(fromDay) });
+    params.push({
+      name: "From",
+      type: TYPES.DateTime2,
+      value: darwinDayStartUtc(fromDay),
+    });
   }
   if (toDay) {
     predicates.push("OccurredAt<@To");
-    params.push({ name: "To", type: TYPES.DateTime2, value: darwinNextDayStartUtc(toDay) });
+    params.push({
+      name: "To",
+      type: TYPES.DateTime2,
+      value: darwinNextDayStartUtc(toDay),
+    });
   }
   if (search) {
     predicates.push("(ActorName LIKE @Search ESCAPE '\\' OR Action LIKE @Search ESCAPE '\\')");
@@ -116,4 +135,8 @@ export async function getAuditLog(
     if (connection) closeConnection(connection);
   }
 }
-app.http("getAuditLog", { methods: ["GET"], authLevel: "anonymous", handler: getAuditLog });
+app.http("getAuditLog", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: getAuditLog,
+});

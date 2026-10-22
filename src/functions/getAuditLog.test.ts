@@ -1,7 +1,12 @@
 import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import { executeQuery } from "../db";
-import { AUDIT_UNION_SQL, fullAuditAccess, OPERATIONAL_AUDIT_ACTIONS } from "../auditLog";
+import {
+  AUDIT_UNION_SQL,
+  fullAuditAccess,
+  OPERATIONAL_AUDIT_ACTIONS,
+  readableOperationalAudiences,
+} from "../auditLog";
 import { getAuditLog } from "./getAuditLog";
 jest.mock("@azure/functions", () => ({
   ...jest.requireActual("@azure/functions"),
@@ -16,7 +21,11 @@ jest.mock("../auth", () => ({
   rolesForRequest: async () => roles,
 }));
 jest.mock("../test-data", () => ({
-  showTestParam: async () => ({ name: "ShowTest", type: require("tedious").TYPES.Bit, value: false }),
+  showTestParam: async () => ({
+    name: "ShowTest",
+    type: require("tedious").TYPES.Bit,
+    value: false,
+  }),
 }));
 jest.mock("../db", () => ({
   createRequestConnection: jest.fn(async () => ({})),
@@ -26,7 +35,10 @@ jest.mock("../db", () => ({
 const query = jest.mocked(executeQuery),
   context = { error: jest.fn() } as unknown as InvocationContext;
 const req = (query = "") =>
-  new HttpRequest({ method: "GET", url: `http://localhost/api/getAuditLog${query}` });
+  new HttpRequest({
+    method: "GET",
+    url: `http://localhost/api/getAuditLog${query}`,
+  });
 beforeEach(() => {
   jest.clearAllMocks();
   roles = [AppRole.FACILITIES_APPROVAL];
@@ -95,7 +107,10 @@ it("binds wildcard search literally and uses stable pagination for the same scop
   expect((await getAuditLog(req("?search=service_schedule&page=2"), context)).status).toBe(200);
   expect(query.mock.calls[0][2]).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({ name: "Search", value: "%service\\_schedule%" }),
+      expect.objectContaining({
+        name: "Search",
+        value: "%service\\_schedule%",
+      }),
       expect.objectContaining({ name: "Offset", value: 50 }),
     ]),
   );
@@ -106,6 +121,22 @@ it("keeps unknown ledger actions, money and tenancy records out of the positive 
   expect(OPERATIONAL_AUDIT_ACTIONS).not.toContain("schedule.manual_edit");
   expect(AUDIT_UNION_SQL).toContain("l.FinancialImpact IS NULL");
   expect(AUDIT_UNION_SQL).toContain("l.TenantId IS NULL");
-  expect(AUDIT_UNION_SQL).toContain("WHERE @Full=1 OR e.Domain='operational'");
+  expect(AUDIT_UNION_SQL).toContain("e.Domain='operational' AND e.Audience IN");
   expect(fullAuditAccess(["accounts_manager"])).toBe(false);
+});
+it("filters operational event entries by the same Audience predicate as canReadEvent", async () => {
+  await getAuditLog(req(), context);
+  const param = query.mock.calls[0][2]!.find((p) => p.name === "EventAudiences");
+  expect(JSON.parse(param!.value as string)).toEqual(
+    readableOperationalAudiences([AppRole.FACILITIES_APPROVAL]),
+  );
+  expect(AUDIT_UNION_SQL).toContain("e.Audience IN (SELECT [value] FROM OPENJSON(@EventAudiences))");
+  expect(readableOperationalAudiences([AppRole.FACILITIES_APPROVAL])).toContain("operational_staff");
+  expect(readableOperationalAudiences([AppRole.ACCOUNTS_APPROVAL])).toEqual([
+    "accounts_managers",
+    "accounts_team",
+    "operational_staff",
+  ]);
+  expect(readableOperationalAudiences([AppRole.FACILITIES])).toEqual(["operational_staff"]);
+  expect(readableOperationalAudiences([AppRole.USER])).toEqual([]);
 });
