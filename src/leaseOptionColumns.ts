@@ -19,10 +19,21 @@ const RECHECK_MS = 60_000;
 
 let absentSince: number | null = null;
 
-/** A query refused because it named a 106 column the database doesn't have. */
-export function isMissingLeaseOptionColumn(error: unknown): boolean {
+const OPTION_COLUMN_ERROR = /^Invalid column name '(OptionsTotal|OptionsRemaining|OptionTermMonths)'\.?$/;
+
+function isOptionColumn207(error: unknown): boolean {
   const failure = error as { message?: unknown; number?: unknown } | null;
-  return failure?.number === 207 && /Options(Total|Remaining)|OptionTermMonths/.test(String(failure.message ?? ""));
+  return failure?.number === 207 && OPTION_COLUMN_ERROR.test(String(failure.message ?? "").trim());
+}
+
+/** A query refused because it named 106 columns the database doesn't have. SQL Server sends one
+ *  207 per unknown column and tedious 18 wraps several in an AggregateError with no number of
+ *  its own (data recheck S2-1), so each inner error must be a 207 naming one of the three;
+ *  anything else (another column, a mixed batch) is the error it is and is rethrown. */
+export function isMissingLeaseOptionColumn(error: unknown): boolean {
+  const inner = (error as { errors?: unknown } | null)?.errors;
+  if (Array.isArray(inner)) return inner.length > 0 && inner.every(isOptionColumn207);
+  return isOptionColumn207(error);
 }
 
 async function stillAbsent(connection: Connection): Promise<boolean> {

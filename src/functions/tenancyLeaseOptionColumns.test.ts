@@ -56,12 +56,15 @@ const TENANT = { BuildingId: 5, LegalName: "Acme Pty Ltd", RentPerAnnum: 50000, 
 const namesRealColumn = (sql: string) => /\bOptions(Total|Remaining)\b|\bOptionTermMonths\b/.test(sql.replace(/AS Options(Total|Remaining)|AS OptionTermMonths/g, "")) && !sql.includes("COL_LENGTH");
 let failures = 0;
 
-/** A database without migration 106: naming its columns fails as SQL Server does (error 207). */
+const invalidColumn = (name: string) => Object.assign(new Error(`Invalid column name '${name}'.`), { number: 207 });
+
+/** A database without migration 106, as tedious 18 reports it: one 207 per unknown column, so
+ *  three of them, wrapped in an AggregateError with no number of its own (data recheck S2-1). */
 function databaseWithout106(sql: string): unknown[] {
   if (sql.includes("COL_LENGTH('dbo.Tenants', 'OptionsRemaining')")) return [{ Len: null }];
   if (namesRealColumn(sql)) {
     failures += 1;
-    throw Object.assign(new Error("Invalid column name 'OptionsTotal'."), { number: 207 });
+    throw new AggregateError([invalidColumn("OptionsTotal"), invalidColumn("OptionsRemaining"), invalidColumn("OptionTermMonths")]);
   }
   if (/FROM dbo\.Tenants t WHERE (BuildingId = @BuildingId|TenantId = @TenantId|TenantId = @Id)/.test(sql)) return [TENANT];
   if (sql.includes("INSERT INTO dbo.Tenants")) return [{ TenantId: 7 }];
@@ -100,6 +103,29 @@ describe("without migration 106", () => {
     const after = failures;
     await handlers.getRegisterTenant(request(null, { tenantId: "7" }), ctx);
     expect(failures).toBe(after);
+  });
+});
+
+describe("isMissingLeaseOptionColumn", () => {
+  const { isMissingLeaseOptionColumn } = jest.requireActual("../leaseOptionColumns") as { isMissingLeaseOptionColumn: (error: unknown) => boolean };
+  it("knows tedious's AggregateError of the three option columns, and a lone 207 for one", () => {
+    expect(isMissingLeaseOptionColumn(new AggregateError([invalidColumn("OptionsTotal"), invalidColumn("OptionsRemaining"), invalidColumn("OptionTermMonths")]))).toBe(true);
+    expect(isMissingLeaseOptionColumn(invalidColumn("OptionTermMonths"))).toBe(true);
+  });
+
+  it("rethrows anything else: a mixed batch, another column, another error, an empty batch", () => {
+    expect(isMissingLeaseOptionColumn(new AggregateError([invalidColumn("OptionsTotal"), invalidColumn("GstBasis")]))).toBe(false);
+    expect(isMissingLeaseOptionColumn(invalidColumn("OptionsTotalX"))).toBe(false);
+    expect(isMissingLeaseOptionColumn(Object.assign(new Error("Deadlock"), { number: 1205 }))).toBe(false);
+    expect(isMissingLeaseOptionColumn(new AggregateError([]))).toBe(false);
+  });
+
+  it("lets a mixed failure through the register as the error it is", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (namesRealColumn(sql)) throw new AggregateError([invalidColumn("OptionsTotal"), invalidColumn("GstBasis")]);
+      return [];
+    });
+    expect((await handlers.getRegisterTenants(request(null, { buildingId: "5" }), ctx)).status).toBe(500);
   });
 });
 
