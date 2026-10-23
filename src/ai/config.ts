@@ -2,6 +2,7 @@
 // cached, so a switch changed in Azure takes effect without a restart. Nothing here
 // ever reaches a client: getAiStatus sends only the fields it names.
 
+import { checkBaseUrl } from "./baseUrl";
 import type { AiProviderName } from "./types";
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
@@ -70,8 +71,8 @@ export function readAiConfig(env: Record<string, string | undefined> = process.e
   };
 }
 
-/** Whether the chosen provider has what it needs to be called. The mock needs nothing. */
+/** Whether the chosen provider has what it needs to be called: an endpoint needs a model and an address that may be called (https, or http to a private one). The mock needs nothing. */
 export function isConfigured(config: AiConfig): boolean {
   if (config.provider === "mock") return true;
-  return config.provider === "openai_compatible" && config.baseUrl !== null && config.model !== null;
+  return config.provider === "openai_compatible" && config.model !== null && checkBaseUrl(config.baseUrl).ok;
 }

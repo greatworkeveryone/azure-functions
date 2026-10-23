@@ -112,6 +112,20 @@ describe("what it says", () => {
     expect(String(unknown.provider)).toHaveLength(40);
   });
 
+  it("says not configured when the address may not be called: plain http to a public host, or an address holding a key", async () => {
+    Object.assign(process.env, { AI_MODEL: "m", AI_PROVIDER: "openai_compatible" });
+    for (const url of ["http://llm.example", "https://user:pw@llm.example", "http://169.254.169.254"]) {
+      process.env.AI_BASE_URL = url;
+      const response = await call();
+      expect(body(response)).toMatchObject({ configured: false });
+      expect(JSON.stringify(response)).not.toMatch(/llm\.example|pw|169\.254/);
+    }
+    for (const url of ["https://llm.example", "http://10.4.0.7:8000", "http://localhost:11434"]) {
+      process.env.AI_BASE_URL = url;
+      expect(body(await call())).toMatchObject({ configured: true });
+    }
+  });
+
   it("reads settings only: no database, no model", async () => {
     await call();
     expect(createRequestConnection).not.toHaveBeenCalled();

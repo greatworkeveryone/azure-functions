@@ -111,4 +111,18 @@ describe("isConfigured", () => {
   it("is false for a provider it does not know", () => {
     expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai", AI_BASE_URL: "https://x.example", AI_MODEL: "m" }))).toBe(false);
   });
+
+  it.each(["http://llm.example", "http://vllm.internal:8000", "http://8.8.8.8", "http://169.254.169.254", "https://user:pw@x.example", "https://x.example?k=1", "x.example"])(
+    "is false when the address %s may not be called (review L4)",
+    (url) => {
+      expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai_compatible", AI_BASE_URL: url, AI_MODEL: "m" }))).toBe(false);
+    },
+  );
+
+  it.each(["https://x.example", "https://10.4.0.7:8443", "http://10.4.0.7:8000", "http://192.168.1.20", "http://172.20.0.5:11434", "http://localhost:11434", "http://127.0.0.1:8000"])(
+    "is true when the address %s is https, or http to this machine or a private address",
+    (url) => {
+      expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai_compatible", AI_BASE_URL: url, AI_MODEL: "m" }))).toBe(true);
+    },
+  );
 });

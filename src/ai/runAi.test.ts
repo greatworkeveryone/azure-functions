@@ -534,6 +534,30 @@ describe("the openai_compatible provider", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["plain http to a public host", "http://llm.example", /AI_BASE_URL must use https\. Plain http is allowed only to localhost or a private address/],
+    ["plain http to a host name that only looks internal", "http://vllm.internal:8000", /AI_BASE_URL must use https/],
+    ["the cloud metadata address", "https://169.254.169.254", /link-local/],
+    ["a key inside the address", "https://user:s3cret@llm.example", /user name or password/],
+  ])("refuses %s before anything is sent, and the log line says why without repeating the address", async (_label, url, line) => {
+    Object.assign(process.env, { AI_BASE_URL: url, AI_MODEL: "m", AI_PROVIDER: "openai_compatible" });
+    const result = await runAi(request());
+    expect(result).toMatchObject({ ok: false, refusal: { code: "provider_error" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(inserts()[0]).toMatchObject({ ErrorCode: "provider_error", Outcome: "failed", Provider: "openai_compatible" });
+    const logged = jest.mocked(console.error).mock.calls.map((args) => args.join(" ")).join("\n");
+    expect(logged).toMatch(/^\[ai\] provider call failed: AI_BASE_URL /);
+    expect(logged).toMatch(line);
+    expect(logged).not.toMatch(/s3cret|llm\.example|vllm\.internal|169\.254\.169\.254/);
+  });
+
+  it("calls an endpoint on a private address over plain http", async () => {
+    Object.assign(process.env, { AI_BASE_URL: "http://10.4.0.7:8000", AI_MODEL: "m", AI_PROVIDER: "openai_compatible" });
+    fetchMock.mockResolvedValue(answer('{"echo":"x"}'));
+    expect(await runAi(request())).toMatchObject({ ok: true });
+    expect(fetchMock.mock.calls[0][0]).toBe("http://10.4.0.7:8000/v1/chat/completions");
+  });
+
   it("refuses as provider_error for a provider name it does not know", async () => {
     process.env.AI_PROVIDER = "openai";
     const result = await runAi(request());

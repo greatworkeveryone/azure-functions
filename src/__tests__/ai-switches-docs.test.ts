@@ -49,4 +49,20 @@ describe("switches.md rows for the AI gateway", () => {
     expect(row).toMatch(/AI_ENABLED/);
     expect(row).toContain("`echo_test`");
   });
+
+  it("says what AI_BASE_URL accepts: https, or http to localhost or a private address; no key, query or fragment; and to check request logging", () => {
+    const row = rowFor("AI_BASE_URL");
+    expect(row).toMatch(/https/);
+    expect(row).toMatch(/localhost/);
+    expect(row).toMatch(/private/i);
+    expect(row).toMatch(/10\.x|10\.0\.0\.0|RFC 1918/);
+    expect(row).toMatch(/AI_API_KEY/);
+    expect(row).toMatch(/query|fragment/);
+    expect(row).toMatch(/request log|prompt log|logging/i);
+    expect(row).not.toMatch(/http or https only/);
+  });
+
+  it("tells operators that Needs setup in Admin → AI activity can mean a refused address", () => {
+    expect(rowFor("AI_BASE_URL")).toMatch(/Needs setup/);
+  });
 });
