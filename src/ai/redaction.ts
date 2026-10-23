@@ -11,23 +11,41 @@ export interface Redaction {
   text: string;
 }
 
-const overlaps = (a: Span, b: Span): boolean => a.start < b.end && b.start < a.end;
+/** Marks each character of `text` a span covers, so "does this touch anything marked?" costs the span's own length. */
+class Coverage {
+  private readonly marks: Uint8Array;
+
+  constructor(length: number) {
+    this.marks = new Uint8Array(length);
+  }
+
+  touches(span: Span): boolean {
+    for (let at = span.start; at < span.end; at++) if (this.marks[at] === 1) return true;
+    return false;
+  }
+
+  mark(span: Span): void {
+    this.marks.fill(1, span.start, span.end);
+  }
+}
 
 /**
  * Rules run in priority order over the original text. A match that touches a
  * business number (ABN, ACN) or a detail already claimed by an earlier rule is
  * dropped, so every character is replaced at most once and ABNs always survive.
+ * The work grows with the length of the text, whatever the text holds.
  */
 export function redactText(input: string): Redaction {
   const byKind: Record<RedactionKind, number> = { account: 0, bsb: 0, card: 0, email: 0, phone: 0, tfn: 0 };
-  const kept = protectedSpans(input);
+  const kept = new Coverage(input.length);
+  for (const span of protectedSpans(input)) kept.mark(span);
+  const taken = new Coverage(input.length);
   const accepted: Array<Span & { kind: RedactionKind }> = [];
 
   for (const rule of REDACTION_RULES) {
     for (const span of rule.spans(input)) {
-      if (span.end <= span.start) continue;
-      if (kept.some((protectedSpan) => overlaps(span, protectedSpan))) continue;
-      if (accepted.some((taken) => overlaps(span, taken))) continue;
+      if (span.end <= span.start || kept.touches(span) || taken.touches(span)) continue;
+      taken.mark(span);
       accepted.push({ ...span, kind: rule.kind });
       byKind[rule.kind] += 1;
     }

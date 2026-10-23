@@ -133,6 +133,8 @@ describe("BSB and account numbers", () => {
     ["Acc No 1234 5678", "Acc No [ACCOUNT]"],
     ["Acct #123-456-789", "Acct #[ACCOUNT]"],
     ["account number 123456789", "account number [ACCOUNT]"],
+    ["Acct. No. 12345678", "Acct. No. [ACCOUNT]"],
+    ["Acc. no 1234 5678", "Acc. no [ACCOUNT]"],
     ["A/C no: 12345678", "A/C no: [ACCOUNT]"],
     ["A/C: 12345678", "A/C: [ACCOUNT]"],
   ])("replaces the account number in %j", (input, expected) => {

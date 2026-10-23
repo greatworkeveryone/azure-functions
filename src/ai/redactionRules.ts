@@ -157,7 +157,7 @@ const TFN_BARE = new RegExp(`${TOKEN_START}\\d{3}${SEP}\\d{3}${SEP}\\d{3}(?!\\d|
 const BSB_ACCOUNT_PAIR = new RegExp(`${TOKEN_START}(\\d{3}-\\d{3})[ \\u00a0,/-]{1,3}(\\d{6,10})(?!\\d)`, "dg");
 const BSB_LABELLED = new RegExp(`\\bBSB\\b(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:.-]{0,6}(\\d{3}${SEP}?\\d{3})(?!\\d)`, "dgi");
 const ACCOUNT_LABELLED = new RegExp(
-  `\\b(?:account|acct|acc)\\b(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:#.-]{0,6}(\\d(?:${SEP}?\\d){4,9})(?!\\d)`,
+  `\\b(?:account|acct|acc)\\b\\.?(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:#.-]{0,6}(\\d(?:${SEP}?\\d){4,9})(?!\\d)`,
   "dgi",
 );
 // "A/C" is also air conditioning, so it needs a marker: A/C no 123456, A/C: 123456.
