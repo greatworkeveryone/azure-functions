@@ -39,6 +39,7 @@ const post = (value: unknown): HttpRequest => ({ json: async () => value }) as u
 const FRONTEND_FEATURE_KEYS = [
   "activity",
   "assets",
+  "contractorSuggestions",
   "decisionJobs",
   "escalations",
   "finance",

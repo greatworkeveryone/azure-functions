@@ -69,8 +69,8 @@ export const ACTION_ROLES = {
   manageMajorEvents: { gate: [A.ADMIN, A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer gate for planning/closure. Admin may create/edit plans; closure retains domain-specific Facilities Manager or CFO/director authority." },
   addQuoteContractor: {
     gate: [A.ACCOUNTS, A.FACILITIES],
-    routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent"],
-    why: "Request quotes: keep a job's list of contractors asked to quote. Field officers do this (decision 1).",
+    routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent", "suggestContractors", "recordContractorSuggestionOutcome"],
+    why: "Request quotes: keep a job's list of contractors asked to quote, and see who is suggested for it. Field officers do this (decision 1). Everyone who may raise a purchase order is in this list, so suggestions serve both choosing a contractor to ask and one to assign.",
   },
   approveInvoice: {
     gate: roles(SUBJECT_ELIGIBLE_ROLES.invoice),
