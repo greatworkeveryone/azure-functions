@@ -412,6 +412,38 @@ describe("getEscalation", () => {
     jobAdapter.visibleTo.mockReturnValue(false);
     expect((await get({ escalationId: "42" }, "director")).status).toBe(404);
   });
+
+  describe("next level", () => {
+    const next = { names: ["Dee"], roleLabel: "Director" };
+    const nextOf = (res: { jsonBody?: unknown }) => (res.jsonBody as { next: unknown }).next;
+
+    it("names who Escalate further would send it to, for the people who can take that action", async () => {
+      for (const roles of ["facilities_manager", "facilities", "director"]) {
+        eng.previewNextLevel.mockResolvedValueOnce(next);
+        expect(nextOf(await get({ escalationId: "42" }, roles))).toEqual(next);
+      }
+      expect(eng.previewNextLevel).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ escalationId: 42 }), expect.any(Date), DIRECTORY);
+    });
+
+    it("is null when the ladder has nobody above", async () => {
+      eng.previewNextLevel.mockResolvedValueOnce(null);
+      expect(nextOf(await get({ escalationId: "42" }))).toBeNull();
+    });
+
+    it("sends no names to someone who can see it but not act on it", async () => {
+      const res = await get({ escalationId: "42" }, "cfo");
+      expect(res.status).toBe(200);
+      expect(nextOf(res)).toBeNull();
+      expect(eng.previewNextLevel).not.toHaveBeenCalled();
+    });
+
+    it("sends none once it has ended, when the action is gone", async () => {
+      st.getEscalationRow.mockResolvedValueOnce(row({ resolutionCode: "done", status: "resolved" }));
+      const res = await get({ escalationId: "42" });
+      expect(nextOf(res)).toBeNull();
+      expect(eng.previewNextLevel).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ── previewEscalationTarget ──────────────────────────────────────────────────
