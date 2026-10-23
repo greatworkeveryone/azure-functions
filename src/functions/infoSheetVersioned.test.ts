@@ -128,7 +128,7 @@ beforeEach(() => {
 
 // ── upsertInfoSheetSection ───────────────────────────────────────────────────
 
-const ledger = jest.requireMock("../ledger") as { record: jest.Mock };
+const ledger = jest.requireMock("../ledger") as { newCorrelationId: jest.Mock; record: jest.Mock };
 
 const S1 = `{"id":"sec-1","title":"Keys","rows":[{"id":"row-1","subheader":"Spare","body":"Office safe","displayOrder":0},{"id":"row-2","subheader":"Fob","body":"x","displayOrder":1}],"displayOrder":0,"legacyNote":"kept 1.50"}`;
 const S2 = `{"id":"sec-2","title":"Contacts","rows":[],"displayOrder":1}`;
@@ -148,12 +148,15 @@ const calls = () => db.executeQuery.mock.calls.map((c: unknown[]) => ({ params: 
 const written = () => calls().find((c) => /UPDATE dbo\.Tenants SET/.test(c.sql));
 const writtenJson = () => written()?.params.find((p) => p.name === "InfoSheetSections")?.value as string | undefined;
 
+// What each delete puts in the ledger's Before: only the entry removed, and where it was (S3-6).
+const SECTION_REMOVED = { position: 0, section: JSON.parse(S1) };
+const ROW_REMOVED = { position: 0, row: JSON.parse(S1).rows[0], sectionId: "sec-1", sectionTitle: "Keys" };
 const DELETES = [
-  ["deleteInfoSheetSection", { BuildingId: 5, SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_section_delete", { sectionId: "sec-1" }],
-  ["deleteInfoSheetRow", { BuildingId: 5, RowId: "row-1", SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_row_delete", { rowId: "row-1", sectionId: "sec-1" }],
+  ["deleteInfoSheetSection", { BuildingId: 5, SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_section_delete", { sectionId: "sec-1" }, SECTION_REMOVED],
+  ["deleteInfoSheetRow", { BuildingId: 5, RowId: "row-1", SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_row_delete", { rowId: "row-1", sectionId: "sec-1" }, ROW_REMOVED],
 ] as const;
 
-describe.each(DELETES)("%s", (route, body, action, after) => {
+describe.each(DELETES)("%s", (route, body, action, after, before) => {
   const send = (extra: Record<string, unknown> = { InfoSheetVersion: 4 }) => handlers[route](makeRequest({ ...body, ...extra }), ctx);
 
   it("is the tenancy desk's, and rate-limited", async () => {
@@ -215,14 +218,15 @@ describe.each(DELETES)("%s", (route, body, action, after) => {
     expect(writtenJson()).toContain(S2);
   });
 
-  it("ledgers the change with the whole sheet as it was, before the commit", async () => {
+  it("ledgers the entry removed, not the whole sheet, before the commit (S3-6)", async () => {
     await send();
+    expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         action,
         after,
-        before: { sections: JSON.parse(STORED) },
+        before,
         buildingId: 5,
         subject: { id: 1, type: "tenancy" },
         tenantId: 1,
@@ -307,6 +311,133 @@ describe.each(UPSERTS)("%s", (route, body) => {
   });
 });
 
+describe("a new entry can say where it goes, for Undo (S2-4)", () => {
+  it("upsertInfoSheetRow puts the row at Position", async () => {
+    const row = { body: "back", displayOrder: 0, id: "row-back", subheader: "Back" };
+    const res = await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 0, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(writtenJson() ?? "[]")[0].rows.map((r: { id: string }) => r.id)).toEqual(["row-back", "row-1", "row-2"]);
+  });
+
+  it("upsertInfoSheetSection puts the section at Position", async () => {
+    const section = { displayOrder: 0, id: "sec-back", rows: [], title: "Back" };
+    const res = await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 1, Section: section, TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(writtenJson() ?? "[]").map((entry: { id: string }) => entry.id)).toEqual(["sec-1", "sec-back", "sec-2"]);
+  });
+
+  it.each([[-1], [1.5], ["1"], [null]])("answers 400 for a Position of %p, before touching the database", async (position) => {
+    const row = { body: "b", displayOrder: 0, id: "r", subheader: "s" };
+    expect((await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: position, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx)).status).toBe(400);
+    expect((await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: position, Section: { displayOrder: 0, id: "s", rows: [], title: "t" }, TenantId: 1 }), ctx)).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("a stale Undo is refused like any write: 409, nothing put back", async () => {
+    const row = { body: "back", displayOrder: 0, id: "row-back", subheader: "Back" };
+    const res = await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 3, IsNew: true, Position: 0, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    expect(res.status).toBe(409);
+    expect(written()).toBeUndefined();
+  });
+});
+
+// S3-2 (D11 re-check): Undo put an entry back without a trace, so Decisions & exceptions
+// still showed a deletion that had been undone. A restore (`Restore: true` on a new entry)
+// is ledgered, in the same transaction, as what was put back and where.
+describe("Undo is ledgered (S3-2)", () => {
+  const row = { body: "Office safe", displayOrder: 0, id: "row-back", subheader: "Spare" };
+  const section = { displayOrder: 1, id: "sec-back", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Parking" };
+  const restoreRow = (extra: Record<string, unknown> = {}) =>
+    handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 0, Restore: true, Row: row, SectionId: "sec-1", TenantId: 1, ...extra }), ctx);
+  const restoreSection = (extra: Record<string, unknown> = {}) =>
+    handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 1, Restore: true, Section: section, TenantId: 1, ...extra }), ctx);
+  const ledgered = () => ledger.record.mock.calls.map((call: unknown[]) => call[1] as { action: string; after?: unknown; before?: unknown; correlationId?: string });
+
+  it("a restored row is ledgered with the row and where it went, before the commit", async () => {
+    expect((await restoreRow()).status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "tenancy.info_sheet_row_restore",
+        after: { position: 0, row, sectionId: "sec-1", sectionTitle: "Keys" },
+        buildingId: 5,
+        subject: { id: 1, type: "tenancy" },
+        tenantId: 1,
+      }),
+    );
+    expect(ledgered()[0].before).toBeUndefined();
+    expect(ledger.record.mock.invocationCallOrder[0]).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("a restored section is ledgered with the section, its rows and where it went", async () => {
+    expect((await restoreSection()).status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "tenancy.info_sheet_section_restore", after: { position: 1, section }, tenantId: 1 }),
+    );
+  });
+
+  it("records the place it actually went when Position was past the end", async () => {
+    await restoreRow({ Position: 99 });
+    expect(ledgered()[0].after).toEqual(expect.objectContaining({ position: 2 }));
+  });
+
+  it("an ordinary add is still not ledgered: only a restore is", async () => {
+    await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Section: section, TenantId: 1 }), ctx);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Restore without IsNew", { IsNew: undefined }],
+    ["Restore on an edit (IsNew false)", { IsNew: false }],
+    ["Restore that isn't true or false", { Restore: "true" }],
+    ["Restore as null", { Restore: null }],
+  ])("answers 400 for %s, before touching the database", async (_label, extra) => {
+    expect((await restoreRow(extra)).status).toBe(400);
+    expect((await restoreSection(extra)).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("a stale Undo (409) writes nothing and ledgers nothing", async () => {
+    expect((await restoreRow({ InfoSheetVersion: 3 })).status).toBe(409);
+    expect((await restoreSection({ InfoSheetVersion: 3 })).status).toBe(409);
+    expect(written()).toBeUndefined();
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("an Undo that can't be put back (the section is gone, the id is already there) ledgers nothing", async () => {
+    expect((await restoreRow({ SectionId: "gone" })).status).toBe(404);
+    expect((await restoreRow({ Row: { ...row, id: "row-1" } })).status).toBe(409);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("rolls back, putting nothing back, when the ledger write fails", async () => {
+    ledger.record.mockRejectedValueOnce(new Error("ledger down"));
+    expect((await restoreRow()).status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("is the tenancy desk's, like the other writes", async () => {
+    auth.requireRole.mockResolvedValue({ jsonBody: { error: "Forbidden" }, status: 403 });
+    expect((await restoreRow()).status).toBe(403);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("a restored section too big for one ledger row is split across several, with one correlation id, losing nothing", async () => {
+    ledger.newCorrelationId.mockReturnValue("11111111-2222-4333-8444-555555555555");
+    const huge = { ...section, rows: [1, 2, 3].map((n) => ({ body: "z".repeat(40_000), displayOrder: n, id: `h${n}`, subheader: "Clause" })) };
+    expect((await restoreSection({ Section: huge })).status).toBe(200);
+    const rows = ledgered();
+    expect(rows.length).toBeGreaterThan(2);
+    expect(new Set(rows.map((entry) => entry.correlationId))).toEqual(new Set(["11111111-2222-4333-8444-555555555555"]));
+    const parts = rows.map((entry) => entry.after as { json: string; part: number; parts: number });
+    expect(JSON.parse(parts.map((part) => part.json).join(""))).toEqual({ position: 1, section: huge });
+  });
+});
+
 describe("upsertInfoSheetSection on an empty sheet", () => {
   it("starts the list", async () => {
     sheet = { ...sheet, InfoSheetSections: null };
@@ -351,5 +482,65 @@ describe("a screen out of date can't undo a colleague's change (the D11 review's
     const row = { body: "y", displayOrder: 0, id: "row-1", subheader: "Spare" };
     expect((await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx)).status).toBe(409);
     expect(written()).toBeUndefined();
+  });
+});
+
+// S3-6 (D11 re-check): the whole array was ledgered against a 64 KB cap, so a delete
+// on a sheet over 64 KB failed with a 500. Only the removed entry is ledgered now;
+// one too big for a ledger row is split across several rows in the same
+// transaction, and never refused for size.
+describe("deletes on a sheet over 64 KB (S3-6)", () => {
+  const bigRow = (id: string, size: number) => ({ body: "x".repeat(size), displayOrder: 0, id, subheader: "Clause" });
+  const section = (id: string, rows: unknown[], order = 0) => ({ displayOrder: order, id, rows, title: `Section ${id}` });
+  const setSheet = (sections: unknown[]) => {
+    sheet = { ...sheet, InfoSheetSections: JSON.stringify(sections) };
+  };
+  const ledgered = () => ledger.record.mock.calls.map((call: unknown[]) => call[1] as { after?: unknown; before?: unknown; correlationId?: string });
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+  it("takes a small section off a 100 KB sheet and ledgers just that section", async () => {
+    setSheet([section("big-1", [bigRow("a", 30_000)]), section("big-2", [bigRow("b", 30_000)]), section("big-3", [bigRow("c", 30_000)]), section("small", [bigRow("d", 20)], 3)]);
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "small", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(ledgered()).toHaveLength(1);
+    expect(bytes(ledgered()[0].before)).toBeLessThan(1000);
+    expect(ledgered()[0].before).toEqual({ position: 3, section: section("small", [bigRow("d", 20)], 3) });
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes a small row off a section that holds 100 KB and ledgers just that row", async () => {
+    setSheet([section("s", [bigRow("a", 40_000), bigRow("b", 40_000), bigRow("small", 10), bigRow("c", 40_000)])]);
+    const res = await handlers.deleteInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, RowId: "small", SectionId: "s", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(ledgered()).toHaveLength(1);
+    expect(ledgered()[0].before).toEqual({ position: 2, row: bigRow("small", 10), sectionId: "s", sectionTitle: "Section s" });
+  });
+
+  it("a section too big for one ledger row is logged across several, in the same transaction, losing no text", async () => {
+    const huge = section("huge", [bigRow("a", 40_000), bigRow("b", 40_000), bigRow("c", 40_000)], 1);
+    setSheet([section("first", []), huge]);
+    ledger.newCorrelationId.mockReturnValue("11111111-2222-4333-8444-555555555555");
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "huge", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+
+    const rows = ledgered();
+    expect(rows.length).toBeGreaterThan(2);
+    expect(new Set(rows.map((row) => row.correlationId))).toEqual(new Set(["11111111-2222-4333-8444-555555555555"]));
+    for (const row of rows) expect(bytes(row.before)).toBeLessThanOrEqual(64 * 1024);
+    const parts = rows.map((row) => row.before as { json: string; part: number; parts: number });
+    expect(parts.map((part) => part.part)).toEqual(parts.map((_part, index) => index + 1));
+    expect(new Set(parts.map((part) => part.parts))).toEqual(new Set([rows.length]));
+    expect(JSON.parse(parts.map((part) => part.json).join(""))).toEqual({ position: 1, section: huge });
+    expect(ledger.record.mock.invocationCallOrder.at(-1)).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+    expect(writtenJson()).toBe(JSON.stringify([section("first", [])]));
+  });
+
+  it("rolls back, removing nothing, when any part of a split ledger entry fails", async () => {
+    setSheet([section("huge", [bigRow("a", 40_000), bigRow("b", 40_000)])]);
+    ledger.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("ledger down"));
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "huge", TenantId: 1 }), ctx);
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
   });
 });

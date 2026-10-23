@@ -111,8 +111,10 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
 // to it were read under lock and found empty — no jobs, keys, vacancies,
 // occupancies or their history, notes, rent reviews, rent schedule change log,
 // lease documents, car parks, decision-ledger rows (as subject or scope),
-// schedule rows, schedule sign-off or defects periods — and its own ledger row
-// (tenancy.delete_draft) is written before the commit.
+// schedule sign-off, defects periods, schedule change requests or documentation
+// register entries — and every column a person can fill in on the tenancy is
+// empty (src/tenancyDraftContent.ts; D11 re-check S1-2), and its own ledger row
+// (tenancy.delete_draft), holding the whole deleted row, is written before the commit.
 const TENANCY_DRAFT_DELETE = {
   file: "src/tenancy-records.ts",
   fn: "deleteTenancyDraft",

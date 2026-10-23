@@ -1,138 +1,27 @@
 import type { HttpResponseInit } from "@azure/functions";
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
+import { AppRole } from "./auth";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "./db";
-import { record } from "./ledger";
+import { editInfoSheet, type InfoSheetOp } from "./infoSheetEdit";
+import { recordInfoSheetChange } from "./infoSheetLedger";
 import type { LedgerActor } from "./ledger/types";
-import type { InfoSheetRow, InfoSheetSection } from "./infoSheetLogic";
+import type { InfoSheetSection } from "./infoSheetLogic";
 import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
 
-// Writes to Tenants.InfoSheetSections (D11; database-safety rules 6 and 7).
-//
-// Every write changes the one entry it names and keeps every other entry as
-// stored, byte for byte (the WP26c appendRelief rule): an entry with a field
-// this code doesn't know is never rebuilt. A column holding something that
-// isn't a JSON array is refused (422) and never written over; the old code read
-// it as an empty sheet and saved the change over it. Each write runs under the
-// tenancy's row lock and moves InfoSheetVersion on. A delete names the version
-// it was shown, is refused (409) when the sheet has changed since, and is
-// ledgered with the whole array as it was.
-//
-// D11 review: every write names the version it was shown (409 when stale). A
-// section write changes only the section's own fields (title, order,
-// strikethrough) and keeps its stored rows; rows change only through row
-// writes. A write for a section or row that is no longer there is a 404 unless
-// it says it is new, so a stale screen can't bring back what a colleague took off.
+export * from "./infoSheetEdit";
+export { jsonArrayElements } from "./jsonArrayElements";
 
-export type InfoSheetOp =
-  | { kind: "deleteRow"; rowId: string; sectionId: string }
-  | { kind: "deleteSection"; sectionId: string }
-  | { isNew: boolean; kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
-  | { isNew: boolean; kind: "upsertSection"; section: InfoSheetSection };
+// Writes to Tenants.InfoSheetSections (D11; database-safety rules 6 and 7). What an edit
+// does to the column is infoSheetEdit.ts; this is the write: every one runs under the
+// tenancy's row lock, names the version it was shown (409 when stale) and moves
+// InfoSheetVersion on, in one transaction. A delete is ledgered with the entry it
+// removed and a bulk add with the rows it added, not the whole sheet, which could pass
+// the ledger's 64 KB cap (S3-6, infoSheetLedger.ts).
 
-export type InfoSheetEdit =
-  | { before: unknown[]; json: string; ok: true; sections: InfoSheetSection[] }
-  | { error: string; ok: false; status: 404 | 409 | 422 };
-
-const UNSAFE = "This tenancy's info sheet is stored in a form that can't be changed safely, so nothing was changed. Ask an admin to look at it.";
-const NO_SECTION = "That section is no longer on the info sheet. Reload to see it as it is now.";
-const NO_ROW = "That row is no longer on the info sheet. Reload to see it as it is now.";
-const ALREADY = "That is already on the info sheet. Reload to see it as it is now.";
-/** The fields a section write may change; its rows change only through row writes. */
-const SECTION_FIELDS = ["displayOrder", "strikethrough", "title"] as const;
-
-/** The top-level entries of a JSON array, each as its own stored text, or null when the text isn't a JSON array. */
-export function jsonArrayElements(text: string): { raw: string; value: unknown }[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed)) return null;
-  const raws: string[] = [];
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  let start = text.indexOf("[") + 1;
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-    } else if (char === '"') inString = true;
-    else if (char === "[" || char === "{") depth += 1;
-    else if ((char === "]" || char === "}") && depth > 0) depth -= 1;
-    else if (char === "]") {
-      const last = text.slice(start, index).trim();
-      if (last !== "") raws.push(last);
-      break;
-    } else if (char === "," && depth === 0) {
-      raws.push(text.slice(start, index).trim());
-      start = index + 1;
-    }
-  }
-  if (raws.length !== parsed.length) return null;
-  const values: unknown[] = parsed;
-  return raws.map((raw, index) => ({ raw, value: values[index] }));
-}
-
-function elementsOf(raw: unknown): { raw: string; value: unknown }[] | null {
-  if (raw === null || raw === undefined) return [];
-  if (typeof raw !== "string") return null;
-  return raw.trim() === "" ? [] : jsonArrayElements(raw);
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const idOf = (value: unknown): unknown => (isRecord(value) ? value.id : undefined);
-const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
-
-/** The column after one change, with every other entry as stored; or why not. */
-export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
-  const elements = elementsOf(raw);
-  if (elements === null) return refuse(422, UNSAFE);
-  const before = elements.map((element) => element.value);
-  const sectionId = op.kind === "upsertSection" ? op.section.id : op.sectionId;
-  const at = elements.findIndex((element) => idOf(element.value) === sectionId);
-  const raws = elements.map((element) => element.raw);
-
-  if (op.kind === "deleteSection") {
-    if (at === -1) return refuse(404, NO_SECTION);
-    raws.splice(at, 1);
-  } else if (op.kind === "upsertSection") {
-    if (at === -1 && !op.isNew) return refuse(404, NO_SECTION);
-    if (at !== -1 && op.isNew) return refuse(409, ALREADY);
-    if (at === -1) {
-      // A new section may arrive with its first rows (bulk add).
-      raws.push(JSON.stringify({ ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] }));
-    } else {
-      const current = elements[at].value;
-      if (!isRecord(current)) return refuse(422, UNSAFE);
-      const own: Record<string, unknown> = {};
-      for (const field of SECTION_FIELDS) if (op.section[field] !== undefined) own[field] = op.section[field];
-      raws[at] = JSON.stringify({ ...current, ...own });
-    }
-  } else {
-    if (at === -1) return refuse(404, NO_SECTION);
-    const section = elements[at].value;
-    if (!isRecord(section) || !Array.isArray(section.rows)) return refuse(422, UNSAFE);
-    const rows: unknown[] = section.rows;
-    const rowAt = rows.findIndex((row) => idOf(row) === (op.kind === "deleteRow" ? op.rowId : op.row.id));
-    let nextRows: unknown[];
-    if (op.kind === "deleteRow") {
-      if (rowAt === -1) return refuse(404, NO_ROW);
-      nextRows = rows.filter((_row, index) => index !== rowAt);
-    } else {
-      if (rowAt === -1 && !op.isNew) return refuse(404, NO_ROW);
-      if (rowAt !== -1 && op.isNew) return refuse(409, ALREADY);
-      nextRows = rowAt === -1 ? [...rows, op.row] : rows.map((row, index) => (index === rowAt ? op.row : row));
-    }
-    raws[at] = JSON.stringify({ ...section, rows: nextRows });
-  }
-  const json = `[${raws.join(",")}]`;
-  return { before, json, ok: true, sections: JSON.parse(json) as InfoSheetSection[] };
-}
+/** Every info sheet write is the tenancy desk's, and counts against one bucket of 60 a minute per person (a bulk add is one write). */
+export const INFO_SHEET_ROLES = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR] as const;
+export const INFO_SHEET_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
 
 /** The version a write names (`InfoSheetVersion`), or a 400 when it doesn't name one. */
 export function infoSheetVersionOf(body: Record<string, unknown>): number | { status: 400; jsonBody: { error: string } } {
@@ -140,6 +29,29 @@ export function infoSheetVersionOf(body: Record<string, unknown>): number | { st
   return typeof version === "number" && Number.isInteger(version) && version >= 0
     ? version
     : { jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" }, status: 400 };
+}
+
+/**
+ * Where a new section or row goes (`Position`, from Undo putting back what was removed), or a 400 when
+ * it names something that isn't a place. Absent means the end; it is ignored for an entry that isn't new.
+ */
+export function infoSheetPositionOf(body: Record<string, unknown>): number | undefined | { status: 400; jsonBody: { error: string } } {
+  if (body.Position === undefined) return undefined;
+  const position = body.Position;
+  return typeof position === "number" && Number.isInteger(position) && position >= 0
+    ? position
+    : { jsonBody: { error: "Position must be a whole number, counting from 0" }, status: 400 };
+}
+
+/**
+ * Whether this write puts back an entry Undo has just taken off (`Restore`), which is then
+ * ledgered. Only a new entry can be restored: anything else naming it is a 400.
+ */
+export function infoSheetRestoreOf(body: Record<string, unknown>): boolean | { status: 400; jsonBody: { error: string } } {
+  if (body.Restore === undefined) return false;
+  if (typeof body.Restore !== "boolean") return { jsonBody: { error: "Restore must be true or false" }, status: 400 };
+  if (body.Restore && body.IsNew !== true) return { jsonBody: { error: "Restore is for putting back an entry: it goes with IsNew" }, status: 400 };
+  return body.Restore;
 }
 
 const LOCKED_SHEET = `SELECT InfoSheetSections, InfoSheetVersion, UpdatedAt, UpdatedByName
@@ -154,13 +66,35 @@ const WRITE_SHEET = `UPDATE dbo.Tenants SET
  OUTPUT INSERTED.InfoSheetVersion
  WHERE TenantId = @TenantId AND BuildingId = @BuildingId`;
 
+/** The small part of a ledger row that names what changed; a delete's Before and a bulk add's After hold the content. */
+function ledgerAfter(op: InfoSheetOp): unknown {
+  switch (op.kind) {
+    case "addRows":
+      return undefined;
+    case "deleteRow":
+      return { rowId: op.rowId, sectionId: op.sectionId };
+    case "upsertSection":
+      return { sectionId: op.section.id };
+    default:
+      return { sectionId: op.sectionId };
+  }
+}
+
 export interface InfoSheetWrite {
   buildingId: number;
   caller: { id: string; name: string };
   /** The version the client was shown; every write names it (D11 review). */
   expectedVersion: number;
-  /** Deletes are ledgered with the whole array as it was. */
-  ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
+  /** Deletes are ledgered with the entry removed, a bulk add with the rows added (S3-6), an Undo with the entry put back (S3-2). */
+  ledger: {
+    action:
+      | "tenancy.info_sheet_row_delete"
+      | "tenancy.info_sheet_row_restore"
+      | "tenancy.info_sheet_rows_added"
+      | "tenancy.info_sheet_section_delete"
+      | "tenancy.info_sheet_section_restore";
+    actor: LedgerActor;
+  } | null;
   op: InfoSheetOp;
   tenantId: number;
 }
@@ -201,11 +135,11 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
     ]);
     if (write.ledger) {
       const { op } = write;
-      await record(connection, {
+      await recordInfoSheetChange(connection, {
         action: write.ledger.action,
         actor: write.ledger.actor,
-        after: op.kind === "deleteRow" ? { rowId: op.rowId, sectionId: op.sectionId } : { sectionId: op.kind === "upsertSection" ? op.section.id : op.sectionId },
-        before: { sections: edit.before },
+        after: edit.restored ?? edit.added ?? ledgerAfter(op),
+        before: edit.removed,
         buildingId: write.buildingId,
         subject: { id: write.tenantId, type: "tenancy" },
         tenantId: write.tenantId,

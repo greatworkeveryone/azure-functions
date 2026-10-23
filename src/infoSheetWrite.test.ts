@@ -24,11 +24,11 @@ describe("jsonArrayElements", () => {
 });
 
 describe("editInfoSheet", () => {
-  it("removes a section and keeps the others byte for byte, with the whole array before", () => {
+  it("removes a section and keeps the others byte for byte, naming the one removed and where it was (S3-6)", () => {
     const edit = editInfoSheet(STORED, { kind: "deleteSection", sectionId: "a" });
     if (!edit.ok) throw new Error("expected ok");
     expect(edit.json).toBe(`[${B},${C}]`);
-    expect(edit.before).toEqual(JSON.parse(STORED));
+    expect(edit.removed).toEqual({ position: 0, section: JSON.parse(A) });
     expect(edit.sections.map((section) => section.id)).toEqual(["b", "c"]);
   });
 
@@ -38,7 +38,7 @@ describe("editInfoSheet", () => {
     const [first, second, third] = jsonArrayElements(edit.json)?.map((element) => element.raw) ?? [];
     expect([first, second]).toEqual([A, B]);
     expect(JSON.parse(third)).toEqual({ ...JSON.parse(C), rows: [JSON.parse(C).rows[1]] });
-    expect(edit.before).toEqual(JSON.parse(STORED));
+    expect(edit.removed).toEqual({ position: 0, row: JSON.parse(C).rows[0], sectionId: "c", sectionTitle: "C" });
   });
 
   it("updates a section's own fields in place, and appends a new one, leaving the rest alone", () => {
@@ -93,10 +93,57 @@ describe("editInfoSheet", () => {
     expect(JSON.parse(raws[2]).rows.map((row: { id: string }) => row.id)).toEqual(["r2", "r3", "r9"]);
   });
 
+  // S2-4: Undo puts a removed entry back where it was, through the same versioned write.
+  it("puts a new row back at the position it names, clamped to the section's rows", () => {
+    const row = { body: "back", displayOrder: 0, id: "r-back", subheader: "Back" };
+    const at = (position: number | undefined) => {
+      const edit = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position, row, sectionId: "c" });
+      if (!edit.ok) throw new Error("expected ok");
+      return JSON.parse(edit.json)[2].rows.map((r: { id: string }) => r.id);
+    };
+    expect(at(0)).toEqual(["r-back", "r2", "r3"]);
+    expect(at(1)).toEqual(["r2", "r-back", "r3"]);
+    expect(at(2)).toEqual(["r2", "r3", "r-back"]);
+    expect(at(99)).toEqual(["r2", "r3", "r-back"]);
+    expect(at(undefined)).toEqual(["r2", "r3", "r-back"]);
+  });
+
+  it("puts a new section back at the position it names, every other section as stored, rows and unknown fields as sent", () => {
+    const section = { displayOrder: 1, id: "back", legacy: "kept", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Back" };
+    const edit = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 1, section });
+    if (!edit.ok) throw new Error("expected ok");
+    const raws = jsonArrayElements(edit.json)?.map((element) => element.raw) ?? [];
+    expect([raws[0], raws[2], raws[3]]).toEqual([A, B, C]);
+    expect(JSON.parse(raws[1])).toEqual(section);
+    const first = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 0, section });
+    if (!first.ok) throw new Error("expected ok");
+    expect(JSON.parse(first.json).map((entry: { id: string }) => entry.id)).toEqual(["back", "a", "b", "c"]);
+  });
+
+  // S3-2: what Undo put back is returned for the ledger: the entry as stored and the place it actually took.
+  it("names what a restore put back and where, clamped to the list; an ordinary add names nothing", () => {
+    const row = { body: "back", displayOrder: 0, id: "r-back", subheader: "Back" };
+    const section = { displayOrder: 1, id: "back", legacy: "kept", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Back" };
+    const restoredRow = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 1, restore: true, row, sectionId: "c" });
+    expect(restoredRow).toEqual(expect.objectContaining({ ok: true, restored: { position: 1, row, sectionId: "c", sectionTitle: "C" } }));
+    const past = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 99, restore: true, row, sectionId: "c" });
+    expect(past).toEqual(expect.objectContaining({ restored: expect.objectContaining({ position: 2 }) }));
+    const restoredSection = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 1, restore: true, section });
+    expect(restoredSection).toEqual(expect.objectContaining({ ok: true, restored: { position: 1, section } }));
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 1, row, sectionId: "c" })).toEqual(expect.objectContaining({ restored: null }));
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertSection", section })).toEqual(expect.objectContaining({ restored: null }));
+  });
+
+  it("ignores a position for something that isn't new", () => {
+    const edit = editInfoSheet(STORED, { isNew: false, kind: "upsertRow", position: 0, row: { body: "z", displayOrder: 1, id: "r3", subheader: "U" }, sectionId: "c" });
+    if (!edit.ok) throw new Error("expected ok");
+    expect(JSON.parse(edit.json)[2].rows.map((r: { id: string }) => r.id)).toEqual(["r2", "r3"]);
+  });
+
   it("starts an empty or missing column as an empty list for a new section", () => {
     for (const raw of [null, undefined, "", "  "]) {
       const edit = editInfoSheet(raw, { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } });
-      expect(edit).toEqual(expect.objectContaining({ before: [], ok: true }));
+      expect(edit).toEqual(expect.objectContaining({ ok: true }));
     }
   });
 
