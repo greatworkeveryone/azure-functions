@@ -48,6 +48,7 @@ jest.mock("../ledger/actor", () => ({
 }));
 
 import { AppRole } from "../auth";
+import { defaultLeaseAdministration } from "../leaseAdministrationLogic";
 
 const auth = jest.requireMock("../auth") as { requireRole: jest.Mock };
 const db = jest.requireMock("../db") as Record<"beginTransaction" | "commitTransaction" | "executeQuery" | "rollbackTransaction", jest.Mock>;
@@ -220,7 +221,7 @@ const DRAFT_HOLDINGS: [string, Record<string, unknown>, string][] = [
 // column, a value someone might have entered, and what the refusal calls it.
 const CONTENT_HOLDINGS: [string, unknown, string][] = [
   ["InfoSheetSections", '[{"id":"s1","title":"Keys","displayOrder":0,"rows":[]}]', "1 lease clause section"],
-  ["LeaseAdministration", '{"executedOn":"2024-01-01"}', "lease administration details"],
+  ["LeaseAdministration", JSON.stringify({ ...defaultLeaseAdministration(), leaseManager: { email: "bea@acme.example", name: "Bea" } }), "lease administration details"],
   ["MiscFees", '[{"id":"m1","title":"Air con"}]', "1 miscellaneous fee"],
   ["Incentives", '[{"id":"i1"}]', "1 incentive"],
   ["ScheduledRateSteps", '[{"id":"s1","effectiveFrom":"2024-07-01","ratePercent":0}]', "a rent schedule"],
@@ -255,7 +256,6 @@ const CONTENT_HOLDINGS: [string, unknown, string][] = [
   ["RentPerAnnum", 0, "rent figures"],
   ["ReviewType", "CPI Darwin (June)", "rent review settings"],
   ["ReviewIntervalMonths", 12, "rent review settings"],
-  ["NextReviewDate", new Date("2027-07-01T00:00:00Z"), "rent review settings"],
   ["LastReviewDate", new Date("2026-07-01T00:00:00Z"), "rent review settings"],
   ["LastReviewIncreasePercent", 3.5, "rent review settings"],
   ["FixedReviewPercent", 3, "rent review settings"],
@@ -374,6 +374,37 @@ describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft
   it("a column the rule has never heard of that is empty doesn't stop a delete", async () => {
     tenantRow = { ...tenantRow, GstBasis: null };
     expect((await handlers[name](post(body), ctx)).status).toBe(200);
+  });
+
+  it("a tenancy exactly as creating one leaves it is an empty draft: the standard lease administration the insert writes, a commencement and the review date worked out from it", async () => {
+    tenantRow = {
+      ...tenantRow,
+      Commencement: new Date("2026-11-01T00:00:00Z"),
+      LeaseAdministration: JSON.stringify(defaultLeaseAdministration()),
+      MyobId: "CUST-0042",
+      NextReviewDate: new Date("2027-11-01T00:00:00Z"),
+      Status: "vacated",
+    };
+    expect((await handlers[name](post(body), ctx)).status).toBe(200);
+  });
+
+  // The seeded lease administration is untouched only while nothing is filled in, added, renamed or removed.
+  const touched = (change: (admin: ReturnType<typeof defaultLeaseAdministration>) => unknown) => JSON.stringify(change(defaultLeaseAdministration()));
+  it.each([
+    ["a date filled in on a field", touched((admin) => ({ ...admin, otherDocuments: admin.otherDocuments.map((field, index) => (index === 0 ? { ...field, value: "2026-01-01" } : field)) }))],
+    ["a date set on the lease document", touched((admin) => ({ ...admin, leaseDocuments: admin.leaseDocuments.map((doc) => ({ ...doc, executedByLessee: "2026-01-01" })) }))],
+    ["a lease document added", touched((admin) => ({ ...admin, leaseDocuments: [...admin.leaseDocuments, { displayOrder: 1, docType: "Deed of Variation", id: "d2" }] }))],
+    ["the seeded lease document removed", touched((admin) => ({ ...admin, leaseDocuments: [] }))],
+    ["a field added", touched((admin) => ({ ...admin, detailsEntered: [...admin.detailsEntered, { displayOrder: 4, fieldType: "text", id: "x", label: "Notes" }] }))],
+    ["a field renamed", touched((admin) => ({ ...admin, detailsEntered: admin.detailsEntered.map((field, index) => (index === 0 ? { ...field, label: "Renamed" } : field)) }))],
+    ["a field removed", touched((admin) => ({ ...admin, detailsEntered: admin.detailsEntered.slice(1) }))],
+    ["a part this code has never heard of", touched((admin) => ({ ...admin, futureThing: "kept" }))],
+  ])("is not an empty draft once its lease administration has %s", async (_label, value) => {
+    tenantRow = { ...tenantRow, LeaseAdministration: value };
+    const res = await handlers[name](post(body), ctx);
+    expect(res.status).toBe(409);
+    expect(res.jsonBody.contains).toEqual(["lease administration details"]);
+    refusedAndNothingChanged();
   });
 
   it("the New tenancy form's own fields (name, building, commencement, MYOB id, status) are not content", async () => {

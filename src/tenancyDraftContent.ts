@@ -1,3 +1,5 @@
+import { defaultLeaseAdministration } from "./leaseAdministrationLogic";
+
 // What makes a tenancy more than an empty draft (D11 re-check S1-2; database-safety
 // rule 1). "Delete empty draft" removes the Tenants row for good, so it is allowed
 // only when a positive rule passes: every column a person can fill in is empty and
@@ -13,7 +15,7 @@
 // until it is. The frontend keeps the same list for its own pre-check
 // (command-centre src/helpers/tenancyDraftContent.ts).
 
-export type ContentKind = "date" | "flag" | "json" | "number" | "reviewType" | "text";
+export type ContentKind = "date" | "flag" | "json" | "leaseAdministration" | "number" | "reviewType" | "text";
 
 export interface ContentColumn {
   column: string;
@@ -32,7 +34,7 @@ const date = (column: string, label: string): ContentColumn => ({ column, kind: 
 
 export const TENANCY_CONTENT_COLUMNS: readonly ContentColumn[] = [
   list("InfoSheetSections", "lease clauses", "lease clause section", "lease clause sections"),
-  json("LeaseAdministration", "lease administration details"),
+  { column: "LeaseAdministration", kind: "leaseAdministration", label: "lease administration details" },
   list("MiscFees", "miscellaneous fees", "miscellaneous fee", "miscellaneous fees"),
   list("Incentives", "incentives", "incentive", "incentives"),
   json("ScheduledRateSteps", "a rent schedule"),
@@ -67,7 +69,6 @@ export const TENANCY_CONTENT_COLUMNS: readonly ContentColumn[] = [
   number("RentPerAnnum", "rent figures"),
   { column: "ReviewType", kind: "reviewType", label: "rent review settings" },
   number("ReviewIntervalMonths", "rent review settings"),
-  date("NextReviewDate", "rent review settings"),
   date("LastReviewDate", "rent review settings"),
   number("LastReviewIncreasePercent", "rent review settings"),
   number("FixedReviewPercent", "rent review settings"),
@@ -99,6 +100,7 @@ export const TENANCY_OTHER_COLUMNS: Readonly<Record<string, string>> = {
   IsTest: "test-data flag: set at creation",
   LegalName: "the name: set at creation",
   MyobId: "the New tenancy form's optional MYOB id",
+  NextReviewDate: "worked out from Commencement when the tenancy is created, so a new draft with a commencement date has one",
   RowVersion: "write counter",
   ScheduleSignedOffAt: "counted as the sign-off fact",
   ScheduleSignedOffById: "counted as the sign-off fact",
@@ -154,6 +156,31 @@ function entries(value: unknown): number | null {
   return parsed.ok && Array.isArray(parsed.parsed) ? parsed.parsed.filter((entry) => !jsonIsNothing(entry)).length : null;
 }
 
+/** The same JSON whatever order its keys were written in, for comparing. */
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value).filter(([, entry]) => entry !== undefined).sort(([one], [two]) => (one < two ? -1 : 1)).map(([key, entry]) => `${JSON.stringify(key)}:${stable(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** The lease administration with its seeded lease document's random id blanked, so two can be compared. */
+function withoutDocumentIds(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const { leaseDocuments, ...rest } = value as Record<string, unknown>;
+  return { ...rest, leaseDocuments: Array.isArray(leaseDocuments) ? leaseDocuments.map((doc) => (typeof doc === "object" && doc !== null ? { ...doc, id: "" } : doc)) : leaseDocuments };
+}
+
+/**
+ * A new tenancy is created with a standard lease administration: the seeded "Original Lease"
+ * document and the default fields (leaseAdministrationLogic.ts). That, and nothing added,
+ * renamed, removed or filled in, is untouched: anything else, an unknown key included, is content.
+ */
+function isUntouchedLeaseAdministration(parsed: unknown): boolean {
+  return stable(withoutDocumentIds(parsed)) === stable(withoutDocumentIds(defaultLeaseAdministration()));
+}
+
 /** A value with nothing in it. For anything not a plain null or blank string, being unsure counts as something. */
 function isEmpty(kind: ContentKind, value: unknown): boolean {
   if (value === null || value === undefined) return true;
@@ -165,6 +192,12 @@ function isEmpty(kind: ContentKind, value: unknown): boolean {
       if (value.trim() === "") return true;
       const parsed = parseJson(value);
       return parsed.ok && jsonIsNothing(parsed.parsed);
+    }
+    case "leaseAdministration": {
+      if (typeof value !== "string") return false;
+      if (value.trim() === "") return true;
+      const parsed = parseJson(value);
+      return parsed.ok && (jsonIsNothing(parsed.parsed) || isUntouchedLeaseAdministration(parsed.parsed));
     }
     case "reviewType":
       return typeof value === "string" && ["", "none"].includes(value.trim().toLowerCase());
