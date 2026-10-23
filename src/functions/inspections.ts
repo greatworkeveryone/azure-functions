@@ -45,8 +45,19 @@ import {
   type RemovedRoom,
 } from "../inspectionRemovalLedger";
 import { assertPointTextLength, OpRefusal } from "../inspectionLimits";
+import {
+  composeGroupTitle,
+  joinDistinct,
+  parseRaiseGroups,
+  type RaiseGroup,
+} from "../inspectionRaiseGroups";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+
+// What a job's LevelName and ExactLocation hold when it is edited (jobs.ts MAX_LEN): a job
+// raised from findings in several rooms lists them all, cut to the same width.
+const JOB_LEVEL_NAME_MAX = 100;
+const JOB_EXACT_LOCATION_MAX = 200;
 
 // Hard ceiling on ops per /applyInspectionOps batch — bounds per-request work
 // (each op is several queries inside one transaction on a Basic-tier DB).
@@ -1845,6 +1856,15 @@ export async function mergeInspections(
 //            Jobs row is created per room, with a combined description and
 //            every contributing point linked to it via InspectionRaisedJobs.
 //
+// Or, in place of PointIds and Mode (SC-AI6, suggested jobs a person reviewed):
+//   Groups: [{ PointIds[], Priority?, Title? }]
+// Each group is exactly one Jobs row from its not-yet-raised points, whatever rooms
+// or levels they sit in. Title (after DescriptionPrefix) and Priority are the
+// person's; without them the job is titled and prioritised as the modes above.
+// Sending Groups together with PointIds or Mode is a 400, so a backend from before
+// this field (which ignores it) refuses the request instead of raising a job per
+// finding. Everything below is shared by both forms: the one route, one transaction.
+//
 // For each Job the endpoint also:
 //   1. Inserts a `creation` JobEvents row (CreationSource = "inspection") so
 //      the activity feed mirrors a manually-created job.
@@ -1872,6 +1892,8 @@ interface RaiseJobsBody {
     Priority?: string;
     SubType?: string;
   };
+  /** Validated by parseRaiseGroups before it is used. */
+  Groups?: unknown;
   InspectionId?: number;
   Mode?: "per-point" | "per-room";
   PointIds?: string[];
@@ -1890,6 +1912,13 @@ interface PointContext {
 interface RaisedJobOutput {
   jobId: number;
   pointIds: string[];
+}
+
+/** The findings that become one job, and what a person chose for it (only Groups carry a choice). */
+interface JobBatch {
+  points: PointContext[];
+  priority?: string;
+  title?: string;
 }
 
 export async function raiseJobsFromInspection(
@@ -1915,14 +1944,29 @@ export async function raiseJobsFromInspection(
     const mode = body?.Mode ?? "per-point";
     const defaults = body?.Defaults ?? {};
 
-    if (!inspectionId || pointIds.length === 0) {
+    // Groups, when sent, are the whole request: PointIds and Mode must not be there beside them.
+    const sentGroups = body?.Groups !== undefined && body?.Groups !== null;
+    let requestedGroups: RaiseGroup[] | null = null;
+    if (sentGroups) {
+      if (!inspectionId) {
+        return { status: 400, jsonBody: { error: "InspectionId and Groups[] required" } };
+      }
+      if (pointIds.length > 0 || (body.Mode !== undefined && body.Mode !== null)) {
+        return { status: 400, jsonBody: { error: "Send Groups, or PointIds with a Mode, not both." } };
+      }
+    } else if (!inspectionId || pointIds.length === 0) {
       return { status: 400, jsonBody: { error: "InspectionId and PointIds[] required" } };
     }
-    if (mode !== "per-point" && mode !== "per-room") {
+    if (!sentGroups && mode !== "per-point" && mode !== "per-room") {
       return { status: 400, jsonBody: { error: "Mode must be 'per-point' or 'per-room'" } };
     }
     if (!defaults.JobType || !defaults.Priority) {
       return { status: 400, jsonBody: { error: "Defaults.JobType and Defaults.Priority required" } };
+    }
+    if (sentGroups) {
+      const parsed = parseRaiseGroups(body.Groups);
+      if ("error" in parsed) return { status: 400, jsonBody: { error: parsed.error } };
+      requestedGroups = parsed.groups;
     }
 
     const caller: UserRef = { id: identity.oid, name: identity.name };
@@ -1945,7 +1989,9 @@ export async function raiseJobsFromInspection(
     }
 
     // A repeated id in one request must not raise two jobs for one finding.
-    const requestedPointIds = Array.from(new Set(pointIds));
+    const requestedPointIds = requestedGroups
+      ? requestedGroups.flatMap((group) => group.pointIds)
+      : Array.from(new Set(pointIds));
     const pointIndex = buildPointIndex(inspection);
     const missing = requestedPointIds.filter((id) => !pointIndex.has(id));
     if (missing.length > 0) {
@@ -1996,7 +2042,9 @@ export async function raiseJobsFromInspection(
       // `missing` check above already rejected any id not in pointIndex, so a
       // fresh lookup here can only miss if the inspection was mutated
       // concurrently — bail with a 409 rather than crash on a non-null assertion.
-      const grouped = groupPointsForJobs(raisedPointIds, mode, pointIndex);
+      const grouped = requestedGroups
+        ? groupPointsByRequest(requestedGroups, alreadyRaised, pointIndex)
+        : groupPointsForJobs(raisedPointIds, mode, pointIndex);
       if ("goneId" in grouped) {
         await rollbackTransaction(connection).catch(() => {});
         return {
@@ -2005,11 +2053,21 @@ export async function raiseJobsFromInspection(
         };
       }
 
-      for (const group of grouped.groups) {
+      for (const batch of grouped.groups) {
+        const group = batch.points;
         const first = group[0];
-        const title = buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
+        const title = batch.title
+          ? composeGroupTitle(descriptionPrefix, batch.title)
+          : buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
         const description = buildJobDescription(group);
         const isPerRoom = group.length > 1 || mode === "per-room";
+        // A group can span rooms and levels; the job's own fields hold them as text.
+        const levelName = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.levelName), JOB_LEVEL_NAME_MAX)
+          : first.levelName;
+        const exactLocation = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.roomName), JOB_EXACT_LOCATION_MAX)
+          : first.roomName;
 
         const inserted = await executeQuery(
           connection,
@@ -2037,11 +2095,11 @@ export async function raiseJobsFromInspection(
             { name: "SourceInspectionId",      type: TYPES.Int,      value: inspectionId },
             { name: "SourceInspectionRoomId",  type: TYPES.NVarChar, value: first.roomId },
             { name: "SourceInspectionPointId", type: TYPES.NVarChar, value: isPerRoom ? null : first.pointId },
-            { name: "LevelName",               type: TYPES.NVarChar, value: first.levelName },
-            { name: "ExactLocation",           type: TYPES.NVarChar, value: first.roomName },
+            { name: "LevelName",               type: TYPES.NVarChar, value: levelName },
+            { name: "ExactLocation",           type: TYPES.NVarChar, value: exactLocation },
             { name: "JobType",                 type: TYPES.NVarChar, value: defaults.JobType },
             { name: "SubType",                 type: TYPES.NVarChar, value: defaults.SubType ?? null },
-            { name: "Priority",                type: TYPES.NVarChar, value: defaults.Priority },
+            { name: "Priority",                type: TYPES.NVarChar, value: batch.priority ?? defaults.Priority },
           ],
         );
         const jobId = inserted[0].JobID as number;
@@ -2113,7 +2171,7 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
   return index;
 }
 
-type GroupedPoints = { groups: PointContext[][] } | { goneId: string };
+type GroupedPoints = { groups: JobBatch[] } | { goneId: string };
 
 // One batch of points per Job-to-create: a batch per point, or a batch per room.
 function groupPointsForJobs(
@@ -2122,21 +2180,42 @@ function groupPointsForJobs(
   pointIndex: Map<string, PointContext>,
 ): GroupedPoints {
   if (mode === "per-room") {
-    const byRoom = new Map<string, PointContext[]>();
+    const byRoom = new Map<string, JobBatch>();
     for (const id of pointIds) {
       const ctx = pointIndex.get(id);
       if (!ctx) return { goneId: id };
-      const list = byRoom.get(ctx.roomId);
-      if (list) list.push(ctx);
-      else byRoom.set(ctx.roomId, [ctx]);
+      const batch = byRoom.get(ctx.roomId);
+      if (batch) batch.points.push(ctx);
+      else byRoom.set(ctx.roomId, { points: [ctx] });
     }
     return { groups: Array.from(byRoom.values()) };
   }
-  const groups: PointContext[][] = [];
+  const groups: JobBatch[] = [];
   for (const id of pointIds) {
     const ctx = pointIndex.get(id);
     if (!ctx) return { goneId: id };
-    groups.push([ctx]);
+    groups.push({ points: [ctx] });
+  }
+  return { groups };
+}
+
+// One batch per requested group: the group's findings that have no job yet, as one
+// job. A group whose findings all have jobs already makes none.
+function groupPointsByRequest(
+  requested: RaiseGroup[],
+  alreadyRaised: ReadonlySet<string>,
+  pointIndex: Map<string, PointContext>,
+): GroupedPoints {
+  const groups: JobBatch[] = [];
+  for (const group of requested) {
+    const points: PointContext[] = [];
+    for (const id of group.pointIds) {
+      if (alreadyRaised.has(id)) continue;
+      const ctx = pointIndex.get(id);
+      if (!ctx) return { goneId: id };
+      points.push(ctx);
+    }
+    if (points.length > 0) groups.push({ points, priority: group.priority, title: group.title });
   }
   return { groups };
 }
