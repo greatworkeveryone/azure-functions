@@ -105,7 +105,9 @@ export function readRenewalDecision(body: Record<string, unknown>): RenewalDecis
   if (method === "fixed" && (typeof fixed !== "number" || !Number.isFinite(fixed) || fixed < 0 || fixed > 100)) {
     throw new LeaseEventError("bad_request", "A fixed review needs renewed.fixedPercent, from 0 to 100");
   }
+  // A choice, never a silent 0: an understated count would refuse a valid exercise later (data recheck S2).
   const optionsTotal = integer(terms.optionsTotal, "renewed.optionsTotal", 0, 20, null);
+  if (optionsTotal === null) throw new LeaseEventError("bad_request", "Say how many options the new lease grants (0 for none)");
   const optionTermMonths = integer(terms.optionTermMonths, "renewed.optionTermMonths", 1, 600, null);
   if (optionsTotal !== null && optionsTotal > 0 && optionTermMonths === null) {
     throw new LeaseEventError("bad_request", "Give the length of each option (renewed.optionTermMonths)");
