@@ -135,7 +135,7 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { INFO_SHEET_RATE_LIMIT, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
+import { INFO_SHEET_RATE_LIMIT, infoSheetPositionOf, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
@@ -3207,17 +3207,20 @@ async function upsertInfoSheetSectionHandler(
     }
     const infoSheetVersion = infoSheetVersionOf(body);
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
+    const position = infoSheetPositionOf(body);
+    if (typeof position === "object") return position;
 
     connection = await createRequestConnection(token);
     // D11: under the row lock and at the version shown (409 when stale). Only the
     // section's own fields change; its rows stay as stored. A section that isn't
-    // there is a 404 unless IsNew; a column that isn't a JSON array a 422.
+    // there is a 404 unless IsNew (then it goes at Position, as Undo puts one back);
+    // a column that isn't a JSON array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
       ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertSection", section },
+      op: { isNew: body.IsNew === true, kind: "upsertSection", position, section },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3321,17 +3324,20 @@ async function upsertInfoSheetRowHandler(
     }
     const infoSheetVersion = infoSheetVersionOf(body);
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
+    const position = infoSheetPositionOf(body);
+    if (typeof position === "object") return position;
 
     connection = await createRequestConnection(token);
     // D11: under the row lock and at the version shown (409 when stale). A row
-    // that isn't there is a 404 unless IsNew, a missing section a 404, and a
-    // column that isn't a JSON array a 422.
+    // that isn't there is a 404 unless IsNew (then it goes at Position, as Undo
+    // puts one back), a missing section a 404, and a column that isn't a JSON
+    // array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
       ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertRow", row, sectionId },
+      op: { isNew: body.IsNew === true, kind: "upsertRow", position, row, sectionId },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;

@@ -311,6 +311,36 @@ describe.each(UPSERTS)("%s", (route, body) => {
   });
 });
 
+describe("a new entry can say where it goes, for Undo (S2-4)", () => {
+  it("upsertInfoSheetRow puts the row at Position", async () => {
+    const row = { body: "back", displayOrder: 0, id: "row-back", subheader: "Back" };
+    const res = await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 0, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(writtenJson() ?? "[]")[0].rows.map((r: { id: string }) => r.id)).toEqual(["row-back", "row-1", "row-2"]);
+  });
+
+  it("upsertInfoSheetSection puts the section at Position", async () => {
+    const section = { displayOrder: 0, id: "sec-back", rows: [], title: "Back" };
+    const res = await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 1, Section: section, TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(writtenJson() ?? "[]").map((entry: { id: string }) => entry.id)).toEqual(["sec-1", "sec-back", "sec-2"]);
+  });
+
+  it.each([[-1], [1.5], ["1"], [null]])("answers 400 for a Position of %p, before touching the database", async (position) => {
+    const row = { body: "b", displayOrder: 0, id: "r", subheader: "s" };
+    expect((await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: position, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx)).status).toBe(400);
+    expect((await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: position, Section: { displayOrder: 0, id: "s", rows: [], title: "t" }, TenantId: 1 }), ctx)).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("a stale Undo is refused like any write: 409, nothing put back", async () => {
+    const row = { body: "back", displayOrder: 0, id: "row-back", subheader: "Back" };
+    const res = await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 3, IsNew: true, Position: 0, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    expect(res.status).toBe(409);
+    expect(written()).toBeUndefined();
+  });
+});
+
 describe("upsertInfoSheetSection on an empty sheet", () => {
   it("starts the list", async () => {
     sheet = { ...sheet, InfoSheetSections: null };

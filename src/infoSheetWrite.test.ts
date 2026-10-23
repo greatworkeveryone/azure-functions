@@ -93,6 +93,39 @@ describe("editInfoSheet", () => {
     expect(JSON.parse(raws[2]).rows.map((row: { id: string }) => row.id)).toEqual(["r2", "r3", "r9"]);
   });
 
+  // S2-4: Undo puts a removed entry back where it was, through the same versioned write.
+  it("puts a new row back at the position it names, clamped to the section's rows", () => {
+    const row = { body: "back", displayOrder: 0, id: "r-back", subheader: "Back" };
+    const at = (position: number | undefined) => {
+      const edit = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position, row, sectionId: "c" });
+      if (!edit.ok) throw new Error("expected ok");
+      return JSON.parse(edit.json)[2].rows.map((r: { id: string }) => r.id);
+    };
+    expect(at(0)).toEqual(["r-back", "r2", "r3"]);
+    expect(at(1)).toEqual(["r2", "r-back", "r3"]);
+    expect(at(2)).toEqual(["r2", "r3", "r-back"]);
+    expect(at(99)).toEqual(["r2", "r3", "r-back"]);
+    expect(at(undefined)).toEqual(["r2", "r3", "r-back"]);
+  });
+
+  it("puts a new section back at the position it names, every other section as stored, rows and unknown fields as sent", () => {
+    const section = { displayOrder: 1, id: "back", legacy: "kept", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Back" };
+    const edit = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 1, section });
+    if (!edit.ok) throw new Error("expected ok");
+    const raws = jsonArrayElements(edit.json)?.map((element) => element.raw) ?? [];
+    expect([raws[0], raws[2], raws[3]]).toEqual([A, B, C]);
+    expect(JSON.parse(raws[1])).toEqual(section);
+    const first = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 0, section });
+    if (!first.ok) throw new Error("expected ok");
+    expect(JSON.parse(first.json).map((entry: { id: string }) => entry.id)).toEqual(["back", "a", "b", "c"]);
+  });
+
+  it("ignores a position for something that isn't new", () => {
+    const edit = editInfoSheet(STORED, { isNew: false, kind: "upsertRow", position: 0, row: { body: "z", displayOrder: 1, id: "r3", subheader: "U" }, sectionId: "c" });
+    if (!edit.ok) throw new Error("expected ok");
+    expect(JSON.parse(edit.json)[2].rows.map((r: { id: string }) => r.id)).toEqual(["r2", "r3"]);
+  });
+
   it("starts an empty or missing column as an empty list for a new section", () => {
     for (const raw of [null, undefined, "", "  "]) {
       const edit = editInfoSheet(raw, { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } });

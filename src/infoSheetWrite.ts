@@ -46,8 +46,8 @@ export type InfoSheetOp =
   | { additions: InfoSheetAddition[]; kind: "addRows" }
   | { kind: "deleteRow"; rowId: string; sectionId: string }
   | { kind: "deleteSection"; sectionId: string }
-  | { isNew: boolean; kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
-  | { isNew: boolean; kind: "upsertSection"; section: InfoSheetSection };
+  | { isNew: boolean; kind: "upsertRow"; position?: number; row: InfoSheetRow; sectionId: string }
+  | { isNew: boolean; kind: "upsertSection"; position?: number; section: InfoSheetSection };
 
 /** What a delete took off, as stored, and the place it held in its list (a section's among the sections, a row's among its section's rows). */
 export type InfoSheetRemoved =
@@ -116,6 +116,12 @@ function elementsOf(raw: unknown): { raw: string; value: unknown }[] | null {
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const idOf = (value: unknown): unknown => (isRecord(value) ? value.id : undefined);
 const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
+
+/** `items` with `item` put in at `position` (the end when none is given, or when it is past the end). */
+function insertedAt<T>(items: T[], item: T, position: number | undefined): T[] {
+  const at = position === undefined ? items.length : Math.min(position, items.length);
+  return [...items.slice(0, at), item, ...items.slice(at)];
+}
 
 /** A row as a bulk add stores it: the fields this code knows, in the order it was entered after the rows already there. */
 const storedRow = (row: InfoSheetNewRow, order: number): InfoSheetRow => ({
@@ -187,8 +193,8 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     if (at === -1 && !op.isNew) return refuse(404, NO_SECTION);
     if (at !== -1 && op.isNew) return refuse(409, ALREADY);
     if (at === -1) {
-      // A new section may arrive with its first rows (bulk add).
-      raws.push(JSON.stringify({ ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] }));
+      // A new section may arrive with its first rows (bulk add, or Undo), and goes where it says (Undo).
+      raws.splice(op.position === undefined ? raws.length : Math.min(op.position, raws.length), 0, JSON.stringify({ ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] }));
     } else {
       const current = elements[at].value;
       if (!isRecord(current)) return refuse(422, UNSAFE);
@@ -210,7 +216,7 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     } else {
       if (rowAt === -1 && !op.isNew) return refuse(404, NO_ROW);
       if (rowAt !== -1 && op.isNew) return refuse(409, ALREADY);
-      nextRows = rowAt === -1 ? [...rows, op.row] : rows.map((row, index) => (index === rowAt ? op.row : row));
+      nextRows = rowAt === -1 ? insertedAt(rows, op.row, op.position) : rows.map((row, index) => (index === rowAt ? op.row : row));
     }
     raws[at] = JSON.stringify({ ...section, rows: nextRows });
   }
@@ -224,6 +230,18 @@ export function infoSheetVersionOf(body: Record<string, unknown>): number | { st
   return typeof version === "number" && Number.isInteger(version) && version >= 0
     ? version
     : { jsonBody: { error: "InfoSheetVersion required: the version of the info sheet you were shown" }, status: 400 };
+}
+
+/**
+ * Where a new section or row goes (`Position`, from Undo putting back what was removed), or a 400 when
+ * it names something that isn't a place. Absent means the end; it is ignored for an entry that isn't new.
+ */
+export function infoSheetPositionOf(body: Record<string, unknown>): number | undefined | { status: 400; jsonBody: { error: string } } {
+  if (body.Position === undefined) return undefined;
+  const position = body.Position;
+  return typeof position === "number" && Number.isInteger(position) && position >= 0
+    ? position
+    : { jsonBody: { error: "Position must be a whole number, counting from 0" }, status: 400 };
 }
 
 const LOCKED_SHEET = `SELECT InfoSheetSections, InfoSheetVersion, UpdatedAt, UpdatedByName
