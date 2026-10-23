@@ -2,8 +2,9 @@
 // inspection (SC-AI6). Floorplan's rules have already grouped the findings into jobs and
 // drafted a title for each; the browser sends those titles and the findings they cover,
 // and the model only rewords the titles. Which findings make a job, and every priority,
-// stay with the rules and the person; the answer is one plain title per job, in order,
-// and the person sees each old and new title before one is used.
+// stay with the rules and the person; the answer is one plain title per job, in order.
+// The new titles land in the fields the person edits, with one undo, and nothing is
+// raised until they press Create.
 
 import { mockJobTitles } from "../inspectionTitles/mock";
 import { TIDY_LIMITS } from "../inspectionTitles/input";
