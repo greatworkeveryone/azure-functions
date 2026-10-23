@@ -24,7 +24,7 @@ const READS: Read[] = [
   { anchor: "const REGISTER_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
   { anchor: "const REGISTER_WITH_ARCHIVED_SQL =", file: "functions/tenancy.ts", mode: "toggle", passes: "async function getRegisterTenants(" },
   { anchor: "async function getReviewsDue(", file: "functions/tenancy.ts", mode: "toggle" },
-  { anchor: "async function getPortfolioOccupancy(", file: "functions/tenancy.ts", mode: "toggle" },
+  { anchor: "const FIGURES_HEAD =", file: "portfolioOccupancy.ts", mode: "toggle", passes: "async function getPortfolioOccupancy(", passesIn: "functions/tenancy.ts" },
   { anchor: "async function getTenants(", file: "functions/tenants.ts", mode: "toggle" },
   { anchor: "async function getInspections(", file: "functions/inspections.ts", mode: "toggle" },
   { anchor: "async function getKeys(", file: "functions/keys.ts", mode: "toggle" },

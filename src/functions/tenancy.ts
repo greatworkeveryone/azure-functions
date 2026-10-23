@@ -108,6 +108,7 @@ import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../r
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
+import { loadPortfolioOccupancy } from "../portfolioOccupancy";
 import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
@@ -2158,10 +2159,11 @@ async function getReviewsDue(
 }
 
 // ── GET /api/getPortfolioOccupancy ───────────────────────────────────────────
-// One row per building with total SQM, active SQM and occupancy %. Active =
-// tenants in status 'current' or 'holdover' (mirrors TenancySummary on the
-// register page). Buildings with no tenant rows are omitted; the client falls
-// back to 0 / no value for those.
+// One row per commercial building with total SQM, active SQM and occupancy %.
+// Active = tenants in status 'current' or 'holdover' (mirrors TenancySummary on
+// the register page). Buildings with no tenant rows are omitted; the client falls
+// back to 0 / no value for those. Residences are the family's own houses and stay
+// out of these company figures (T10); see portfolioOccupancy.ts.
 
 async function getPortfolioOccupancy(
   request: HttpRequest,
@@ -2176,68 +2178,7 @@ async function getPortfolioOccupancy(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT t.BuildingId,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN occ.TenantSqm ELSE 0 END) AS ActiveSqm,
-              SUM(occ.TenantSqm) AS TotalSqm,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN t.RentPerAnnum ELSE 0 END) AS AnnualRent,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN 1 ELSE 0 END) AS ActiveTenantCount,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.ScheduleSignedOffAt IS NULL
-                       THEN 1 ELSE 0 END) AS UnsignedTenantCount,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.Expiry IS NOT NULL
-                       THEN occ.TenantSqm
-                            * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
-                       ELSE 0 END) AS WaleNumeratorSqmDays,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.Expiry IS NOT NULL
-                       THEN occ.TenantSqm ELSE 0 END) AS WaleDenominatorSqm
-       FROM dbo.Tenants t
-       INNER JOIN (
-         SELECT TenantId, SUM(SizeSqm) AS TenantSqm
-         FROM dbo.TenantOccupancies
-         WHERE ArchivedAt IS NULL
-         GROUP BY TenantId
-       ) occ ON occ.TenantId = t.TenantId
-       WHERE t.ArchivedAt IS NULL
-         AND (t.IsTest = 0 OR @ShowTest = 1)
-       GROUP BY t.BuildingId`,
-      [showTest],
-    );
-
-    // WP26c: changes awaiting a director across the portfolio, dates and names
-    // only: facilities read these figures too.
-    const pending = await loadPendingChanges(connection, { all: true }, "dates_only", showTest.value);
-    const buildings = rows.map((r) => {
-      const totalSqm = Number(r.TotalSqm) || 0;
-      const activeSqm = Number(r.ActiveSqm) || 0;
-      const annualRent = Number(r.AnnualRent) || 0;
-      const activeTenantCount = Number(r.ActiveTenantCount) || 0;
-      const waleNumerator = Number(r.WaleNumeratorSqmDays) || 0;
-      const waleDenominator = Number(r.WaleDenominatorSqm) || 0;
-      const waleYears =
-        waleDenominator > 0 ? waleNumerator / waleDenominator / 365.25 : 0;
-      return {
-        activeSqm,
-        activeTenantCount,
-        annualRent,
-        buildingId: r.BuildingId as number,
-        occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
-        // The building's changes awaiting a director (WP26c): "Includes {n} changes awaiting a director".
-        pendingChangeCount: pending.filter((item) => item.buildingId === Number(r.BuildingId)).length,
-        totalSqm,
-        // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
-        unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
-        waleExpirySqm: waleDenominator,
-        waleYears,
-      };
-    });
-
+    const { buildings, pending } = await loadPortfolioOccupancy(connection, showTest);
     return { status: 200, jsonBody: { buildings, pendingChanges: pendingChangesOf(pending) } };
   } catch (error: any) {
     context.error("getPortfolioOccupancy failed:", error.message);
