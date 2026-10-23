@@ -106,6 +106,7 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
+import { selectWithLeaseOptions } from "../leaseOptionColumns";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -708,7 +709,6 @@ const TENANT_COLUMNS = `
   PrimaryContactName, PrimaryContactEmail, PrimaryContactPhone,
   Lot, InformationSheetAsAt, InformationSheetReference,
   Commencement, Expiry, TermMonths, OptionPeriods, OptionNoticeMonths,
-  OptionsTotal, OptionsRemaining, OptionTermMonths,
   RenewalLetterIssueBy, HoldoverTerms,
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
@@ -735,10 +735,11 @@ const TENANT_COLUMNS = `
 `;
 
 // The building register: archived tenancies (D4) only when asked for.
-const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+// The 106 option columns join each select below through selectWithLeaseOptions (data review S2-1).
+const registerSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
-const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+const registerWithArchivedSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
@@ -806,9 +807,9 @@ async function getRegisterTenants(
   try {
     connection = await createRequestConnection(token);
 
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
-      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
+      includeArchived ? registerWithArchivedSql : registerSql,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
     );
 
@@ -915,9 +916,9 @@ async function getRegisterTenant(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (tenantRows.length === 0) {
@@ -1148,9 +1149,9 @@ async function upsertRegisterTenant(
       resultId = tenantId;
     }
 
-    const stored = await executeQuery(
+    const stored = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
@@ -2139,12 +2140,12 @@ async function getReviewsDue(
       ...(buildingIdParam ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }] : []),
       await showTestParam(request),
     ];
-    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
+    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), OPTION_COLUMNS (one of two constants, leaseOptionColumns.ts), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     // Also expiries and option deadlines from yesterday to 91 days ahead: a
     // wider net than the Darwin-day filter below, which is exact.
-    const rows = await executeQuery(
+    const rows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t
        ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
@@ -2228,9 +2229,9 @@ async function reloadFullTenant(
   // tenant payload back from a mutation. We do the cheaper subset (skip
   // notes/reviews/history) because the frontend re-uses the cached
   // detail-query response for those and only patches the tenant row.
-  const tenantRows = await executeQuery(
+  const tenantRows = await selectWithLeaseOptions(
     connection,
-    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+    (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
