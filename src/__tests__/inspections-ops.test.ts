@@ -920,3 +920,105 @@ describe("applyInspectionOps addLevel op with a free-text name (IN3)", () => {
   });
 });
 
+
+// ── N3: every point removal is written to the decision ledger ────────────────
+
+describe("applyInspectionOps removePoint op (UX review N3)", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const REMOVE = { id: "op-rm", inspectionId: 7, createdAt: "", op: { type: "removePoint", pointId: "pt-1" } };
+  const POINT_ROW = { PointId: "pt-1", RoomId: "rm-1", Description: "Cracked tile", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9 };
+  const PHOTOS = [
+    { Id: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg" },
+    { Id: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg" },
+  ];
+
+  function removeDb(point: Row[], photos: Row[], failLedger = false): void {
+    db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
+      if (sql.includes("SELECT p.Id AS PointId")) return point;
+      if (sql.includes("FROM dbo.InspectionAttachments a WHERE a.PointId")) return photos;
+      if (sql.includes("INSERT INTO dbo.DecisionLedger") && failLedger) throw new Error("ledger down");
+      if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
+      return [];
+    });
+  }
+
+  const apply = () =>
+    applyInspectionOps(
+      makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [REMOVE] } }),
+      makeContext(),
+    );
+
+  const paramsOf = (call: SqlCall): Record<string, unknown> => Object.fromEntries(call[2].map((p) => [p.name, p.value]));
+
+  it("logs who, which inspection, which point and how many photos, then removes it", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const row = paramsOf(ledger[0]);
+    expect(row).toMatchObject({
+      Action: "inspection.point_removed",
+      ActorKind: "user",
+      ActorName: "Test User",
+      ActorRole: "facilities",
+      BuildingId: 9,
+      SubjectId: "7",
+      SubjectType: "inspection",
+    });
+    expect(JSON.parse(row.Before as string)).toEqual({
+      attachmentCount: 2,
+      attachments: [
+        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1" },
+        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2" },
+      ],
+      description: "Cracked tile",
+      levelName: "Ground",
+      pointId: "pt-1",
+      roomId: "rm-1",
+      roomName: "Lobby",
+    });
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+    const removed = sqls.findIndex((sql) => sql.startsWith("DELETE p"));
+    expect(logged).toBeGreaterThan(-1);
+    expect(removed).toBeGreaterThan(logged);
+  });
+
+  it("keeps the photo files: nothing is removed from blob storage", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+    await apply();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("does not remove the point when the ledger row cannot be written; the op is rejected", async () => {
+    removeDb([POINT_ROW], PHOTOS, true);
+
+    const res = await apply();
+
+    const out = res.jsonBody as OpsOut;
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    expect(sqls.some((sql) => sql.startsWith("DELETE p"))).toBe(false);
+    expect(sqls).toContain("ROLLBACK TRANSACTION op_sp");
+  });
+
+  it("writes no ledger row for a point that is not in this inspection", async () => {
+    removeDb([], []);
+    const res = await apply();
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+  });
+
+  it("still refuses a completed inspection before anything is read or logged", async () => {
+    mockDb([{ match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 3, Status: "complete" }] }]);
+    const res = await apply();
+    expect(res.status).toBe(409);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    expect(callsMatching("SELECT p.Id AS PointId")).toHaveLength(0);
+  });
+});

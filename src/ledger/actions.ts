@@ -126,6 +126,11 @@ export const LEDGER_ACTIONS = {
   "schedule.recompute_next_review": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.terms_edit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // A point taken off a draft inspection (UX review N3). The subject is the
+  // inspection; `before` holds the point's text and its photo records so it can be
+  // put back by hand. Routine mid-inspection work, so not an exception.
+  "inspection.point_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
   // Tenancy archive (D4): a tenancy or a lease document leaves the register
   // without being destroyed; only an empty draft is ever hard-deleted.
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },

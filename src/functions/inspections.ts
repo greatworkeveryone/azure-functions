@@ -32,6 +32,9 @@ import { isDevOverrideEnabled } from "../jwt";
 import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 import { showTestParam, testFlagForCreate } from "../test-data";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import type { LedgerActor } from "../ledger";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 
@@ -636,6 +639,13 @@ export async function applyInspectionOps(
     await beginTransaction(connection);
     const applied: string[] = [];
     const rejected: { id: string; reason: string }[] = [];
+    // Resolved on first use (a point removal), once per batch: most batches never need it.
+    let ledgerActor: LedgerActor | null = null;
+    const loadLedgerActor = async (conn: any): Promise<LedgerActor> => {
+      if (!ledgerActor) ledgerActor = await resolveLedgerActor(request, conn);
+      if (!ledgerActor) throw new Error("Could not resolve the signed-in user for the decision ledger");
+      return ledgerActor;
+    };
 
     try {
       // Concurrency + status guard INSIDE the transaction: UPDLOCK/HOLDLOCK
@@ -692,7 +702,7 @@ export async function applyInspectionOps(
         // instead of committing torn state with the rest of the batch.
         await executeQuery(connection, "SAVE TRANSACTION op_sp", []);
         try {
-          await applyOne(connection, inspectionId, queued.op, identity);
+          await applyOne(connection, inspectionId, queued.op, identity, loadLedgerActor);
           await executeQuery(
             connection,
             `INSERT INTO dbo.InspectionOperationLog (OpId, InspectionId, OpType)
@@ -731,6 +741,7 @@ async function applyOne(
   inspectionId: number,
   op: any,
   identity: { oid: string; name: string },
+  loadLedgerActor: (conn: any) => Promise<LedgerActor>,
 ): Promise<void> {
   switch (op?.type) {
     case "updateInspection": {
@@ -918,6 +929,45 @@ async function applyOne(
       return;
     }
     case "removePoint": {
+      // Every removal is written to the decision ledger in this same transaction,
+      // with the point's text and its photo records in Before: if the ledger row
+      // cannot be written the op is rolled back to its savepoint and rejected, so
+      // nothing goes unlogged. The photo blobs stay in storage (never removed here).
+      const found = await executeQuery(
+        connection,
+        `SELECT p.Id AS PointId, p.RoomId, p.Description, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE p.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (found.length > 0) {
+        const photos = await executeQuery(
+          connection,
+          `SELECT a.Id, a.BlobName, a.FileName FROM dbo.InspectionAttachments a WHERE a.PointId = @Id`,
+          [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
+        );
+        await record(connection, {
+          action: "inspection.point_removed",
+          actor: await loadLedgerActor(connection),
+          before: {
+            attachmentCount: photos.length,
+            attachments: photos.map((photo) => ({ blobName: photo.BlobName, fileName: photo.FileName, id: photo.Id })),
+            description: found[0].Description ?? "",
+            levelName: found[0].LevelName,
+            pointId: found[0].PointId,
+            roomId: found[0].RoomId,
+            roomName: found[0].RoomName,
+          },
+          buildingId: (found[0].BuildingId as number | null) ?? null,
+          subject: { id: inspectionId, type: "inspection" },
+        });
+      }
       await executeQuery(
         connection,
         `DELETE p

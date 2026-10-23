@@ -38,7 +38,7 @@ export function fullAuditAccess(roles: readonly string[]): boolean {
 // lease terms, payroll details and financial amounts never enter this projection.
 export const AUDIT_UNION_SQL = `
  SELECT CONCAT('ledger:',l.LedgerId) AS AuditKey,l.OccurredAt,l.ActorName,
- l.Action,CASE WHEN l.Action IN (SELECT [value] FROM OPENJSON(@OperationalActions)) AND l.TenantId IS NULL AND l.FinancialImpact IS NULL THEN 'facilities' WHEN l.Action LIKE 'job.%' AND l.TenantId IS NULL AND l.FinancialImpact IS NULL THEN 'facilities' WHEN l.Action LIKE 'user.%' OR l.Action LIKE 'access.%' THEN 'administration' ELSE 'finance' END AS Area,
+ l.Action,CASE WHEN l.Action IN (SELECT [value] FROM OPENJSON(@OperationalActions)) AND l.TenantId IS NULL AND l.FinancialImpact IS NULL THEN 'facilities' WHEN l.Action LIKE 'job.%' AND l.TenantId IS NULL AND l.FinancialImpact IS NULL THEN 'facilities' WHEN l.Action LIKE 'inspection.%' THEN 'inspections' WHEN l.Action LIKE 'user.%' OR l.Action LIKE 'access.%' THEN 'administration' ELSE 'finance' END AS Area,
  l.SubjectType,CONVERT(NVARCHAR(128),l.SubjectId) AS SubjectId,l.BuildingId,
  CASE WHEN @Full=1 THEN l.JobId ELSE NULL END AS JobId
  FROM dbo.DecisionLedger l
