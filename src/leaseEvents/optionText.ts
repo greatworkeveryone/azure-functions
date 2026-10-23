@@ -3,10 +3,11 @@
 // text re-derives them in the same transaction, ledgered:
 //
 //   readable ("2 x 5 years")  total and term from the text; remaining is the
-//                             text's count when nothing was recorded, else the
-//                             lower of the two, so an edit never gives back an
-//                             option already exercised (the old Accept options
-//                             dialog rewrites the text to what is left)
+//                             text's count when nothing was recorded (a recorded
+//                             0 of 0 counts as nothing), else the lower of the two,
+//                             so an edit never gives back an option already
+//                             exercised (the old Accept options dialog rewrites the
+//                             text to what is left)
 //   blank or plainly none     none: 0 of 0
 //   unreadable prose          the counts stay as they are (nothing invented);
 //                             the tenancy page shows both, so accounts see the gap
@@ -32,7 +33,11 @@ export function deriveOptionsFromText(text: string | null | undefined, current: 
   if (trimmed === "" || NONE_WORDS.test(trimmed)) return { remaining: 0, termMonths: null, total: 0 };
   const parsed = parseOptionPeriods(trimmed);
   if (!parsed) return null;
-  const remaining = current.remaining === null ? parsed.count : Math.min(current.remaining, parsed.count);
+  // A recorded none (0 of 0) says the lease granted nothing, not that options were used, so it
+  // reads as not recorded and the text can set the counts (data recheck S2). Otherwise an
+  // understated "none" could never be corrected from the text.
+  const recorded = current.remaining !== null && !(current.total === 0 && current.remaining === 0);
+  const remaining = recorded ? Math.min(current.remaining as number, parsed.count) : parsed.count;
   return { remaining, termMonths: parsed.termMonths, total: parsed.count };
 }
 
