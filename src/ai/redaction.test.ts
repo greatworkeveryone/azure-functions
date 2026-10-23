@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { isAbnValid, isLuhnValid, isTfnValid } from "./redactionRules";
+import { isAbnValid, isLuhnValid, isTfnValid } from "./checksums";
 import { redactText } from "./redaction";
 
 // Each kind of personal detail the gateway replaces before a provider sees text,
