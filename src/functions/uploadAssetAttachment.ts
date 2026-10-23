@@ -15,7 +15,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { errorResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { checkRateLimit } from "../rateLimit";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 import { ASSET_BLOB_PREFIX, EDIT_ASSETS_ROLES, attachmentRowToApi, parseQueryInt } from "../assetRegister";
 import {
   authorizeWrite,
@@ -60,7 +60,7 @@ export async function uploadAssetAttachment(
   if (!assetId.ok) return badRequest(assetId.error);
   if (assetId.value === undefined || assetId.value < 1) return badRequest("Missing 'assetId' field");
 
-  const contentType = file.type || "application/octet-stream";
+  const contentType = normaliseMediaType(file.type || "") || "application/octet-stream"; // stored form, never the raw header
   if (!isAllowedContentType(contentType)) {
     return { jsonBody: { error: `File type '${contentType}' is not allowed` }, status: 415 };
   }
@@ -90,6 +90,9 @@ export async function uploadAssetAttachment(
 
     context.log(`Uploading asset file ${originalName} (${contentType}, ${file.size} bytes) for asset ${assetId.value}`);
     const buffer = Buffer.from(await file.arrayBuffer());
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
     const uploaded = await uploadBlob(buffer, originalName, contentType, `${ASSET_BLOB_PREFIX}${assetId.value}`);
     blobName = uploaded.blobName;
     const storedBlobName = uploaded.blobName;

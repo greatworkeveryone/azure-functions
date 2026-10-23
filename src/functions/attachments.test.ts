@@ -6,9 +6,12 @@ jest.mock("@azure/functions", () => {
   return { ...actual, app: { http: jest.fn(), storageQueue: jest.fn(), timer: jest.fn() } };
 });
 jest.mock("../db", () => ({
+  beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),
+  commitTransaction: jest.fn().mockResolvedValue(undefined),
   createRequestConnection: jest.fn().mockResolvedValue({}),
   executeQuery: jest.fn(),
+  rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../auth", () => {
   const actual = jest.requireActual("../auth");
@@ -32,7 +35,7 @@ jest.mock("../mybuildings-client", () => ({ uploadAttachment: jest.fn() }));
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ status?: number; jsonBody?: any }>;
 
-const db = require("../db") as { executeQuery: jest.Mock };
+const db = require("../db") as { executeQuery: jest.Mock; commitTransaction: jest.Mock; rollbackTransaction: jest.Mock };
 const auth = require("../auth") as { extractToken: jest.Mock; rolesForRequest: jest.Mock; verifiedIdentityFromRequest: jest.Mock };
 const blob = require("../blob-storage") as { deleteBlob: jest.Mock; generateReadSasUrl: jest.Mock };
 const { app } = require("@azure/functions") as { app: { http: jest.Mock } };
@@ -118,6 +121,56 @@ describe("deleteAttachment only deletes blobs the row owns", () => {
     expect(res.status).toBe(200);
     expect(blob.deleteBlob).not.toHaveBeenCalled();
     expect(sqlCalls().some((s: string) => /DELETE FROM Attachments/.test(s))).toBe(true);
+  });
+});
+
+describe("deleteAttachment ordering and asset links", () => {
+  const rowFor = [{ BlobName: `attachments/jobs/12/${UUID}.pdf`, MyBuildingsConfirmedAt: null, UploadedBy: "caller-oid", JobID: 12 }];
+
+  it("409s and keeps the row and blob when the file is attached to an asset", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("FROM Attachments a")) return rowFor;
+      if (sql.includes("dbo.AssetAttachments")) return [{ AssetId: 3 }];
+      return [];
+    });
+    const res = await deleteAttachment(post({ AttachmentID: 5 }), ctx);
+    expect(res.status).toBe(409);
+    expect(sqlCalls().some((s: string) => /DELETE FROM Attachments/.test(s))).toBe(false);
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("deletes the row and commits before touching the blob", async () => {
+    const order: string[] = [];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("FROM Attachments a")) return rowFor;
+      if (sql.startsWith("DELETE FROM Attachments")) order.push("row");
+      return [];
+    });
+    db.commitTransaction.mockImplementationOnce(async () => { order.push("commit"); });
+    blob.deleteBlob.mockImplementationOnce(async () => { order.push("blob"); });
+    const res = await deleteAttachment(post({ AttachmentID: 5 }), ctx);
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["row", "commit", "blob"]);
+  });
+
+  it("rolls back and keeps the blob when the row delete fails", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("FROM Attachments a")) return rowFor;
+      if (sql.startsWith("DELETE FROM Attachments")) throw new Error("fk");
+      return [];
+    });
+    const res = await deleteAttachment(post({ AttachmentID: 5 }), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("still succeeds when the blob delete fails after the commit", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("FROM Attachments a") ? rowFor : []));
+    blob.deleteBlob.mockRejectedValueOnce(new Error("gone"));
+    expect((await deleteAttachment(post({ AttachmentID: 5 }), ctx)).status).toBe(200);
   });
 });
 

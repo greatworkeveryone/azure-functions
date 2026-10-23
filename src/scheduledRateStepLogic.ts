@@ -678,7 +678,15 @@ export function upsertStep(
   const idx = existing.findIndex((s) => s.id === incoming.id);
   if (idx === -1) return [...existing, incoming];
   const next = existing.slice();
-  next[idx] = incoming;
+  // Fields the client omits stay as stored (the edit dialog doesn't send them).
+  const prev = existing[idx];
+  next[idx] = {
+    ...incoming,
+    ...(incoming.sqm === undefined && prev.sqm !== undefined && { sqm: prev.sqm }),
+    ...(incoming.flagComment === undefined && prev.flagComment !== undefined && { flagComment: prev.flagComment }),
+    ...(incoming.reviewId === undefined && prev.reviewId !== undefined && { reviewId: prev.reviewId }),
+    ...(incoming.resolution === undefined && prev.resolution !== undefined && { resolution: prev.resolution }),
+  };
   return next;
 }
 
@@ -914,7 +922,9 @@ export function upsertGroup(existing: CarparkScheduleGroup[], incoming: CarparkS
   const idx = existing.findIndex((g) => g.id === incoming.id);
   if (idx === -1) return [...existing, incoming];
   const next = existing.slice();
-  next[idx] = incoming;
+  // Absent rateSteps keeps the stored ones; an explicit [] clears them.
+  const kept = incoming.rateSteps === undefined ? existing[idx].rateSteps : undefined;
+  next[idx] = kept ? { ...incoming, rateSteps: kept } : incoming;
   return next;
 }
 
@@ -1098,7 +1108,9 @@ export function upsertMiscFee(existing: MiscFee[], incoming: MiscFee): MiscFee[]
   const idx = existing.findIndex((f) => f.id === incoming.id);
   if (idx === -1) return [...existing, incoming];
   const next = existing.slice();
-  next[idx] = incoming;
+  // Absent rateSteps keeps the stored ones; an explicit [] clears them.
+  const kept = incoming.rateSteps === undefined ? existing[idx].rateSteps : undefined;
+  next[idx] = kept ? { ...incoming, rateSteps: kept } : incoming;
   return next;
 }
 

@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { clientAddress, forwardedSummary } from "../access/clientIp";
 import { TYPES, type Connection } from "tedious";
 import { AppRole, requireRole } from "../auth";
-import { missingSettings } from "../config/envContract";
+import { forbiddenSettingsSet, missingSettings } from "../config/envContract";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
 import { isAllowedNetwork, moneyGateConfig } from "../moneyGate";
 import { checkMigrations } from "../migrate";
@@ -99,13 +99,15 @@ export async function health(request: HttpRequest, context: InvocationContext): 
     const timers = await lastTimerRuns(connection, context);
     const migrations = await migrationStatus(context);
     const missing = missingSettings(process.env);
+    const forbidden = forbiddenSettingsSet(process.env);
     const ok =
       !missing.some((m) => m.requiredInProd) &&
+      !forbidden.some((f) => f.severity === "error") &&
       (migrations === "unavailable" || (migrations.pending.length === 0 && migrations.changed.length === 0)) &&
       (timers === "unavailable" || !timers.some((t) => t.lastRun?.outcome === "error"));
     return {
       status: 200,
-      jsonBody: { ...base, ok, db: "ok", migrations, settings: { missing }, timers },
+      jsonBody: { ...base, ok, db: "ok", migrations, settings: { missing, forbidden }, timers },
     };
   } catch (err) {
     // Log the full error server-side so on-call can diagnose, but never

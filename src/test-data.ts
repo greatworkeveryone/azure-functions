@@ -6,8 +6,8 @@ import { executeQuery } from "./db";
 // Test records (D9, WP58-lite; migration 127 adds IsTest to the record tables).
 //
 // A test record never leaves Floorplan: every egress helper (Graph mail,
-// Planner, MYOB, WordPress, the digest) takes what the call is about and
-// throws TestDataEgressError for a test record before it touches the network.
+// Planner, MYOB, WordPress, the digest, Teams alerts) takes what the call is
+// about and throws TestDataEgressError for a test record before it touches the network.
 // Test records are also left out of lists, counts, figures and exports unless
 // an admin has turned on Show test data, which the app sends as the
 // X-Show-Test-Data header on every request.
@@ -16,7 +16,7 @@ export const TEST_RECORD_MESSAGE = "Not sent: test record";
 export const TEST_TITLE_PREFIX = "[TEST]";
 export const SHOW_TEST_DATA_HEADER = "x-show-test-data";
 
-export type EgressChannel = "digest" | "email" | "mybuildings" | "myob" | "planner" | "wordpress";
+export type EgressChannel = "digest" | "email" | "mybuildings" | "myob" | "planner" | "teams" | "wordpress";
 
 export class TestDataEgressError extends Error {
   readonly channel: EgressChannel;

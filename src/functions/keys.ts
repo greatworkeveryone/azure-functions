@@ -25,7 +25,9 @@ import {
 } from "../auth";
 import { uploadKeyPhotoBlob, keyPhotoReadSasUrl } from "../blob-storage";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "../keyRoles";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
+import { parseIsoDateTime } from "../iso-datetime";
+import { cellValueText } from "../xlsx-cells";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
 import { rollbackQuietly, rowVersionHex } from "../tenancyScheduleWrite";
 import { showTestParam, testFlagForCreate } from "../test-data";
@@ -64,6 +66,7 @@ function callerFromToken(token: string): UserRef {
 
 /** Largest key spreadsheet accepted. A real register is well under 1 MB. */
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 2000; // matches serviceScheduleImport
 
 const KEY_SUB_TYPES = [
   "Normal", "BiLock", "Dimpled", "Safe", "Laser Tracked", "Cylinder",
@@ -948,6 +951,11 @@ async function checkoutKeys(
     if (!CheckedOutTo || !ExpectedReturnAt) {
       return { status: 400, jsonBody: { error: "CheckedOutTo, ExpectedReturnAt required" } };
     }
+    // Bound as DateTime2: a free-text string would be read in the session language (01/02 = 2 Jan).
+    const expectedReturnAt = parseIsoDateTime(ExpectedReturnAt);
+    if (!expectedReturnAt) {
+      return { status: 400, jsonBody: { error: "ExpectedReturnAt must be an ISO 8601 date or date-time" } };
+    }
     // Photo is required when at least one item is a physical key. For codes
     // there's no handover, so it's optional.
     const photoBlob: string | null =
@@ -1056,7 +1064,7 @@ async function checkoutKeys(
           [
             { name: "CheckedOutBy",  type: TYPES.NVarChar, value: checkedOutBy },
             { name: "CheckedOutTo",  type: TYPES.NVarChar, value: CheckedOutTo },
-            { name: "ExpectedReturnAt", type: TYPES.NVarChar, value: ExpectedReturnAt },
+            { name: "ExpectedReturnAt", type: TYPES.DateTime2, value: expectedReturnAt },
             { name: "Photo",         type: TYPES.NVarChar, value: photoBlob },
             { name: "Notes",         type: TYPES.NVarChar, value: Notes ?? null },
             { name: "SignatureAttachmentId", type: TYPES.Int, value: hasSignature ? SignatureAttachmentId : null },
@@ -1242,8 +1250,9 @@ async function uploadKeyPhoto(
     const file = formData.get("photo") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'photo' field required" } };
 
-    const contentType = file.type || "image/jpeg";
-    if (!contentType.startsWith("image/") || contentType === "image/svg+xml") {
+    const contentType = normaliseMediaType(file.type || "image/jpeg");
+    // Same exact allowlist as other uploads (no SVG), images only.
+    if (!contentType.startsWith("image/") || !isAllowedContentType(contentType)) {
       return { status: 415, jsonBody: { error: "Only image files are accepted for key photos" } };
     }
 
@@ -1253,6 +1262,9 @@ async function uploadKeyPhoto(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
     const result = await uploadKeyPhotoBlob(buffer, file.name, contentType);
     const url = keyPhotoReadSasUrl(result.blobName, 15 * 60 * 1000);
     return { status: 200, jsonBody: { blobName: result.blobName, url } };
@@ -1272,7 +1284,8 @@ async function keyImportTemplate(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  // Same roles as bulkImportKeys: a role that can't import shouldn't get the template.
+  const denied = await requireRole(request, BULK_CREATE_ROLES);
   if (denied) return denied;
 
   let connection;
@@ -1402,22 +1415,27 @@ async function bulkImportKeys(
     // Build header→column index map from row 1
     const headerMap = new Map<string, number>();
     ws.getRow(1).eachCell((cell, colNum) => {
-      const h = String(cell.value ?? "").trim();
+      const h = cellValueText(cell.value);
       if (h) headerMap.set(h, colNum);
     });
 
-    // Extract data rows — cells coerced to string matching sheet_to_json({ raw: false }) behaviour
-    const allRows: Record<string, string>[] = [];
+    // Rows entirely blank are skipped (and counted); anything with a value is validated, so a
+    // row missing both Item Type and Building is reported rather than vanishing.
+    const rows: { rowNum: number; cells: Record<string, string> }[] = [];
+    let skipped = 0;
     ws.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return;
-      const r: Record<string, string> = {};
+      const cells: Record<string, string> = {};
       headerMap.forEach((colNum, header) => {
-        r[header] = String(row.getCell(colNum).value ?? "").trim();
+        const cell = row.getCell(colNum);
+        cells[header] = cellValueText(cell.value, cell.numFmt);
       });
-      allRows.push(r);
+      if (Object.values(cells).every((v) => v === "")) skipped++;
+      else rows.push({ rowNum: rowNumber, cells });
     });
-    // Skip trailing blank rows
-    const rows = allRows.filter((r) => (r["Item Type"] ?? "").trim() !== "" || (r["Building"] ?? "").trim() !== "");
+    if (rows.length > MAX_IMPORT_ROWS) {
+      return { status: 400, jsonBody: { error: `Import at most ${MAX_IMPORT_ROWS} rows at a time` } };
+    }
 
     connection = await createRequestConnection(token);
 
@@ -1442,9 +1460,7 @@ async function bulkImportKeys(
     const duplicatesSkipped: { keyNumber: string; buildingName: string }[] = [];
     const errors: { row: number; reason: string }[] = [];
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const rowNum = i + 2; // 1-indexed, header is row 1
+    for (const { rowNum, cells: r } of rows) {
       const buildingName = (r["Building"] ?? "").trim();
       const keyNumber = (r["Key Number"] ?? "").trim();
       const level = (r["Level"] ?? "").trim();
@@ -1469,6 +1485,10 @@ async function bulkImportKeys(
 
       const tenancyName = (r["Tenancy Name"] ?? "").trim();
       const tenancyId = tenancyName ? (tenancyMap.get(tenancyName.toLowerCase().trim()) ?? null) : null;
+      if (tenancyName && tenancyId === null) {
+        errors.push({ row: rowNum, reason: `Tenancy "${tenancyName}" not found` });
+        continue;
+      }
 
       const subType = (r["Sub Type"] ?? "").trim() || null;
       const registration = (r["Registration"] ?? "standard").trim().toLowerCase() || "standard";
@@ -1524,7 +1544,7 @@ async function bulkImportKeys(
 
     return {
       status: 200,
-      jsonBody: { created: created.length, duplicatesSkipped, errors },
+      jsonBody: { created: created.length, duplicatesSkipped, errors, skipped },
     };
   } catch (error: any) {
     context.error("bulkImportKeys failed:", error.message);

@@ -1,4 +1,4 @@
-import { AppRole } from "../auth";
+import { AppRole, rolesPassGate } from "../auth";
 import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
 
 // Who may read the Decision history of a subject: whoever may already read that
@@ -70,4 +70,14 @@ const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
 
 export function historyReadRoles(subjectType: string): readonly AppRole[] {
   return HISTORY_READ_ROLES.get(subjectType) ?? DEFAULT_READ;
+}
+
+/**
+ * SubjectTypes these roles may read, for scoping a wider ledger query (a job's
+ * payments, a tenancy's notes). null = no restriction (admin/director pass
+ * every history gate, including the director-only default).
+ */
+export function readableSubjectTypes(roles: readonly string[]): string[] | null {
+  if (rolesPassGate(roles, DEFAULT_READ)) return null;
+  return [...HISTORY_READ_ROLES.entries()].filter(([, allowed]) => rolesPassGate(roles, allowed)).map(([type]) => type);
 }

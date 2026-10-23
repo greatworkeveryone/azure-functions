@@ -356,6 +356,22 @@ describe("upsertPayment: recording a payment", () => {
 
   beforeEach(() => mockSql(createRoutes()));
 
+  it.each(["12abc", "abc", -5, "1.234", true, {}])("refuses the amount %j with 400 before any SQL, instead of binding a truncated number", async (Amount) => {
+    const res = await create({ ...valid, Amount } as Record<string, unknown>);
+
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toMatch(/^Amount must be/);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("reads \"100.50\" as 100.5 and records exactly that", async () => {
+    const res = await create({ ...valid, Amount: "100.50" });
+
+    expect(res.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => /INSERT INTO Payments/.test(String(c[1])));
+    expect((insert?.[2] as { name: string; value: unknown }[]).find((p) => p.name === "Amount")?.value).toBe(100.5);
+  });
+
   it("writes one payment.create row naming who, what, where, and who the money is for", async () => {
     const res = await create();
 
@@ -690,8 +706,15 @@ describe("upsertPayment: changing the amount of a payment", () => {
     expect(rows()).toHaveLength(0);
   });
 
-  it("compares amounts in cents: a difference below a cent is not a change", async () => {
+  it("refuses an amount with sub-cent precision instead of rounding it in silently", async () => {
     const res = await edit({ Amount: 100.004 });
+
+    expect(res.status).toBe(400);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("reads \"100.00\" as the same amount, not a change", async () => {
+    const res = await edit({ Amount: "100.00" as unknown as number });
 
     expect(res.status).toBe(200);
     expect(rows()).toHaveLength(0);

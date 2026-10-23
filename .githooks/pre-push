@@ -36,18 +36,14 @@ fi
 
 echo "pre-push: auditing production dependencies..."
 
-# Gate is critical, not high — matches security.yml. The outstanding high
-# (brace-expansion via exceljs -> archiver) is unreachable; see CLAUDE.md.
-if ! npm audit --omit=dev --audit-level=critical; then
+# Gate is high, matching security.yml and deploy.yml. The remaining moderates
+# (uuid via exceljs) are an accepted exception; see CLAUDE.md.
+if ! npm audit --omit=dev --audit-level=high; then
   echo ""
-  echo "✗ Critical vulnerabilities in the production tree."
+  echo "✗ High or critical vulnerabilities in the production tree."
   echo "  CI (.github/workflows/security.yml) runs this same command and will fail."
   echo "  Fix, or push with --no-verify if this is a known accepted risk."
   exit 1
-fi
-
-if ! npm audit --omit=dev --audit-level=high >/dev/null 2>&1; then
-  echo "⚠ high-severity advisories present (non-blocking) — review: npm audit --omit=dev"
 fi
 
 echo "pre-push: verifying package-lock.json is in sync..."

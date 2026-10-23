@@ -10,6 +10,7 @@ import { loadApprovalFacts } from "../approvalAuthority-db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
+import { parseMoneyField } from "../money";
 import { adminRefusal, holdsAdmin } from "../moneyRules";
 import { isTestJob } from "../testRecords";
 import { adminJobMoneyRefusal, refuseMoneyChange } from "../moneyJob-db";
@@ -75,7 +76,7 @@ interface UpsertPaymentBody {
   JobInvoiceID?: number | null;
   QuoteID?: number;
   PurchaseOrderID?: number;
-  Amount?: number;
+  Amount?: number | string | null;
   Notes?: string;
   /** @deprecated ignored — identity comes from the token */
   PaidBy?: string;
@@ -95,6 +96,8 @@ const formatMoney = (cents: number): string =>
 export interface PaymentInvoiceFacts {
   amount: number | null;
   directorApprovedAt: Date | null;
+  /** Stamped when stage 1 approved an invoice that still needed a director; survives threshold changes. */
+  directorRequiredAt?: Date | null;
   direction: string;
   jobId: number;
   /** Sum of the invoice's other pending + paid payments. */
@@ -137,7 +140,7 @@ export function paymentInvoiceRefusal(input: {
     return { code: "no_invoice_amount", message: "The invoice has no amount recorded, so it can't be paid." };
   }
   const directorRequired = decideAuthority({ amount: invoice.amount, buildingId: 0, subject: "invoice" }, facts).directorRequired;
-  if (directorRequired && !invoice.directorApprovedAt) {
+  if ((directorRequired || invoice.directorRequiredAt != null) && !invoice.directorApprovedAt) {
     return {
       code: "director_approval_required",
       message: "This invoice is over the approval limit and needs director approval before it can be paid.",
@@ -192,7 +195,7 @@ async function loadInvoiceForPayment(
 ): Promise<PaymentInvoiceFacts | null> {
   const rows = await executeQuery(
     connection,
-    `SELECT i.JobID, i.Direction, i.Status, i.Amount, i.DirectorApprovedAt,
+    `SELECT i.JobID, i.Direction, i.Status, i.Amount, i.DirectorApprovedAt, i.DirectorRequiredAt,
             ISNULL((SELECT SUM(p.Amount) FROM Payments p
                      WHERE p.JobInvoiceID = i.JobInvoiceID
                        AND p.Status IN ('pending', 'paid')
@@ -209,6 +212,7 @@ async function loadInvoiceForPayment(
   return {
     amount: row.Amount == null ? null : Number(row.Amount),
     directorApprovedAt: (row.DirectorApprovedAt as Date | null) ?? null,
+    directorRequiredAt: (row.DirectorRequiredAt as Date | null) ?? null,
     direction: (row.Direction as string | null) ?? "incoming",
     jobId: row.JobID as number,
     paidSoFar: Number(row.PaidSoFar ?? 0),
@@ -251,7 +255,7 @@ const PAYMENT_TARGETS: RefusalTarget[] = [
     subjectType: "invoice",
   },
   {
-    attempted: (body) => (body.PaymentID !== undefined && typeof body.Amount === "number" ? "payment.amount_change" : null),
+    attempted: (body) => (body.PaymentID !== undefined && body.Amount !== undefined && body.Amount !== null ? "payment.amount_change" : null),
     idField: "PaymentID",
     subjectType: "payment",
   },
@@ -298,11 +302,15 @@ async function upsertPayment(
   let connection: Connection | undefined;
   try {
     const body = ((await request.json()) ?? {}) as UpsertPaymentBody;
-    const { PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Amount, Notes } = body;
+    const { PaymentID, JobID, JobInvoiceID, QuoteID, PurchaseOrderID, Notes } = body;
+    // "1,500" is 1500 and "12abc" is refused; tedious alone would bind them as 1 and 12.
+    const amountField = parseMoneyField(body.Amount, "Amount");
+    if (!amountField.ok) return { status: 400, jsonBody: { error: amountField.error } };
+    const Amount = amountField.value ?? undefined;
 
     let create: CreatePaymentInput | undefined;
     if (PaymentID === undefined) {
-      const parsed = parseCreateInput(body);
+      const parsed = parseCreateInput({ ...body, Amount });
       if (!parsed.ok) return parsed.response;
       create = parsed.value;
     }

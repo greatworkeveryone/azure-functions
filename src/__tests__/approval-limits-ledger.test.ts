@@ -234,12 +234,24 @@ describe("setting a limit for a role that has none yet", () => {
   it("ledgers the first value with no 'before'", async () => {
     mockDb([ADA, { match: LOCK_READ, rows: [] }]);
 
-    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: 750, RoleName: "cfo" }), makeContext());
+    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: 750, RoleName: "facilities" }), makeContext());
 
     expect(res.status).toBe(200);
     const [ledger] = callsMatching("INSERT INTO dbo.DecisionLedger");
     expect(param(ledger, "Before")?.value).toBeNull();
     expect(JSON.parse(param(ledger, "After")?.value as string)).toEqual({ maxApprovalAmount: 750 });
+  });
+});
+
+describe("changing the limit of a role the caller holds", () => {
+  it.each([["cfo", "cfo"], ["director", "director"], ["cfo", " CFO "]])("refuses %s setting %j with 403 and writes nothing", async (callerRole, roleName) => {
+    mockDb([ADA, { match: LOCK_READ, rows: [] }]);
+
+    const res = await setApprovalLimit(makeRequest({ MaxApprovalAmount: null, RoleName: roleName }, authHeaders(callerRole)), makeContext());
+
+    expect(res.status).toBe(403);
+    expect(callsMatching("MERGE dbo.ApprovalLimits")).toHaveLength(0);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
   });
 });
 

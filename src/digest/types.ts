@@ -6,6 +6,8 @@ import type { EscalationRow } from "../escalation/types";
 /** An active AppUsers row with a role, as the digest sees it. */
 export interface DigestUser {
   email: string | null;
+  /** AppUsers.EntraOid, the Teams alert address; null until first sign-in. Absent where a caller built the user by hand. */
+  entraOid?: string | null;
   /** AppUsers.DigestLastSentOn: the Darwin day (YYYY-MM-DD) the last digest went to this person, or null. */
   lastSentOn: string | null;
   name: string;

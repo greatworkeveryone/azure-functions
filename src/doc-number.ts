@@ -4,12 +4,14 @@
 //
 // `prefix` is "PO", "QT", or "IV". `acronym` is the contractor's initials
 // (first letter of each word, up to 3), or "INT" for internal jobs.
+// The date is the Darwin calendar date; uniqueness comes from the seq (a MAX+1
+// per contractor/job under lock), not the date.
 
+import { todayInDarwin } from "./darwinDate";
+
+/** YYMMDD on the Darwin calendar (a document raised before 09:30 Darwin isn't dated yesterday). */
 export function formatYYMMDD(now: Date = new Date()): string {
-  const yy = String(now.getUTCFullYear() % 100).padStart(2, "0");
-  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(now.getUTCDate()).padStart(2, "0");
-  return `${yy}${mm}${dd}`;
+  return todayInDarwin(now).slice(2).replace(/-/g, "");
 }
 
 export function formatDocNumber(input: {

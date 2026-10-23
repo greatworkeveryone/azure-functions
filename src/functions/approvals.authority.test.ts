@@ -67,7 +67,7 @@ const getApprovalLimits = registered("getApprovalLimits");
 
 type Route = { match: RegExp; rows?: Record<string, unknown>[] };
 function mockSql(routes: Route[]): void {
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? []);
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []));
 }
 const ran = (re: RegExp): boolean => db.executeQuery.mock.calls.some((c: unknown[]) => re.test(String(c[1])));
 const param = (re: RegExp, name: string): unknown => {

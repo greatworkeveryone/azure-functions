@@ -37,6 +37,7 @@ function setAllSettings() {
 beforeEach(() => {
   jest.clearAllMocks();
   setAllSettings();
+  for (const name of ["DEV_EMAIL_OVERRIDE", "EMAIL_REPLY_DECISIONS_ENABLED"]) delete process.env[name];
   checkMigrations.mockResolvedValue({ changed: [], invalid: [], missing: [], outOfOrder: [], pending: [], unverified: [] });
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM STRING_SPLIT/.test(sql)) {
@@ -76,6 +77,22 @@ describe("health?deep=true", () => {
     process.env.SQL_DATABASE = "  ";
     const body = (await health(deep, ctx)).jsonBody as { settings: { missing: { name: string }[] } };
     expect(body.settings.missing.map((m) => m.name)).toEqual(["SQL_DATABASE"]);
+  });
+
+  it("lists a dev lever that is set in Production and fails the check", async () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Production";
+    process.env.DEV_EMAIL_OVERRIDE = "dev@example.com";
+    const body = (await health(deep, ctx)).jsonBody as { ok: boolean; settings: { forbidden: { name: string }[] } };
+    expect(body.settings.forbidden.map((f) => f.name)).toEqual(["DEV_EMAIL_OVERRIDE"]);
+    expect(body.ok).toBe(false);
+  });
+
+  it("reports a warn-level forbidden setting without failing the check", async () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Production";
+    process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
+    const body = (await health(deep, ctx)).jsonBody as { ok: boolean; settings: { forbidden: { name: string }[] } };
+    expect(body.settings.forbidden.map((f) => f.name)).toEqual(["EMAIL_REPLY_DECISIONS_ENABLED"]);
+    expect(body.ok).toBe(true);
   });
 
   it("lists pending and changed migrations", async () => {

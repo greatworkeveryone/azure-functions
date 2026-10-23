@@ -30,13 +30,14 @@ const asText = (value: unknown): string | null => (typeof value === "string" && 
 export async function listDigestUsers(connection: Connection): Promise<DigestUser[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT UserID, DisplayName, Email, Role, DigestOptOut, CONVERT(CHAR(10), DigestLastSentOn, 23) AS DigestLastSentOn
+    `SELECT UserID, DisplayName, Email, EntraOid, Role, DigestOptOut, CONVERT(CHAR(10), DigestLastSentOn, 23) AS DigestLastSentOn
        FROM dbo.AppUsers
       WHERE IsActive = 1 AND Role IS NOT NULL
       ORDER BY UserID`,
   );
   return rows.map((row) => ({
     email: asText(row.Email),
+    entraOid: asText(row.EntraOid),
     lastSentOn: asText(row.DigestLastSentOn),
     name: asText(row.DisplayName) ?? asText(row.Email) ?? `User ${row.UserID}`,
     optedOut: Boolean(row.DigestOptOut),

@@ -7,6 +7,7 @@ jest.mock("@azure/functions", () => {
   const actual = jest.requireActual("@azure/functions");
   return { ...actual, app: { http: jest.fn(), storageQueue: jest.fn(), timer: jest.fn() } };
 });
+jest.mock("../moneyGate", () => ({ requireMoneyContext: jest.fn().mockResolvedValue(null) }));
 jest.mock("../db", () => ({
   beginTransaction: jest.fn().mockResolvedValue(undefined),
   closeConnection: jest.fn(),

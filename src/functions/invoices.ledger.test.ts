@@ -90,7 +90,7 @@ function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     const hit = [...routes, CONTRACTOR].find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
-    return hit?.rows ?? [];
+    return hit?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []); // send claim succeeds by default
   });
 }
 
@@ -207,6 +207,43 @@ describe("approveJobInvoice", () => {
     expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeLessThan(
       directorEmails.sendDirectorApprovalEmail.mock.invocationCallOrder[0],
     );
+  });
+
+  it("persists that a director is required when stage 1 approves a large invoice, and not for a small one", async () => {
+    const requiredParam = (): unknown =>
+      (db.executeQuery.mock.calls.find((c: unknown[]) => /UPDATE JobInvoices\s+SET Status = @Status/.test(String(c[1])))?.[2] as { name: string; value: unknown }[])
+        .find((p) => p.name === "DirectorRequired")?.value;
+
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 5000 }), STORED]);
+    await approve();
+    expect(requiredParam()).toBe(true);
+    expect(String(db.executeQuery.mock.calls.find((c: unknown[]) => /UPDATE JobInvoices\s+SET Status = @Status/.test(String(c[1])))?.[1])).toMatch(/DirectorRequiredAt = CASE WHEN @DirectorRequired = 1/);
+
+    db.executeQuery.mockClear();
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 500 }), STORED]);
+    await approve();
+    expect(requiredParam()).toBe(false);
+  });
+
+  it("sends the director email before the response returns (awaited, not fire-and-forget)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 5000 }), STORED]);
+
+    const res = await approve();
+
+    expect(directorEmails.sendDirectorApprovalEmail).toHaveBeenCalledTimes(1);
+    expect(orderOf(/INSERT INTO dbo\.DecisionLedger/)).toBeGreaterThan(-1);
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).not.toHaveProperty("directorEmailFailed");
+  });
+
+  it("a failed director email still answers 200 for the approval, flags directorEmailFailed and ledgers the failure", async () => {
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValue(new Error("Graph 503"));
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 5000 }), STORED]);
+
+    const res = await approve();
+
+    expect(res).toMatchObject({ status: 200, jsonBody: { directorEmailFailed: true } });
+    expect(ledgerInserts(db.executeQuery).map((r) => r.action)).toEqual(["invoice.approve", "invoice.director_request_failed"]);
   });
 
   it("beyond the caller's own limit but short of the director's: waits for someone senior, as over_limit", async () => {
@@ -1247,7 +1284,7 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
     const routes = [APP_USER, JOB_BUILDING, approved({ ContractorID: 3 }), reloaded];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
       if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 99 }];
-      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+      return routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []);
     });
 
     await edit({ ContractorName: "Beta Pty" });
@@ -1261,7 +1298,7 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
     const routes = [APP_USER, JOB_BUILDING, approved(), reloaded];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params?: { value: unknown }[]) => {
       if (/FROM dbo\.Contractors WHERE ContractorName/.test(sql)) return [{ ContractorID: params?.[0].value === "Beta Pty" ? 8 : 3 }];
-      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+      return routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []);
     });
 
     await edit({ ContractorName: "Beta Pty" });
@@ -1650,7 +1687,7 @@ describe("the director request that follows an invoice approval", () => {
     const routes = [APP_USER, JOB_BUILDING, overEveryLimit, STORED, NAMES, CONTRACTOR];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (/INSERT INTO dbo\.DecisionLedger/.test(sql) && ++inserts >= 2) throw new Error("ledger unavailable");
-      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+      return routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []);
     });
 
     const res = await approve();

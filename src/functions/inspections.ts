@@ -636,6 +636,8 @@ export async function applyInspectionOps(
     await beginTransaction(connection);
     const applied: string[] = [];
     const rejected: { id: string; reason: string }[] = [];
+    // Blobs of removed attachments: deleted only once the batch has committed.
+    const blobsAfterCommit: string[] = [];
 
     try {
       // Concurrency + status guard INSIDE the transaction: UPDLOCK/HOLDLOCK
@@ -691,8 +693,9 @@ export async function applyInspectionOps(
         // linkRooms) rolls back to here — leaving earlier successful ops intact —
         // instead of committing torn state with the rest of the batch.
         await executeQuery(connection, "SAVE TRANSACTION op_sp", []);
+        const opBlobs: string[] = [];
         try {
-          await applyOne(connection, inspectionId, queued.op, identity);
+          await applyOne(connection, inspectionId, queued.op, identity, opBlobs);
           await executeQuery(
             connection,
             `INSERT INTO dbo.InspectionOperationLog (OpId, InspectionId, OpType)
@@ -704,6 +707,7 @@ export async function applyInspectionOps(
             ],
           );
           applied.push(queued.id);
+          blobsAfterCommit.push(...opBlobs);
         } catch (err: any) {
           await executeQuery(connection, "ROLLBACK TRANSACTION op_sp", []).catch(() => {});
           context.error(`op ${queued.id} (${queued.op?.type}) failed:`, err);
@@ -713,6 +717,9 @@ export async function applyInspectionOps(
 
       const revision = await bumpRevision(connection, inspectionId);
       await commitTransaction(connection);
+      for (const blobName of blobsAfterCommit) {
+        try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
+      }
       return { status: 200, jsonBody: { applied, rejected: rejected.length > 0 ? rejected : undefined, revision } };
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
@@ -731,6 +738,7 @@ async function applyOne(
   inspectionId: number,
   op: any,
   identity: { oid: string; name: string },
+  blobsAfterCommit: string[],
 ): Promise<void> {
   switch (op?.type) {
     case "updateInspection": {
@@ -999,7 +1007,7 @@ async function applyOne(
       // Defence in depth: never destroy a blob outside this feature's prefix,
       // even if a legacy row catalogued one.
       if (blobName && blobName.startsWith("inspections/")) {
-        try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
+        blobsAfterCommit.push(blobName);
       }
       return;
     }

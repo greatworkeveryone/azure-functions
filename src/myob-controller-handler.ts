@@ -7,6 +7,7 @@ import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import type { Connection } from "tedious";
 import { errorResponse, extractToken, forbiddenResponse, rolesForRequest, unauthorizedResponse } from "./auth";
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, rollbackTransaction } from "./db";
+import { requireMoneyContext } from "./moneyGate";
 import { LedgerValidationError, type LedgerActor } from "./ledger";
 import { resolveLedgerActor } from "./ledger/actor";
 import { isMyobController, MyobControlsError } from "./myob-controls-admin";
@@ -16,6 +17,8 @@ type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface ControllerAction<T> {
   failure: string;
   forbidden: string;
+  /** Behind the money-action gate (S11): src/money-gated-routes.ts. Off for read-only discovery. */
+  moneyGate?: boolean;
   name: string;
   parse: (body: unknown) => Parsed<T>;
   /** Optional slow step (a MYOB read) run before any transaction is opened. */
@@ -32,6 +35,10 @@ export async function runControllerAction<T>(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isMyobController(await rolesForRequest(request))) return forbiddenResponse(action.forbidden);
+  if (action.moneyGate) {
+    const gate = await requireMoneyContext(request);
+    if (gate) return gate;
+  }
   const parsed = action.parse(await request.json().catch(() => null));
   if (!parsed.ok) return { jsonBody: { error: parsed.error }, status: 400 };
 

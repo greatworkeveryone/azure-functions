@@ -306,7 +306,7 @@ describe("promoteEmailToJobUpdate", () => {
 
 describe("recordEmailQuoteDecision", () => {
   const emailWith = (over: Record<string, unknown> = {}): SqlRoute => [
-    /SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated FROM Emails/,
+    /SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated, Body FROM Emails/,
     [
       {
         EmailID: 42,

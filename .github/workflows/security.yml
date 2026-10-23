@@ -24,8 +24,8 @@ jobs:
           cache: "npm"
       - name: Install with scripts ignored
         run: npm ci --ignore-scripts
-      # Runtime brace-expansion is patched. High/critical findings now block;
-      # moderate compatibility upgrades remain tracked in the review report.
+      # High/critical findings block. Remaining moderates (uuid via exceljs) are
+      # tracked in CLAUDE.md as an accepted exception.
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Verify registry signatures

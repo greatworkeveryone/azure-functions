@@ -25,7 +25,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { TYPES } from "tedious";
+import { TYPES, type Connection } from "tedious";
 import {
   closeConnection,
   createRequestConnection,
@@ -35,6 +35,7 @@ import {
 } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { isDevOverrideEnabled } from "../jwt";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { syncMailbox } from "../email/mail-sync";
 import { findPoNumber } from "../email/po-ref";
@@ -51,6 +52,29 @@ const TODDLER_URL = process.env.TODDLER_URL ?? "";
 // Must equal toddler's SERVICE_KEY_COMMAND_CENTRE. /parse-incoming rejects
 // anonymous calls with 401, so without it every parse burns a retry.
 const TODDLER_SERVICE_KEY = process.env.TODDLER_SERVICE_KEY ?? "";
+
+// The service key and SAS URLs go in these requests: https only, except
+// loopback or the local dev override. Throws a config error otherwise.
+export function assertSafeToddlerUrl(url: string, devOverride: boolean = isDevOverrideEnabled()): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("TODDLER_URL is not a valid URL");
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !devOverride && !loopback) {
+    throw new Error("TODDLER_URL must use https: (the service key and file URLs are sent to it)");
+  }
+}
+
+// A user token, or null for the service identity (timers and queue triggers
+// have no caller; a SQL_USER_CONNECTION rollback must not hand them a user path).
+type DbToken = string | null;
+
+function openConnection(token: DbToken): Promise<Connection> {
+  return token === null ? createServiceRequestConnection() : createRequestConnection(token);
+}
 
 // Positive integer from an env string, else `fallback` — a typo must not
 // become NaN and silently stop the runner.
@@ -219,6 +243,7 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), TODDLER_TIMEOUT_MS);
   try {
+    assertSafeToddlerUrl(TODDLER_URL);
     const response = await fetch(`${TODDLER_URL}/parse-incoming`, {
       body: JSON.stringify(req),
       headers: {
@@ -244,6 +269,12 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
 function toddlerConfigured(context: InvocationContext, caller: string): boolean {
   if (!TODDLER_URL) {
     context.log(`${caller}: TODDLER_URL not configured — skipping (AI service not yet deployed)`);
+    return false;
+  }
+  try {
+    assertSafeToddlerUrl(TODDLER_URL);
+  } catch (err: unknown) {
+    context.error(`${caller}: ${err instanceof Error ? err.message : String(err)} — skipping`);
     return false;
   }
   if (!TODDLER_SERVICE_KEY) {
@@ -291,8 +322,8 @@ export async function warmUpToddler(
 // Same predicate as claimOne, lease included: only rows a runner could claim
 // now count, so a leased-only queue doesn't warm the scale-to-zero GPU.
 // Hits IX_Emails_AIParse_Queue.
-async function hasUnparsedEmails(token: string): Promise<boolean> {
-  const connection = await createRequestConnection(token);
+async function hasUnparsedEmails(token: DbToken): Promise<boolean> {
+  const connection = await openConnection(token);
   try {
     const rows = await executeQuery(
       connection,
@@ -318,8 +349,8 @@ async function hasUnparsedEmails(token: string): Promise<boolean> {
 // failed — successfully classified emails (AIClassification IS NOT NULL,
 // AIParseError IS NULL) are left untouched.
 
-async function resetFailedEmails(token: string): Promise<number> {
-  const connection = await createRequestConnection(token);
+async function resetFailedEmails(token: DbToken): Promise<number> {
+  const connection = await openConnection(token);
   try {
     const rows = (await executeQuery(
       connection,
@@ -362,8 +393,8 @@ interface ClaimedEmail {
 // Skips rows still leased — their last attempt may yet succeed.
 // Idempotent; runs on every parseQueued tick (even idle) and in runParseBatch
 // for direct callers (emails.ts, graphWebhook).
-async function expireExhausted(token: string): Promise<void> {
-  const connection = await createRequestConnection(token);
+async function expireExhausted(token: DbToken): Promise<void> {
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -392,8 +423,8 @@ async function expireExhausted(token: string): Promise<void> {
 // Final write-backs clear the lease; transient errors keep it so the retry
 // waits for expiry; a killed run's row frees after the lease and
 // has spent one attempt.
-async function claimOne(token: string): Promise<ClaimedEmail | null> {
-  const connection = await createRequestConnection(token);
+async function claimOne(token: DbToken): Promise<ClaimedEmail | null> {
+  const connection = await openConnection(token);
   try {
     const rows = (await executeQuery(
       connection,
@@ -438,8 +469,8 @@ interface KnownJobRow {
   Title: string | null;
 }
 
-async function loadKnownJob(token: string, jobId: number): Promise<KnownJob | null> {
-  const connection = await createRequestConnection(token);
+async function loadKnownJob(token: DbToken, jobId: number): Promise<KnownJob | null> {
+  const connection = await openConnection(token);
   try {
     const rows = (await executeQuery(
       connection,
@@ -485,8 +516,8 @@ async function loadKnownJob(token: string, jobId: number): Promise<KnownJob | nu
 // ── Sender trust ───────────────────────────────────────────────────────────
 // From is spoofable, so trust needs a Graph-sourced, authenticated row first.
 
-async function isActiveContractor(token: string, address: string): Promise<boolean> {
-  const connection = await createRequestConnection(token);
+async function isActiveContractor(token: DbToken, address: string): Promise<boolean> {
+  const connection = await openConnection(token);
   try {
     const rows = await executeQuery(
       connection,
@@ -503,7 +534,7 @@ async function isActiveContractor(token: string, address: string): Promise<boole
 
 // Best-effort: a lookup failure means "unknown", never a retry.
 export async function resolveSenderTrust(
-  token: string,
+  token: DbToken,
   email: Pick<ClaimedEmail, "FromAddress" | "SenderAuthenticated" | "Source">,
   context: InvocationContext,
 ): Promise<SenderTrust> {
@@ -564,7 +595,7 @@ function needsReview(result: ToddlerResponse): boolean {
 }
 
 async function writeSuccess(
-  token: string,
+  token: DbToken,
   emailId: number,
   hints: ExtractedHints,
   result: ToddlerResponse,
@@ -582,7 +613,7 @@ async function writeSuccess(
   const withheld = readWithheldFields(result);
   // Nothing runs on an unknown, so drop any model-written fields.
   const data = result.classification === "unknown" ? {} : modelData;
-  const connection = await createRequestConnection(token);
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -625,7 +656,7 @@ async function writeSuccess(
 }
 
 async function recordTransientError(
-  token: string,
+  token: DbToken,
   emailId: number,
   err: Error,
 ): Promise<void> {
@@ -633,7 +664,7 @@ async function recordTransientError(
   // so a later claim retries; record the error. The lease is kept on purpose:
   // it stops this run re-claiming the row and burning all attempts in seconds.
   // Attempt counter was incremented by claimOne already.
-  const connection = await createRequestConnection(token);
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -650,8 +681,8 @@ async function recordTransientError(
 
 // Permanent failure: finalise like expireExhausted does — stamp AIParsedAt,
 // flag for review, clear the lease — but with the real error message.
-async function recordPermanentError(token: string, emailId: number, err: Error): Promise<void> {
-  const connection = await createRequestConnection(token);
+async function recordPermanentError(token: DbToken, emailId: number, err: Error): Promise<void> {
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -728,7 +759,7 @@ export interface ParseBatchResult {
 type EmailOutcome = "succeeded" | "flagged" | "errored";
 
 async function parseClaimedEmail(
-  token: string,
+  token: DbToken,
   email: ClaimedEmail,
   context: InvocationContext,
 ): Promise<EmailOutcome> {
@@ -796,7 +827,7 @@ async function parseClaimedEmail(
 // before every claim. `deadline` is epoch ms; callers pass invocation start +
 // RUN_BUDGET_MS so warm-up time counts against it.
 export async function runParseBatch(
-  token: string,
+  token: DbToken,
   context: InvocationContext,
   deadline: number = Date.now() + RUN_BUDGET_MS,
 ): Promise<ParseBatchResult> {
@@ -857,11 +888,7 @@ export async function runParseBatch(
 
 async function parseQueued(caller: string, context: InvocationContext, deadline: number): Promise<void> {
   if (!toddlerConfigured(context, caller)) return;
-  const token = process.env.MYBUILDINGS_BEARER_TOKEN;
-  if (!token) {
-    context.error(`${caller}: MYBUILDINGS_BEARER_TOKEN not set`);
-    return;
-  }
+  const token = null; // service identity: no user token on timer or queue paths
 
   try {
     await expireExhausted(token);

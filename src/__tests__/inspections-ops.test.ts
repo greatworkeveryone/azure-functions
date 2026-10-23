@@ -226,6 +226,46 @@ describe("applyInspectionOps batching (F13)", () => {
   });
 });
 
+// ── Blob deletion waits for the commit ───────────────────────────────────────
+
+describe("applyInspectionOps removeAttachment blob delete", () => {
+  const BLOB = "inspections/7/abc.jpg";
+  const body = { inspectionId: 7, ops: [{ id: "op-1", inspectionId: 7, createdAt: "", op: { type: "removeAttachment", attachmentId: "att-1" } }] };
+  const routes = [
+    { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
+    { match: "SELECT a.BlobName", rows: [{ BlobName: BLOB }] },
+    { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
+  ];
+
+  it("deletes the blob only after the transaction commits", async () => {
+    mockDb(routes);
+    db.commitTransaction.mockImplementation(async () => { expect(blob.deleteBlob).not.toHaveBeenCalled(); });
+    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
+    expect(res.status).toBe(200);
+    expect(blob.deleteBlob).toHaveBeenCalledWith(BLOB);
+  });
+
+  it("keeps the blob when the commit fails", async () => {
+    mockDb(routes);
+    db.commitTransaction.mockRejectedValue(new Error("commit failed"));
+    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("keeps the blob when the op is rolled back to its savepoint", async () => {
+    mockDb(routes);
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("INSERT INTO dbo.InspectionOperationLog")) throw new Error("log insert failed");
+      return routes.find((r) => sql.includes(r.match))?.rows ?? [];
+    });
+    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
+    expect(res.jsonBody).toMatchObject({ rejected: [{ id: "op-1" }] });
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+});
+
 // ── F14: updateInspection op (title) ─────────────────────────────────────────
 
 describe("applyInspectionOps updateInspection op (F14)", () => {

@@ -5,6 +5,7 @@
 // (promoteEmailToJobUpdate) or a recorded director decision
 // (recordEmailQuoteDecision), then flip it to 'promoted'.
 
+import { createHash } from "node:crypto";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
 import {
@@ -39,6 +40,7 @@ import { LEDGER_LIMITS } from "../ledger/validate";
 import { parseMoneyField } from "../money";
 import { amountRefusal, jobMoneyRefusal, refusalResponse } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
+import { requireMoneyContext } from "../moneyGate";
 import { linkDirectorReply } from "../email/director-reply-link";
 import { showTestParam } from "../test-data";
 
@@ -1066,6 +1068,15 @@ function parseRecipientList(raw: string | null): string[] {
     .filter((r) => r.length > 0);
 }
 
+const REPLY_EXCERPT_CHARS = 500;
+
+/** SHA-256 of the whole reply plus its first 500 characters, for the ledger. */
+export function replyEvidence(body: unknown): { replyExcerpt: string | null; replySha256: string | null } {
+  const text = typeof body === "string" ? body : "";
+  if (!text) return { replyExcerpt: null, replySha256: null };
+  return { replyExcerpt: text.trim().slice(0, REPLY_EXCERPT_CHARS), replySha256: createHash("sha256").update(text).digest("hex") };
+}
+
 export async function recordEmailQuoteDecision(
   request: HttpRequest,
   context: InvocationContext,
@@ -1083,12 +1094,18 @@ export async function recordEmailQuoteDecision(
     return denied;
   }
 
-  const identity = await verifiedIdentityFromRequest(request);
-  if (!identity) return unauthorizedResponse();
-
   // Decisions belong in the app, where the approver is a verified sign-in rather
   // than a reply's From address. Read per call so it can be flipped without a redeploy.
   const replyDecisionsOn = process.env.EMAIL_REPLY_DECISIONS_ENABLED === "true";
+  // Recording a director's decision is a money action (S11), like directorApproveQuote.
+  // Off, the call only files the reply and decides nothing, so it stays ungated.
+  if (replyDecisionsOn) {
+    const gate = await requireMoneyContext(request);
+    if (gate) return gate;
+  }
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
@@ -1139,7 +1156,7 @@ export async function recordEmailQuoteDecision(
 
     const emailRows = await executeQuery(
       conn,
-      "SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id",
+      "SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated, Body FROM Emails WHERE EmailID = @Id",
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     if (emailRows.length === 0) return { status: 404, jsonBody: { error: "Email not found" } };
@@ -1261,6 +1278,8 @@ export async function recordEmailQuoteDecision(
       }),
       after: {
         recordedBy: { name: operator.name, userId: operator.kind === "user" ? operator.userId : null },
+        // What the director wrote, so the operator-chosen Decision can be checked against it.
+        ...replyEvidence(emailRows[0].Body),
         sourceEmailId: EmailID,
         status: Decision === "approved" ? "approved" : "rejected",
         ...quoteFacts(outcome.quote),

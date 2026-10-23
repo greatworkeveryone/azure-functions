@@ -12,6 +12,7 @@ export function setMyobFileMode(request: HttpRequest, context: InvocationContext
   return runControllerAction(request, context, {
     failure: "Failed to change the MYOB company file",
     forbidden: "Only the CFO can change which MYOB company files Floorplan may touch",
+    moneyGate: true,
     name: "setMyobFileMode",
     parse: parseFileSettings,
     work: async (tx, actor, input) => {

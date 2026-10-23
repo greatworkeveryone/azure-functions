@@ -3,7 +3,7 @@ import { createRequestConnection, closeConnection, executeQuery } from "../db";
 import { fetchWorkRequests } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
-import { upsertWorkRequest } from "./workRequests";
+import { parseIntegerParam, upsertWorkRequest } from "./workRequests";
 
 async function syncWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -18,11 +18,16 @@ async function syncWorkRequests(request: HttpRequest, context: InvocationContext
     const statusId = request.query.get("statusId") || "";
     const lastModified = request.query.get("lastModifiedDate") || "";
 
-    let params = "";
-    if (buildingId) params += `buildingID=${buildingId}&`;
-    if (statusId) params += `statusID=${statusId}&`;
-    if (lastModified) params += `lastmodifieddate=${lastModified}&`;
-    params = params.replace(/&$/, "");
+    // Whole numbers only, and every value encoded, so a query value cannot add upstream parameters.
+    const buildingNumber = buildingId ? parseIntegerParam(buildingId) : null;
+    if (buildingId && buildingNumber === null) return { status: 400, jsonBody: { error: "buildingId must be a whole number" } };
+    const statusNumber = statusId ? parseIntegerParam(statusId) : null;
+    if (statusId && statusNumber === null) return { status: 400, jsonBody: { error: "statusId must be a whole number" } };
+    const upstream = new URLSearchParams();
+    if (buildingNumber !== null) upstream.set("buildingID", String(buildingNumber));
+    if (statusNumber !== null) upstream.set("statusID", String(statusNumber));
+    if (lastModified) upstream.set("lastmodifieddate", lastModified);
+    const params = upstream.toString();
 
     context.log("Fetching work requests from myBuildings API...");
     const workRequests = await fetchWorkRequests(params);
@@ -32,7 +37,7 @@ async function syncWorkRequests(request: HttpRequest, context: InvocationContext
 
     // Resolve the BuildingID myBuildings omits — using the query param when
     // it's a per-building sync, otherwise a name→id lookup from Buildings.
-    const fallbackId = buildingId ? parseInt(buildingId) : undefined;
+    const fallbackId = buildingNumber ?? undefined;
     let nameToId: Map<string, number> | undefined;
     if (!fallbackId) {
       const buildingRows = await executeQuery(

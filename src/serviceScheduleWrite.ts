@@ -102,3 +102,52 @@ export async function updateSchedule(
   });
   return schedule;
 }
+
+// ── Import idempotency ───────────────────────────────────────────────────────
+
+type KeyFields = Pick<ScheduleInput, "anchorDate" | "assetId" | "buildingId" | "contractorId" | "intervalCount" | "intervalUnit" | "locationId" | "name" | "scope">;
+
+/** Natural key of a schedule: what makes a spreadsheet row "the same service" on a retry. */
+export function scheduleNaturalKey(f: KeyFields): string {
+  const text = (value: string | null): string | null => (value === null ? null : value.trim().toLowerCase());
+  return JSON.stringify([f.buildingId, f.assetId, f.locationId, text(f.scope), text(f.name), f.contractorId, f.intervalCount, f.intervalUnit, f.anchorDate.slice(0, 10)]);
+}
+
+/** Serialises imports; a retry waits for the first run to commit, then sees its rows. Call inside the transaction. */
+export async function lockServiceScheduleImport(connection: Connection): Promise<void> {
+  const rows = await executeQuery(
+    connection,
+    `DECLARE @Result INT;
+     EXEC @Result = sp_getapplock @Resource = N'import_service_schedules', @LockMode = N'Exclusive',
+                                  @LockOwner = N'Transaction', @LockTimeout = 60000;
+     SELECT @Result AS LockResult;`,
+    [],
+  );
+  if (!(Number(rows[0]?.LockResult ?? -999) >= 0)) throw new Error("Could not take the service schedule import lock");
+}
+
+/** Natural keys of every live (unarchived) schedule. */
+export async function loadScheduleNaturalKeys(connection: Connection): Promise<Set<string>> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT BuildingId, AssetId, LocationId, Scope, Name, ContractorId, IntervalCount, IntervalUnit, AnchorDate
+       FROM dbo.ServiceSchedules WHERE ArchivedAt IS NULL`,
+    [],
+  );
+  const keys = new Set<string>();
+  for (const row of rows) {
+    const anchor = row.AnchorDate instanceof Date ? row.AnchorDate.toISOString() : String(row.AnchorDate);
+    keys.add(scheduleNaturalKey({
+      anchorDate: anchor,
+      assetId: row.AssetId === null ? null : Number(row.AssetId),
+      buildingId: Number(row.BuildingId),
+      contractorId: row.ContractorId === null ? null : Number(row.ContractorId),
+      intervalCount: Number(row.IntervalCount),
+      intervalUnit: row.IntervalUnit as ScheduleInput["intervalUnit"],
+      locationId: row.LocationId === null ? null : Number(row.LocationId),
+      name: String(row.Name),
+      scope: row.Scope === null ? null : String(row.Scope),
+    }));
+  }
+  return keys;
+}

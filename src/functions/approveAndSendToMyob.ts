@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { forbidden, inTx, jobLink, readPreview, withCaller } from "../myob/proposalHttp";
+import { isMyobController } from "../myob-controls-admin";
 import { approveAndSend } from "../myob/send";
 import { LIVE_PURCHASES } from "../myob/sendSteps";
 
@@ -9,9 +10,9 @@ import { LIVE_PURCHASES } from "../myob/sendSteps";
 // one record, then reads it back. Answers with what MYOB returned.
 
 export async function approveAndSendToMyob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  const body = ((await request.json().catch(() => null)) ?? {}) as Record<string, unknown>;
   return withCaller(request, context, "approveAndSendToMyob", async ({ connection, isController, person }) => {
     if (!isController) return forbidden("Only the CFO can approve and send to MYOB");
+    const body = ((await request.json().catch(() => null)) ?? {}) as Record<string, unknown>;
     const preview = readPreview(body);
     const proposalId = Number(body.proposalId);
     if (!preview || !Number.isInteger(proposalId) || typeof body.expectedRowVersion !== "string") {
@@ -23,7 +24,7 @@ export async function approveAndSendToMyob(request: HttpRequest, context: Invoca
       { ...preview, expectedRowVersion: body.expectedRowVersion, proposalId },
     );
     return { jsonBody: outcome, status: 200 };
-  });
+  }, { allowed: isMyobController, forbidden: "Only the CFO can approve and send to MYOB" });
 }
 
 app.http("approveAndSendToMyob", { authLevel: "anonymous", handler: approveAndSendToMyob, methods: ["POST"] });

@@ -140,7 +140,7 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
 
     expect(res.status).toBe(200);
     const params = insertParams();
-    expect(params.PONumber).toBe("261012-PO-42-ACM-7");
+    expect(params.PONumber).toBe("261013-PO-42-ACM-7");
     expect(params.ChargeCode).toBe("e");
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toMatch(/no ReferenceCode/);
@@ -149,7 +149,7 @@ describe("upsertPurchaseOrder — PO number in Johanne's format", () => {
   it("uses the internal acronym for the fallback when there is no contractor", async () => {
     arrange({ referenceCode: null });
     await upsertPurchaseOrder(makeRequest({ JobID: 42, CostNotToExceed: 500 }), ctx);
-    expect(insertParams().PONumber).toBe("261012-PO-42-INT-7");
+    expect(insertParams().PONumber).toBe("261013-PO-42-INT-7");
   });
 
   it("still requires JobID to create", async () => {

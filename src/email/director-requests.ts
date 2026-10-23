@@ -11,16 +11,19 @@
 // about to. A send that fails leaves no stamp and a `*.director_request_failed`
 // row, written in a transaction of its own.
 //
-// What is left is the stretch between Graph accepting the mail and the commit:
-// if the database fails there, the mail is out with neither stamp nor row (the
-// stamp always had that exposure). Everything the row needs is found before the
-// mail goes, so only the database itself failing can do it.
+// The stretch between Graph accepting the mail and the commit is covered by a
+// claim (DirectorEmailAttemptedAt), taken atomically before the mail goes and
+// cleared by the stamp or by a failed send. If the database fails after the
+// mail left, the claim stays (and goes to Sentry): the next send is refused
+// with DirectorRequestClaimedError until a person has checked, instead of
+// quietly mailing the directors twice.
 
 import { TYPES, type Connection } from "tedious";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "../db";
 import { record } from "../ledger";
 import { jobScope } from "../ledger/moneyDecisions";
 import { recordApart, underRowLimit } from "../ledger/refusals";
+import { Sentry } from "../sentry";
 import type { LedgerActor } from "../ledger/types";
 import type { SendDirectorApprovalResult } from "./director-emails";
 
@@ -35,14 +38,57 @@ const STAMP_SQL: Record<Stage, string> = {
   invoice: `UPDATE JobInvoices
                SET DirectorEmailSentAt = @SentAt,
                    DirectorEmailSentTo = @SentTo,
-                   DirectorEmailSentBy = @SentBy
+                   DirectorEmailSentBy = @SentBy,
+                   DirectorEmailAttemptedAt = NULL
              WHERE JobInvoiceID = @Id`,
   quote: `UPDATE Quotes
                SET DirectorEmailSentAt = @SentAt,
                    DirectorEmailSentTo = @SentTo,
-                   DirectorEmailSentBy = @SentBy
+                   DirectorEmailSentBy = @SentBy,
+                   DirectorEmailAttemptedAt = NULL
              WHERE QuoteID = @Id`,
 };
+
+const TABLES: Record<Stage, { id: string; table: string }> = {
+  invoice: { id: "JobInvoiceID", table: "JobInvoices" },
+  quote: { id: "QuoteID", table: "Quotes" },
+};
+
+/** A earlier send was started and never recorded as finished: the mail may have gone. */
+export class DirectorRequestClaimedError extends Error {
+  constructor(readonly attemptedAt: Date | null) {
+    super(
+      `A director approval email was already started${attemptedAt ? ` at ${attemptedAt.toISOString()}` : ""} and may have been sent; ` +
+        "check with the director before sending it again.",
+    );
+    this.name = "DirectorRequestClaimedError";
+  }
+}
+
+/** Takes the send claim, or throws DirectorRequestClaimedError. Atomic: one UPDATE. */
+async function claimSend(connection: Connection, stage: Stage, subjectId: number): Promise<void> {
+  const { id: ID_COLUMN, table: TABLE } = TABLES[stage];
+  const params = [{ name: "Id", type: TYPES.Int, value: subjectId }];
+  const claimed = await executeQuery(
+    connection,
+    `UPDATE ${TABLE} SET DirectorEmailAttemptedAt = SYSUTCDATETIME()
+     OUTPUT inserted.${ID_COLUMN} AS Id
+     WHERE ${ID_COLUMN} = @Id AND DirectorEmailAttemptedAt IS NULL`,
+    params,
+  );
+  if (claimed.length > 0) return;
+  const existing = await executeQuery(connection, `SELECT DirectorEmailAttemptedAt FROM ${TABLE} WHERE ${ID_COLUMN} = @Id`, params);
+  if (existing.length === 0) throw new Error(`${stage} ${subjectId} not found`);
+  throw new DirectorRequestClaimedError((existing[0].DirectorEmailAttemptedAt as Date | null) ?? null);
+}
+
+/** The mail did not go: give the claim back. Best effort; a stuck claim only blocks a resend. */
+async function releaseClaim(connection: Connection, stage: Stage, subjectId: number): Promise<void> {
+  const { id: ID_COLUMN, table: TABLE } = TABLES[stage];
+  await executeQuery(connection, `UPDATE ${TABLE} SET DirectorEmailAttemptedAt = NULL WHERE ${ID_COLUMN} = @Id`, [
+    { name: "Id", type: TYPES.Int, value: subjectId },
+  ]).catch(() => undefined);
+}
 
 export interface DirectorRequest {
   /** The person who asked for it: the approver, or whoever pressed resend. */
@@ -105,11 +151,13 @@ export async function sendDirectorRequest(request: DirectorRequest): Promise<Sen
   // Found before the mail goes, so that once it has, recording it can fail only
   // if the database does.
   const scope = await jobScope(connection, jobId);
+  await claimSend(connection, stage, subjectId);
 
   let result: SendDirectorApprovalResult;
   try {
     result = await sendDirectorApprovalEmail({ amount, connection, currency, jobId, stage, subjectId, triggeredBy });
   } catch (err) {
+    await releaseClaim(connection, stage, subjectId);
     if (underRowLimit(actor, `failed ${stage} director request`)) {
       await recordApart(
         connection,
@@ -161,7 +209,24 @@ export async function sendDirectorRequest(request: DirectorRequest): Promise<Sen
     await commitTransaction(connection);
   } catch (err) {
     await rollbackTransaction(connection).catch(() => {});
+    // The mail is out and unrecorded; the claim stays so nobody sends it again blind.
+    Sentry.captureException(err, { extra: { stage, subjectId, note: "director request sent but not recorded" } });
     throw err;
   }
   return result;
+}
+
+/**
+ * The send that follows an approval, awaited so the Functions host cannot cut
+ * it short. The approval has already happened, so a failure is reported, not
+ * thrown: true means the email did not go (the failure is ledgered).
+ */
+export async function sendDirectorRequestAfterApproval(request: DirectorRequest, warn: (message: string) => void): Promise<boolean> {
+  try {
+    await sendDirectorRequest(request);
+    return false;
+  } catch (err) {
+    warn(`Director email failed for ${request.stage} ${request.subjectId}: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
 }

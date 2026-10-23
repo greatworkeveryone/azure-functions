@@ -12,7 +12,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 
 // A stored name that was never minted (a legacy upload kept its raw file
 // extension) gets no link rather than failing the tenant's whole list (SEC-01).
@@ -52,7 +52,7 @@ async function handleUploadTenancyAttachment(
       return { status: 400, jsonBody: { error: "'tenantId' must be a number" } };
     }
 
-    const contentType = (file as any).type || "application/octet-stream";
+    const contentType = normaliseMediaType((file as any).type || "") || "application/octet-stream"; // stored form, never the raw header
     if (!isAllowedContentType(contentType)) {
       return { status: 415, jsonBody: { error: `File type '${contentType}' is not allowed` } };
     }
@@ -65,6 +65,9 @@ async function handleUploadTenancyAttachment(
     const originalName = (file as any).name as string;
     const extension = originalName.includes(".") ? originalName.split(".").pop() ?? null : null;
     const buffer = Buffer.from(await (file as any).arrayBuffer());
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
 
     context.log(`Uploading tenancy doc ${originalName} (${contentType}, ${size} bytes) for tenant ${tenantId}`);
     const { blobName } = await uploadBlob(buffer, originalName, contentType, `tenancy-${tenantId}`);

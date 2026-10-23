@@ -22,6 +22,7 @@ export async function pauseMyob(request: HttpRequest, context: InvocationContext
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isMyobController(await rolesForRequest(request))) return forbiddenResponse("Only the CFO can pause or resume MYOB");
+  // No money gate here on purpose: this is the emergency stop (src/money-gated-routes.ts).
 
   const parsed = parsePause(await request.json().catch(() => null));
   if (!parsed.ok) return { jsonBody: { error: parsed.error }, status: 400 };

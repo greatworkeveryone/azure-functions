@@ -213,11 +213,27 @@ export async function upsertAppUser(
         return { status: 403, jsonBody: { error: "Cannot edit your own account" } };
       }
 
-      // The role the UPDATE leaves in place (an omitted role is written as NULL).
-      const newRole = role ?? null;
+      // An omitted role leaves the role as it is; an explicit null clears it.
+      const newRole = role === undefined ? oldRole : role;
       // An edit that omits isActive leaves the account as it is; defaulting to
       // true here used to reactivate a deactivated account on every role change.
       const newActive = isActive ?? oldActive;
+
+      // Never leave the app without an active admin.
+      if (oldRole === AppRole.ADMIN && oldActive && (!newActive || newRole !== AppRole.ADMIN)) {
+        const others = await executeQuery(
+          connection,
+          `SELECT COUNT(*) AS Remaining FROM dbo.AppUsers
+           WHERE Role = @Admin AND IsActive = 1 AND UserID <> @UserID`,
+          [
+            { name: "Admin",  type: TYPES.NVarChar, value: AppRole.ADMIN },
+            { name: "UserID", type: TYPES.Int,      value: userId },
+          ],
+        );
+        if (((others[0]?.Remaining as number | undefined) ?? 0) < 1) {
+          return { status: 409, jsonBody: { error: "Cannot deactivate or demote the last active admin" } };
+        }
+      }
 
       // The role or activation change, its UserRoleAudit row and its ledger rows
       // commit or roll back together: no ledger row, no decision.

@@ -51,7 +51,7 @@ import {
   jobScope,
   withContractorId,
 } from "../ledger/moneyDecisions";
-import { sendDirectorRequest } from "../email/director-requests";
+import { DirectorRequestClaimedError, sendDirectorRequest, sendDirectorRequestAfterApproval } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
@@ -137,7 +137,8 @@ async function syncInvoices(request: HttpRequest, context: InvocationContext): P
   let connection;
   try {
     const body = await request.json() as SyncInvoicesBody;
-    const params = body.queryParams || "";
+    // Re-encoded so a stray "&" or "#" in a value cannot change what is asked of myBuildings.
+    const params = new URLSearchParams(body.queryParams || "").toString();
 
     if (!params) {
       return { status: 400, jsonBody: { error: "queryParams required (e.g. statusid=17 or minimumdateapproved=2024-01-01)" } };
@@ -701,6 +702,7 @@ export async function upsertJobInvoice(
               SET Status = 'pending',
                   ApprovedAt = NULL, ApprovedBy = NULL,
                   DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
+                  DirectorRequiredAt = NULL, DirectorEmailAttemptedAt = NULL,
                   DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
                   DirectorEmailSentBy = NULL,
                   MyobCreatedAt = NULL, MyobCreatedBy = NULL
@@ -933,10 +935,13 @@ async function approveInvoiceInTransaction(
     await executeQuery(
       connection,
       `UPDATE JobInvoices
-       SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy
+       SET Status = @Status, ApprovedAt = SYSUTCDATETIME(), ApprovedBy = @ApprovedBy,
+           DirectorRequiredAt = CASE WHEN @DirectorRequired = 1 THEN SYSUTCDATETIME() ELSE NULL END
        WHERE JobInvoiceID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: invoiceId },
+        // Persisted at approval: a later threshold change cannot make stage 1 final.
+        { name: "DirectorRequired", type: TYPES.Bit, value: directorGateEngaged },
         { name: "Status", type: TYPES.NVarChar, value: newStatus },
         { name: "ApprovedBy", type: TYPES.NVarChar, value: approvedBy },
       ],
@@ -1075,41 +1080,30 @@ async function approveJobInvoice(
       await raiseAttributionNotice(connection, { actor, managerUserId: variance.attributedToUserId, ref: { id: variance.varianceId, jobId, kind: "variance" } });
     }
 
-    // Director email + job→Done transition both gated on a successful approve
-    // landing at status='approved'. If we routed to awaiting_approval, nothing
-    // else fires until a senior manager re-approves.
-    //
-    // Fire-and-forget: spawn the email on a FRESH connection so the request
-    // connection closes in `finally` once the response returns. Packet build
-    // + Graph sendMail can take 5–20s with attachments — we don't want the
-    // user's Approve click to block on it. If the background send fails, the
-    // Resend button on the banner is the recovery path. The stamp and the
-    // ledger row for the send are written once the mail has gone (see
-    // ../email/director-requests).
+    // Director email, awaited: the Functions host does not guarantee work after
+    // the response returns, so the send (and its stamp and ledger rows) finish
+    // first. Packet build + Graph sendMail can take 5-20s with attachments; the
+    // client allows 45s. The approval has already happened, so a failed send is
+    // flagged (directorEmailFailed), not an error; the Resend button recovers.
+    // Nothing fires when the invoice was routed to awaiting_approval.
+    let directorEmailFailed = false;
     if (directorGateEngaged && !routesToAwaitingApproval) {
-      void (async () => {
-        let bgConnection;
-        try {
-          bgConnection = await createRequestConnection(token);
-          await sendDirectorRequest({
-            actor,
-            amount,
-            connection: bgConnection,
-            correlationId,
-            currency: "AUD",
-            facts,
-            jobId,
-            resend: false,
-            stage: "invoice",
-            subjectId: JobInvoiceID,
-            triggeredBy: identity.name,
-          });
-        } catch (emailErr: any) {
-          context.warn(`Director email failed for invoice ${JobInvoiceID}: ${emailErr?.message}`);
-        } finally {
-          if (bgConnection) closeConnection(bgConnection);
-        }
-      })();
+      directorEmailFailed = await sendDirectorRequestAfterApproval(
+        {
+          actor,
+          amount,
+          connection,
+          correlationId,
+          currency: "AUD",
+          facts,
+          jobId,
+          resend: false,
+          stage: "invoice",
+          subjectId: JobInvoiceID,
+          triggeredBy: identity.name,
+        },
+        (msg) => context.warn(msg),
+      );
     }
 
     const stored = await executeQuery(
@@ -1125,7 +1119,7 @@ async function approveJobInvoice(
       await syncJobActionTriggersStandalone(jobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { invoice: stored[0] } };
+    return { status: 200, jsonBody: directorEmailFailed ? { directorEmailFailed, invoice: stored[0] } : { invoice: stored[0] } };
   } catch (error: any) {
     context.error("approveJobInvoice failed:", error.message);
     return errorResponse("Approve invoice failed", error.message);
@@ -1349,6 +1343,9 @@ async function undoDirectorApproveJobInvoice(
     });
     return { status: 403, jsonBody: { error: "Director role required" } };
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   let connection;
   try {
@@ -1425,7 +1422,8 @@ async function undoDirectorApproveJobInvoice(
         `UPDATE JobInvoices
            SET Status = 'approved',
                DirectorApprovedAt = NULL,
-               DirectorApprovedBy = NULL
+               DirectorApprovedBy = NULL,
+               DirectorRequiredAt = COALESCE(DirectorRequiredAt, SYSUTCDATETIME())
          WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1652,7 +1650,7 @@ async function rejectJobInvoice(
 
       await executeQuery(
         connection,
-        "UPDATE JobInvoices SET Status = 'rejected' WHERE JobInvoiceID = @Id",
+        "UPDATE JobInvoices SET Status = 'rejected', DirectorRequiredAt = NULL WHERE JobInvoiceID = @Id",
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
       await executeQuery(
@@ -1759,7 +1757,7 @@ async function markJobInvoiceMyobCreated(
       // Locked until commit, so the approval we check is the one we act on.
       const rows = await executeQuery(
         connection,
-        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt, ContractorID
+        `SELECT JobID, InvoiceNumber, Status, Amount, Direction, ContractorName, SupplierInvoiceNumber, MyobCreatedAt, ContractorID, DirectorRequiredAt
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -1797,7 +1795,8 @@ async function markJobInvoiceMyobCreated(
         jobId,
         subject: "invoice",
       });
-      const directorWasRequired = authority.directorRequired;
+      // The requirement stamped at approval stands even if the threshold has since moved.
+      const directorWasRequired = authority.directorRequired || invoice.DirectorRequiredAt != null;
       const fullyApproved =
         status === "director_approved" || (status === "approved" && !directorWasRequired);
       if (!fullyApproved) {
@@ -2241,6 +2240,7 @@ async function resendDirectorInvoiceEmail(
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {
     if (error instanceof TestDataEgressError) return testRecordResponse();
+    if (error instanceof DirectorRequestClaimedError) return { status: 409, jsonBody: { error: error.message } };
     context.error("resendDirectorInvoiceEmail failed:", error.message);
     return errorResponse("Resend director invoice email failed", error.message);
   } finally {

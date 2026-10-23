@@ -57,7 +57,7 @@ import {
   quoteFacts,
   quoteSnapshot,
 } from "../ledger/moneyDecisions";
-import { sendDirectorRequest } from "../email/director-requests";
+import { DirectorRequestClaimedError, sendDirectorRequest, sendDirectorRequestAfterApproval } from "../email/director-requests";
 import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
@@ -422,6 +422,7 @@ export async function upsertQuote(
               SET Status = 'pending',
                   ApprovedAt = NULL, ApprovedBy = NULL,
                   DirectorApprovedAt = NULL, DirectorApprovedBy = NULL,
+                  DirectorEmailAttemptedAt = NULL,
                   DirectorEmailSentAt = NULL, DirectorEmailSentTo = NULL,
                   DirectorEmailSentBy = NULL${CLEARS}
             WHERE QuoteID = @Id`,
@@ -866,36 +867,29 @@ async function approveQuote(
       await raiseAttributionNotice(connection, { actor, managerUserId, ref: { id: QuoteID, jobId, kind: "quote" } });
     }
 
-    // Fire-and-forget director email: packet build + Graph sendMail can take
-    // 5–20s with attachments, and we don't want the user's click to block on
-    // it. Uses a fresh connection so the request connection can close in
-    // `finally`. The Resend button on the banner recovers from background
-    // failures. The stamp and the ledger row for the send are written once the
-    // mail has gone (see ../email/director-requests).
+    // Director email, awaited: the Functions host does not guarantee work after
+    // the response returns, so the send (and its stamp and ledger rows) finish
+    // first. Packet build + Graph sendMail can take 5-20s with attachments; the
+    // client allows 45s. The approval has already happened, so a failed send is
+    // flagged (directorEmailFailed), not an error; the Resend button recovers.
+    let directorEmailFailed = false;
     if (directorNeeded) {
-      void (async () => {
-        let bgConnection;
-        try {
-          bgConnection = await createRequestConnection(token);
-          await sendDirectorRequest({
-            actor,
-            amount,
-            connection: bgConnection,
-            correlationId,
-            currency,
-            facts,
-            jobId,
-            resend: false,
-            stage: "quote",
-            subjectId: QuoteID,
-            triggeredBy: approvedBy,
-          });
-        } catch (emailErr: any) {
-          context.warn(`Director email failed for quote ${QuoteID}: ${emailErr?.message}`);
-        } finally {
-          if (bgConnection) closeConnection(bgConnection);
-        }
-      })();
+      directorEmailFailed = await sendDirectorRequestAfterApproval(
+        {
+          actor,
+          amount,
+          connection,
+          correlationId,
+          currency,
+          facts,
+          jobId,
+          resend: false,
+          stage: "quote",
+          subjectId: QuoteID,
+          triggeredBy: approvedBy,
+        },
+        (msg) => context.warn(msg),
+      );
     }
 
     const stored = await executeQuery(
@@ -911,7 +905,7 @@ async function approveQuote(
       await syncJobActionTriggersStandalone(jobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { quote: stored[0] } };
+    return { status: 200, jsonBody: directorEmailFailed ? { directorEmailFailed, quote: stored[0] } : { quote: stored[0] } };
   } catch (error: any) {
     context.error("approveQuote failed:", error.message);
     return errorResponse("Approve quote failed", error.message);
@@ -1808,6 +1802,7 @@ async function resendDirectorQuoteEmail(
     return { status: 200, jsonBody: { quote: stored[0] } };
   } catch (error: any) {
     if (error instanceof TestDataEgressError) return testRecordResponse();
+    if (error instanceof DirectorRequestClaimedError) return { status: 409, jsonBody: { error: error.message } };
     context.error("resendDirectorQuoteEmail failed:", error.message);
     return errorResponse("Resend director quote email failed", error.message);
   } finally {

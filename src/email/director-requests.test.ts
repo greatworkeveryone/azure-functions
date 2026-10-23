@@ -7,7 +7,7 @@ import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
 import { moneyShape } from "../__tests__/fixtures/moneyRowShape";
 import type { LedgerActor } from "../ledger/types";
 import { _resetRateLimitForTests } from "../rateLimit";
-import { sendDirectorRequest, type DirectorRequest } from "./director-requests";
+import { DirectorRequestClaimedError, sendDirectorRequest, sendDirectorRequestAfterApproval, type DirectorRequest } from "./director-requests";
 
 jest.mock("../db", () => ({
   beginTransaction: jest.fn(),
@@ -40,7 +40,7 @@ function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     const hit = routes.find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
-    return hit?.rows ?? [];
+    return hit?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []); // send claim succeeds by default
   });
 }
 const JOB: Route = { match: /SELECT BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5 }] };
@@ -377,5 +377,62 @@ describe("sendDirectorRequest: when the mail does not go", () => {
 
     expect(ledgerInserts(db.executeQuery)).toHaveLength(20);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("not recording this failed quote director request"));
+  });
+});
+
+describe("sendDirectorRequest: the send claim", () => {
+  const CLAIM = /UPDATE Quotes SET DirectorEmailAttemptedAt = SYSUTCDATETIME\(\)/;
+  const TAKEN: Route = { match: CLAIM, rows: [] };
+  const ATTEMPTED = new Date("2026-10-23T01:02:03Z");
+
+  it("takes the claim before the mail goes and clears it with the stamp", async () => {
+    await sendDirectorRequest(request());
+
+    expect(orderOf(CLAIM)).toBeLessThan(mail.sendDirectorApprovalEmail.mock.invocationCallOrder[0]);
+    expect(String(callsTo(STAMP_QUOTE)[0][1])).toMatch(/DirectorEmailAttemptedAt = NULL/);
+  });
+
+  it("refuses with the attempted time, and sends nothing, when a claim is already held", async () => {
+    mockSql([JOB, NAMES, TAKEN, { match: /SELECT DirectorEmailAttemptedAt FROM Quotes/, rows: [{ DirectorEmailAttemptedAt: ATTEMPTED }] }]);
+
+    const failure = await sendDirectorRequest(request()).catch((e: unknown) => e);
+
+    expect(failure).toBeInstanceOf(DirectorRequestClaimedError);
+    expect((failure as DirectorRequestClaimedError).message).toContain("2026-10-23T01:02:03.000Z");
+    expect(mail.sendDirectorApprovalEmail).not.toHaveBeenCalled();
+    expect(orderOf(STAMP_QUOTE)).toBe(-1);
+  });
+
+  it("gives the claim back when the mail does not go, so a retry is allowed", async () => {
+    mail.sendDirectorApprovalEmail.mockRejectedValue(new Error("503"));
+
+    await expect(sendDirectorRequest(request())).rejects.toThrow("503");
+
+    expect(callsTo(/SET DirectorEmailAttemptedAt = NULL WHERE QuoteID/)).toHaveLength(1);
+  });
+
+  it("keeps the claim and reports to Sentry when the mail went but could not be recorded", async () => {
+    mockSql([JOB, NAMES, { match: STAMP_QUOTE, reject: new Error("deadlock") }]);
+
+    await expect(sendDirectorRequest(request())).rejects.toThrow("deadlock");
+
+    expect(sentry.Sentry.captureException).toHaveBeenCalledTimes(1);
+    expect(callsTo(/SET DirectorEmailAttemptedAt = NULL WHERE/)).toHaveLength(0);
+  });
+});
+
+describe("sendDirectorRequestAfterApproval", () => {
+  it("is false when the mail went", async () => {
+    expect(await sendDirectorRequestAfterApproval(request(), jest.fn())).toBe(false);
+  });
+
+  it("is true, and warns, when the mail failed; the failed row is still written", async () => {
+    mail.sendDirectorApprovalEmail.mockRejectedValue(new Error("503"));
+    const warn = jest.fn();
+
+    expect(await sendDirectorRequestAfterApproval(request(), warn)).toBe(true);
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("quote 7"));
+    expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "quote.director_request_failed" });
   });
 });

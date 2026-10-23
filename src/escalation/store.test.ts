@@ -155,14 +155,15 @@ describe("reads", () => {
 
   it("listActiveUsers lower-cases roles and tolerates a missing name or email", async () => {
     db.executeQuery.mockResolvedValueOnce([
-      { DisplayName: "Adam", Email: " adam@example.com ", Role: " Facilities_Manager ", UserID: 1 },
-      { DisplayName: null, Email: null, Role: "director", UserID: 2 },
+      { DisplayName: "Adam", Email: " adam@example.com ", EntraOid: "oid-1", Role: " Facilities_Manager ", UserID: 1 },
+      { DisplayName: null, Email: null, EntraOid: null, Role: "director", UserID: 2 },
     ]);
     expect(await listActiveUsers(conn)).toEqual([
-      { email: "adam@example.com", name: "Adam", role: "facilities_manager", userId: 1 },
-      { email: null, name: "User 2", role: "director", userId: 2 },
+      { email: "adam@example.com", entraOid: "oid-1", name: "Adam", role: "facilities_manager", userId: 1 },
+      { email: null, entraOid: null, name: "User 2", role: "director", userId: 2 },
     ]);
     expect(lastCall()[1]).toMatch(/IsActive = 1/);
+    expect(lastCall()[1]).toMatch(/EntraOid/);
   });
 
   it("latestTimesBySubject maps a row per subject and policy", async () => {

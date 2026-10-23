@@ -145,7 +145,7 @@ describe("raise: email the targets", () => {
     const o = options();
     await notifyTargets(conn, row(), "raise", o);
 
-    expect(recorded()).toEqual([{ attempts: 1, id: 42, outcome: { attemptedAt: NOW, error: null, notifiedAt: NOW, state: "sent" } }]);
+    expect(recorded()).toEqual([{ attempts: 1, id: 42, outcome: { attemptedAt: NOW, channel: "email", error: null, notifiedAt: NOW, state: "sent" } }]);
     expect(o.sendMail.mock.invocationCallOrder[0]).toBeLessThan(store.recordNotification.mock.invocationCallOrder[0]);
   });
 

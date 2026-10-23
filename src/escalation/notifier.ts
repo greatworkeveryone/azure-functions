@@ -13,6 +13,7 @@
 // (the sweep calls retryDue).
 
 import type { Connection } from "tedious";
+import { resolveAlertChannels, type AlertChannel } from "../alerts/channel";
 import { resolveRecipient } from "../email-recipient";
 import { reportSystemHealth } from "../email/role-recipients";
 import { graphSendMail } from "../graph";
@@ -23,6 +24,7 @@ import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingN
 import { buildDecisionEmail } from "./decisionEmail";
 import { askedOfIds, ladderOf, namedTargetIds } from "./decisionRows";
 import { buildNextStepEmail } from "./nextStepEmail";
+import { deliverUrgentAlerts, isAlertEvent, isUrgentAlert } from "./urgentAlert";
 import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
@@ -33,6 +35,8 @@ export type SendMail = (to: string[], subject: string, body: string, egress: Egr
 export type NotifyEvent = "follow_up" | "raise" | "reminder" | "supersede";
 
 export interface NotifyOptions {
+  /** Real-time alert channels for urgent events (default: whatever the env switches on). */
+  channels?: readonly AlertChannel[];
   /** Tries before giving up in this call (default 1: HTTP requests don't wait). */
   attempts?: number;
   /** First wait between tries, doubled each time (default 500 ms). */
@@ -53,6 +57,8 @@ export interface NotifyOptions {
 
 export interface NotifyOutcome {
   attempts: number;
+  /** "teams" when a real-time alert told at least one target. */
+  channel?: "email" | "teams";
   error: string | null;
   recipients: string[];
   state: NotificationState;
@@ -210,6 +216,11 @@ function linkFor(row: EscalationRow, env: NodeJS.ProcessEnv): string | null {
   return adapter ? absoluteLink(adapter.deepLink(row.subjectId, row), env) : null;
 }
 
+/** The in-app path an alert opens, or null when the subject has no adapter. */
+function linkRoute(row: EscalationRow): string | null {
+  return getAdapter(row.subjectType)?.deepLink(row.subjectId, row) ?? null;
+}
+
 // ── Sending ──────────────────────────────────────────────────────────────────
 
 function errorText(error: unknown): string {
@@ -256,6 +267,7 @@ async function remember(
       row.escalationId,
       {
         attemptedAt: now,
+        channel: outcome.channel ?? "email",
         error: outcome.error,
         notifiedAt: outcome.state === "sent" ? now : null,
         state: outcome.state,
@@ -303,13 +315,36 @@ export async function notifyTargets(
       outcome = { attempts: 0, error: `Notification settings are missing: ${missing.join(", ")}`, recipients: [], state: "pending" };
     } else {
       const users = options.users ?? (await listActiveUsers(connection));
-      const recipients = targetAddresses(row, users, env);
+      // D21: an urgent raise, reminder or supersede is tried as a real-time alert first. Not on
+      // a retry of a failed send, which would alert the people already told a second time.
+      const route = linkRoute(row);
+      const alerted =
+        isAlertEvent(event) && isUrgentAlert(row) && route !== null && row.notificationState !== "failed"
+          ? await deliverUrgentAlerts(
+              targetUsers(row, users),
+              event,
+              route,
+              egress,
+              options.channels ?? resolveAlertChannels(env),
+              options.log,
+            )
+          : null;
+      const told = alerted?.toldUserIds ?? new Set<number>();
+      const channel = told.size > 0 ? "teams" : "email";
+      const recipients =
+        told.size > 0
+          ? uniqueAddresses(targetUsers(row, users).filter((user) => !told.has(user.userId)).map((user) => user.email))
+          : targetAddresses(row, users, env);
       if (recipients.length === 0) {
-        outcome = { attempts: 0, error: "No one with an email address is at this level", recipients, state: "none" };
+        // Everyone with an address was told by alert, or no one is there to tell.
+        outcome =
+          told.size > 0
+            ? { attempts: 0, channel, error: null, recipients, state: "sent" }
+            : { attempts: 0, error: "No one with an email address is at this level", recipients, state: "none" };
       } else {
         const { body, subject } = buildEmail(event, row, linkFor(row, env), askedOfNames(row, users));
         const sent = await sendWithRetry(options.sendMail ?? defaultSend, recipients, subject, body, egress, options);
-        outcome = { attempts: sent.attempts, error: sent.error, recipients, state: sent.error === null ? "sent" : "failed" };
+        outcome = { attempts: sent.attempts, channel, error: sent.error, recipients, state: sent.error === null ? "sent" : "failed" };
       }
     }
   } catch (error) {

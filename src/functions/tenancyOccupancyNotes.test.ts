@@ -246,6 +246,21 @@ describe("upsertOccupancy", () => {
     expect(insertCall).toBeDefined();
   });
 
+  it("dates the occupancy history on the Darwin calendar, not UTC", async () => {
+    // 20:00 UTC on 18 Oct is 05:30 on 19 Oct in Darwin.
+    jest.useFakeTimers({ doNotFake: ["nextTick", "setImmediate"], now: new Date("2026-10-18T20:00:00Z") });
+    try {
+      db.executeQuery.mockResolvedValue([]);
+      db.executeQuery.mockResolvedValueOnce([{ RentPerAnnum: 50000 }]);
+      await handlers.upsertOccupancy(makeRequest(validBody), ctx);
+      const history = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.TenantOccupancyHistory"));
+      const params = history?.[2] as Array<{ name: string; value: unknown }>;
+      expect(params.find((p) => p.name === "EffectiveFrom")?.value).toBe("2026-10-19");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it("updates an existing occupancy when one matches the cell key", async () => {
     db.executeQuery
       .mockResolvedValueOnce([{ RentPerAnnum: 50000 }])

@@ -9,6 +9,7 @@
 // Changing a fact is a decision (PLAN §3.12): the value and its ledger row
 // (approval_fact.change, an exception) commit together. Re-saving the value a
 // fact already has changes nothing and writes no row. A money action (S11).
+// director_approval_threshold is director/admin only; margin and cap are CFO only.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
@@ -30,7 +31,9 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
   if (!token) return unauthorizedResponse();
 
   const userRoles = await rolesForRequest(request);
-  if (!userRoles.includes(AppRole.CFO)) {
+  const isCfo = userRoles.includes(AppRole.CFO);
+  const isDirector = userRoles.includes(AppRole.DIRECTOR) || userRoles.includes(AppRole.ADMIN);
+  if (!isCfo && !isDirector) {
     return { status: 403, jsonBody: { error: "CFO role required" } };
   }
   // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
@@ -43,6 +46,11 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
     const key = typeof body.factKey === "string" ? body.factKey : "";
     const bounds = BOUNDS[key];
     if (!bounds) return { status: 400, jsonBody: { error: `factKey must be one of ${Object.keys(BOUNDS).join(", ")}` } };
+    // The director threshold bounds the CFO's own reach, so the CFO cannot set it alone.
+    const thresholdKey = key === "director_approval_threshold";
+    if (thresholdKey ? !isDirector : !isCfo) {
+      return { status: 403, jsonBody: { error: thresholdKey ? "Director role required to set the director approval threshold" : "CFO role required" } };
+    }
     const value = body.value;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || (key === "director_approval_threshold" && value === 0) || value > bounds.max || Math.round(value * 100) !== value * 100) {
       return { status: 400, jsonBody: { error: `${bounds.label} must be a number from 0 to ${bounds.max}, with at most 2 decimal places` } };

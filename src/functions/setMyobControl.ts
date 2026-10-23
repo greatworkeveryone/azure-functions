@@ -7,6 +7,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { errorResponse, extractToken, forbiddenResponse, rolesForRequest, unauthorizedResponse } from "../auth";
+import { requireMoneyContext } from "../moneyGate";
 import { LedgerValidationError } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { changeControl, isMyobController, MyobControlsError } from "../myob-controls-admin";
@@ -22,6 +23,9 @@ export async function setMyobControl(request: HttpRequest, context: InvocationCo
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   if (!isMyobController(await rolesForRequest(request))) return forbiddenResponse("Only the CFO can change MYOB controls");
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const parsed = parseControlChange(await request.json().catch(() => null));
   if (!parsed.ok) return { jsonBody: { error: parsed.error }, status: 400 };

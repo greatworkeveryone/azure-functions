@@ -505,6 +505,63 @@ describe("upsertAppUser decision ledger (WP19b)", () => {
     });
   });
 
+  it("leaves the role untouched on an edit that omits it (no audit or role ledger row)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+      .mockResolvedValueOnce([{ Role: "facilities", Email: "x@co.com", EntraOid: "target-oid", IsActive: true }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    const res = await upsertAppUser(makeRequest({ userId: 7, isActive: false }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(paramValue(callsMatching("UPDATE dbo.AppUsers")[0], "Role")).toBe("facilities");
+    expect(callsMatching("INSERT INTO dbo.UserRoleAudit")).toHaveLength(0);
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    expect(JSON.parse(paramValue(ledger[0], "After") as string)).toEqual({ isActive: false });
+  });
+
+  describe("the last active admin", () => {
+    const target = { Role: "admin", Email: "boss@co.com", EntraOid: "boss-oid", IsActive: true };
+
+    it("cannot be deactivated", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([target])
+        .mockResolvedValueOnce([{ Remaining: 0 }]);
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, isActive: false }), ctx);
+
+      expect(res.status).toBe(409);
+      expect(callsMatching("UPDATE dbo.AppUsers")).toHaveLength(0);
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+    });
+
+    it("cannot be demoted", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([target])
+        .mockResolvedValueOnce([{ Remaining: 0 }]);
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, role: "director" }), ctx);
+
+      expect(res.status).toBe(409);
+    });
+
+    it("can be deactivated when another active admin remains", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])
+        .mockResolvedValueOnce([target])
+        .mockResolvedValueOnce([{ Remaining: 1 }])
+        .mockResolvedValue([]);
+
+      const res = await upsertAppUser(makeRequest({ userId: 7, isActive: false }), ctx);
+
+      expect(res.status).toBe(200);
+    });
+  });
+
   it("ledgers clearing a role (null) as a change", async () => {
     db.executeQuery
       .mockResolvedValueOnce([{ UserID: 3, DisplayName: "Admin User" }])

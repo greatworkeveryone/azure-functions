@@ -64,7 +64,7 @@ const call = (name: string, body: Record<string, unknown>) => {
 
 type Route = { match: RegExp; rows?: Record<string, unknown>[] };
 function mockSql(routes: Route[]): void {
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? []);
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []));
 }
 const sqls = (): string[] => db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1]));
 const wrote = (re: RegExp) => sqls().some((sql) => re.test(sql));
@@ -385,6 +385,20 @@ describe("markJobInvoiceMyobCreated (decision 4)", () => {
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, ready, INVOICE_SCOPE]);
     expect(await call("markJobInvoiceMyobCreated", { JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "admin_test_records_only" }, status: 403 });
     expect(wrote(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/)).toBe(false);
+  });
+
+  it("refuses an approval that needed a director when none has approved, though today's threshold would not ask for one", async () => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, invoice({ ApprovedAt: new Date(), ApprovedBy: "Abby", DirectorRequiredAt: new Date(), Status: "approved" }), INVOICE_SCOPE]);
+    expect(await call("markJobInvoiceMyobCreated", { JobInvoiceID: 5 })).toMatchObject({
+      jsonBody: { error: "Invoice must be director-approved before MYOB creation" },
+      status: 400,
+    });
+    expect(wrote(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/)).toBe(false);
+  });
+
+  it("lets it through once the director has approved", async () => {
+    mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, invoice({ DirectorApprovedAt: new Date(), DirectorRequiredAt: new Date(), Status: "director_approved" }), STORED]);
+    expect((await call("markJobInvoiceMyobCreated", { JobInvoiceID: 5 })).status).toBe(200);
   });
 
   it("lets admin mark a test record", async () => {

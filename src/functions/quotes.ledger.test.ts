@@ -101,7 +101,7 @@ function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     const hit = routes.find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
-    return hit?.rows ?? [];
+    return hit?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []); // send claim succeeds by default
   });
 }
 
@@ -1497,7 +1497,7 @@ describe("the director request that follows a quote approval", () => {
     const routes = [APP_USER, JOB_BUILDING, overEveryLimit, stored, NAMES];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (/INSERT INTO dbo\.DecisionLedger/.test(sql) && ++inserts >= 2) throw new Error("ledger unavailable");
-      return routes.find((r) => r.match.test(sql))?.rows ?? [];
+      return routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []);
     });
 
     const res = await approve();
@@ -1507,6 +1507,26 @@ describe("the director request that follows a quote approval", () => {
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(orderOf(STAMP)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
     expect(ctx.warn).toHaveBeenCalledWith(expect.stringContaining("Director email failed for quote 7"));
+  });
+
+  it("sends before answering, and flags directorEmailFailed (still 200) when the mail fails, with the failed row written", async () => {
+    directorEmails.sendDirectorApprovalEmail.mockRejectedValue(new Error("Graph 503"));
+    mockSql([APP_USER, JOB_BUILDING, overEveryLimit, stored, NAMES]);
+
+    const res = await approve();
+
+    expect(res).toMatchObject({ status: 200, jsonBody: { directorEmailFailed: true } });
+    expect(byAction("quote.director_request_failed")).toHaveLength(1);
+  });
+
+  it("answers without the flag when the mail went", async () => {
+    mockSql([APP_USER, JOB_BUILDING, overEveryLimit, stored, NAMES]);
+
+    const res = await approve();
+
+    expect(directorEmails.sendDirectorApprovalEmail).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).not.toHaveProperty("directorEmailFailed");
   });
 
   it("sends nothing and records no request for a quote the caller's own limit covers", async () => {
@@ -1630,6 +1650,20 @@ describe("resendDirectorQuoteEmail", () => {
     expect(db.commitTransaction).not.toHaveBeenCalled();
     expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(orderOf(STAMP)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("answers 409 and sends nothing when an earlier send left its claim", async () => {
+    mockSql([
+      APP_USER, JOB_BUILDING, awaiting(), stored, NAMES,
+      { match: /UPDATE Quotes SET DirectorEmailAttemptedAt = SYSUTCDATETIME\(\)/, rows: [] },
+      { match: /SELECT DirectorEmailAttemptedAt FROM Quotes/, rows: [{ DirectorEmailAttemptedAt: new Date("2026-10-23T01:02:03Z") }] },
+    ]);
+
+    const res = await resend();
+
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toContain("check with the director");
+    expect(directorEmails.sendDirectorApprovalEmail).not.toHaveBeenCalled();
   });
 
   it("a quote that isn't awaiting the director is the same 400: nothing sent, nothing recorded", async () => {

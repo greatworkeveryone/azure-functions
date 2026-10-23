@@ -11,8 +11,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery, SqlParam } from "../db";
-import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
-import { historyReadRoles } from "../ledger/historyRoles";
+import { errorResponse, extractToken, requireRole, rolesForRequest, unauthorizedResponse } from "../auth";
+import { historyReadRoles, readableSubjectTypes } from "../ledger/historyRoles";
 import { DECISION_COLUMNS, toDecisionRow } from "../ledger/rows";
 
 const HISTORY_LIMIT = 200;
@@ -21,8 +21,9 @@ const MAX_SUBJECT_ID_CHARS = 64;
 const INT_MAX = 2_147_483_647;
 
 const WHERE_SAME_SUBJECT = "SubjectType = @SubjectType AND SubjectId = @SubjectId";
-const WHERE_TENANCY = "(SubjectType = @SubjectType AND SubjectId = @SubjectId) OR TenantId = @ScopeId";
-const WHERE_JOB = "(SubjectType = @SubjectType AND SubjectId = @SubjectId) OR JobId = @ScopeId";
+// The scoped branch is limited to SubjectTypes the caller may read (e.g. no payment rows for facilities).
+const scopedWhere = (column: string, typeFilter: string): string =>
+  `(SubjectType = @SubjectType AND SubjectId = @SubjectId) OR (${column} = @ScopeId${typeFilter})`;
 
 export async function getDecisionHistory(
   request: HttpRequest,
@@ -56,7 +57,15 @@ export async function getDecisionHistory(
       return { status: 400, jsonBody: { error: `subjectId must be a whole number for a ${subjectType}` } };
     }
     params.push({ name: "ScopeId", type: TYPES.Int, value: scopeId });
-    whereSql = subjectType === "tenancy" ? WHERE_TENANCY : WHERE_JOB;
+    const readable = readableSubjectTypes(await rolesForRequest(request));
+    let typeFilter = "";
+    if (readable) {
+      // An empty list yields IN (NULL): matches nothing.
+      const names = readable.map((_, i) => `@t${i}`);
+      readable.forEach((value, i) => params.push({ name: `t${i}`, type: TYPES.NVarChar, value }));
+      typeFilter = ` AND SubjectType IN (${names.length ? names.join(",") : "NULL"})`;
+    }
+    whereSql = scopedWhere(subjectType === "tenancy" ? "TenantId" : "JobId", typeFilter);
   }
 
   let connection;

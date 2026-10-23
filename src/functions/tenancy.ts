@@ -32,6 +32,8 @@ import {
   extractToken,
   oidFromToken,
   requireRole,
+  rolesForRequest,
+  rolesPassGate,
   unauthorizedResponse,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
@@ -81,6 +83,7 @@ import {
   validateUpsertStepEnvelope,
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
+import { parseMoney, parseMoneyField } from "../money";
 import { hasLeaseEventWithin } from "../tenancyLeaseEvents";
 import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
@@ -1263,8 +1266,51 @@ function comparableTerm(value: unknown): number | string | null {
   return Number(value);
 }
 
+const MONEY_COLUMNS: readonly string[] = ["RentPerAnnum", "SecurityDepositHeld"];
+// DECIMAL(13,10) holds three integer digits; only the last review's increase can be a cut.
+const PERCENT_COLUMNS: Readonly<Record<string, { max: number; min: number }>> = {
+  EscalationPercent: { max: 999, min: 0 },
+  FixedReviewPercent: { max: 999, min: 0 },
+  LastReviewIncreasePercent: { max: 999, min: -100 },
+};
+const MONTH_COLUMNS: Readonly<Record<string, number>> = { OptionNoticeMonths: 1200, ReviewIntervalMonths: 1200, TermMonths: 1200 };
+
+/** A finite number from a number or a numeric string; null otherwise. */
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const num = Number(value.trim());
+  return Number.isFinite(num) ? num : null;
+}
+
+/** 400 for a malformed money, percent, month-count or text value on a tenancy write; null when fine. */
+function invalidNumericValue(body: Record<string, any>): HttpResponseInit | null {
+  const bad = (error: string): HttpResponseInit => ({ status: 400, jsonBody: { error } });
+  const blank = (v: unknown): boolean => v === undefined || v === null || v === "";
+  for (const col of MONEY_COLUMNS) {
+    const parsed = parseMoneyField(body[col], col);
+    if (!parsed.ok) return bad(parsed.error);
+  }
+  for (const [col, { max, min }] of Object.entries(PERCENT_COLUMNS)) {
+    if (blank(body[col])) continue;
+    const num = toFiniteNumber(body[col]);
+    if (num === null || num < min || num > max) return bad(`${col} must be a percentage from ${min} to ${max}`);
+  }
+  for (const [col, max] of Object.entries(MONTH_COLUMNS)) {
+    if (blank(body[col])) continue;
+    const num = toFiniteNumber(body[col]);
+    if (num === null || !Number.isInteger(num) || num < 0 || num > max) return bad(`${col} must be a whole number of months from 0 to ${max}`);
+  }
+  if (body.ReviewType !== undefined && body.ReviewType !== null && typeof body.ReviewType !== "string") {
+    return bad("ReviewType must be text");
+  }
+  return null;
+}
+
 /** 400 for a malformed schedule-term value; null when the body is fine. */
 function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
+  const numeric = invalidNumericValue(body);
+  if (numeric) return numeric;
   if (body.ReviewRatchet !== undefined && typeof body.ReviewRatchet !== "boolean") {
     return { status: 400, jsonBody: { error: "ReviewRatchet must be true or false" } };
   }
@@ -1459,7 +1505,12 @@ async function updateRegisterTenantRow(
 }
 
 function normaliseValue(col: string, value: any): any {
+  // NOT NULL with a default: blank means the default, not NULL (a NULL is a 500).
+  if (col === "ReviewType" && (value === null || (typeof value === "string" && value.trim() === ""))) return "none";
   if (value === null || value === "") return null;
+  // Numbers reach SQL as numbers: tedious would parseFloat "1,500" to 1.
+  if (MONEY_COLUMNS.includes(col)) return parseMoney(value) ?? value;
+  if (col in PERCENT_COLUMNS || col in MONTH_COLUMNS) return toFiniteNumber(value) ?? value;
   // Dates: trim a full ISO datetime down to YYYY-MM-DD for DATE columns.
   const dateCols = new Set([
     "Commencement",
@@ -1541,7 +1592,7 @@ function buildTenantParams(
     {
       name: "ReviewType",
       type: TYPES.NVarChar,
-      value: body.ReviewType ?? "none",
+      value: v("ReviewType") ?? "none",
     },
     {
       name: "ReviewIntervalMonths",
@@ -1858,7 +1909,7 @@ async function upsertOccupancy(
         Notes,
         RentPerAnnum: rentPerAnnum,
       });
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayInDarwin();
       await executeQuery(
         connection,
         `INSERT INTO dbo.TenantOccupancyHistory (
@@ -2147,6 +2198,8 @@ async function getReviewsDue(
 // register page). Buildings with no tenant rows are omitted; the client falls
 // back to 0 / no value for those.
 
+const TENANCY_DESK_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
+
 async function getPortfolioOccupancy(
   request: HttpRequest,
   context: InvocationContext,
@@ -2156,6 +2209,8 @@ async function getPortfolioOccupancy(
   const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (roleCheck) return roleCheck;
 
+  // Rent is the tenancy desk's; facilities read the rest. Mirrors the gate above.
+  const seesRent = rolesPassGate(await rolesForRequest(request), TENANCY_DESK_ROLES);
   const showTest = await showTestParam(request);
   let connection;
   try {
@@ -2209,7 +2264,7 @@ async function getPortfolioOccupancy(
       return {
         activeSqm,
         activeTenantCount,
-        annualRent,
+        annualRent: seesRent ? annualRent : null,
         buildingId: r.BuildingId as number,
         occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
         // The building's changes awaiting a director (WP26c): "Includes {n} changes awaiting a director".
@@ -3129,7 +3184,7 @@ async function upsertCarparkScheduleGroup(
           column: "CarparkScheduleGroups",
           kind: "write",
           ledgerEntries: [
-            { action: "schedule.manual_edit", after: group, before, subject: { id: group.id, type: "carpark_group" } },
+            { action: "schedule.manual_edit", after: next.find((g) => g.id === group.id) ?? group, before, subject: { id: group.id, type: "carpark_group" } },
           ],
           result: next,
           value: next,
@@ -3267,7 +3322,7 @@ async function upsertInfoSheetSectionHandler(
     });
     if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, sections: outcome.sections } };
+    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, rowVersion: outcome.rowVersion, sections: outcome.sections } };
   } catch (error: any) {
     context.error("upsertInfoSheetSection failed:", error.message);
     return errorResponse("Failed to upsert info sheet section", error.message);
@@ -3324,7 +3379,7 @@ async function deleteInfoSheetSectionHandler(
     });
     if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, sectionId } };
+    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, rowVersion: outcome.rowVersion, sectionId } };
   } catch (error: any) {
     context.error("deleteInfoSheetSection failed:", error.message);
     return errorResponse("Failed to delete info sheet section", error.message);
@@ -3381,7 +3436,7 @@ async function upsertInfoSheetRowHandler(
     });
     if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, sections: outcome.sections } };
+    return { status: 200, jsonBody: { infoSheetVersion: outcome.version, rowVersion: outcome.rowVersion, sections: outcome.sections } };
   } catch (error: any) {
     context.error("upsertInfoSheetRow failed:", error.message);
     return errorResponse("Failed to upsert info sheet row", error.message);
@@ -3439,7 +3494,7 @@ async function deleteInfoSheetRowHandler(
     });
     if (!outcome.ok) return outcome.response;
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, rowId, sectionId } };
+    return { status: 200, jsonBody: { deleted: true, infoSheetVersion: outcome.version, rowVersion: outcome.rowVersion, rowId, sectionId } };
   } catch (error: any) {
     context.error("deleteInfoSheetRow failed:", error.message);
     return errorResponse("Failed to delete info sheet row", error.message);
@@ -3482,37 +3537,63 @@ async function upsertLeaseAdministrationHandler(
     }
 
     const next: LeaseAdministration = normaliseLeaseAdministration(raw);
+    // Optional, so today's client keeps working: when sent, a stale tenant RowVersion is a 409.
+    const expected = body.RowVersion;
+    if (expected !== undefined && (typeof expected !== "string" || !ROW_VERSION_RE.test(expected))) {
+      return { status: 400, jsonBody: { error: "RowVersion must be the 16-character hex value from the tenant" } };
+    }
 
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT TenantId FROM dbo.Tenants WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
-    if (rows.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
-
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Tenants SET
-         LeaseAdministration = @LeaseAdministration,
-         UpdatedAt = SYSUTCDATETIME(),
-         UpdatedById = @UpdatedById,
-         UpdatedByName = @UpdatedByName
-       WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
-      [
-        { name: "LeaseAdministration", type: TYPES.NVarChar, value: JSON.stringify(next) },
-        { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
-        { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
-        { name: "TenantId", type: TYPES.Int, value: TenantId },
-        { name: "BuildingId", type: TYPES.Int, value: BuildingId },
-      ],
-    );
+    await beginTransaction(connection);
+    let rowVersion = "";
+    try {
+      const rows = await executeQuery(
+        connection,
+        `SELECT TenantId, RowVersion, UpdatedAt, UpdatedByName FROM dbo.Tenants WITH (UPDLOCK, ROWLOCK)
+          WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+        [
+          { name: "TenantId", type: TYPES.Int, value: TenantId },
+          { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+        ],
+      );
+      if (rows.length === 0) {
+        await rollbackQuietly(connection);
+        return { status: 404, jsonBody: { error: "Tenant not found" } };
+      }
+      const currentVersion = rowVersionHex(rows[0].RowVersion);
+      if (typeof expected === "string" && expected.toLowerCase() !== currentVersion) {
+        await rollbackQuietly(connection);
+        return conflictResponse(
+          { changedAt: isoTimestamp(rows[0].UpdatedAt), changedBy: (rows[0].UpdatedByName as string | null) ?? null },
+          { rowVersion: currentVersion },
+        );
+      }
+      const updated = await executeQuery(
+        connection,
+        `UPDATE dbo.Tenants SET
+           LeaseAdministration = @LeaseAdministration,
+           UpdatedAt = SYSUTCDATETIME(),
+           UpdatedById = @UpdatedById,
+           UpdatedByName = @UpdatedByName
+         OUTPUT INSERTED.RowVersion
+         WHERE TenantId = @TenantId AND BuildingId = @BuildingId`,
+        [
+          { name: "LeaseAdministration", type: TYPES.NVarChar, value: JSON.stringify(next) },
+          { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
+          { name: "UpdatedByName", type: TYPES.NVarChar, value: caller.name },
+          { name: "TenantId", type: TYPES.Int, value: TenantId },
+          { name: "BuildingId", type: TYPES.Int, value: BuildingId },
+        ],
+      );
+      rowVersion = rowVersionHex(updated[0]?.RowVersion);
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackQuietly(connection);
+      throw err;
+    }
 
     invalidateTenantAndBuilding(TenantId, BuildingId);
-    return { status: 200, jsonBody: { leaseAdministration: next } };
+    return { status: 200, jsonBody: { leaseAdministration: next, rowVersion } };
   } catch (error: any) {
     context.error("upsertLeaseAdministration failed:", error.message);
     return errorResponse("Failed to upsert lease administration", error.message);
@@ -3567,7 +3648,7 @@ async function upsertMiscFeeHandler(
           column: "MiscFees",
           kind: "write",
           ledgerEntries: [
-            { action: "schedule.manual_edit", after: fee, before, subject: { id: fee.id, type: "misc_fee" } },
+            { action: "schedule.manual_edit", after: next.find((f) => f.id === fee.id) ?? fee, before, subject: { id: fee.id, type: "misc_fee" } },
           ],
           result: next,
           value: next,
