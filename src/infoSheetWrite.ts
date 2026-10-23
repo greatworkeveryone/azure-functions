@@ -1,6 +1,7 @@
 import type { HttpResponseInit } from "@azure/functions";
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
+import { AppRole } from "./auth";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "./db";
 import { recordInfoSheetChange } from "./infoSheetLedger";
 import type { LedgerActor } from "./ledger/types";
@@ -27,7 +28,22 @@ import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
 // S3-6: a delete ledgers only the entry removed, with where it was (infoSheetLedger.ts),
 // not the whole sheet: the whole sheet could pass the ledger's 64 KB cap.
 
+/** Every info sheet write is the tenancy desk's, and counts against one bucket of 60 a minute per person (a bulk add is one write). */
+export const INFO_SHEET_ROLES = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR] as const;
+export const INFO_SHEET_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
+
+/** A row as a bulk add sends it: its place is the server's to give when it names none. */
+export type InfoSheetNewRow = Omit<InfoSheetRow, "displayOrder"> & { displayOrder?: number };
+
+/** One section's share of a bulk add: rows for an existing section, or a new section with its first rows. */
+export interface InfoSheetAddition {
+  isNew: boolean;
+  rows: InfoSheetNewRow[];
+  section: { displayOrder?: number; id: string; title?: string };
+}
+
 export type InfoSheetOp =
+  | { additions: InfoSheetAddition[]; kind: "addRows" }
   | { kind: "deleteRow"; rowId: string; sectionId: string }
   | { kind: "deleteSection"; sectionId: string }
   | { isNew: boolean; kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
@@ -38,8 +54,13 @@ export type InfoSheetRemoved =
   | { position: number; row: unknown; sectionId: string; sectionTitle: unknown }
   | { position: number; section: unknown };
 
+/** What a bulk add put on the sheet, as the ledger keeps it: only the rows added, by section. */
+export interface InfoSheetAdded {
+  additions: { isNew: boolean; rows: InfoSheetRow[]; sectionId: string; sectionTitle: unknown }[];
+}
+
 export type InfoSheetEdit =
-  | { json: string; ok: true; removed: InfoSheetRemoved | null; sections: InfoSheetSection[] }
+  | { added: InfoSheetAdded | null; json: string; ok: true; removed: InfoSheetRemoved | null; sections: InfoSheetSection[] }
   | { error: string; ok: false; status: 404 | 409 | 422 };
 
 const UNSAFE = "This tenancy's info sheet is stored in a form that can't be changed safely, so nothing was changed. Ask an admin to look at it.";
@@ -96,10 +117,63 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const idOf = (value: unknown): unknown => (isRecord(value) ? value.id : undefined);
 const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
 
+/** A row as a bulk add stores it: the fields this code knows, in the order it was entered after the rows already there. */
+const storedRow = (row: InfoSheetNewRow, order: number): InfoSheetRow => ({
+  body: row.body,
+  displayOrder: row.displayOrder ?? order,
+  id: row.id,
+  ...(row.strikethrough === undefined ? {} : { strikethrough: row.strikethrough }),
+  subheader: row.subheader,
+});
+
+/**
+ * Every addition in one edit: rows onto existing sections, new sections with their
+ * first rows. One refusal (a section gone, a row id already there) refuses all of
+ * it, so a retry after a refused or half-seen save can't leave rows added twice.
+ */
+function addRows(elements: { raw: string; value: unknown }[], additions: InfoSheetAddition[]): InfoSheetEdit {
+  const raws = elements.map((element) => element.raw);
+  const values = elements.map((element) => element.value);
+  const taken = new Set<string>();
+  for (const value of values) {
+    if (!isRecord(value) || !Array.isArray(value.rows)) continue;
+    for (const existing of value.rows) {
+      const id = idOf(existing);
+      if (typeof id === "string") taken.add(id);
+    }
+  }
+  const added: InfoSheetAdded["additions"] = [];
+  for (const addition of additions) {
+    const at = values.findIndex((value) => idOf(value) === addition.section.id);
+    if (addition.isNew ? at !== -1 : at === -1) return refuse(addition.isNew ? 409 : 404, addition.isNew ? ALREADY : NO_SECTION);
+    if (addition.rows.some((row) => taken.has(row.id))) return refuse(409, ALREADY);
+    if (addition.isNew) {
+      const rows = addition.rows.map((row, index) => storedRow(row, index));
+      const created = { displayOrder: addition.section.displayOrder ?? values.length, id: addition.section.id, rows, title: addition.section.title };
+      raws.push(JSON.stringify(created));
+      values.push(created);
+      added.push({ isNew: true, rows, sectionId: addition.section.id, sectionTitle: addition.section.title });
+    } else {
+      const section = values[at];
+      if (!isRecord(section) || !Array.isArray(section.rows)) return refuse(422, UNSAFE);
+      const existing: unknown[] = section.rows;
+      const rows = addition.rows.map((row, index) => storedRow(row, existing.length + index));
+      const next = { ...section, rows: [...existing, ...rows] };
+      raws[at] = JSON.stringify(next);
+      values[at] = next;
+      added.push({ isNew: false, rows, sectionId: addition.section.id, sectionTitle: section.title });
+    }
+    for (const row of addition.rows) taken.add(row.id);
+  }
+  const json = `[${raws.join(",")}]`;
+  return { added: { additions: added }, json, ok: true, removed: null, sections: JSON.parse(json) as InfoSheetSection[] };
+}
+
 /** The column after one change, with every other entry as stored; or why not. */
 export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
   const elements = elementsOf(raw);
   if (elements === null) return refuse(422, UNSAFE);
+  if (op.kind === "addRows") return addRows(elements, op.additions);
   const sectionId = op.kind === "upsertSection" ? op.section.id : op.sectionId;
   const at = elements.findIndex((element) => idOf(element.value) === sectionId);
   const raws = elements.map((element) => element.raw);
@@ -141,7 +215,7 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     raws[at] = JSON.stringify({ ...section, rows: nextRows });
   }
   const json = `[${raws.join(",")}]`;
-  return { json, ok: true, removed, sections: JSON.parse(json) as InfoSheetSection[] };
+  return { added: null, json, ok: true, removed, sections: JSON.parse(json) as InfoSheetSection[] };
 }
 
 /** The version a write names (`InfoSheetVersion`), or a 400 when it doesn't name one. */
@@ -164,13 +238,27 @@ const WRITE_SHEET = `UPDATE dbo.Tenants SET
  OUTPUT INSERTED.InfoSheetVersion
  WHERE TenantId = @TenantId AND BuildingId = @BuildingId`;
 
+/** The small part of a ledger row that names what changed; a delete's Before and a bulk add's After hold the content. */
+function ledgerAfter(op: InfoSheetOp): unknown {
+  switch (op.kind) {
+    case "addRows":
+      return undefined;
+    case "deleteRow":
+      return { rowId: op.rowId, sectionId: op.sectionId };
+    case "upsertSection":
+      return { sectionId: op.section.id };
+    default:
+      return { sectionId: op.sectionId };
+  }
+}
+
 export interface InfoSheetWrite {
   buildingId: number;
   caller: { id: string; name: string };
   /** The version the client was shown; every write names it (D11 review). */
   expectedVersion: number;
-  /** Deletes are ledgered with the entry removed (S3-6). */
-  ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
+  /** Deletes are ledgered with the entry removed, a bulk add with the rows added (S3-6). */
+  ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_rows_added" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
   op: InfoSheetOp;
   tenantId: number;
 }
@@ -214,7 +302,7 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
       await recordInfoSheetChange(connection, {
         action: write.ledger.action,
         actor: write.ledger.actor,
-        after: op.kind === "deleteRow" ? { rowId: op.rowId, sectionId: op.sectionId } : { sectionId: op.kind === "upsertSection" ? op.section.id : op.sectionId },
+        after: edit.added ?? ledgerAfter(op),
         before: edit.removed,
         buildingId: write.buildingId,
         subject: { id: write.tenantId, type: "tenancy" },

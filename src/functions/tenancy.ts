@@ -135,7 +135,7 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
+import { INFO_SHEET_RATE_LIMIT, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
@@ -3176,8 +3176,6 @@ async function deleteCarparkScheduleGroup(
 }
 
 // ── POST /api/upsertInfoSheetSection ─────────────────────────────────────────
-
-const INFO_SHEET_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
 
 async function upsertInfoSheetSectionHandler(
   request: HttpRequest,
