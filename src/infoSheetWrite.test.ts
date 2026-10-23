@@ -24,11 +24,11 @@ describe("jsonArrayElements", () => {
 });
 
 describe("editInfoSheet", () => {
-  it("removes a section and keeps the others byte for byte, with the whole array before", () => {
+  it("removes a section and keeps the others byte for byte, naming the one removed and where it was (S3-6)", () => {
     const edit = editInfoSheet(STORED, { kind: "deleteSection", sectionId: "a" });
     if (!edit.ok) throw new Error("expected ok");
     expect(edit.json).toBe(`[${B},${C}]`);
-    expect(edit.before).toEqual(JSON.parse(STORED));
+    expect(edit.removed).toEqual({ position: 0, section: JSON.parse(A) });
     expect(edit.sections.map((section) => section.id)).toEqual(["b", "c"]);
   });
 
@@ -38,7 +38,7 @@ describe("editInfoSheet", () => {
     const [first, second, third] = jsonArrayElements(edit.json)?.map((element) => element.raw) ?? [];
     expect([first, second]).toEqual([A, B]);
     expect(JSON.parse(third)).toEqual({ ...JSON.parse(C), rows: [JSON.parse(C).rows[1]] });
-    expect(edit.before).toEqual(JSON.parse(STORED));
+    expect(edit.removed).toEqual({ position: 0, row: JSON.parse(C).rows[0], sectionId: "c", sectionTitle: "C" });
   });
 
   it("updates a section's own fields in place, and appends a new one, leaving the rest alone", () => {
@@ -96,7 +96,7 @@ describe("editInfoSheet", () => {
   it("starts an empty or missing column as an empty list for a new section", () => {
     for (const raw of [null, undefined, "", "  "]) {
       const edit = editInfoSheet(raw, { isNew: true, kind: "upsertSection", section: { displayOrder: 0, id: "a", rows: [], title: "A" } });
-      expect(edit).toEqual(expect.objectContaining({ before: [], ok: true }));
+      expect(edit).toEqual(expect.objectContaining({ ok: true }));
     }
   });
 

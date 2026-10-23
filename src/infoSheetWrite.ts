@@ -2,7 +2,7 @@ import type { HttpResponseInit } from "@azure/functions";
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "./db";
-import { record } from "./ledger";
+import { recordInfoSheetChange } from "./infoSheetLedger";
 import type { LedgerActor } from "./ledger/types";
 import type { InfoSheetRow, InfoSheetSection } from "./infoSheetLogic";
 import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
@@ -16,13 +16,16 @@ import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
 // it as an empty sheet and saved the change over it. Each write runs under the
 // tenancy's row lock and moves InfoSheetVersion on. A delete names the version
 // it was shown, is refused (409) when the sheet has changed since, and is
-// ledgered with the whole array as it was.
+// ledgered with the entry it removed.
 //
 // D11 review: every write names the version it was shown (409 when stale). A
 // section write changes only the section's own fields (title, order,
 // strikethrough) and keeps its stored rows; rows change only through row
 // writes. A write for a section or row that is no longer there is a 404 unless
 // it says it is new, so a stale screen can't bring back what a colleague took off.
+//
+// S3-6: a delete ledgers only the entry removed, with where it was (infoSheetLedger.ts),
+// not the whole sheet: the whole sheet could pass the ledger's 64 KB cap.
 
 export type InfoSheetOp =
   | { kind: "deleteRow"; rowId: string; sectionId: string }
@@ -30,8 +33,13 @@ export type InfoSheetOp =
   | { isNew: boolean; kind: "upsertRow"; row: InfoSheetRow; sectionId: string }
   | { isNew: boolean; kind: "upsertSection"; section: InfoSheetSection };
 
+/** What a delete took off, as stored, and the place it held in its list (a section's among the sections, a row's among its section's rows). */
+export type InfoSheetRemoved =
+  | { position: number; row: unknown; sectionId: string; sectionTitle: unknown }
+  | { position: number; section: unknown };
+
 export type InfoSheetEdit =
-  | { before: unknown[]; json: string; ok: true; sections: InfoSheetSection[] }
+  | { json: string; ok: true; removed: InfoSheetRemoved | null; sections: InfoSheetSection[] }
   | { error: string; ok: false; status: 404 | 409 | 422 };
 
 const UNSAFE = "This tenancy's info sheet is stored in a form that can't be changed safely, so nothing was changed. Ask an admin to look at it.";
@@ -92,13 +100,14 @@ const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ err
 export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
   const elements = elementsOf(raw);
   if (elements === null) return refuse(422, UNSAFE);
-  const before = elements.map((element) => element.value);
   const sectionId = op.kind === "upsertSection" ? op.section.id : op.sectionId;
   const at = elements.findIndex((element) => idOf(element.value) === sectionId);
   const raws = elements.map((element) => element.raw);
+  let removed: InfoSheetRemoved | null = null;
 
   if (op.kind === "deleteSection") {
     if (at === -1) return refuse(404, NO_SECTION);
+    removed = { position: at, section: elements[at].value };
     raws.splice(at, 1);
   } else if (op.kind === "upsertSection") {
     if (at === -1 && !op.isNew) return refuse(404, NO_SECTION);
@@ -122,6 +131,7 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     let nextRows: unknown[];
     if (op.kind === "deleteRow") {
       if (rowAt === -1) return refuse(404, NO_ROW);
+      removed = { position: rowAt, row: rows[rowAt], sectionId: op.sectionId, sectionTitle: section.title };
       nextRows = rows.filter((_row, index) => index !== rowAt);
     } else {
       if (rowAt === -1 && !op.isNew) return refuse(404, NO_ROW);
@@ -131,7 +141,7 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     raws[at] = JSON.stringify({ ...section, rows: nextRows });
   }
   const json = `[${raws.join(",")}]`;
-  return { before, json, ok: true, sections: JSON.parse(json) as InfoSheetSection[] };
+  return { json, ok: true, removed, sections: JSON.parse(json) as InfoSheetSection[] };
 }
 
 /** The version a write names (`InfoSheetVersion`), or a 400 when it doesn't name one. */
@@ -159,7 +169,7 @@ export interface InfoSheetWrite {
   caller: { id: string; name: string };
   /** The version the client was shown; every write names it (D11 review). */
   expectedVersion: number;
-  /** Deletes are ledgered with the whole array as it was. */
+  /** Deletes are ledgered with the entry removed (S3-6). */
   ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
   op: InfoSheetOp;
   tenantId: number;
@@ -201,11 +211,11 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
     ]);
     if (write.ledger) {
       const { op } = write;
-      await record(connection, {
+      await recordInfoSheetChange(connection, {
         action: write.ledger.action,
         actor: write.ledger.actor,
         after: op.kind === "deleteRow" ? { rowId: op.rowId, sectionId: op.sectionId } : { sectionId: op.kind === "upsertSection" ? op.section.id : op.sectionId },
-        before: { sections: edit.before },
+        before: edit.removed,
         buildingId: write.buildingId,
         subject: { id: write.tenantId, type: "tenancy" },
         tenantId: write.tenantId,

@@ -128,7 +128,7 @@ beforeEach(() => {
 
 // ── upsertInfoSheetSection ───────────────────────────────────────────────────
 
-const ledger = jest.requireMock("../ledger") as { record: jest.Mock };
+const ledger = jest.requireMock("../ledger") as { newCorrelationId: jest.Mock; record: jest.Mock };
 
 const S1 = `{"id":"sec-1","title":"Keys","rows":[{"id":"row-1","subheader":"Spare","body":"Office safe","displayOrder":0},{"id":"row-2","subheader":"Fob","body":"x","displayOrder":1}],"displayOrder":0,"legacyNote":"kept 1.50"}`;
 const S2 = `{"id":"sec-2","title":"Contacts","rows":[],"displayOrder":1}`;
@@ -148,12 +148,15 @@ const calls = () => db.executeQuery.mock.calls.map((c: unknown[]) => ({ params: 
 const written = () => calls().find((c) => /UPDATE dbo\.Tenants SET/.test(c.sql));
 const writtenJson = () => written()?.params.find((p) => p.name === "InfoSheetSections")?.value as string | undefined;
 
+// What each delete puts in the ledger's Before: only the entry removed, and where it was (S3-6).
+const SECTION_REMOVED = { position: 0, section: JSON.parse(S1) };
+const ROW_REMOVED = { position: 0, row: JSON.parse(S1).rows[0], sectionId: "sec-1", sectionTitle: "Keys" };
 const DELETES = [
-  ["deleteInfoSheetSection", { BuildingId: 5, SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_section_delete", { sectionId: "sec-1" }],
-  ["deleteInfoSheetRow", { BuildingId: 5, RowId: "row-1", SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_row_delete", { rowId: "row-1", sectionId: "sec-1" }],
+  ["deleteInfoSheetSection", { BuildingId: 5, SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_section_delete", { sectionId: "sec-1" }, SECTION_REMOVED],
+  ["deleteInfoSheetRow", { BuildingId: 5, RowId: "row-1", SectionId: "sec-1", TenantId: 1 }, "tenancy.info_sheet_row_delete", { rowId: "row-1", sectionId: "sec-1" }, ROW_REMOVED],
 ] as const;
 
-describe.each(DELETES)("%s", (route, body, action, after) => {
+describe.each(DELETES)("%s", (route, body, action, after, before) => {
   const send = (extra: Record<string, unknown> = { InfoSheetVersion: 4 }) => handlers[route](makeRequest({ ...body, ...extra }), ctx);
 
   it("is the tenancy desk's, and rate-limited", async () => {
@@ -215,14 +218,15 @@ describe.each(DELETES)("%s", (route, body, action, after) => {
     expect(writtenJson()).toContain(S2);
   });
 
-  it("ledgers the change with the whole sheet as it was, before the commit", async () => {
+  it("ledgers the entry removed, not the whole sheet, before the commit (S3-6)", async () => {
     await send();
+    expect(ledger.record).toHaveBeenCalledTimes(1);
     expect(ledger.record).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         action,
         after,
-        before: { sections: JSON.parse(STORED) },
+        before,
         buildingId: 5,
         subject: { id: 1, type: "tenancy" },
         tenantId: 1,
@@ -351,5 +355,65 @@ describe("a screen out of date can't undo a colleague's change (the D11 review's
     const row = { body: "y", displayOrder: 0, id: "row-1", subheader: "Spare" };
     expect((await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx)).status).toBe(409);
     expect(written()).toBeUndefined();
+  });
+});
+
+// S3-6 (D11 re-check): the whole array was ledgered against a 64 KB cap, so a delete
+// on a sheet over 64 KB failed with a 500. Only the removed entry is ledgered now;
+// one too big for a ledger row is split across several rows in the same
+// transaction, and never refused for size.
+describe("deletes on a sheet over 64 KB (S3-6)", () => {
+  const bigRow = (id: string, size: number) => ({ body: "x".repeat(size), displayOrder: 0, id, subheader: "Clause" });
+  const section = (id: string, rows: unknown[], order = 0) => ({ displayOrder: order, id, rows, title: `Section ${id}` });
+  const setSheet = (sections: unknown[]) => {
+    sheet = { ...sheet, InfoSheetSections: JSON.stringify(sections) };
+  };
+  const ledgered = () => ledger.record.mock.calls.map((call: unknown[]) => call[1] as { after?: unknown; before?: unknown; correlationId?: string });
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+  it("takes a small section off a 100 KB sheet and ledgers just that section", async () => {
+    setSheet([section("big-1", [bigRow("a", 30_000)]), section("big-2", [bigRow("b", 30_000)]), section("big-3", [bigRow("c", 30_000)]), section("small", [bigRow("d", 20)], 3)]);
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "small", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(ledgered()).toHaveLength(1);
+    expect(bytes(ledgered()[0].before)).toBeLessThan(1000);
+    expect(ledgered()[0].before).toEqual({ position: 3, section: section("small", [bigRow("d", 20)], 3) });
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes a small row off a section that holds 100 KB and ledgers just that row", async () => {
+    setSheet([section("s", [bigRow("a", 40_000), bigRow("b", 40_000), bigRow("small", 10), bigRow("c", 40_000)])]);
+    const res = await handlers.deleteInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, RowId: "small", SectionId: "s", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    expect(ledgered()).toHaveLength(1);
+    expect(ledgered()[0].before).toEqual({ position: 2, row: bigRow("small", 10), sectionId: "s", sectionTitle: "Section s" });
+  });
+
+  it("a section too big for one ledger row is logged across several, in the same transaction, losing no text", async () => {
+    const huge = section("huge", [bigRow("a", 40_000), bigRow("b", 40_000), bigRow("c", 40_000)], 1);
+    setSheet([section("first", []), huge]);
+    ledger.newCorrelationId.mockReturnValue("11111111-2222-4333-8444-555555555555");
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "huge", TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+
+    const rows = ledgered();
+    expect(rows.length).toBeGreaterThan(2);
+    expect(new Set(rows.map((row) => row.correlationId))).toEqual(new Set(["11111111-2222-4333-8444-555555555555"]));
+    for (const row of rows) expect(bytes(row.before)).toBeLessThanOrEqual(64 * 1024);
+    const parts = rows.map((row) => row.before as { json: string; part: number; parts: number });
+    expect(parts.map((part) => part.part)).toEqual(parts.map((_part, index) => index + 1));
+    expect(new Set(parts.map((part) => part.parts))).toEqual(new Set([rows.length]));
+    expect(JSON.parse(parts.map((part) => part.json).join(""))).toEqual({ position: 1, section: huge });
+    expect(ledger.record.mock.invocationCallOrder.at(-1)).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+    expect(writtenJson()).toBe(JSON.stringify([section("first", [])]));
+  });
+
+  it("rolls back, removing nothing, when any part of a split ledger entry fails", async () => {
+    setSheet([section("huge", [bigRow("a", 40_000), bigRow("b", 40_000)])]);
+    ledger.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("ledger down"));
+    const res = await handlers.deleteInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, SectionId: "huge", TenantId: 1 }), ctx);
+    expect(res.status).toBe(500);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
   });
 });
