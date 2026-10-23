@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { Connection, TYPES } from "tedious";
 import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
+import { ACTION_ROLES } from "../action-roles";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
@@ -480,13 +481,15 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
 // ── POST /api/createWorkRequest ───────────────────────────────────────────────
 // Creates the WR in myBuildings, fetches the fresh record back (so we have
 // the authoritative WorkRequestID and LastModifiedDate), upserts it into SQL,
-// and returns the AzureSqlWorkRequest row the frontend expects.
+// and returns the AzureSqlWorkRequest row the frontend expects. Facilities
+// managers, admin and directors (ACTION_ROLES.createWorkRequest): Job Intake
+// offers New request to exactly those roles.
 
 async function handleCreateWorkRequest(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.createWorkRequest.gate);
   if (denied) return denied;
 
   let connection;
