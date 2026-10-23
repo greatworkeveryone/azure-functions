@@ -38,6 +38,7 @@ const post = (value: unknown): HttpRequest => ({ json: async () => value }) as u
 // Admin -> Features answer 400 and the module can never be switched on.
 const FRONTEND_FEATURE_KEYS = [
   "activity",
+  "aiAssist",
   "assets",
   "decisionJobs",
   "escalations",

@@ -422,6 +422,11 @@ export const ACTION_ROLES = {
     routes: ["revertRentReview"],
     why: "Revert an applied rent review (REVIEW_APPROVE_ROLES). Admin is refused.",
   },
+  runAiHealthCheck: {
+    gate: [A.ADMIN],
+    routes: ["runAiHealthCheck"],
+    why: "Send a test call through the AI gateway (echo_test) to check the switch, the provider and the log: admin only, as the other technical administration (viewTechnicalSettings). It reads no record and takes no input.",
+  },
   sendPurchaseOrder: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES_APPROVAL],
     routes: ["sendPurchaseOrder", "previewPurchaseOrder"],
@@ -468,6 +473,11 @@ export const ACTION_ROLES = {
     gate: [A.CFO],
     routes: ["getAccessEvents"],
     why: "Recent sign-ins and anomalies (ACCESS_VIEW_ROLES).",
+  },
+  viewAiActivity: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    routes: ["listAiCalls"],
+    why: "Admin → AI activity: the log of every AI call (who, which purpose, how big, how it ended): admin and directors, as Settings and rollout controls (viewAdmin). No route returns stored text.",
   },
   viewFinanceControlsPack: { gate: [A.CFO, A.DIRECTOR], routes: ["getFinanceControlsPack"], why: "Read the CFO controls matrix and sign-off history (WP55)." },
   signFinanceControlsPack: { gate: [A.CFO], match: "exact", routes: ["signFinanceControlsPack"], why: "The CFO records her review of the current controls pack; this enables no MYOB writes." },
