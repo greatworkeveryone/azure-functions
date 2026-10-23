@@ -54,6 +54,7 @@ const FRONTEND_FEATURE_KEYS = [
   "payroll",
   "procedures",
   "quotes",
+  "recurringFaults",
   "rentReviews",
   "tenancySchedule",
   "tenancyScheduleReport",

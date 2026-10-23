@@ -132,6 +132,17 @@ stored on it (`JobDecisionRequests.AutoEscalate`): always for Soon, Routine and
 Fixed; the raiser's tick for Urgent, off unless ticked; never for an Emergency.
 An Urgent request that was not ticked has no due moment, so the sweep reminds it
 and then leaves it where it is until someone answers or withdraws it.
+Recurring faults (`recurringFaults`, SC-AI5) ships hidden and needs no app setting and no
+migration: `getRecurringFaults` only reads jobs, asset links and invoices and writes nothing,
+so it has no switch. Set it to preview or enabled per role in Admin → Features; it shows on
+Maintenance, on an asset's detail and in a building's overview for whoever can see
+Maintenance (admin, director and the facilities and accounts roles). A signal is three or more jobs on
+one asset, or on one trade on one level of a building, made in the last 365 Darwin days
+(`RECURRING_FAULT_MIN_JOBS` and `RECURRING_FAULT_WINDOW_DAYS`, `src/recurringFaultConstants.ts`).
+Archived jobs, Admin / Accounts jobs, jobs the scheduler made and test records (unless an admin has
+Show test data on) are not counted. Spend is approved incoming invoices excluding GST: Floorplan
+holds amounts GST inclusive, so it is 10/11 of them, and a stage-1 approval still waiting on a
+director is not spend yet.
 
 ## Migrations
 

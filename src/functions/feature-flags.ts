@@ -28,8 +28,8 @@ const ROLE_NAMES: readonly string[] = Object.values(AppRole);
 const FEATURE_KEYS = [
   "activity", "aiAssist", "assets", "comms", "contractorSuggestions", "decisionJobs", "documentation", "escalations",
   "finance", "guidedHelp", "incoming", "inspections", "jobs", "keys", "maintenance", "maintenanceSpendReport",
-  "majorEvents", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule", "tenancyScheduleReport",
-  "tenancyVacancies", "timesheets",
+  "majorEvents", "payroll", "procedures", "quotes", "recurringFaults", "rentReviews", "tenancySchedule",
+  "tenancyScheduleReport", "tenancyVacancies", "timesheets",
 ] as const;
 
 export async function getFeatureFlags(
