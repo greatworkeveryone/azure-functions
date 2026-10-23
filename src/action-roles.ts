@@ -297,6 +297,11 @@ export const ACTION_ROLES = {
     routes: ["upsertDefectsPeriod", "archiveDefectsPeriod"],
     why: "Add, edit and archive defects periods, and book inside one with a reason.",
   },
+  manageManualBuildings: {
+    gate: [A.ADMIN],
+    routes: ["upsertManualBuilding"],
+    why: "Add a building myBuildings doesn't manage, and edit it (upsertManualBuilding: authorizeWrite with ADMIN only).",
+  },
   managePurchaseOrders: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES_APPROVAL],
     routes: ["deletePurchaseOrder", "unmarkPurchaseOrderComplete"],

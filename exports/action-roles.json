@@ -271,6 +271,9 @@
     "director",
     "facilities_manager"
   ],
+  "manageManualBuildings": [
+    "admin"
+  ],
   "manageOperationalEvents": [
     "admin",
     "director",
