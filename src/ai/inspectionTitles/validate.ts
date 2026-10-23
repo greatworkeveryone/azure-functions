@@ -5,8 +5,8 @@
 // model cannot add a job, a finding or a priority through this door.
 //
 // This proves each title is short plain text and that there is one per job, not that it
-// says the same thing as the job: the prompt asks for that, and the person sees the old
-// and the new title side by side before anything is used.
+// says the same thing as the job: the prompt asks for that, and the new titles land in
+// fields the person reads and can change (or undo all at once) before anything is raised.
 
 import { jobCountOf } from "./input";
 import { accept, isRecord, refuse, unknownKeys } from "../validate";
