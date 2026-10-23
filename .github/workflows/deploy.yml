@@ -195,9 +195,13 @@ jobs:
             --settings "BUILD_SHA=${{ needs.verify.outputs.build_sha }}" "BUILD_TIME=${{ needs.verify.outputs.build_time }}" \
             --output none
 
+      # `az functionapp show` returns null for defaultHostName on a Flex Consumption
+      # app (older API surface), which left curl with no host; the generic resource
+      # read reports it.
       - name: Smoke test
         run: |
-          host=$(az functionapp show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query defaultHostName --output tsv)
+          host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
+          test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
           curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"
 
       # Read-only, for whoever approves production: what to apply by hand first.
@@ -293,7 +297,11 @@ jobs:
             --settings "BUILD_SHA=${{ needs.verify.outputs.build_sha }}" "BUILD_TIME=${{ needs.verify.outputs.build_time }}" \
             --output none
 
+      # `az functionapp show` returns null for defaultHostName on a Flex Consumption
+      # app (older API surface), which left curl with no host; the generic resource
+      # read reports it.
       - name: Smoke test
         run: |
-          host=$(az functionapp show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query defaultHostName --output tsv)
+          host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
+          test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
           curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"
