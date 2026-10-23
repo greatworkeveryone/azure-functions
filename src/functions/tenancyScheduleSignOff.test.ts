@@ -157,6 +157,18 @@ const storedRow = (over: Record<string, unknown> = {}) => [
   { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
 ];
 const sqlRun = (pattern: RegExp) => db.executeQuery.mock.calls.filter((call) => pattern.test(call[1] as string));
+
+/** An edit's reads by what they ask, not their order: expiry and option text edits also look for
+ *  migration 106's columns and lease events (data review S2-3, S2-4); absent here. */
+function editReads(locked: Record<string, unknown>) {
+  return async (_connection: unknown, sql: string) => {
+    if (sql.includes("WITH (UPDLOCK, ROWLOCK)")) return [locked];
+    if (sql.includes("COL_LENGTH(")) return [{ Len: null }];
+    if (sql.includes("OBJECT_ID('dbo.LeaseEvents'")) return [{ Id: null }];
+    if (/FROM dbo\.Tenants t WHERE TenantId = @Id/.test(sql)) return storedRow();
+    return [];
+  };
+}
 const actions = () => ledger.record.mock.calls.map(([, entry]) => entry.action);
 
 describe("upsertRegisterTenant on a signed-off tenancy (PLAN WP24)", () => {
@@ -182,10 +194,7 @@ describe("upsertRegisterTenant on a signed-off tenancy (PLAN WP24)", () => {
     ["ReviewRatchet", true, { ReviewRatchet: false }],
     ["ReviewIntervalMonths", 24, { ReviewIntervalMonths: 12 }],
   ])("clears the sign-off when %s changes, in the same transaction, with the reason ledgered", async (field, value, current) => {
-    db.executeQuery
-      .mockResolvedValueOnce([lockedRow({ ...SIGNED, ...current })])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(storedRow());
+    db.executeQuery.mockImplementation(editReads(lockedRow({ ...SIGNED, ...current })));
     const res = await handlers.upsertRegisterTenant(
       makeRequest({ [field]: value, SignOffClearReason: "Lease variation received", TenantId: 7 }),
       ctx,
@@ -210,10 +219,7 @@ describe("upsertRegisterTenant on a signed-off tenancy (PLAN WP24)", () => {
     ["last review", { LastReviewDate: "2026-01-01" }],
     ["a rent value re-sent unchanged", { RentPerAnnum: 100000 }],
   ])("leaves the sign-off alone when only %s is edited", async (_what, change) => {
-    db.executeQuery
-      .mockResolvedValueOnce([lockedRow({ ...SIGNED, RentPerAnnum: 100000 })])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(storedRow());
+    db.executeQuery.mockImplementation(editReads(lockedRow({ ...SIGNED, RentPerAnnum: 100000 })));
     const res = await handlers.upsertRegisterTenant(makeRequest({ ...change, TenantId: 7 }), ctx);
     expect(res.status).toBe(200);
     expect(sqlRun(/ScheduleSignedOffAt = NULL/)).toHaveLength(0);

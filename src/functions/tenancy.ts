@@ -109,6 +109,7 @@ import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../r
 import { selectWithLeaseOptions } from "../leaseOptionColumns";
 import { concludeLeaseEscalations } from "../leaseEvents/escalations";
 import { closeEventsForEditedExpiry } from "../leaseEvents/expiryEdit";
+import { optionCountsForTextEdit } from "../leaseEvents/optionText";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -1287,7 +1288,7 @@ const SCHEDULE_TERM_FIELDS: Record<string, string> = {
 const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", "ReviewIntervalMonths"] as const;
 
 const LOCKED_TENANT_COLUMNS = `
-  TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
+  TenantId, BuildingId, Status, Expiry, OptionPeriods, RowVersion, UpdatedByName, UpdatedAt,
   CpiCapPercent, CpiFloorPercent, CpiReferenceQuarterRule, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
@@ -1467,6 +1468,18 @@ async function updateRegisterTenantRow(
       await commitTransaction(connection);
       return null;
     }
+    // Data review S2-4: the option text and the structured counts move together.
+    const optionCounts = fields.OptionPeriods !== undefined
+      ? await optionCountsForTextEdit(connection, tenantId, fields.OptionPeriods as string | null)
+      : null;
+    if (optionCounts) {
+      setParts.push("OptionsTotal = @OptionsTotal", "OptionsRemaining = @OptionsRemaining", "OptionTermMonths = @OptionTermMonths");
+      updateParams.push(
+        { name: "OptionsTotal", type: TYPES.Int, value: optionCounts.after.total },
+        { name: "OptionsRemaining", type: TYPES.Int, value: optionCounts.after.remaining },
+        { name: "OptionTermMonths", type: TYPES.Int, value: optionCounts.after.termMonths },
+      );
+    }
     const termsChanged = Object.keys(termsAfter).length > 0;
     // A change to what the schedule is computed from clears a sign-off, and the
     // person says why (PLAN WP24). Asked before anything is written.
@@ -1504,6 +1517,20 @@ async function updateRegisterTenantRow(
     }
     if (priorSignOff && clearReason) {
       await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
+    }
+    if (optionCounts) {
+      const counts = (c: { remaining: number | null; termMonths: number | null; total: number | null }) => ({
+        optionsRemaining: c.remaining,
+        optionsTotal: c.total,
+        optionTermMonths: c.termMonths,
+      });
+      await ledger.record(connection, {
+        ...scope,
+        action: "schedule.terms_edit",
+        after: { ...counts(optionCounts.after), optionPeriods: fields.OptionPeriods ?? null },
+        before: { ...counts(optionCounts.before), optionPeriods: (current.OptionPeriods as string | null | undefined) ?? null },
+        ruleApplied: "options_from_text",
+      });
     }
     // Data review S2-3: open lease events of the old expiry close with the edit.
     const oldExpiry = toIsoDate(current.Expiry) ?? null;
