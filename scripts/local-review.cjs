@@ -44,6 +44,8 @@ function prepareRuntime() {
     DEV_ROLE_OVERRIDE_ENABLED: "true", APP_BASE_URL: "http://localhost:3000",
     GRAPH_MAILBOX_ACTIVE: "dev", ACCESS_LOG_ENABLED: "false", MYOB_WRITES_ENABLED: "false",
     ATTRIBUTED_APPROVAL_ENABLED: "false", SCHEDULER_ENABLED: "false",
+    // AI gateway: off, and on the built-in mock if it is switched on (set AI_ENABLED to "true" here to try Admin -> AI activity; nothing leaves the machine).
+    AI_ENABLED: "false", AI_PROVIDER: "mock",
     APPLICATIONINSIGHTS_CONNECTION_STRING: "", APPINSIGHTS_INSTRUMENTATIONKEY: "",
   };
   for (const name of fs.readdirSync(path.join(root, "src/functions"))) {
@@ -95,7 +97,7 @@ async function prepare() {
     const report = await runSeed(connection, entries, { apply: true, log: console.log });
     if (report.failed) throw new Error("Procedure seed failed.");
     const { TYPES } = require("tedious");
-    const features = ["documentation", "activity", "assets", "contractorSuggestions", "decisionJobs", "escalations", "finance", "incoming", "inspections", "jobs", "keys", "maintenance", "majorEvents", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule", "tenancyScheduleReport", "tenancyVacancies", "timesheets"];
+    const features = ["activity", "aiAssist", "assets", "contractorSuggestions", "decisionJobs", "documentation", "escalations", "finance", "incoming", "inspections", "jobs", "keys", "maintenance", "majorEvents", "payroll", "procedures", "quotes", "rentReviews", "tenancySchedule", "tenancyScheduleReport", "tenancyVacancies", "timesheets"];
     const roles = Object.values(require("../dist/auth").AppRole);
     await db.executeQuery(connection, `MERGE dbo.FeatureFlags AS t
       USING (SELECT f.[value] AS FeatureKey, r.[value] AS RoleName FROM OPENJSON(@Features) f CROSS JOIN OPENJSON(@Roles) r) s

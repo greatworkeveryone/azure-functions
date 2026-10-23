@@ -37,6 +37,14 @@ then the real switch.
 | `MONEY_STEP_UP_ENFORCED` | off: only the exact string `true` turns it on (`TRUE`, `1` do not) | With `MONEY_ALLOWED_CIDRS` unset, money actions are refused (428 `step_up_required`) when MFA did not run or the sign-in is older than `MONEY_STEP_UP_MINUTES`; the network is still not checked and health still says so. With the list set it changes nothing | Staging first: confirm a fresh MFA sign-in passes (the token's `amr` carries `mfa`) and a stale one gets the confirm prompt, then production, until the list is set |
 | `MONEY_STEP_UP_MINUTES` | 10 | How recent the sign-in must be for a money action | Leave at 10 |
 | `DIRECTOR_APPROVAL_THRESHOLD` | unset: highest other limit | Amount above which only a director approves | `50000` with WP43a-2 |
+| `AI_ENABLED` | off | Master switch for the AI gateway (`runAi`, SC-AI1). Only the exact string `"true"` turns it on. Off: every AI endpoint answers that AI is switched off and nothing is sent to any model (the attempt is still logged). Pair with the `aiAssist` flag | Only once a self-hosted model runs on RP's own Azure tenant and Connor says yes; run Admin → AI activity → Run a test call first |
+| `AI_PROVIDER` | `mock` | `mock`: a built-in stand-in that answers at once and sends nothing anywhere. `openai_compatible`: a self-hosted OpenAI-compatible endpoint (vLLM or Ollama). Anything else is refused as a provider error | `openai_compatible`, once the endpoint exists |
+| `AI_BASE_URL` | unset | The endpoint's address with no path (`http://10.4.0.7:8000`): Floorplan posts to `<AI_BASE_URL>/v1/chat/completions`. http or https only. Needed with `openai_compatible` | With the endpoint |
+| `AI_MODEL` | unset | The model name sent with every call, and shown in Admin → AI activity. Needed with `openai_compatible` | With the endpoint |
+| `AI_API_KEY` | unset | Bearer token for the endpoint, as a Key Vault reference (`@Microsoft.KeyVault(SecretUri=...)`), never the key itself. Optional: a self-hosted endpoint that needs none is called without one | If the endpoint wants one |
+| `AI_LOG_CONTENT` | off | Only `"true"` stores each call's redacted input and output text in `AiCallLog`. The log is append-only: stored text can never be removed. Off, a row keeps who asked, the purpose, sizes, a hash of the redacted input, the outcome and timing, and no text | Only while diagnosing a fault, then off again; what it stored stays |
+| `AI_TIMEOUT_MS` | 20000 | How long one call may take before it is cut off and refused as a timeout. A whole number from 1 to 120000; anything else uses 20000 | Leave at 20000 |
+| `AI_RATE_PER_MINUTE` | 20 | Most calls to the model one person may make in a minute, counted from `AiCallLog`. A whole number from 1 to 1000; anything else uses 20 | Leave at 20 |
 | `GRAPH_MAILBOX_ACTIVE` | required: `dev` or `prod` | Which inbox Incoming reads | `prod` in production, `dev` on staging |
 | `RUN_MIGRATIONS_ON_STARTUP` | off: startup only checks | Applies migrations at startup | Never in production |
 | `DEV_ROLE_OVERRIDE_ENABLED` | ignored on Azure | Local role switcher; startup refuses to boot if set on Azure | Never in production |
@@ -104,6 +112,7 @@ ranker. Each person may ask 30 times and record 60 times a minute (per instance)
 route answers 429 and the app simply shows no suggestions. Read the log with
 `node scripts/eval-contractor-ranker.cjs` (it reads the local review database by default and
 refuses any other server without `--allow-remote`).
+AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. Redaction replaces emails, Australian phone numbers, BSB and account numbers, TFNs and card numbers before any call; names and street addresses are not removed, which is why the model runs on RP's own tenant. Later AI packages add their own flags under the same "AI assistance" area.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
@@ -124,6 +133,13 @@ npm run migrate -- --target <server>/<database> --apply    # apply as your az lo
 
 Dry-run on a restored copy first by targeting it. Migration 101 applies out of
 order, with a warning only.
+
+Migration 170 (`170_ai_call_log.sql`, SC-AI1) is applied before the build that serves `listAiCalls` and
+`runAiHealthCheck`. It adds `dbo.AiCallLog`, an append-only ledger table (or, if the database refuses
+those, an ordinary table with a trigger that refuses UPDATE and DELETE: the same two-path mechanism as
+094 and 115, see `docs/decision-ledger-fallback.md`; `SELECT name, ledger_type_desc FROM sys.tables WHERE
+name = 'AiCallLog'` says which). It changes nothing that exists, and a second run is a no-op. Dry-run it on a
+restored copy first, as for any migration.
 
 Migrations 119 (`119_defects_periods.sql`, sprint F1) and 120
 (`120_service_schedules.sql`, sprint F2) are applied before the build that serves

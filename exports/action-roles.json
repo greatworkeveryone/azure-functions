@@ -420,6 +420,9 @@
     "cfo",
     "director"
   ],
+  "runAiHealthCheck": [
+    "admin"
+  ],
   "sendPurchaseOrder": [
     "accounts_manager",
     "admin",
@@ -478,6 +481,10 @@
     "director"
   ],
   "viewAdmin": [
+    "admin",
+    "director"
+  ],
+  "viewAiActivity": [
     "admin",
     "director"
   ],
