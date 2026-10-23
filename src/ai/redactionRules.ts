@@ -14,13 +14,12 @@
 // That is why the model runs on Randazzo Properties' own Azure tenant.
 
 import { isAbnValid, isLuhnValid, isTfnValid, plausibleCardPrefix } from "./checksums";
+import { accountSpans, bsbSpans } from "./redactionBank";
+import { digitsOf, GROUP_START, SEP, spansOf, TOKEN_START, type Span } from "./redactionKit";
+
+export type { Span } from "./redactionKit";
 
 export type RedactionKind = "account" | "bsb" | "card" | "email" | "phone" | "tfn";
-
-export interface Span {
-  end: number;
-  start: number;
-}
 
 export interface RedactionRule {
   kind: RedactionKind;
@@ -35,24 +34,6 @@ export const PLACEHOLDERS: Record<RedactionKind, string> = {
   phone: "[PHONE]",
   tfn: "[TFN]",
 };
-
-/* ── Building blocks ───────────────────────────────────────────────────────── */
-
-const SEP = "[ \\u00a0-]"; // between digit groups
-const TOKEN_START = "(?<![\\w.,$-])"; // not glued to a longer token, an amount or a hyphenated id
-const digitsOf = (value: string): string => value.replace(/\D/g, "");
-
-function spansOf(text: string, pattern: RegExp, group = 0, accept?: (value: string) => boolean): Span[] {
-  const found: Span[] = [];
-  for (const match of text.matchAll(pattern)) {
-    const range = match.indices?.[group];
-    if (!range) continue;
-    const [start, end] = range;
-    if (accept && !accept(text.slice(start, end))) continue;
-    found.push({ end, start });
-  }
-  return found;
-}
 
 /* ── Protected: never replaced ─────────────────────────────────────────────── */
 
@@ -117,16 +98,7 @@ const TFN_LABELLED = new RegExp(
   `\\b(?:TFN|tax\\s{1,3}file\\s{1,3}(?:no\\.?|number|num\\.?))\\b[\\s:#.-]{0,6}(\\d(?:${SEP}?\\d){6,8})(?!\\d)`,
   "dgi",
 );
-const TFN_BARE = new RegExp(`${TOKEN_START}\\d{3}${SEP}\\d{3}${SEP}\\d{3}(?!\\d|${SEP}\\d)`, "dg");
-
-const BSB_ACCOUNT_PAIR = new RegExp(`${TOKEN_START}(\\d{3}-\\d{3})[ \\u00a0,/-]{1,3}(\\d{6,10})(?!\\d)`, "dg");
-const BSB_LABELLED = new RegExp(`\\bBSB\\b(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:.-]{0,6}(\\d{3}${SEP}?\\d{3})(?!\\d)`, "dgi");
-const ACCOUNT_LABELLED = new RegExp(
-  `\\b(?:account|acct|acc)\\b\\.?(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:#.-]{0,6}(\\d(?:${SEP}?\\d){4,9})(?!\\d)`,
-  "dgi",
-);
-// "A/C" is also air conditioning, so it needs a marker: A/C no 123456, A/C: 123456.
-const AC_LABELLED = new RegExp(`\\ba\\/c\\b\\s{0,2}(?:no\\.?|number|num\\.?|#|:)[\\s:#.-]{0,6}(\\d(?:${SEP}?\\d){4,9})(?!\\d)`, "dgi");
+const TFN_BARE = new RegExp(`${TOKEN_START}${GROUP_START}\\d{3}${SEP}\\d{3}${SEP}\\d{3}(?!\\d|${SEP}\\d)`, "dg");
 
 const MOBILE = new RegExp(`${TOKEN_START}(?:04|\\+61${SEP}?(?:\\(0\\)${SEP}?|0${SEP}?)?4)(?:${SEP}?\\d){8}(?!\\d)`, "dg");
 const LANDLINE = new RegExp(
@@ -138,6 +110,8 @@ const PHONE_LABELLED = new RegExp(
   `\\b(?:ph|phone|tel|telephone|mob|mobile|cell|fax)\\b\\.?(?:\\s{0,2}(?:no\\.?|number|num\\.?|#))?[\\s:.-]{0,6}(\\+?\\(?\\d[\\d ()\\u00a0-]{5,18}\\d)(?!\\d)`,
   "dgi",
 );
+// P: 8981 1234, T: 08 8981 1234, M: ..., F: ...: the letters email signatures use, with a colon or a full stop.
+const PHONE_LABELLED_LETTER = new RegExp("(?<!\\w)[PTMF](?:\\s?:|\\.)\\s{0,3}(\\+?\\(?\\d[\\d ()\\u00a0-]{5,18}\\d)(?!\\d)", "dgi");
 const phoneLength = (value: string): boolean => digitsOf(value).length >= 8 && digitsOf(value).length <= 12;
 
 export const REDACTION_RULES: readonly RedactionRule[] = [
@@ -145,18 +119,8 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   { kind: "card", spans: cardSpans },
   { kind: "tfn", spans: (text) => spansOf(text, TFN_LABELLED, 1) },
   { kind: "tfn", spans: (text) => spansOf(text, TFN_BARE, 0, (value) => isTfnValid(digitsOf(value))) },
-  {
-    kind: "bsb",
-    spans: (text) => [...spansOf(text, BSB_ACCOUNT_PAIR, 1), ...spansOf(text, BSB_LABELLED, 1)],
-  },
-  {
-    kind: "account",
-    spans: (text) => [
-      ...spansOf(text, BSB_ACCOUNT_PAIR, 2),
-      ...spansOf(text, ACCOUNT_LABELLED, 1),
-      ...spansOf(text, AC_LABELLED, 1),
-    ],
-  },
+  { kind: "bsb", spans: bsbSpans },
+  { kind: "account", spans: accountSpans },
   {
     kind: "phone",
     spans: (text) => [
@@ -164,6 +128,7 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
       ...spansOf(text, LANDLINE),
       ...spansOf(text, SERVICE_NUMBER),
       ...spansOf(text, PHONE_LABELLED, 1, phoneLength),
+      ...spansOf(text, PHONE_LABELLED_LETTER, 1, phoneLength),
     ],
   },
 ];
