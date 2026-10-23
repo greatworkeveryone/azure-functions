@@ -41,7 +41,7 @@ const FRONTEND_FEATURE_KEYS = [
   "aiAssist",
   "aiDocumentExtraction",
   "assets",
-  "comms", "contractorSuggestions",
+  "comms", "complianceReport", "contractorSuggestions",
   "decisionJobs",
   "escalations",
   "finance",

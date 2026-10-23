@@ -137,6 +137,20 @@ review database, whose demo invoices are all test records, it shows figures only
 that on. As for the Tenancy Schedule report, check every family residence is marked
 `residence` in Buildings before showing it to anyone.
 Read this document (`aiDocumentExtraction`, the quote and invoice forms) ships hidden. With it enabled, a form that has a PDF attached offers Read this document: the browser reads the PDF's text layer, Floorplan's own rules find the ABN, total, GST, number and dates, and the form's empty fields are filled and marked Check until the person edits or confirms them. It needs no migration and no app setting of its own, and never approves, submits or sends anything. The model step (`extractDocumentFields`, purposes `quote_extraction@1` and `invoice_extraction@1`) runs only when `AI_ENABLED` is `"true"` as well; with it unset the rules still work and the form says nothing about AI. Each model call is one `AiCallLog` row (recordType `job`, or `quote` / `invoice` when the form has no job yet). The route is gated like adding a quote or an invoice (`createQuote`, `createInvoice`: the same list). The text of the PDF's first five pages, up to 12,000 characters, is what the model sees, after the redaction above.
+Compliance report (`complianceReport`, Tools → Reports) ships hidden. Set it to enabled
+for director, cfo, admin and facilities_manager once the backend with
+`getComplianceReport` is deployed. No app setting and no migration: it reads
+`ServiceSchedules`, `DefectsPeriods`, `MaintenanceCoverage`, `Contractors` and the
+insurance certificates in `RegisterDocuments`, and writes nothing. It lists, for active
+commercial buildings, contractors on a live schedule or named in the building's coverage
+whose certificate of currency is missing, expired or ends within 30 days of the date;
+required trades with no active contractor; overdue services; and defects periods in
+force. It flags only trades a manager marked required in a building's coverage: no
+building has one until someone sets it, so that section reads "nothing to check" until
+then. The date can't be in the past (services are judged by their next due date as it
+stands today). Test tenancies' defects periods stay out unless an admin has Show test
+data on. As for the other reports, check every family residence is marked `residence`
+in Buildings before showing it to anyone.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the

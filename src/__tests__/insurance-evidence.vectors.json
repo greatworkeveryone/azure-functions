@@ -1,0 +1,600 @@
+{
+  "about": "Shared vectors for the contractor insurance evidence rule (rpcc-functions src/complianceReport/insuranceEvidence.ts and command-centre src/helpers/contractorInsurance.ts). The same file sits in both repos; change both or neither. Each document is the default certificate with its fields replaced by the patch.",
+  "certificate": {
+    "buildingId": null,
+    "category": "Insurance",
+    "contractorId": 7,
+    "expiresOn": "2027-04-30",
+    "insuranceType": "Public liability",
+    "issuedOn": "2026-05-01",
+    "kind": "certificate"
+  },
+  "cases": [
+    {
+      "name": "nothing recorded reads as missing",
+      "documents": [],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Certificate of currency",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "another contractor's certificate is not evidence",
+      "documents": [
+        {
+          "patch": {
+            "contractorId": 8
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Certificate of currency",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "a document that is not a certificate, or not insurance, is not evidence",
+      "documents": [
+        {
+          "patch": {
+            "kind": "report"
+          }
+        },
+        {
+          "patch": {
+            "category": "Plumbing / hydraulic"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Certificate of currency",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "a renewal replaces the older policy of the same kind, whatever its case",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-09-01"
+          }
+        },
+        {
+          "patch": {
+            "insuranceType": "PUBLIC LIABILITY"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "PUBLIC LIABILITY",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "a renewal that starts later does not cover the gap before it",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-10-01"
+          }
+        },
+        {
+          "patch": {
+            "issuedOn": "2026-11-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "expired",
+          "type": "Public liability",
+          "expiresOn": "2026-10-01"
+        }
+      ]
+    },
+    {
+      "name": "the same renewal covers the date once it has started",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-10-01"
+          }
+        },
+        {
+          "patch": {
+            "issuedOn": "2026-11-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-11-02",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "the only evidence starts after the date",
+      "documents": [
+        {
+          "patch": {
+            "issuedOn": "2026-11-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "evidence starting the day after the date does not cover it",
+      "documents": [
+        {
+          "patch": {
+            "issuedOn": "2026-10-22"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "evidence starting on the date covers it",
+      "documents": [
+        {
+          "patch": {
+            "issuedOn": "2026-10-22"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-22",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "kinds of insurance are judged separately, and a blank expiry is never indefinite cover",
+      "documents": [
+        {
+          "patch": {}
+        },
+        {
+          "patch": {
+            "expiresOn": null,
+            "insuranceType": "Workers compensation"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        },
+        {
+          "state": "undated",
+          "type": "Workers compensation",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "expiring today is expiring, not expired",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-10-21"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "expiring",
+          "type": "Public liability",
+          "expiresOn": "2026-10-21"
+        }
+      ]
+    },
+    {
+      "name": "expiring exactly 30 days after the date is expiring",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-11-20"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "expiring",
+          "type": "Public liability",
+          "expiresOn": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "name": "expiring 31 days after the date is recorded",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-11-21"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2026-11-21"
+        }
+      ]
+    },
+    {
+      "name": "expired yesterday is expired",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-10-20"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "expired",
+          "type": "Public liability",
+          "expiresOn": "2026-10-20"
+        }
+      ]
+    },
+    {
+      "name": "evidence that runs past a date is recorded then",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-12-31"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2026-12-31"
+        }
+      ]
+    },
+    {
+      "name": "the same evidence has expired by a later date",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-12-31"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2027-01-02",
+      "expected": [
+        {
+          "state": "expired",
+          "type": "Public liability",
+          "expiresOn": "2026-12-31"
+        }
+      ]
+    },
+    {
+      "name": "a certificate for one building counts for that building",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": 31
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": 31,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "a certificate for one building does not count for another",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": 31
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": 32,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Certificate of currency",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "a certificate for one building does not count when no building is asked about",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": 31
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "missing",
+          "type": "Certificate of currency",
+          "expiresOn": null
+        }
+      ]
+    },
+    {
+      "name": "a portfolio-wide certificate counts for every building",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": null
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": 32,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "a portfolio-wide certificate counts when no building is asked about",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": null
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "a building certificate and a portfolio-wide one of the same kind compete on expiry",
+      "documents": [
+        {
+          "patch": {
+            "buildingId": 31,
+            "expiresOn": "2026-10-01"
+          }
+        },
+        {
+          "patch": {
+            "buildingId": null,
+            "expiresOn": "2027-02-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": 31,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-02-01"
+        }
+      ]
+    },
+    {
+      "name": "a certificate with no kind is Unspecified insurance",
+      "documents": [
+        {
+          "patch": {
+            "insuranceType": null
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Unspecified insurance",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "kinds match whatever their case and spacing",
+      "documents": [
+        {
+          "patch": {}
+        },
+        {
+          "patch": {
+            "expiresOn": "2026-10-01",
+            "insuranceType": "  public LIABILITY "
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-04-30"
+        }
+      ]
+    },
+    {
+      "name": "the certificate that runs longest wins, even if an older one was issued later",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": "2026-12-01",
+            "issuedOn": "2026-06-01"
+          }
+        },
+        {
+          "patch": {
+            "expiresOn": "2027-12-01",
+            "issuedOn": "2026-05-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "recorded",
+          "type": "Public liability",
+          "expiresOn": "2027-12-01"
+        }
+      ]
+    },
+    {
+      "name": "a certificate with an expiry outranks one without",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": null
+          }
+        },
+        {
+          "patch": {
+            "expiresOn": "2026-10-01"
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "expired",
+          "type": "Public liability",
+          "expiresOn": "2026-10-01"
+        }
+      ]
+    },
+    {
+      "name": "a certificate with no expiry is undated",
+      "documents": [
+        {
+          "patch": {
+            "expiresOn": null
+          }
+        }
+      ],
+      "contractorId": 7,
+      "buildingId": null,
+      "onDate": "2026-10-21",
+      "expected": [
+        {
+          "state": "undated",
+          "type": "Public liability",
+          "expiresOn": null
+        }
+      ]
+    }
+  ]
+}
