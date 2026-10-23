@@ -96,7 +96,7 @@ St, 2 Godfrey Ct and 27 Lambell Tce would otherwise report as commercial. Before
 the CFO's first run, set each tenancy's lease type and each fee's category in the
 register, or the summary groups those charges as "Rent" and "Other charges"; the
 report's Data gaps panel lists what is missing.
-AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. The log never stores prompt or answer text: a row holds who asked, the purpose and prompt version, sizes, a hash of the redacted input, the outcome and the timing. Redaction replaces emails, Australian phone numbers, BSB and account numbers, TFNs and card numbers before any call; names and street addresses are not removed, which is why the model runs on RP's own tenant. Later AI packages add their own flags under the same "AI assistance" area.
+AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. The log never stores prompt or answer text: a row holds who asked, the purpose and prompt version, sizes, a hash of the redacted input, the outcome and the timing. Redaction is limited to the patterns listed under "AI gateway: what redaction removes" below; it does not remove names or addresses. Later AI packages add their own flags under the same "AI assistance" area.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
@@ -105,6 +105,22 @@ stored on it (`JobDecisionRequests.AutoEscalate`): always for Soon, Routine and
 Fixed; the raiser's tick for Urgent, off unless ticked; never for an Emergency.
 An Urgent request that was not ticked has no due moment, so the sweep reminds it
 and then leaves it where it is until someone answers or withdraws it.
+
+## AI gateway: what redaction removes
+
+Before any call, `runAi` replaces the following in the text it sends, wherever it recognises them by their written form. It works on patterns, not meaning, and the log never keeps the text.
+
+Removed:
+
+- Email addresses (`jo@example.com`).
+- Australian phone numbers in the usual written forms: mobiles (`0412 345 678`, `+61 412 345 678`), landlines with an area code (`(08) 8941 2345`, `+61 8 8941 2345`), 1300 and 1800 numbers written in groups (`1300 123 456`), and any number written after Ph, Phone, Tel, Mob, Mobile or Fax, or after a one-letter label P, T, M or F (`Ph: 8981 1234`, `P: 8981 1234`).
+- A BSB with its account number: a hyphenated BSB (`062-000 1234 5678`), a spaced one (`062 000 1234 5678`), or either after a Bank, EFT, Direct credit, Deposit or Remittance label (`EFT: 062000 12345678`); and a number written after `BSB`, `Account`, `Acct` or `A/C no` (`BSB 062-000`, `Account 12345678`).
+- Tax file numbers written after TFN or Tax file number (`TFN 123 456 782`), or grouped 3-3-3 and passing the TFN check.
+- Card numbers of 13 to 19 digits that pass the Luhn check and begin as a card's do (`4111 1111 1111 1111`).
+
+Kept on purpose, because extraction needs them: ABNs and ACNs (`ABN 51 824 753 556`), and dates, amounts and invoice or document numbers (`INV-2026-0042`, `$1,233.10`, `22/11/2026`).
+
+Not removed, because nothing can recognise them reliably: names of people and companies; street and postal addresses (`24 Gunbar St`, `Jo Bloggs`); any other free text; a bare account number or landline with no label (`12345678`, `0889412345`); Medicare, passport and driver licence numbers; dates of birth. That is why the model runs on Randazzo Properties' own Azure tenant and why the log keeps no prompt or answer text. Before AI is switched on, confirm the model server's own request logging (vLLM, Ollama) is off, or the redacted prompts would be kept there.
 
 ## Migrations
 
