@@ -213,8 +213,8 @@ export const ACTION_ROLES = {
   },
   createQuote: {
     gate: [A.ACCOUNTS, A.FACILITIES],
-    routes: ["upsertQuote"],
-    why: "Add or edit a received quote. Field officers do this (decision 1); approving one is approveQuote.",
+    routes: ["upsertQuote", "extractDocumentFields"],
+    why: "Add or edit a received quote. Field officers do this (decision 1); approving one is approveQuote. extractDocumentFields (Read this document, SC-AI2) shares this gate for quotes and invoices alike, because createInvoice is the same list.",
   },
   createTestData: {
     gate: [A.ADMIN, A.DIRECTOR],
