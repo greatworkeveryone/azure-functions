@@ -100,6 +100,20 @@ Test jobs and invoices stay out unless an admin has Show test data on, so on the
 review database, whose demo invoices are all test records, it shows figures only with
 that on. As for the Tenancy Schedule report, check every family residence is marked
 `residence` in Buildings before showing it to anyone.
+Compliance report (`complianceReport`, Tools → Reports) ships hidden. Set it to enabled
+for director, cfo, admin and facilities_manager once the backend with
+`getComplianceReport` is deployed. No app setting and no migration: it reads
+`ServiceSchedules`, `DefectsPeriods`, `MaintenanceCoverage`, `Contractors` and the
+insurance certificates in `RegisterDocuments`, and writes nothing. It lists, for active
+commercial buildings, contractors on a live schedule or named in the building's coverage
+whose certificate of currency is missing, expired or ends within 30 days of the date;
+required trades with no active contractor; overdue services; and defects periods in
+force. It flags only trades a manager marked required in a building's coverage: no
+building has one until someone sets it, so that section reads "nothing to check" until
+then. The date can't be in the past (services are judged by their next due date as it
+stands today). Test tenancies' defects periods stay out unless an admin has Show test
+data on. As for the other reports, check every family residence is marked `residence`
+in Buildings before showing it to anyone.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the

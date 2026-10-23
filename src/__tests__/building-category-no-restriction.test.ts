@@ -20,6 +20,7 @@ import { join, relative } from "node:path";
 const SRC = join(__dirname, "..");
 const ALLOWED = new Set(["functions/getBuildings.ts", "functions/upsertManualBuilding.ts", "manualBuildingInput.ts"]);
 const COMPANY_REPORTING_REASONS: Record<string, string> = {
+  "complianceReport/load.ts": "the Compliance report's reads (spare-capacity package SC-RP2): commercial buildings only, like the Tenancy Schedule",
   "maintenanceSpend/load.ts": "the Maintenance spend report's reads (spare-capacity package SC-RP1): commercial buildings only, like the Tenancy Schedule",
   "portfolioOccupancy.ts": "the portfolio occupancy, rent, WALE and tenant figures the Overview and dashboard total",
   "scheduleChange/pending.ts": "the `commercial` scope: the pending-changes count that rides on those company figures",

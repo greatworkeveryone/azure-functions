@@ -557,8 +557,8 @@ export const ACTION_ROLES = {
   },
   viewOperationsReports: {
     gate: [A.CFO, A.FACILITIES_APPROVAL],
-    routes: ["getMaintenanceSpendReport"],
-    why: "The operations reports in Tools → Reports (maintenance spend first): the CFO, directors and admin, and facilities managers. Reads only, commercial buildings only.",
+    routes: ["getMaintenanceSpendReport", "getComplianceReport"],
+    why: "The operations reports in Tools → Reports (maintenance spend, compliance): the CFO, directors and admin, and facilities managers. Reads only, commercial buildings only.",
   },
   viewPayments: {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.DIRECTOR],
