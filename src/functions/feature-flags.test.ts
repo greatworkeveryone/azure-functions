@@ -47,6 +47,7 @@ const FRONTEND_FEATURE_KEYS = [
   "inspections",
   "jobs",
   "keys",
+  "libraryAsk",
   "maintenance",
   "payroll",
   "procedures",
