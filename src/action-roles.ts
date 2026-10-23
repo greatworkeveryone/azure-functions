@@ -228,6 +228,11 @@ export const ACTION_ROLES = {
     routes: [],
     why: "Create a record marked as test data (D9). It gates the create forms' test checkbox; the rule itself lives inside the creates (test-data.ts testFlagForCreate, a literal admin-or-director check), so no route of its own.",
   },
+  createWorkRequest: {
+    gate: [A.FACILITIES_APPROVAL],
+    routes: ["createWorkRequest"],
+    why: "File a new work request from Job Intake, which creates it in myBuildings first: facilities managers, with admin and directors through the hierarchy. Field officers and accounts are refused, so the New request button is not offered to them.",
+  },
   deleteAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
     refused: [A.FACILITIES],

@@ -169,6 +169,11 @@
     "admin",
     "director"
   ],
+  "createWorkRequest": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "deleteAnyInspection": [
     "admin",
     "director",
