@@ -113,6 +113,17 @@ route answers 429 and the app simply shows no suggestions. Read the log with
 `node scripts/eval-contractor-ranker.cjs` (it reads the local review database by default and
 refuses any other server without `--allow-remote`).
 AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. Redaction replaces emails, Australian phone numbers, BSB and account numbers, TFNs and card numbers before any call; names and street addresses are not removed, which is why the model runs on RP's own tenant. Later AI packages add their own flags under the same "AI assistance" area.
+Maintenance spend report (`maintenanceSpendReport`, Tools → Reports) ships hidden. Set
+it to enabled for director, cfo, admin and facilities_manager once the backend with
+`getMaintenanceSpendReport` is deployed. No app setting and no migration: it reads
+`Jobs` and `JobInvoices` and writes nothing. It counts approved invoices (`approved`
+and `director_approved`) on commercial buildings by invoice date in Darwin time, or by
+approval date when an invoice has none (the page says how many), ex GST: Floorplan
+keeps each invoice as one total including GST, so GST is taken out at an eleventh.
+Test jobs and invoices stay out unless an admin has Show test data on, so on the local
+review database, whose demo invoices are all test records, it shows figures only with
+that on. As for the Tenancy Schedule report, check every family residence is marked
+`residence` in Buildings before showing it to anyone.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
