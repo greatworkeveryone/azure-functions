@@ -36,6 +36,9 @@ const READS: Read[] = [
   { anchor: "export async function loadReviews(", file: "rentReview/store.ts", mode: "toggle", passes: "async function getRentReviews(", passesIn: "functions/getRentReviews.ts" },
   { anchor: "async function getQuotes(", file: "functions/quotes.ts", mode: "toggle" },
   { anchor: "const LINKED_JOBS =", file: "functions/getMaintenanceOverview.ts", mode: "toggle", passes: "async function getMaintenanceOverview(" },
+  // Contractor suggestions: the job and quote history behind the figures. A test job, or an admin with Show test data on, sees test records too.
+  { anchor: "const ENGAGEMENTS_SQL =", file: "contractorSuggestions/load.ts", mode: "toggle", passes: "async function suggestContractors(", passesIn: "functions/suggestContractors.ts" },
+  { anchor: "const QUOTE_STATUSES_SQL =", file: "contractorSuggestions/load.ts", mode: "toggle", passes: "async function suggestContractors(", passesIn: "functions/suggestContractors.ts" },
   { anchor: "const NOT_TEST_SCOPE =", file: "functions/getDecisions.ts", mode: "toggle", passes: "async function getDecisions(" },
   // The inbox and its top-bar count (one where clause), and the Next 90 days feed with its pending changes (D9 review).
   { anchor: "const NOT_TEST_SUBJECT_SQL =", file: "escalation/store.ts", mode: "toggle", passes: "async function getEscalations(", passesIn: "functions/getEscalations.ts" },
