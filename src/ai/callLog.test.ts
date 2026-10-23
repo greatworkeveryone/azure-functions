@@ -32,12 +32,10 @@ const ENTRY: AiLogEntry = {
   errorCode: null,
   inputChars: 25,
   inputSha256: "a".repeat(64),
-  inputText: null,
   latencyMs: 12,
   model: "mock",
   outcome: "ok",
   outputChars: 36,
-  outputText: null,
   promptVersion: "echo_test@1",
   provider: "mock",
   purpose: "echo_test",
@@ -52,10 +50,21 @@ beforeEach(() => {
 });
 
 describe("the insert and migration 170 agree", () => {
-  it("writes exactly the columns the migration has, in its order, leaving the id and the clock to the database", () => {
+  it("writes the columns the migration has, in its order, leaving the id and the clock to the database, and the two text columns empty", () => {
     const columns = [...migrationColumns().keys()];
     expect(columns.slice(0, 2)).toEqual(["Id", "CreatedAt"]);
-    expect([...AI_CALL_INSERT_COLUMNS]).toEqual(columns.slice(2));
+    expect(columns.slice(-2)).toEqual(["InputText", "OutputText"]);
+    expect([...AI_CALL_INSERT_COLUMNS]).toEqual(columns.slice(2, -2));
+  });
+
+  it("never writes InputText or OutputText: prompt and answer text is not stored in the append-only log (review M2)", async () => {
+    expect([...AI_CALL_INSERT_COLUMNS]).not.toContain("InputText");
+    expect([...AI_CALL_INSERT_COLUMNS]).not.toContain("OutputText");
+    await insertAiCall(connection, ENTRY);
+    expect(String(query.mock.calls[0][1])).not.toMatch(/InputText|OutputText/);
+    expect((query.mock.calls[0][2] ?? []).map((param) => param.name)).not.toEqual(expect.arrayContaining(["InputText"]));
+    expect(migrationColumns().get("InputText")).toMatch(/NULL,?$/);
+    expect(migrationColumns().get("OutputText")).toMatch(/NULL,?$/);
   });
 
   it("binds one parameter per column, by the column's name", async () => {

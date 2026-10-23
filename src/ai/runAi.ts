@@ -61,13 +61,13 @@ export async function runAi<Output = unknown>(request: AiRequest): Promise<AiRes
     try {
       answer = await callProvider(config, purpose, call.prepared().redaction.text);
     } catch (error) {
-      return await settle(call, { code: failureCode(error), latencyMs: Date.now() - startedAt, model: intendedModel(config), outputText: null });
+      return await settle(call, { code: failureCode(error), latencyMs: Date.now() - startedAt, model: intendedModel(config), outputChars: null });
     }
     const latencyMs = Date.now() - startedAt;
 
     const checked = interpretOutput(purpose, answer.text);
-    if (!checked.ok) return await settle(call, { code: "invalid_output", latencyMs, model: answer.model, outputText: answer.text });
-    return await settle(call, { code: null, latencyMs, model: answer.model, output: checked.value, outputText: answer.text });
+    if (!checked.ok) return await settle(call, { code: "invalid_output", latencyMs, model: answer.model, outputChars: answer.text.length });
+    return await settle(call, { code: null, latencyMs, model: answer.model, output: checked.value, outputChars: answer.text.length });
   } finally {
     release();
   }

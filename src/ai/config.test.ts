@@ -7,7 +7,6 @@ describe("readAiConfig: everything off or default when nothing is set", () => {
       apiKey: null,
       baseUrl: null,
       enabled: false,
-      logContent: false,
       model: null,
       provider: "mock",
       ratePerMinute: 20,
@@ -18,13 +17,20 @@ describe("readAiConfig: everything off or default when nothing is set", () => {
   });
 });
 
-describe("the two switches: only the exact string true turns them on", () => {
-  it.each(["AI_ENABLED", "AI_LOG_CONTENT"])("%s", (name) => {
-    const key = name === "AI_ENABLED" ? "enabled" : "logContent";
-    expect(readAiConfig({ [name]: "true" })[key]).toBe(true);
+describe("the switch: only the exact string true turns AI on", () => {
+  it("AI_ENABLED", () => {
+    expect(readAiConfig({ AI_ENABLED: "true" }).enabled).toBe(true);
     for (const value of ["TRUE", "True", "1", "yes", "on", " true", "true ", "", "false", undefined]) {
-      expect(readAiConfig({ [name]: value })[key]).toBe(false);
+      expect(readAiConfig({ AI_ENABLED: value }).enabled).toBe(false);
     }
+  });
+});
+
+describe("there is no setting that stores prompt or answer text (review M2)", () => {
+  it("ignores AI_LOG_CONTENT altogether: the gateway reads nothing by that name", () => {
+    expect(readAiConfig({ AI_LOG_CONTENT: "true" })).toEqual(readAiConfig({}));
+    expect(readAiConfig({ AI_LOG_CONTENT: "true" })).not.toHaveProperty("logContent");
+    expect(Object.keys(readAiConfig({ AI_ENABLED: "true", AI_LOG_CONTENT: "true" })).join(" ")).not.toMatch(/log|content|text/i);
   });
 });
 

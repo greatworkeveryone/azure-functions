@@ -41,7 +41,6 @@ then the real switch.
 | `AI_BASE_URL` | unset | The endpoint's address with no path (`http://10.4.0.7:8000`): Floorplan posts to `<AI_BASE_URL>/v1/chat/completions`. http or https only. Needed with `openai_compatible` | With the endpoint |
 | `AI_MODEL` | unset | The model name sent with every call, and shown in Admin → AI activity. Needed with `openai_compatible` | With the endpoint |
 | `AI_API_KEY` | unset | Bearer token for the endpoint, as a Key Vault reference (`@Microsoft.KeyVault(SecretUri=...)`), never the key itself. Optional: a self-hosted endpoint that needs none is called without one | If the endpoint wants one |
-| `AI_LOG_CONTENT` | off | Only `"true"` stores each call's redacted input and output text in `AiCallLog`. The log is append-only: stored text can never be removed. Off, a row keeps who asked, the purpose, sizes, a hash of the redacted input, the outcome and timing, and no text | Only while diagnosing a fault, then off again; what it stored stays |
 | `AI_TIMEOUT_MS` | 20000 | How long one call may take before it is cut off and refused as a timeout. A whole number from 1 to 120000; anything else uses 20000 | Leave at 20000 |
 | `AI_RATE_PER_MINUTE` | 20 | Most AI calls one person may make in a minute, counted from `AiCallLog`. Every call counts, answered or refused. At the limit a call is refused (`rate_limited`) and logged; above twice the limit it is turned away with HTTP 429 and no log row, so a loop cannot fill the log. Separately, a person may have two calls running at once on each Function App instance (the cap is per instance: two instances allow up to four). A whole number from 1 to 1000; anything else uses 20 | Leave at 20 |
 | `GRAPH_MAILBOX_ACTIVE` | required: `dev` or `prod` | Which inbox Incoming reads | `prod` in production, `dev` on staging |
@@ -97,7 +96,7 @@ St, 2 Godfrey Ct and 27 Lambell Tce would otherwise report as commercial. Before
 the CFO's first run, set each tenancy's lease type and each fee's category in the
 register, or the summary groups those charges as "Rent" and "Other charges"; the
 report's Data gaps panel lists what is missing.
-AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. Redaction replaces emails, Australian phone numbers, BSB and account numbers, TFNs and card numbers before any call; names and street addresses are not removed, which is why the model runs on RP's own tenant. Later AI packages add their own flags under the same "AI assistance" area.
+AI assistance (`aiAssist`, Settings → AI activity) ships hidden. It shows the AI gateway's page: whether AI is on, which provider and model it points at, a Run a test call button (admin only) and the log of every AI call (admin and directors). Migration 170 (`170_ai_call_log.sql`, additive: `dbo.AiCallLog`) must be applied before the log or the test call is used; `getAiStatus` needs no table. The flag only shows the page: `AI_ENABLED` (above) is what lets a call through, and with it unset nothing is sent anywhere. The log never stores prompt or answer text: a row holds who asked, the purpose and prompt version, sizes, a hash of the redacted input, the outcome and the timing. Redaction replaces emails, Australian phone numbers, BSB and account numbers, TFNs and card numbers before any call; names and street addresses are not removed, which is why the model runs on RP's own tenant. Later AI packages add their own flags under the same "AI assistance" area.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
@@ -124,7 +123,9 @@ Migration 170 (`170_ai_call_log.sql`, SC-AI1) is applied before the build that s
 those, an ordinary table with a trigger that refuses UPDATE and DELETE: the same two-path mechanism as
 094 and 115, see `docs/decision-ledger-fallback.md`; `SELECT name, ledger_type_desc FROM sys.tables WHERE
 name = 'AiCallLog'` says which). It changes nothing that exists, and a second run is a no-op. Dry-run it on a
-restored copy first, as for any migration.
+restored copy first, as for any migration. Its nullable `InputText` and `OutputText` columns are never written:
+the log keeps no prompt or answer text, because an append-only table could never give it back (a purgeable
+debug table, joined by `CorrelationId`, could be added later if it is ever needed).
 
 Migrations 119 (`119_defects_periods.sql`, sprint F1) and 120
 (`120_service_schedules.sql`, sprint F2) are applied before the build that serves

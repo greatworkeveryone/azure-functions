@@ -1,7 +1,7 @@
 // Reading AiCallLog for Admin → AI activity (SC-AI1): the filters a request may
-// send, the paged query, and the shape of a row on the wire. Reads only. A row's
-// stored text (InputText, OutputText) and its hash are never selected: the screen
-// needs who, what and how big, and the text stays in the database.
+// send, the paged query, and the shape of a row on the wire. Reads only. A row holds
+// no prompt or answer text, and its input hash is never selected: the screen needs
+// who, what and how big.
 
 import { TYPES } from "tedious";
 import { executeQuery, type SqlParam } from "../db";

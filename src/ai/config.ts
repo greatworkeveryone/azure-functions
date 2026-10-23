@@ -15,8 +15,6 @@ export interface AiConfig {
   baseUrl: string | null;
   /** Only the exact string "true" turns AI on. */
   enabled: boolean;
-  /** Store the (redacted) input and the output with each call. The log is append-only: stored text can never be removed. */
-  logContent: boolean;
   model: string | null;
   /** The raw AI_PROVIDER value, trimmed and lower-cased; anything but a known name is refused as provider_error. */
   provider: string;
@@ -46,7 +44,6 @@ export function readAiConfig(env: Record<string, string | undefined> = process.e
     apiKey: text(env.AI_API_KEY),
     baseUrl: text(env.AI_BASE_URL),
     enabled: env.AI_ENABLED === "true",
-    logContent: env.AI_LOG_CONTENT === "true",
     model: text(env.AI_MODEL),
     provider: text(env.AI_PROVIDER)?.toLowerCase() ?? "mock",
     ratePerMinute: wholeNumber(env.AI_RATE_PER_MINUTE, DEFAULT_RATE_PER_MINUTE, MAX_RATE_PER_MINUTE),

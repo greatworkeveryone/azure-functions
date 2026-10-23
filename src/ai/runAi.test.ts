@@ -129,25 +129,20 @@ describe("the mock provider (the default)", () => {
     expect(result.meta).toMatchObject({ callId: 101, model: "mock", promptVersion: "echo_test@1", provider: "mock", purpose: "echo_test", redactionCount: 0 });
   });
 
-  it("keeps no text in the log unless AI_LOG_CONTENT is exactly true", async () => {
-    for (const value of [undefined, "false", "TRUE", "1"]) {
+  it("never stores prompt or answer text, whatever the environment says (review M2)", async () => {
+    for (const value of [undefined, "true", "TRUE", "1"]) {
       query.mockClear();
       if (value === undefined) delete process.env.AI_LOG_CONTENT;
       else process.env.AI_LOG_CONTENT = value;
-      await runAi(request({ input: "Contact jo@example.com" }));
-      expect(inserts()[0]).toMatchObject({ InputText: null, OutputText: null });
-      expect(JSON.stringify(inserts()[0])).not.toContain("jo@example.com");
+      await runAi(request({ input: "Contact jo@example.com about the lift in Building 7" }));
+      const insert = query.mock.calls.find((call) => String(call[1]).includes("INSERT INTO dbo.AiCallLog"));
+      const names = (insert?.[2] ?? []).map((param) => param.name);
+      expect(names).not.toContain("InputText");
+      expect(names).not.toContain("OutputText");
+      expect(String(insert?.[1])).not.toMatch(/InputText|OutputText/);
+      const row = JSON.stringify(inserts()[0]);
+      for (const text of ["jo@example.com", "[EMAIL]", "Building 7", "lift"]) expect(row).not.toContain(text);
     }
-  });
-
-  it("keeps the redacted text, never the original, when AI_LOG_CONTENT is true", async () => {
-    process.env.AI_LOG_CONTENT = "true";
-    await runAi(request({ input: "Contact jo@example.com" }));
-    const row = inserts()[0];
-    expect(row.InputText).toBe("Contact [EMAIL]");
-    expect(row.OutputText).toBe('{"echo":"Contact [EMAIL]"}');
-    expect(JSON.stringify(row)).not.toContain("jo@example.com");
-    expect(row.RedactionCount).toBe(1);
   });
 
   it("hashes the redacted input, so the same text with a different address gives the same hash", async () => {
@@ -473,24 +468,19 @@ describe("the openai_compatible provider", () => {
     expect(result).toMatchObject({ ok: false, refusal: { code: "invalid_output" } });
     expect(inserts()[0]).toMatchObject({ ErrorCode: "invalid_output", Outcome: "failed" });
     expect(inserts()[0].OutputChars).toBe(content.length);
-    expect(inserts()[0].OutputText).toBeNull();
+    expect(Object.keys(inserts()[0])).not.toContain("OutputText");
   });
 
-  it("stores no more of a runaway answer than the purpose could have asked for, and records its full length", async () => {
+  it("records how long a refused answer was, and keeps none of its text", async () => {
     process.env.AI_LOG_CONTENT = "true";
     const runaway = `{"echo":"${"x".repeat(5_000)}"}`;
     fetchMock.mockResolvedValue(answer(runaway));
     await runAi(request());
     const row = inserts()[0];
     expect(row).toMatchObject({ ErrorCode: "invalid_output", OutputChars: runaway.length });
-    expect(String(row.OutputText)).toHaveLength(100 * 8);
-  });
-
-  it("keeps a refused answer's text, redacted, when AI_LOG_CONTENT is true", async () => {
-    process.env.AI_LOG_CONTENT = "true";
-    fetchMock.mockResolvedValue(answer("Ring jo@example.com"));
-    await runAi(request());
-    expect(inserts()[0]).toMatchObject({ ErrorCode: "invalid_output", OutputText: "Ring [EMAIL]" });
+    expect(Object.keys(row)).not.toContain("OutputText");
+    expect(Object.keys(row)).not.toContain("InputText");
+    expect(JSON.stringify(row)).not.toContain("xxxx");
   });
 
   it.each([
