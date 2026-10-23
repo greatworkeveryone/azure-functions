@@ -36,6 +36,9 @@ export interface OptionNoticeTenant {
   expiry?: string | null;
   optionNoticeMonths?: number | null;
   optionPeriods?: string | null;
+  /** Tenants.OptionsRemaining (WP32), when known: 0 means nothing is left to
+   *  exercise whatever the free text says; null falls back to parsing it. */
+  optionsRemaining?: number | null;
 }
 
 const WINDOW_OPENS_MONTHS_BEFORE_DEADLINE = 6;
@@ -159,6 +162,13 @@ function shiftMonths(parts: IsoParts, delta: number): IsoParts {
   return { day: Math.min(parts.day, daysIn(year, month)), month, year };
 }
 
+/** Options still to exercise: the structured count when known, else the text's. */
+function hasOptionsLeft(tenant: OptionNoticeTenant): boolean {
+  const remaining = tenant.optionsRemaining;
+  if (typeof remaining === "number" && Number.isFinite(remaining)) return remaining > 0;
+  return parseOptionPeriods(tenant.optionPeriods) !== null;
+}
+
 /**
  * Where `today` ("YYYY-MM-DD") sits against the tenant's option notice window.
  * The deadline is expiry minus `optionNoticeMonths`; the window opens six
@@ -166,7 +176,9 @@ function shiftMonths(parts: IsoParts, delta: number): IsoParts {
  * there is nothing to date or nothing to exercise: the option text doesn't
  * parse (see `parseOptionPeriods`), `optionNoticeMonths` is not a whole number
  * of months of at least 1 (0 is how an unset notice period reads), or `expiry`
- * / `today` aren't real dates.
+ * / `today` aren't real dates. A known `optionsRemaining` (WP32) decides on its
+ * own: 0 or less is "none" even when the text still reads "2 x 5 years"; more
+ * than 0 dates the window even when the text doesn't parse.
  */
 export function optionNoticeWindow(
   tenant: OptionNoticeTenant,
@@ -178,7 +190,7 @@ export function optionNoticeWindow(
   if (
     !expiry ||
     !current ||
-    !parseOptionPeriods(tenant.optionPeriods) ||
+    !hasOptionsLeft(tenant) ||
     noticeMonths == null ||
     !Number.isInteger(noticeMonths) ||
     noticeMonths < 1
@@ -196,4 +208,105 @@ export function optionNoticeWindow(
   if (todayIso < opensAt) return { deadline, opensAt, state: "not_yet" };
   if (todayIso <= deadline) return { deadline, opensAt, state: "open" };
   return { deadline, opensAt, state: "closed" };
+}
+
+/** True when `date` ("YYYY-MM-DD") falls inside the window, both ends included (C10). */
+export function isInsideOptionWindow(window: Pick<OptionNoticeWindow, "deadline" | "opensAt">, date: string): boolean {
+  const day = readIsoDate(date);
+  if (!day || window.opensAt === null || window.deadline === null) return false;
+  const iso = formatIso(day);
+  return iso >= window.opensAt && iso <= window.deadline;
+}
+
+export interface OptionTermDates {
+  /** The new expiry: the option's last day. */
+  newExpiry: string;
+  /** The first day of the option term: the day after the current expiry. */
+  optionStart: string;
+  /** The day after the new expiry (the schedule's exclusive end). */
+  termEnd: string;
+}
+
+function addDays(parts: IsoParts, days: number): IsoParts {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day) + days * 86_400_000);
+  return { day: date.getUTCDate(), month: date.getUTCMonth() + 1, year: date.getUTCFullYear() };
+}
+
+/**
+ * The option term that follows `expiry`: it starts the next day and runs
+ * `termMonths` whole months from there, so its last day is the day before the
+ * same date `termMonths` later. Worked from the start, not the expiry, so a
+ * lease ending on 28 Feb runs to the end of February (29 Feb in a leap year)
+ * and one ending on 30 Apr to 30 Apr. Null when the expiry isn't a real date
+ * or the term isn't a whole number of months of at least 1.
+ */
+export function optionTermDates(expiry: string | null | undefined, termMonths: number | null | undefined): OptionTermDates | null {
+  const end = readIsoDate(expiry);
+  if (!end || termMonths == null || !Number.isInteger(termMonths) || termMonths < 1) return null;
+  const start = addDays(end, 1);
+  const termEnd = shiftMonths(start, termMonths);
+  return { newExpiry: formatIso(addDays(termEnd, -1)), optionStart: formatIso(start), termEnd: formatIso(termEnd) };
+}
+
+/** How the rent moves during an option term (WP32): the method of the review
+ *  at the option's start, and of the reviews after it. */
+export type OptionMethodKind = "cpi" | "fixed" | "market" | "other";
+
+export interface OptionTermPlan {
+  /** Increase % of a fixed review; ignored for the other methods. */
+  fixedPercent?: number | null;
+  /** Months between reviews during the term (the lease's interval; 12 when unset). */
+  intervalMonths?: number | null;
+  /** The reviews after the first. */
+  ongoingMethod: OptionMethodKind;
+  /** The review on the option's first day ("market" when the lease says the option starts at market). */
+  startMethod: OptionMethodKind;
+}
+
+/** A schedule row an option term adds, in the schedule engine's shape. */
+export interface OptionTermStep {
+  effectiveFrom: string;
+  /** Exclusive end. */
+  effectiveTo: string;
+  id: string;
+  methodKind: OptionMethodKind;
+  ratePercent: number;
+}
+
+const DEFAULT_INTERVAL_MONTHS = 12;
+
+/**
+ * The schedule rows for an option term (PLAN §3.5 APPLY: "option-term schedule
+ * steps per the lease method"): one review row on the option's first day with
+ * the start method, then one every `intervalMonths` with the ongoing method,
+ * each ending (exclusively) where the next begins and the last on the day after
+ * the new expiry. A fixed row carries its percentage; every other row starts at
+ * 0 and waits for its review (a market or other row reads "rate not set", a CPI
+ * row "index missing") until the review workflow settles it. Pure: `newId`
+ * names each row. Empty when the term can't be dated.
+ */
+export function buildOptionTermSteps(
+  expiry: string | null | undefined,
+  termMonths: number | null | undefined,
+  plan: OptionTermPlan,
+  newId: () => string,
+): OptionTermStep[] {
+  const dates = optionTermDates(expiry, termMonths);
+  if (!dates || termMonths == null) return [];
+  const start = readIsoDate(dates.optionStart) as IsoParts;
+  const interval =
+    plan.intervalMonths != null && Number.isInteger(plan.intervalMonths) && plan.intervalMonths >= 1
+      ? plan.intervalMonths
+      : DEFAULT_INTERVAL_MONTHS;
+  const rate = (method: OptionMethodKind): number =>
+    method === "fixed" && typeof plan.fixedPercent === "number" && Number.isFinite(plan.fixedPercent) ? plan.fixedPercent : 0;
+  const steps: OptionTermStep[] = [];
+  for (let months = 0; months < termMonths; months += interval) {
+    const from = formatIso(shiftMonths(start, months));
+    const nextMonths = Math.min(months + interval, termMonths);
+    const to = nextMonths >= termMonths ? dates.termEnd : formatIso(shiftMonths(start, nextMonths));
+    const method = months === 0 ? plan.startMethod : plan.ongoingMethod;
+    steps.push({ effectiveFrom: from, effectiveTo: to, id: newId(), methodKind: method, ratePercent: rate(method) });
+  }
+  return steps;
 }

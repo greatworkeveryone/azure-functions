@@ -315,6 +315,10 @@ interface RegisterTenantApi {
   occupancies: TenantOccupancyApi[];
   optionNoticeMonths?: number;
   optionPeriods?: string;
+  /** Options left to exercise (Tenants.OptionsRemaining, WP32); absent until recorded. */
+  optionsRemaining?: number;
+  optionsTotal?: number;
+  optionTermMonths?: number;
   postalAddress?: string;
   primaryContactEmail?: string;
   primaryContactName?: string;
@@ -596,6 +600,11 @@ function tenantRowToApi(
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
     optionPeriods: asStr(row.OptionPeriods),
+    // WP32 (migration 106): the structured options, when recorded; the option
+    // window counts these before the free text.
+    optionsRemaining: asNum(row.OptionsRemaining),
+    optionsTotal: asNum(row.OptionsTotal),
+    optionTermMonths: asNum(row.OptionTermMonths),
     ...(pending ? { pendingChanges: pending } : {}),
     postalAddress: asStr(row.PostalAddress),
     primaryContactEmail: asStr(row.PrimaryContactEmail),
@@ -695,6 +704,7 @@ const TENANT_COLUMNS = `
   PrimaryContactName, PrimaryContactEmail, PrimaryContactPhone,
   Lot, InformationSheetAsAt, InformationSheetReference,
   Commencement, Expiry, TermMonths, OptionPeriods, OptionNoticeMonths,
+  OptionsTotal, OptionsRemaining, OptionTermMonths,
   RenewalLetterIssueBy, HoldoverTerms,
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,

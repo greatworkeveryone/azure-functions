@@ -14,7 +14,8 @@
     "check:routes": "node scripts/check-routes.cjs",
     "export-roles": "tsc && node scripts/export-roles.cjs",
     "migrate": "tsc && node scripts/migrate.cjs",
-    "seed:procedures": "tsc && node scripts/seed-procedures.cjs"
+    "seed:procedures": "tsc && node scripts/seed-procedures.cjs",
+    "backfill:lease-options": "tsc && node scripts/backfill-lease-options.cjs"
   },
   "dependencies": {
     "@azure/functions": "4.12.0",

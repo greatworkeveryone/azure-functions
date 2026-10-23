@@ -60,6 +60,7 @@ export interface DraftFacts extends TenancyState {
   documents: number;
   jobs: number;
   keys: number;
+  leaseEvents: number;
   notes: number;
   occupancies: number;
   occupancyHistory: number;
@@ -92,9 +93,9 @@ const DRAFT_FACTS_SQL = `SELECT t.LegalName, t.BuildingId, t.ArchivedAt,
  WHERE t.TenantId = @Id`;
 
 // Sign-off (migration 097), defects periods (119), schedule change requests (099)
-// and the documentation register (154) may not exist yet where this runs; each is
+// the documentation register (154) and lease events (106) may not exist yet where this runs; each is
 // read only when its column or table does.
-const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0, @Requests INT = 0, @RegisterDocs INT = 0;
+const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0, @Requests INT = 0, @RegisterDocs INT = 0, @LeaseEvents INT = 0;
 IF COL_LENGTH(N'dbo.Tenants', N'ScheduleSignedOffAt') IS NOT NULL
   EXEC sp_executesql
     N'SELECT @n = COUNT(*) FROM dbo.Tenants WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @Id AND ScheduleSignedOffAt IS NOT NULL',
@@ -105,7 +106,9 @@ IF OBJECT_ID(N'dbo.ScheduleChangeRequests', N'U') IS NOT NULL
   SELECT @Requests = COUNT(*) FROM dbo.ScheduleChangeRequests WITH (HOLDLOCK) WHERE TenantId = @Id;
 IF OBJECT_ID(N'dbo.RegisterDocuments', N'U') IS NOT NULL
   SELECT @RegisterDocs = COUNT(*) FROM dbo.RegisterDocuments WITH (HOLDLOCK) WHERE TenantId = @Id;
-SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods, @Requests AS ChangeRequests, @RegisterDocs AS RegisterDocuments;`;
+IF OBJECT_ID(N'dbo.LeaseEvents', N'U') IS NOT NULL
+  SELECT @LeaseEvents = COUNT(*) FROM dbo.LeaseEvents WITH (HOLDLOCK) WHERE TenantId = @Id;
+SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods, @Requests AS ChangeRequests, @RegisterDocs AS RegisterDocuments, @LeaseEvents AS LeaseEvents;`;
 
 const DELETE_DRAFT_SQL = `DELETE FROM dbo.Tenants WHERE TenantId = @Id`;
 
@@ -130,6 +133,7 @@ export async function readDraftFacts(connection: Connection, tenantId: number): 
     documents: num(row.Documents),
     jobs: num(row.Jobs),
     keys: num(row.Keys),
+    leaseEvents: num(optional?.LeaseEvents),
     legalName: String(row.LegalName ?? `Tenancy #${tenantId}`),
     notes: num(row.Notes),
     occupancies: num(row.Occupancies),
@@ -171,6 +175,7 @@ export function draftDeletionRefusal(facts: DraftFacts): { contains?: string[]; 
     ...(facts.scheduleChanges > 0 ? ["rent schedule history"] : []),
     ...(facts.documents > 0 ? [counted(facts.documents, "document", "documents")] : []),
     ...(facts.keys > 0 ? [counted(facts.keys, "key", "keys")] : []),
+    ...(facts.leaseEvents > 0 ? [counted(facts.leaseEvents, "option or renewal record", "option or renewal records")] : []),
     ...(facts.vacancies > 0 ? [counted(facts.vacancies, "vacancy", "vacancies")] : []),
     ...(facts.carparks > 0 ? [counted(facts.carparks, "car park", "car parks")] : []),
     ...(facts.defectsPeriods > 0 ? [counted(facts.defectsPeriods, "defects period", "defects periods")] : []),

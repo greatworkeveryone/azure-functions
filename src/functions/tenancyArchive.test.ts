@@ -78,7 +78,7 @@ const BLANK_COLUMNS = [
   "Incentives", "InformationSheetAsAt", "InformationSheetReference", "InfoSheetSections", "LastReviewDate", "LastReviewIncreasePercent",
   "LeaseAdministration", "LeaseType", "Lot", "MiscFees", "NextReviewDate", "OptionNoticeMonths", "OptionPeriods", "PostalAddress",
   "PrimaryContactEmail", "PrimaryContactName", "PrimaryContactPhone", "RenewalLetterIssueBy", "RentPerAnnum", "RentReliefs", "ReviewIntervalMonths",
-  "ScheduledRateSteps", "SecurityDepositHeld", "SecurityDepositMethod", "SecurityDepositRequired", "SecurityDepositSteps", "StreetAddress", "TermMonths", "TradingName",
+  "ScheduledRateSteps", "SecurityDepositHeld", "SecurityDepositMethod", "SecurityDepositRequired", "SecurityDepositSteps", "StreetAddress", "TermMonths", "TradingName", "OptionsTotal", "OptionsRemaining", "OptionTermMonths",
 ];
 const blankRow = (): Record<string, unknown> => ({
   ...Object.fromEntries(BLANK_COLUMNS.map((column) => [column, null])),
@@ -124,7 +124,7 @@ beforeEach(() => {
     Vacancies: 0,
   };
   tenantRow = blankRow();
-  optional = { ChangeRequests: 0, DefectsPeriods: 0, RegisterDocuments: 0, SignedOff: 0 };
+  optional = { ChangeRequests: 0, DefectsPeriods: 0, LeaseEvents: 0, RegisterDocuments: 0, SignedOff: 0 };
   documentRow = { ArchivedAt: null, OriginalName: "lease.pdf" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/SELECT \* FROM dbo\.Tenants WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return tenantRow ? [tenantRow] : [];
@@ -214,6 +214,7 @@ const DRAFT_HOLDINGS: [string, Record<string, unknown>, string][] = [
   ["defects periods", { DefectsPeriods: 2 }, "2 defects periods"],
   ["schedule change requests", { ChangeRequests: 1 }, "1 schedule change request"],
   ["documentation register entries", { RegisterDocuments: 2 }, "2 documentation register entries"],
+  ["option or renewal records", { LeaseEvents: 2 }, "2 option or renewal records"],
 ];
 
 // S1-2 (D11 re-check): every column a person can fill in on the tenancy itself is
@@ -245,6 +246,9 @@ const CONTENT_HOLDINGS: [string, unknown, string][] = [
   ["PrimaryContactPhone", "0400 000 000", "address and contact details"],
   ["Expiry", new Date("2029-06-30T00:00:00Z"), "lease terms"],
   ["TermMonths", 60, "lease terms"],
+  ["OptionsTotal", 2, "lease options"],
+  ["OptionsRemaining", 1, "lease options"],
+  ["OptionTermMonths", 60, "lease options"],
   ["OptionPeriods", "2 x 5 years", "lease terms"],
   ["OptionNoticeMonths", 6, "lease terms"],
   ["RenewalLetterIssueBy", "ASAP", "lease terms"],
@@ -458,6 +462,7 @@ describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft
     expect(optionalSql).toMatch(/FROM dbo\.DefectsPeriods WITH \(HOLDLOCK\) WHERE TenantId = @Id/);
     expect(optionalSql).toMatch(/IF OBJECT_ID\(N'dbo\.ScheduleChangeRequests', N'U'\) IS NOT NULL\s+SELECT @Requests = COUNT\(\*\) FROM dbo\.ScheduleChangeRequests WITH \(HOLDLOCK\) WHERE TenantId = @Id/);
     expect(optionalSql).toMatch(/IF OBJECT_ID\(N'dbo\.RegisterDocuments', N'U'\) IS NOT NULL\s+SELECT @RegisterDocs = COUNT\(\*\) FROM dbo\.RegisterDocuments WITH \(HOLDLOCK\) WHERE TenantId = @Id/);
+    expect(optionalSql).toMatch(/IF OBJECT_ID\(N'dbo\.LeaseEvents', N'U'\) IS NOT NULL\s+SELECT @LeaseEvents = COUNT\(\*\) FROM dbo\.LeaseEvents WITH \(HOLDLOCK\) WHERE TenantId = @Id/);
     expect(order(/ScheduleSignedOffAt/)).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
   });
 

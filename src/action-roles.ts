@@ -125,6 +125,12 @@ export const ACTION_ROLES = {
     routes: ["directorApproveQuote"],
     why: "The director's approval of a quote. The handler re-checks the director role: admin is never a director approver.",
   },
+  approveOptionExercise: {
+    gate: REVIEW_APPROVERS,
+    refused: [A.ADMIN],
+    routes: ["approveOptionExercise"],
+    why: `Approve a recorded option notice, which extends the lease and its schedule (OPTION_APPROVE_ROLES, leaseEvents/http.ts); not the notice's recorder; ${ADMIN_TEST_ONLY}.`,
+  },
   approveRentReview: {
     gate: REVIEW_APPROVERS,
     refused: [A.ADMIN],
@@ -345,6 +351,12 @@ export const ACTION_ROLES = {
     routes: ["setMyobControl", "pauseMyob", "acceptMyobBaseline", "runMyobLabProbe", "recordMyobLabResult"],
     why: "The CFO's MYOB switches and the pause, accepting MYOB's record as the baseline (SPR-M4), and the MYOB lab's probes and results (plan M5) (isMyobController: the cfo role, literally).",
   },
+  overrideLeaseEventChecks: {
+    gate: [A.DIRECTOR],
+    match: "exact",
+    routes: [],
+    why: "Accept an option notice dated outside its window, approve an exercise with the schedule not signed off, or approve a notice you recorded, each with a reason: directors only (D23).",
+  },
   overrideRentReviewChecks: {
     gate: [A.DIRECTOR],
     match: "exact",
@@ -409,6 +421,23 @@ export const ACTION_ROLES = {
     gate: RESPOND_TO_DECISION_ROLES,
     routes: ["respondToJobDecision"],
     why: "Answer a decision you were asked for (the request names who).",
+  },
+  recordOptionNotice: {
+    gate: TENANCY_DESK,
+    routes: ["recordOptionNotice"],
+    why: "Record a tenant's notice exercising a lease option (OPTION_RECORD_ROLES, leaseEvents/http.ts: the editTenancy roles).",
+  },
+  recordRenewalOutcome: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["recordRenewalOutcome"],
+    why: `Decide a lease referred for renewal: renewed, vacating or holdover (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
+  },
+  rejectOptionNotice: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["rejectOptionNotice"],
+    why: `Reject a recorded option notice, with a reason (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
   },
   revertAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
@@ -595,6 +624,11 @@ export const ACTION_ROLES = {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.FACILITIES, A.FACILITIES_APPROVAL, A.DIRECTOR],
     routes: ["getQuotes"],
     why: "Read a job's quotes.",
+  },
+  viewLeaseEvents: {
+    gate: TENANCY_DESK,
+    routes: ["getTenancyLeaseEvents"],
+    why: "A tenancy's option exercises and renewals (LEASE_EVENT_VIEW_ROLES: the roles that may read a tenancy).",
   },
   viewRentReviews: {
     gate: TENANCY_DESK,
