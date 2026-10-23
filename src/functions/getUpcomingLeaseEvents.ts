@@ -7,9 +7,14 @@
 //   LeaseEvent  { kind: "review" | "expiry" | "option_deadline",
 //                 tenantId, buildingId, tenantName, date, overdue,
 //                 scheduleSignedOff (whether the tenancy's schedule is signed off, D7),
-//                 review rows also: state, reviewId, method, ownerUserId, ownerName }
+//                 review rows also: state, reviewId, method, ownerUserId, ownerName
+//                 (notStarted rows: notStarted true, method from the lease, no reviewId) }
 //
-//   review           every open review dated inside the window or already past
+//   review           every open review dated inside the window or already past,
+//                    plus a row marked `notStarted` (no reviewId, no state) for
+//                    each tenancy whose Tenants.NextReviewDate is inside the
+//                    window or past with no open review row. Read-only: this
+//                    feed never creates a review row (UX review TN5)
 //   expiry           every active tenancy's expiry, not only those with a review due
 //   option_deadline  the last day to give notice of an option (leaseOptions.ts)
 //
@@ -40,6 +45,7 @@ import {
   DEFAULT_LEASE_EVENT_DAYS,
   MAX_LEASE_EVENT_DAYS,
   type LeaseEventReview,
+  type LeaseEventScheduledReview,
   type LeaseEventTenancy,
 } from "../rentReview/leaseEvents";
 import { showTestParam } from "../test-data";
@@ -60,6 +66,13 @@ const REVIEWS_SQL = `SELECT r.ReviewId, r.TenantId, r.ScheduledFor, r.State, r.M
   INNER JOIN dbo.Tenants t ON t.TenantId = r.TenantId
   LEFT JOIN dbo.AppUsers u ON u.UserID = r.OwnerUserId
   WHERE r.State IN (${OPEN_STATE_LIST}) AND r.ScheduledFor <= @Until AND t.Status <> 'vacated' AND t.ArchivedAt IS NULL
+    AND (t.IsTest = 0 OR @ShowTest = 1)`;
+
+// The schedule's next review date (the register's "Review overdue" comes from it). Dates and names only.
+const SCHEDULED_REVIEWS_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.NextReviewDate, t.ReviewType,
+    t.ScheduleSignedOffAt
+  FROM dbo.Tenants t
+  WHERE t.Status <> 'vacated' AND t.ArchivedAt IS NULL AND t.NextReviewDate IS NOT NULL AND t.NextReviewDate <= @Until
     AND (t.IsTest = 0 OR @ShowTest = 1)`;
 
 const BUILDING_FILTER = " AND t.BuildingId = @BuildingId";
@@ -115,6 +128,12 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       reviewParams,
     );
 
+    const scheduledRows = await executeQuery(
+      connection,
+      buildingId === null ? SCHEDULED_REVIEWS_SQL : `${SCHEDULED_REVIEWS_SQL}${BUILDING_FILTER}`,
+      reviewParams,
+    );
+
     const tenancies: LeaseEventTenancy[] = tenancyRows.map((row) => ({
       buildingId: Number(row.BuildingId),
       expiry: sqlDateToIso(row.Expiry),
@@ -137,9 +156,22 @@ export async function getUpcomingLeaseEvents(request: HttpRequest, context: Invo
       tenantName: tenantDisplayName(row),
     }));
 
+    const scheduledReviews: LeaseEventScheduledReview[] = scheduledRows.flatMap((row) => {
+      const nextReviewDate = sqlDateToIso(row.NextReviewDate);
+      if (!nextReviewDate) return [];
+      return [{
+        buildingId: Number(row.BuildingId),
+        method: METHODS.includes(String(row.ReviewType)) ? (row.ReviewType as RentReviewMethod) : null,
+        nextReviewDate,
+        scheduleSignedOff: Boolean(row.ScheduleSignedOffAt),
+        tenantId: Number(row.TenantId),
+        tenantName: tenantDisplayName(row),
+      }];
+    });
+
     const pending = await loadPendingChanges(connection, buildingId === null ? { all: true } : { buildingId }, "dates_only", showTest.value);
     return {
-      jsonBody: { asOf: today, days, events: buildLeaseEvents({ days, reviews, tenancies, today }), pendingChanges: pendingChangesOf(pending) },
+      jsonBody: { asOf: today, days, events: buildLeaseEvents({ days, reviews, scheduledReviews, tenancies, today }), pendingChanges: pendingChangesOf(pending) },
       status: 200,
     };
   } catch (error) {

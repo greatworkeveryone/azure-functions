@@ -21,6 +21,7 @@ type Body = { asOf: string; days: number; events: Event[] };
 
 let tenancies: Row[];
 let reviews: Row[];
+let scheduled: Row[];
 
 const tenancyRow = (id: number, over: Row = {}): Row => ({
   BuildingId: 5,
@@ -61,8 +62,10 @@ beforeEach(() => {
   db.createRequestConnection.mockResolvedValue({});
   tenancies = [];
   reviews = [];
+  scheduled = [];
   routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], 
     [/FROM dbo\.RentReviews r/, () => reviews],
+    [/t\.NextReviewDate <= @Until/, () => scheduled],
     [/FROM dbo\.Tenants t\s+WHERE/, () => tenancies],
   ]);
 });
@@ -301,5 +304,53 @@ describe("the events", () => {
     routeSql(db.executeQuery, [[/FROM dbo\.ScheduleChangeRequests c/, () => []], [/FROM dbo\.Tenants/, () => Promise.reject(new Error("boom"))]]);
     expect((await ask()).status).toBe(500);
     expect(db.closeConnection).toHaveBeenCalled();
+  });
+});
+
+describe("a review date with no review row yet (UX review TN5)", () => {
+  const scheduledRow = (id: number, date: string, over: Row = {}): Row => ({
+    BuildingId: 5,
+    LegalName: `Tenant ${id} Pty Ltd`,
+    NextReviewDate: asDate(date),
+    ReviewType: "cpi",
+    ScheduleSignedOffAt: new Date("2026-10-01T00:00:00Z"),
+    TenantId: id,
+    TradingName: null,
+    ...over,
+  });
+
+  it("lists an overdue next review date as a review that has not started, overdue first", async () => {
+    scheduled = [scheduledRow(1, DAY(-3))];
+    tenancies = [tenancyRow(2, { Expiry: asDate(DAY(-10)) })];
+    const events = ((await ask()).jsonBody as Body).events;
+    expect(events.map((e) => [e.tenantId, e.kind])).toEqual([[2, "expiry"], [1, "review"]]);
+    expect(events[1]).toMatchObject({ date: DAY(-3), method: "cpi", notStarted: true, overdue: true, tenantName: "Tenant 1 Pty Ltd" });
+    expect(events[1]).not.toHaveProperty("reviewId");
+  });
+
+  it("leaves out a tenancy whose open review row already covers its date", async () => {
+    scheduled = [scheduledRow(1, DAY(-3)), scheduledRow(2, DAY(10))];
+    reviews = [reviewRow(1, DAY(-3))];
+    const events = ((await ask()).jsonBody as Body).events;
+    expect(events.map((e) => [e.tenantId, e.reviewId ?? null])).toEqual([[1, "rev-1"], [2, null]]);
+  });
+
+  it("filters by building, owner-less, and reads only dates and names for it", async () => {
+    await ask("buildingId=5");
+    const { sql, params } = sqlOf(/t\.NextReviewDate <= @Until/);
+    expect(sql).toContain("t.Status <> 'vacated' AND t.ArchivedAt IS NULL");
+    expect(sql).toContain("t.BuildingId = @BuildingId");
+    expect(sql).toContain("t.IsTest = 0 OR @ShowTest = 1");
+    expect(params.BuildingId).toBe(5);
+    expect(params.Until).toBe(DAY(90));
+    for (const column of ["RentPerAnnum", "Abn", "Notes", "Basis", "Comments"]) expect(sql).not.toContain(column);
+  });
+
+  it("only reads: it never writes a review row", async () => {
+    scheduled = [scheduledRow(1, DAY(-3))];
+    await ask();
+    const sqls = (db.executeQuery.mock.calls as unknown[][]).map((call) => String(call[1]));
+    expect(sqls.length).toBeGreaterThan(0);
+    for (const sql of sqls) expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE|EXEC)\b/i);
   });
 });

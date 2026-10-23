@@ -75,6 +75,9 @@ enter the current periods. Service schedules (add, edit, import, mark serviced
 or skip) are managed by the same three roles.
 Rent reviews (`rentReviews`) shows the review screens; the generator and the CPI
 timer behind it need their settings above, and migration 101.
+Switch the generator on (`RENT_REVIEW_GENERATOR_ENABLED`) before or with the
+`rentReviews` flag, so reviews get their rows: until it has run, a tenancy with an
+overdue review date appears in Next 90 days only as "Review not started".
 Tenancy Schedule report (`tenancyScheduleReport`, Tools → Reports) ships in
 preview: set it to enabled for director, cfo and admin once migration 159
 (`159_tenancy_lease_type.sql`, additive: `Tenants.LeaseType`) is applied and the
