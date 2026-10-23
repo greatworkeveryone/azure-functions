@@ -11,6 +11,8 @@ export interface OptionTerms {
   /** Increase % of a fixed review during the term. */
   fixedPercent: number | null;
   intervalMonths: number;
+  /** For a notice dated outside the window: the recorder's reason, for the director deciding it. */
+  lateReason?: string | null;
   /** The new expiry the term ends on. */
   newExpiry: string;
   ongoingMethod: OptionMethodKind;

@@ -180,6 +180,9 @@ export async function recordOptionNotice(request: HttpRequest, context: Invocati
         optionStart: dates.optionStart,
         startMethod: body.startMethod,
         termMonths: options.termMonths,
+        // A notice outside the window carries the recorder's reason, so the
+        // director deciding it reads it beside the notice (the ledger keeps it too).
+        ...(inWindow ? {} : { lateReason: body.reason }),
       };
       const leaseEventId = String(event.LeaseEventId);
       const recorded = await markNoticeRecorded(db, leaseEventId, from, to, {

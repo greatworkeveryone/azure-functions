@@ -99,6 +99,7 @@ describe("recordOptionNotice", () => {
     expect((await record({ noticeDate: "2026-06-29" })).status).toBe(400); // reason_required
     const res = await record({ noticeDate: "2026-06-29", reason: "Posted early by the tenant" });
     expect(body(res)).toMatchObject({ late: true, event: { lateNotice: true, state: "notice_received" } });
+    expect(body(res).event.terms).toMatchObject({ lateReason: "Posted early by the tenant" });
     const late = world.state.ledger.find((row) => row.Action === "lease_event.late_notice");
     expect(late).toMatchObject({ IsException: true, Reason: "Posted early by the tenant" });
   });
