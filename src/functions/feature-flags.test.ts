@@ -40,7 +40,7 @@ const FRONTEND_FEATURE_KEYS = [
   "activity",
   "aiAssist",
   "assets",
-  "contractorSuggestions",
+  "comms", "contractorSuggestions",
   "decisionJobs",
   "escalations",
   "finance",
