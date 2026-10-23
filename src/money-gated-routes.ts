@@ -38,6 +38,10 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   // WP26c: a director's decision on a pending schedule change (rent relief) changes what a tenant is billed.
   { file: "src/functions/ratifyScheduleChange.ts", label: "Approve a schedule change (rent relief)", route: "ratifyScheduleChange" },
   { file: "src/functions/rejectScheduleChange.ts", label: "Reject a schedule change (rent relief)", route: "rejectScheduleChange" },
+  // WP32, WP33: an option exercise extends the lease and adds its schedule rows; a
+  // renewal sets a new starting rent. Both change what a tenant is billed.
+  { file: "src/functions/approveOptionExercise.ts", label: "Approve an option exercise", route: "approveOptionExercise" },
+  { file: "src/functions/recordRenewalOutcome.ts", label: "Decide a lease renewal", route: "recordRenewalOutcome" },
 ];
 
 export function isMoneyGatedRoute(route: string): boolean {

@@ -1,5 +1,6 @@
 // azure-functions/src/functions/vacancies.ts
 
+import { sqlDateToIso } from "../nextReviewDate";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
@@ -152,6 +153,8 @@ function rowToVacancy(row: SqlRow): Record<string, unknown> {
     wordpressSlug: row.WordPressSlug ?? null,
     lastSyncedAt: row.LastSyncedAt ?? null,
     tenancyId: row.TenancyId ?? null,
+    // WP33: a renewal decided as "vacating" sets it (migration 106); absent before 106.
+    availableFrom: sqlDateToIso(row.AvailableFrom),
     isTest: row.IsTest === true || row.IsTest === 1,
     createdAt: row.CreatedAt,
     updatedAt: row.UpdatedAt,

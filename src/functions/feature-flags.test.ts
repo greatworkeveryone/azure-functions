@@ -46,6 +46,7 @@ const FRONTEND_FEATURE_KEYS = [
   "inspections",
   "jobs",
   "keys",
+  "leaseEvents",
   "maintenance",
   "payroll",
   "procedures",

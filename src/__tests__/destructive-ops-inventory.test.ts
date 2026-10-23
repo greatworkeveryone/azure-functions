@@ -41,6 +41,7 @@ const REVIEWED_TIMERS: Record<string, string> = {
   tenancyCpiSyncTimer: "tenancyCpiSyncTimer.ts — CPI rows it owns",
   timesheetSyncTimer: "timesheetSyncTimer.ts — stamps Timesheets.SentToMyobDate",
   tenancyReviewScheduleTimer: "tenancyReviewScheduleTimer.ts — writes only its own RentReviews workflow rows, and only when RENT_REVIEW_GENERATOR_ENABLED is \"true\"",
+  leaseEventsGeneratorTimer: "leaseEventsGeneratorTimer.ts — writes only its own LeaseEvents rows (open, window open, lapse, renewal referral) and their ledger rows, selected positively (live, non-test tenancies with an expiry); deletes nothing; off unless LEASE_EVENTS_GENERATOR_ENABLED is \"true\", LEASE_EVENTS_GENERATOR_DRY_RUN writes nothing (WP32, WP33)",
   syncAllWorkRequestsTimer: "syncAllWorkRequests.ts — MERGE into WorkRequests (local edits live in WorkRequestOverrides)",
   plannerSyncTimer: "plannerSyncTimer.ts — PlannerTasks + Graph Planner; shared with jobPlannerSync",
   renewGraphSubscription: "graphWebhook.ts — Graph subscription only",

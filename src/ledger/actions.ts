@@ -13,8 +13,7 @@ export interface ActionDefinition {
 
 // Every decision code, `domain.verb`. Each package adds its codes in its own
 // block so parallel branches don't collide. Packages still to add theirs:
-// WP26b (billing holds), WP29b (billing runs), WP32 (lease events), WP60–WP62
-// (comms).
+// WP26b (billing holds), WP29b (billing runs), WP60–WP62 (comms).
 export const LEDGER_ACTIONS = {
   // Refusals, any subject (WP19b)
   denied: { exception: true, reasonRequired: false, subjects: "any" },
@@ -238,6 +237,31 @@ export const LEDGER_ACTIONS = {
   "rent_review.revert": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
   "rent_review.submit": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.waive": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
+
+  // Lease events (WP32 option exercise, WP33 expiry and renewal). The subject is
+  // the lease event; the scope columns carry the tenancy and building. The
+  // generator records open, window_open, lapsed and renewal_referred as the
+  // system actor (leaseEventsGeneratorTimer). A notice dated outside its window
+  // is recorded as late_notice, an exception with the recorder's reason (PLAN
+  // §3.12: late option notices need one); a director accepting it, or approving
+  // with the schedule not signed off, writes director_override naming the check
+  // (C10, C3; D23). option_exercised is the APPLY: expiry, options remaining,
+  // the option-term rows and any market review, before and after. A rejection
+  // and a cancellation are exceptions with their reason; each renewal outcome
+  // carries what the directors decided.
+  "lease_event.cancel": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.director_override": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.holdover": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.lapsed": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.late_notice": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.notice_recorded": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.open": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.option_exercised": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.option_rejected": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.renewal_referred": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.renewed": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.vacating": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.window_open": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
 
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one

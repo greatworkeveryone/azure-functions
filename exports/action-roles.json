@@ -18,6 +18,11 @@
   "approveInvoiceAsDirector": [
     "director"
   ],
+  "approveOptionExercise": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
   "approveOwnRentReview": [
     "director"
   ],
@@ -334,6 +339,9 @@
   "myobController": [
     "cfo"
   ],
+  "overrideLeaseEventChecks": [
+    "director"
+  ],
   "overrideRentReviewChecks": [
     "director"
   ],
@@ -365,15 +373,28 @@
     "director",
     "facilities_manager"
   ],
+  "recordOptionNotice": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
   "recordPayment": [
     "accounts_manager",
     "cfo",
+    "director"
+  ],
+  "recordRenewalOutcome": [
     "director"
   ],
   "rejectInvoice": [
     "accounts_manager",
     "admin",
     "cfo",
+    "director"
+  ],
+  "rejectOptionNotice": [
     "director"
   ],
   "rejectScheduleChange": [
@@ -576,6 +597,13 @@
     "director",
     "facilities",
     "facilities_manager"
+  ],
+  "viewLeaseEvents": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
   ],
   "viewLeave": [
     "accounts",

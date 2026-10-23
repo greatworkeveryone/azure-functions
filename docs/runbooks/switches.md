@@ -20,6 +20,8 @@ then the real switch.
 | `DEV_EMAIL_OVERRIDE` | unset | Every outgoing escalation and decision-request email goes to this one address instead of the people asked | Dev and staging only; never in production |
 | `DIGEST_ENABLED` · `_DRY_RUN` | off | The morning digest email, 07:30 Darwin on business days, to a person only when something needs them. Needs migrations 132 (opt-out) and 143 (`AppUsers.DigestLastSentOn`). Once per person per Darwin day: each person is stamped the moment their email has gone and a run skips anyone stamped today, so a restart inside the morning or a run that died part-way tells nobody twice (the log line counts them as `alreadySent`). A dry run reads the stamps and writes none. With `DEV_EMAIL_OVERRIDE` set the stamp is neither read nor written, so staging can send the same morning again. To resend one person today, set their `DigestLastSentOn` to NULL by hand | After a dry run, with 143 applied first |
 | `RENT_REVIEW_GENERATOR_ENABLED` · `_DRY_RUN` | off | Creates and moves rent reviews (WP25). Each live run also raises E1/E2, re-raises a lost E3 at the rung it reached, and writes the RentPerAnnum cache of a review applied ahead of its date once the date comes (WP26); at most `ESCALATION_SWEEP_MAX_ACTIONS` escalations a run. Pair with the Rent reviews flag | After a dry run |
+| `LEASE_EVENTS_GENERATOR_ENABLED` · `_DRY_RUN` | off | The daily `leaseEventsGeneratorTimer` (02:30 UTC, 12:00 in Darwin; WP32, WP33) opens a lease's option event 90 days before its notice window, opens the window on its day, warns the accounts manager 30 days before the deadline (`lease.option_deadline`), lapses an option whose deadline passed with no notice (`lease.option_lapsed` to the directors), and refers a lease with no option left to the directors at 180 days to expiry (`lease.renewal`, holdovers included). Positive selection: current or holdover tenancies, not archived, not test data, with an expiry; a window that closed before the timer ever saw it raises no lapse (its expiry goes to the directors as a renewal). Needs migration 106. The dry run (wins over ENABLED) logs and counts what it would do and writes nothing; off, it writes only its `TimerRuns` row. Recording, approving and rejecting notices work without it (recording opens the option event), and a director can decide a renewal from the tenancy without a referral (the decision opens it). Pair with the `leaseEvents` flag | After a dry run: the first live run refers every lease already inside 180 days of expiry |
+| `LEASE_EVENTS_GENERATOR_MAX_ACTIONS` | 50 | Most writes one generator run makes, soonest date first; the rest wait for the next day's run (the log and `TimerRuns.Counts.deferred` say how many) | Leave at 50 |
 | `REVIEW_WINDOW_DAYS` | 60 | Days before its date a scheduled rent review becomes due | Leave at 60 |
 | `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
 | `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row From WP26c, an unresolved review row dated on or after it shows as pending (awaiting review) on the schedule until a review applies it | The day WP25/WP26 go live (gate B) |
@@ -78,6 +80,16 @@ timer behind it need their settings above, and migration 101.
 Switch the generator on (`RENT_REVIEW_GENERATOR_ENABLED`) before or with the
 `rentReviews` flag, so reviews get their rows: until it has run, a tenancy with an
 overdue review date appears in Next 90 days only as "Review not started".
+Lease events (`leaseEvents`, WP32/WP33) ships hidden. On, the tenancy page shows
+the Lease events section (option exercises and renewals), the option exercise
+stepper (notice, checks, term and method preview, approve) instead of the old
+Accept options dialog, the confirmation letter, and the directors' renewal
+decision. Apply migration 106 first, and run the option backfill
+(`npm run backfill:lease-options -- --target <server>/<db>`: a dry run by
+default that lists the tenancies whose option text it can't read, for accounts
+to fix; `--apply` writes the structured counts). Turn on
+`LEASE_EVENTS_GENERATOR_ENABLED` (after its dry run) so windows, lapses and
+renewal referrals happen without anyone recording a notice first.
 Tenancy Schedule report (`tenancyScheduleReport`, Tools → Reports) ships in
 preview: set it to enabled for director, cfo and admin once migration 159
 (`159_tenancy_lease_type.sql`, additive: `Tenants.LeaseType`) is applied and the
