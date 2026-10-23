@@ -39,7 +39,7 @@ beforeEach(() => {
   roles = [AppRole.USER];
   token = "token";
   process.env = { ...saved };
-  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_LOG_CONTENT"]) delete process.env[name];
+  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_PURPOSES_ENABLED"]) delete process.env[name];
   jest.mocked(registry.listPurposeIds).mockReturnValue(["echo_test"]);
 });
 
@@ -69,7 +69,16 @@ describe("what it says", () => {
     const response = await call();
     expect(response.status).toBe(200);
     expect(response.headers).toMatchObject({ "Cache-Control": "no-store" });
-    expect(body(response)).toEqual({ configured: true, enabled: false, model: "mock", provider: "mock", purposes: ["echo_test"] });
+    expect(body(response)).toEqual({ configured: true, enabled: false, enabledPurposes: [], model: "mock", provider: "mock", purposes: ["echo_test"] });
+  });
+
+  it("lists the purposes switched on separately from the ones it has: none by default, and only registered ones", async () => {
+    jest.mocked(registry.listPurposeIds).mockReturnValue(["echo_test", "quote_extraction"]);
+    expect(body(await call())).toMatchObject({ enabledPurposes: [], purposes: ["echo_test", "quote_extraction"] });
+    process.env.AI_PURPOSES_ENABLED = "quote_extraction, not_registered";
+    expect(body(await call())).toMatchObject({ enabledPurposes: ["quote_extraction"], purposes: ["echo_test", "quote_extraction"] });
+    process.env.AI_PURPOSES_ENABLED = "echo_test,quote_extraction";
+    expect(body(await call())).toMatchObject({ enabledPurposes: ["echo_test", "quote_extraction"] });
   });
 
   it("reads the settings on every call, so a switch takes effect without a restart", async () => {
@@ -89,7 +98,7 @@ describe("what it says", () => {
       AI_PROVIDER: "openai_compatible",
     });
     const response = await call();
-    expect(body(response)).toEqual({ configured: true, enabled: true, model: "llama-3.1-8b", provider: "openai_compatible", purposes: ["echo_test"] });
+    expect(body(response)).toEqual({ configured: true, enabled: true, enabledPurposes: [], model: "llama-3.1-8b", provider: "openai_compatible", purposes: ["echo_test"] });
     const text = JSON.stringify(response);
     for (const secret of ["s3cret-key", "10.4.0.7", "8000"]) expect(text).not.toContain(secret);
   });

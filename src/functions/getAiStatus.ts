@@ -1,7 +1,8 @@
 // GET /api/getAiStatus
 //
-// Whether the AI gateway is switched on, which provider and model it points at, and
-// which purposes it allows (SC-AI1). Any signed-in user: staff are told whether an AI
+// Whether the AI gateway is switched on, which provider and model it points at, which
+// purposes it has, and which of those are switched on (AI_PURPOSES_ENABLED) (SC-AI1).
+// Any signed-in user: staff are told whether an AI
 // feature will answer before they try it. It reads settings only: no database, no
 // call to any model, and nothing secret (no endpoint URL, no key). With AI_ENABLED
 // unset it says enabled: false, and every AI endpoint refuses.
@@ -18,15 +19,17 @@ export async function getAiStatus(request: HttpRequest, context: InvocationConte
 
   try {
     const config = readAiConfig();
+    const purposes = listPurposeIds();
     return {
       status: 200,
       headers: { "Cache-Control": "no-store" },
       jsonBody: {
         configured: isConfigured(config),
         enabled: config.enabled,
+        enabledPurposes: purposes.filter((id) => config.enabledPurposes.includes(id)),
         model: config.provider === "mock" ? "mock" : config.model,
         provider: config.provider.slice(0, 40),
-        purposes: listPurposeIds(),
+        purposes,
       },
     };
   } catch (error) {

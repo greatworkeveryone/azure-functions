@@ -44,8 +44,8 @@ function prepareRuntime() {
     DEV_ROLE_OVERRIDE_ENABLED: "true", APP_BASE_URL: "http://localhost:3000",
     GRAPH_MAILBOX_ACTIVE: "dev", ACCESS_LOG_ENABLED: "false", MYOB_WRITES_ENABLED: "false",
     ATTRIBUTED_APPROVAL_ENABLED: "false", SCHEDULER_ENABLED: "false",
-    // AI gateway: off, and on the built-in mock if it is switched on (set AI_ENABLED to "true" here to try Admin -> AI activity; nothing leaves the machine).
-    AI_ENABLED: "false", AI_PROVIDER: "mock",
+    // AI gateway: off, and on the built-in mock if it is switched on (set AI_ENABLED to "true" here to try Admin -> AI activity; nothing leaves the machine; each purpose is switched on in AI_PURPOSES_ENABLED).
+    AI_ENABLED: "false", AI_PROVIDER: "mock", AI_PURPOSES_ENABLED: "echo_test",
     APPLICATIONINSIGHTS_CONNECTION_STRING: "", APPINSIGHTS_INSTRUMENTATIONKEY: "",
   };
   for (const name of fs.readdirSync(path.join(root, "src/functions"))) {

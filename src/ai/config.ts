@@ -8,6 +8,8 @@ export const DEFAULT_TIMEOUT_MS = 20_000;
 export const MAX_TIMEOUT_MS = 120_000;
 export const DEFAULT_RATE_PER_MINUTE = 20;
 export const MAX_RATE_PER_MINUTE = 1_000;
+const MAX_ENABLED_PURPOSES = 50;
+const PURPOSE_ID = /^[a-z][a-z0-9_]{0,63}$/;
 
 export interface AiConfig {
   /** Bearer token for the endpoint; optional for a self-hosted one. */
@@ -15,6 +17,8 @@ export interface AiConfig {
   baseUrl: string | null;
   /** Only the exact string "true" turns AI on. */
   enabled: boolean;
+  /** AI_PURPOSES_ENABLED: the purposes switched on, one by one. None by default; there is no "all". */
+  enabledPurposes: string[];
   model: string | null;
   /** The raw AI_PROVIDER value, trimmed and lower-cased; anything but a known name is refused as provider_error. */
   provider: string;
@@ -39,11 +43,26 @@ function wholeNumber(value: string | undefined, fallback: number, max: number): 
   return parsed >= 1 && parsed <= max ? parsed : fallback;
 }
 
+/**
+ * A comma list of purpose ids. Anything that is not a purpose id is dropped, so a typo or a wildcard
+ * switches nothing on; repeats collapse; the list stops at 50 so a stray value cannot grow without limit.
+ */
+function purposeList(value: string | undefined): string[] {
+  const ids: string[] = [];
+  for (const part of (value ?? "").split(",")) {
+    const id = part.trim();
+    if (PURPOSE_ID.test(id) && !ids.includes(id)) ids.push(id);
+    if (ids.length === MAX_ENABLED_PURPOSES) break;
+  }
+  return ids;
+}
+
 export function readAiConfig(env: Record<string, string | undefined> = process.env): AiConfig {
   return {
     apiKey: text(env.AI_API_KEY),
     baseUrl: text(env.AI_BASE_URL),
     enabled: env.AI_ENABLED === "true",
+    enabledPurposes: purposeList(env.AI_PURPOSES_ENABLED),
     model: text(env.AI_MODEL),
     provider: text(env.AI_PROVIDER)?.toLowerCase() ?? "mock",
     ratePerMinute: wholeNumber(env.AI_RATE_PER_MINUTE, DEFAULT_RATE_PER_MINUTE, MAX_RATE_PER_MINUTE),

@@ -7,6 +7,7 @@ describe("readAiConfig: everything off or default when nothing is set", () => {
       apiKey: null,
       baseUrl: null,
       enabled: false,
+      enabledPurposes: [],
       model: null,
       provider: "mock",
       ratePerMinute: 20,
@@ -31,6 +32,33 @@ describe("there is no setting that stores prompt or answer text (review M2)", ()
     expect(readAiConfig({ AI_LOG_CONTENT: "true" })).toEqual(readAiConfig({}));
     expect(readAiConfig({ AI_LOG_CONTENT: "true" })).not.toHaveProperty("logContent");
     expect(Object.keys(readAiConfig({ AI_ENABLED: "true", AI_LOG_CONTENT: "true" })).join(" ")).not.toMatch(/log|content|text/i);
+  });
+});
+
+describe("AI_PURPOSES_ENABLED: each purpose is switched on separately (review L3)", () => {
+  it("is none at all by default, so turning AI on switches no purpose on", () => {
+    expect(readAiConfig({ AI_ENABLED: "true" }).enabledPurposes).toEqual([]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "" }).enabledPurposes).toEqual([]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: " , ,, " }).enabledPurposes).toEqual([]);
+  });
+
+  it("reads a comma list of purpose ids, trimmed, in order, without repeats", () => {
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "echo_test" }).enabledPurposes).toEqual(["echo_test"]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: " echo_test , quote_extraction,echo_test,library_answer " }).enabledPurposes).toEqual([
+      "echo_test",
+      "quote_extraction",
+      "library_answer",
+    ]);
+  });
+
+  it("drops anything that is not a purpose id, and has no wildcard", () => {
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "*, all, Echo_Test, echo-test, echo test, 9lives, echo_test;x, ok_id" }).enabledPurposes).toEqual(["all", "ok_id"]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: `${"a".repeat(65)}, b` }).enabledPurposes).toEqual(["b"]);
+  });
+
+  it("keeps at most 50, so a stray value cannot grow without limit", () => {
+    const many = Array.from({ length: 80 }, (_, index) => `purpose_${index}`).join(",");
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: many }).enabledPurposes).toHaveLength(50);
   });
 });
 

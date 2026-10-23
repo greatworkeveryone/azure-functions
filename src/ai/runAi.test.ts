@@ -46,6 +46,7 @@ beforeEach(() => {
   countShouldFail = false;
   process.env = { ...saved, AI_ENABLED: "true" };
   for (const name of ["AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_LOG_CONTENT", "AI_TIMEOUT_MS", "AI_RATE_PER_MINUTE"]) delete process.env[name];
+  process.env.AI_PURPOSES_ENABLED = "echo_test";
   jest.mocked(createServiceRequestConnection).mockResolvedValue({} as never);
   query.mockImplementation(async (_connection, sql) => {
     if (sql.includes("INSERT INTO dbo.AiCallLog")) {
@@ -230,6 +231,44 @@ describe("refusals before anything is sent", () => {
     expect(await runAi(request({ input: "x".repeat(999), purpose: "nope" }))).toMatchObject({ refusal: { code: "purpose_not_allowed" } });
     expect(await runAi(request({ input: "x".repeat(999) }))).toMatchObject({ refusal: { code: "input_too_large" } });
     expect(await runAi(request())).toMatchObject({ refusal: { code: "rate_limited" } });
+  });
+});
+
+describe("AI_PURPOSES_ENABLED: each purpose is switched on separately (review L3)", () => {
+  it("refuses every purpose when none is switched on, even with AI on and the purpose registered", async () => {
+    delete process.env.AI_PURPOSES_ENABLED;
+    const result = await runAi(request());
+    expect(result).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
+    expect(inserts()[0]).toMatchObject({ ErrorCode: "purpose_not_allowed", Outcome: "refused", Purpose: "echo_test", PromptVersion: "echo_test@1" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["", " ", "other_purpose", "ECHO_TEST", "echo_test_2", "echo", "*"])("refuses echo_test when the list is %j", async (value) => {
+    process.env.AI_PURPOSES_ENABLED = value;
+    expect(await runAi(request())).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
+  });
+
+  it("allows a purpose that is listed, alone or among others", async () => {
+    for (const value of ["echo_test", "echo_test,quote_extraction", " other , echo_test "]) {
+      process.env.AI_PURPOSES_ENABLED = value;
+      expect(await runAi(request())).toMatchObject({ ok: true });
+    }
+  });
+
+  it("is checked after AI_ENABLED: switched off says disabled, whatever the list holds", async () => {
+    delete process.env.AI_ENABLED;
+    delete process.env.AI_PURPOSES_ENABLED;
+    expect(await runAi(request())).toMatchObject({ ok: false, refusal: { code: "disabled" } });
+  });
+
+  it("does not make an unknown purpose real by listing it", async () => {
+    process.env.AI_PURPOSES_ENABLED = "write_my_emails";
+    expect(await runAi(request({ purpose: "write_my_emails" }))).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
+  });
+
+  it("is checked before the size cap, so an unlisted purpose says so, not that its input was long", async () => {
+    delete process.env.AI_PURPOSES_ENABLED;
+    expect(await runAi(request({ input: "x".repeat(999) }))).toMatchObject({ refusal: { code: "purpose_not_allowed" } });
   });
 });
 
@@ -531,7 +570,19 @@ describe("a purpose of its own", () => {
       validate: (value) => ((value as { n?: unknown })?.n === 1 ? { ok: true, value: { n: 1 } } : { ok: false, reason: "n must be 1" }),
       ...over,
     });
-  const use = (purpose: ReturnType<typeof purposeNamed>) => jest.spyOn(registry, "getPurpose").mockReturnValue(purpose);
+  const use = (purpose: ReturnType<typeof purposeNamed>) => {
+    process.env.AI_PURPOSES_ENABLED = purpose.id;
+    return jest.spyOn(registry, "getPurpose").mockReturnValue(purpose);
+  };
+
+  it("needs its own id in AI_PURPOSES_ENABLED: being registered is not enough", async () => {
+    jest.spyOn(registry, "getPurpose").mockReturnValue(purposeNamed());
+    expect(await runAi(request({ purpose: "probe" }))).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
+    process.env.AI_PURPOSES_ENABLED = "echo_test";
+    expect(await runAi(request({ purpose: "probe" }))).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
+    process.env.AI_PURPOSES_ENABLED = "echo_test,probe";
+    expect(await runAi(request({ purpose: "probe" }))).toMatchObject({ ok: true });
+  });
 
   it("logs the purpose's own prompt version", async () => {
     use(purposeNamed());

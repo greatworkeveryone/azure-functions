@@ -5,7 +5,8 @@
 //   1. this person's rows in AiCallLog for the last minute are counted, every outcome included;
 //      above twice AI_RATE_PER_MINUTE the call is turned away before any row is written (429)
 //   2. the switch (AI_ENABLED must equal "true"): off means nothing is sent anywhere
-//   3. the purpose allowlist (./registry)
+//   3. the purpose allowlist: the purpose must exist (./registry) AND be listed in
+//      AI_PURPOSES_ENABLED, so each purpose is switched on on its own (default: none)
 //   4. the size cap (the purpose's maxInputChars)
 //   5. the per-minute limit itself (AI_RATE_PER_MINUTE): at it, a refusal that is logged
 //   6. redaction: personal details are replaced; a provider only ever sees the result
@@ -52,7 +53,7 @@ export async function runAi<Output = unknown>(request: AiRequest): Promise<AiRes
     if (recent > 2 * config.ratePerMinute) return throttled(call);
 
     if (!config.enabled) return await settle(call, refused("disabled"));
-    if (!purpose) return await settle(call, refused("purpose_not_allowed"));
+    if (!purpose || !config.enabledPurposes.includes(purpose.id)) return await settle(call, refused("purpose_not_allowed"));
     if (call.input.length > purpose.maxInputChars) return await settle(call, refused("input_too_large"));
     if (recent >= config.ratePerMinute) return await settle(call, refused("rate_limited"));
 
