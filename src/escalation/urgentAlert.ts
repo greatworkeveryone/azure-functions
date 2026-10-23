@@ -1,10 +1,10 @@
-// Urgent escalations get a real-time alert before any email (D21): per target with an
-// Entra id, each enabled channel is tried once, and only a "sent" result replaces that
+// Urgent escalations get a real-time alert before any email (D21): per target the channel can
+// reach and the teamsAlerts flag allows, each enabled channel is tried once, and only a "sent" result replaces that
 // person's email. Anything else (not installed, retry, dry run, no id) leaves the email
 // to go as before. A channel is never retried here, so a 5xx that may have landed can't
 // alert twice.
 
-import type { AlertChannel, AlertResult } from "../alerts/channel";
+import type { AlertChannel, AlertKind, AlertResult } from "../alerts/channel";
 import type { EgressSubject } from "../test-data";
 import { normaliseRole, ROLES } from "./roles";
 import type { DirectoryUser, EscalationRow } from "./types";
@@ -20,6 +20,12 @@ export function isAlertEvent(event: string): event is AlertEvent {
   return event === "raise" || event === "reminder" || event === "supersede";
 }
 
+/** Which generic line the Workflows flow shows: a reminder, else a decision (authority) or an escalation. */
+export function alertKind(event: AlertEvent, row: EscalationRow): AlertKind {
+  if (event === "reminder") return "reminder";
+  return row.kind === "authority" ? "decision" : "escalation";
+}
+
 /** Generic on purpose: lock screens are public, so no amounts, names or addresses. */
 export function alertCopy(event: AlertEvent): { previewText: string; text: string } {
   return event === "reminder"
@@ -32,22 +38,33 @@ export interface UrgentDelivery {
   toldUserIds: Set<number>;
 }
 
+export interface DeliverOptions {
+  kind: AlertKind;
+  log?: (message: string) => void;
+  /** Per-target gate (the teamsAlerts flag for the target's role). False = email only. */
+  mayAlert: (user: DirectoryUser) => Promise<boolean>;
+}
+
 export async function deliverUrgentAlerts(
   targets: readonly DirectoryUser[],
   event: AlertEvent,
   route: string,
   egress: EgressSubject,
   channels: readonly AlertChannel[],
-  log?: (message: string) => void,
+  options: DeliverOptions,
 ): Promise<UrgentDelivery> {
   const toldUserIds = new Set<number>();
   const copy = alertCopy(event);
+  if (channels.length === 0) return { toldUserIds };
   for (const user of targets) {
-    if (!user.entraOid) continue;
+    const address = { email: user.email, entraOid: user.entraOid ?? null };
+    if (!channels.some((channel) => address[channel.needs])) continue;
+    if (!(await options.mayAlert(user))) continue;
     for (const channel of channels) {
+      if (!address[channel.needs]) continue;
       let result: AlertResult;
       try {
-        result = await channel.send({ entraOid: user.entraOid }, { egress, route, ...copy });
+        result = await channel.send(address, { egress, kind: options.kind, route, ...copy });
       } catch (error) {
         result = { detail: error instanceof Error ? error.message : String(error), status: "failed" };
       }
@@ -55,7 +72,7 @@ export async function deliverUrgentAlerts(
         toldUserIds.add(user.userId);
         break;
       }
-      log?.(`urgent alert via ${channel.name} not sent for user ${user.userId} (${result.status}); email will go`);
+      options.log?.(`urgent alert via ${channel.name} not sent for user ${user.userId} (${result.status}); email will go`);
     }
   }
   return { toldUserIds };

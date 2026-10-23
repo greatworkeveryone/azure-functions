@@ -56,6 +56,10 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   optional("WORDPRESS_USERNAME", "Vacancies cannot be published or unpublished on the website."),
   optional("WORDPRESS_APP_PASSWORD", "Vacancies cannot be published or unpublished on the website."),
   optional("TEAMS_APP_ID", "Teams alerts cannot build a tab link, so none is sent even when TEAMS_ALERTS_ENABLED is on."),
+  // TEAMS_WORKFLOW_WEBHOOK_URL and TEAMS_WORKFLOW_KEY are secrets: set them as Key Vault references.
+  optional("TEAMS_WORKFLOW_WEBHOOK_URL", "The Workflows route has nowhere to post, so urgent alerts go by email only."),
+  optional("TEAMS_WORKFLOW_KEY", "The Workflows flow would refuse our posts, so urgent alerts go by email only."),
+  optional("TEAMS_ALERTS_ROUTE", "Defaults to \"workflows\"; set \"app\" once the Floorplan Teams app is installed."),
   optional("BUILD_SHA", "Health cannot say which commit is deployed."),
 ];
 

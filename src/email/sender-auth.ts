@@ -34,8 +34,8 @@ const AUTH_AS = "x-ms-exchange-organization-authas";
 const CROSS_TENANT_AUTH_AS = "x-ms-exchange-crosstenant-authas";
 const AUTH_RESULTS = "authentication-results";
 
-export function orgEmailDomains(): string[] {
-  return (process.env.ORG_EMAIL_DOMAINS ?? "")
+export function orgEmailDomains(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.ORG_EMAIL_DOMAINS ?? "")
     .split(",")
     .map((d) => d.trim().toLowerCase())
     .filter((d) => d.length > 0);

@@ -17,6 +17,8 @@ jest.mock("../auth", () => ({
   requireRole: jest.fn().mockResolvedValue(null),
 }));
 jest.mock("../teams/activity", () => ({ sendActivityNotification: jest.fn() }));
+jest.mock("../features/flags", () => ({ isFeatureEnabledForRoles: jest.fn().mockResolvedValue(false) }));
+jest.mock("../alerts/rateCap", () => ({ claimWorkflowsSlot: jest.fn().mockResolvedValue(true) }));
 
 import { AppRole } from "../auth";
 import { NOT_A_RECORD } from "../test-data";
@@ -25,17 +27,28 @@ import { TEAMS_TEST_USER_SQL, teamsTestAlert } from "./teamsTestAlert";
 const auth = require("../auth") as { extractToken: jest.Mock; requireRole: jest.Mock };
 const db = require("../db") as { executeQuery: jest.Mock };
 const activity = require("../teams/activity") as { sendActivityNotification: jest.Mock };
+const flags = require("../features/flags") as { isFeatureEnabledForRoles: jest.Mock };
+const rateCap = require("../alerts/rateCap") as { claimWorkflowsSlot: jest.Mock };
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const post = (body: unknown) => ({ headers: { get: () => null }, json: async () => body }) as unknown as HttpRequest;
-const ENV_KEYS = ["TEAMS_ALERTS_ENABLED", "TEAMS_ALERTS_DRY_RUN", "TEAMS_APP_ID"] as const;
+const ENV_KEYS = [
+  "TEAMS_ALERTS_ENABLED",
+  "TEAMS_ALERTS_DRY_RUN",
+  "TEAMS_APP_ID",
+  "TEAMS_ALERTS_ROUTE",
+  "TEAMS_WORKFLOW_WEBHOOK_URL",
+  "TEAMS_WORKFLOW_KEY",
+  "ORG_EMAIL_DOMAINS",
+] as const;
 
 beforeEach(() => {
   jest.clearAllMocks();
   for (const key of ENV_KEYS) delete process.env[key];
+  process.env.TEAMS_ALERTS_ROUTE = "app";
   auth.extractToken.mockReturnValue("tok");
   auth.requireRole.mockResolvedValue(null);
-  db.executeQuery.mockResolvedValue([{ EntraOid: " oid-7 ", UserID: 7 }]);
+  db.executeQuery.mockResolvedValue([{ Email: "gus@randazzo.properties", EntraOid: " oid-7 ", Role: "director", UserID: 7 }]);
   activity.sendActivityNotification.mockResolvedValue({ mode: "live", status: "sent" });
 });
 
@@ -80,7 +93,7 @@ describe("teamsTestAlert", () => {
       expect.objectContaining({ egress: NOT_A_RECORD, route: "/dashboard" }),
       expect.anything(),
     );
-    expect(res).toEqual({ jsonBody: { mode: "live", result: { mode: "live", status: "sent" }, route: "/dashboard", userId: 7 }, status: 200 });
+    expect(res).toEqual({ jsonBody: { alertsRoute: "app", flagEnabled: false, mode: "live", result: { mode: "live", status: "sent" }, route: "/dashboard", userId: 7 }, status: 200 });
   });
 
   it("reports the mode, so off reads as off", async () => {
@@ -118,5 +131,46 @@ describe("teamsTestAlert", () => {
     activity.sendActivityNotification.mockRejectedValue(new Error("boom"));
     expect((await teamsTestAlert(post({ userId: 7 }), ctx)).status).toBe(500);
     expect(ctx.error).toHaveBeenCalled();
+  });
+});
+
+describe("teamsTestAlert on the workflows route", () => {
+  const fetchMock = jest.fn();
+  const realFetch = global.fetch;
+  beforeEach(() => {
+    delete process.env.TEAMS_ALERTS_ROUTE; // default is workflows
+    process.env.TEAMS_ALERTS_ENABLED = "true";
+    process.env.TEAMS_WORKFLOW_WEBHOOK_URL = "https://flow.example/hook?sig=SECRET";
+    process.env.TEAMS_WORKFLOW_KEY = "KEY";
+    process.env.ORG_EMAIL_DOMAINS = "randazzo.properties";
+    fetchMock.mockReset().mockResolvedValue({ status: 202 });
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+  afterAll(() => {
+    global.fetch = realFetch;
+  });
+
+  it("is the default route: posts recipient, route and kind only, and reports route and flag state", async () => {
+    flags.isFeatureEnabledForRoles.mockResolvedValue(true);
+    const res = await teamsTestAlert(post({ route: "/jobs?jobId=1", userId: 7 }), ctx);
+    expect(activity.sendActivityNotification).not.toHaveBeenCalled();
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ kind: "escalation", recipient: "gus@randazzo.properties", route: "/jobs?jobId=1" });
+    expect(res.jsonBody).toMatchObject({ alertsRoute: "workflows", flagEnabled: true, mode: "live", result: { status: "sent" } });
+    expect(flags.isFeatureEnabledForRoles).toHaveBeenCalledWith("teamsAlerts", ["director"], expect.anything());
+  });
+
+  it("still sends with the flag off (reported, not enforced) and uses the rate cap", async () => {
+    flags.isFeatureEnabledForRoles.mockResolvedValue(false);
+    rateCap.claimWorkflowsSlot.mockResolvedValueOnce(false);
+    const res = await teamsTestAlert(post({ userId: 7 }), ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.jsonBody).toMatchObject({ flagEnabled: false, result: { detail: "rate cap reached", status: "skipped" } });
+  });
+
+  it("400s when the user has no email, 503s when the flow is not configured", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Email: null, Role: "director", UserID: 7 }]);
+    expect((await teamsTestAlert(post({ userId: 7 }), ctx)).status).toBe(400);
+    delete process.env.TEAMS_WORKFLOW_KEY;
+    expect((await teamsTestAlert(post({ userId: 7 }), ctx)).status).toBe(503);
   });
 });

@@ -14,6 +14,8 @@
 
 import type { Connection } from "tedious";
 import { resolveAlertChannels, type AlertChannel } from "../alerts/channel";
+import { isFeatureEnabledForRoles } from "../features/flags";
+import { teamsMode } from "../teams/config";
 import { resolveRecipient } from "../email-recipient";
 import { reportSystemHealth } from "../email/role-recipients";
 import { graphSendMail } from "../graph";
@@ -24,7 +26,7 @@ import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingN
 import { buildDecisionEmail } from "./decisionEmail";
 import { askedOfIds, ladderOf, namedTargetIds } from "./decisionRows";
 import { buildNextStepEmail } from "./nextStepEmail";
-import { deliverUrgentAlerts, isAlertEvent, isUrgentAlert } from "./urgentAlert";
+import { alertKind, deliverUrgentAlerts, isAlertEvent, isUrgentAlert } from "./urgentAlert";
 import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
@@ -35,6 +37,8 @@ export type SendMail = (to: string[], subject: string, body: string, egress: Egr
 export type NotifyEvent = "follow_up" | "raise" | "reminder" | "supersede";
 
 export interface NotifyOptions {
+  /** Whether the teamsAlerts flag lets this role be alerted (default: dbo.FeatureFlags, fail closed). */
+  alertFlag?: (role: string) => Promise<boolean>;
   /** Real-time alert channels for urgent events (default: whatever the env switches on). */
   channels?: readonly AlertChannel[];
   /** Tries before giving up in this call (default 1: HTTP requests don't wait). */
@@ -318,15 +322,21 @@ export async function notifyTargets(
       // D21: an urgent raise, reminder or supersede is tried as a real-time alert first. Not on
       // a retry of a failed send, which would alert the people already told a second time.
       const route = linkRoute(row);
+      // Gate: ops mode on (TEAMS_ALERTS_ENABLED / _DRY_RUN) AND flag teamsAlerts enabled for the
+      // target's role; otherwise that person just gets the email.
       const alerted =
-        isAlertEvent(event) && isUrgentAlert(row) && route !== null && row.notificationState !== "failed"
+        isAlertEvent(event) && isUrgentAlert(row) && route !== null && row.notificationState !== "failed" && teamsMode(env) !== "off"
           ? await deliverUrgentAlerts(
               targetUsers(row, users),
               event,
               route,
               egress,
-              options.channels ?? resolveAlertChannels(env),
-              options.log,
+              options.channels ?? resolveAlertChannels(env, { connection }),
+              {
+                kind: alertKind(event, row),
+                log: options.log,
+                mayAlert: (user) => (options.alertFlag ?? ((role) => isFeatureEnabledForRoles("teamsAlerts", [role], { connection })))(user.role),
+              },
             )
           : null;
       const told = alerted?.toldUserIds ?? new Set<number>();
