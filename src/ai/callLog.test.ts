@@ -134,12 +134,12 @@ describe("insertAiCall", () => {
 });
 
 describe("countRecentAiCalls", () => {
-  it("counts this person's calls to the model in the last 60 seconds, by their id", async () => {
+  it("counts every call this person made in the last 60 seconds, whatever its outcome, by their id", async () => {
     query.mockResolvedValueOnce([{ Calls: 3 }]);
     expect(await countRecentAiCalls(connection, ACTOR)).toBe(3);
     const sql = String(query.mock.calls[0][1]);
     expect(sql).toContain("DATEADD(SECOND, -60, SYSUTCDATETIME())");
-    expect(sql).toContain("Outcome IN (N'ok', N'failed')");
+    expect(sql).not.toMatch(/Outcome/);
     expect(sql).not.toMatch(/\b(UPDATE|DELETE)\b/i);
     expect(paramsOf(0)).toEqual({ Email: "jo@randazzo.example", Kind: "user", Name: "Jo Bloggs", UserId: 41 });
   });

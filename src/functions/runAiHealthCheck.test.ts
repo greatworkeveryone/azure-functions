@@ -132,6 +132,29 @@ describe("with AI switched on", () => {
     expect(body(response)).toMatchObject({ ok: false, outcome: "refused", refusal: { code: "rate_limited" } });
   });
 
+  it("answers 429 with Retry-After, and writes no row, when the person is far over the limit", async () => {
+    query.mockImplementation(async (_c, sql) => (sql.includes("INSERT INTO") ? [{ Id: "56" }] : [{ Calls: 41 }]));
+    const response = await call();
+    expect(response.status).toBe(429);
+    expect(response.headers).toMatchObject({ "Cache-Control": "no-store", "Retry-After": "60" });
+    expect(body(response)).toEqual({ code: "rate_limited", error: "That is too many AI requests in a minute. Wait a moment and try again." });
+    expect(inserts()).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 429 when the person already has two test calls running", async () => {
+    Object.assign(process.env, { AI_BASE_URL: "https://llm.example", AI_MODEL: "llama", AI_PROVIDER: "openai_compatible" });
+    const open: Array<() => void> = [];
+    fetchMock.mockImplementation(() => new Promise<Response>((resolve) => open.push(() => resolve(new Response(JSON.stringify({ choices: [{ message: { content: '{"echo":"ok"}' } }] }))))));
+    const running = [call(), call()];
+    for (let turn = 0; turn < 200 && open.length < 2; turn++) await new Promise((resolve) => setImmediate(resolve));
+    const third = await call();
+    expect(third.status).toBe(429);
+    expect(third.headers).toMatchObject({ "Retry-After": "60" });
+    open.splice(0).forEach((release) => release());
+    for (const response of await Promise.all(running)) expect(response.status).toBe(200);
+  });
+
   it("reports a failing endpoint as ok: false with a plain sentence, and none of what the endpoint said", async () => {
     Object.assign(process.env, { AI_BASE_URL: "http://10.4.0.7:8000", AI_MODEL: "llama", AI_PROVIDER: "openai_compatible" });
     fetchMock.mockResolvedValue(new Response("prompt: Floorplan AI health check; key=s3cret", { status: 500 }));

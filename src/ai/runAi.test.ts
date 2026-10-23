@@ -80,7 +80,8 @@ describe("the switch", () => {
 
     expect(result).toMatchObject({ ok: false, refusal: { code: "disabled" } });
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(counts()).toHaveLength(0);
+    // The person's recent calls are counted first, even switched off, so a loop of refused calls can be stopped.
+    expect(counts()).toHaveLength(1);
     expect(inserts()).toHaveLength(1);
     expect(inserts()[0]).toMatchObject({ ErrorCode: "disabled", Model: null, Outcome: "refused", LatencyMs: null, OutputChars: null });
   });
@@ -176,7 +177,7 @@ describe("refusals before anything is sent", () => {
   it("refuses a purpose that is not on the allowlist, logging the id it asked for", async () => {
     const result = await runAi(request({ purpose: "write_my_emails" }));
     expect(result).toMatchObject({ ok: false, refusal: { code: "purpose_not_allowed" } });
-    expect(counts()).toHaveLength(0);
+    expect(counts()).toHaveLength(1);
     expect(inserts()[0]).toMatchObject({ ErrorCode: "purpose_not_allowed", Outcome: "refused", Purpose: "write_my_emails", PromptVersion: "unknown", Model: null });
   });
 
@@ -189,7 +190,7 @@ describe("refusals before anything is sent", () => {
     const result = await runAi(request({ input: "x".repeat(201) }));
     expect(result).toMatchObject({ ok: false, refusal: { code: "input_too_large" } });
     expect(inserts()[0]).toMatchObject({ ErrorCode: "input_too_large", InputChars: 201, Outcome: "refused" });
-    expect(counts()).toHaveLength(0);
+    expect(counts()).toHaveLength(1);
   });
 
   it("lets an input of exactly the cap through", async () => {
@@ -227,13 +228,174 @@ describe("refusals before anything is sent", () => {
   });
 
   it("applies the checks in order: switch, then purpose, then size, then rate", async () => {
-    recentCalls = 99;
+    recentCalls = 20;
     delete process.env.AI_ENABLED;
     expect(await runAi(request({ input: "x".repeat(999), purpose: "nope" }))).toMatchObject({ refusal: { code: "disabled" } });
     process.env.AI_ENABLED = "true";
     expect(await runAi(request({ input: "x".repeat(999), purpose: "nope" }))).toMatchObject({ refusal: { code: "purpose_not_allowed" } });
     expect(await runAi(request({ input: "x".repeat(999) }))).toMatchObject({ refusal: { code: "input_too_large" } });
     expect(await runAi(request())).toMatchObject({ refusal: { code: "rate_limited" } });
+  });
+});
+
+describe("the per-minute limit counts every call, and stops writing rows when it is far exceeded", () => {
+  it("counts rows of every outcome: refused calls count too", async () => {
+    await runAi(request());
+    expect(String(counts()[0][1])).not.toMatch(/Outcome/);
+  });
+
+  it("refuses at the limit and up to twice it, each with a row", async () => {
+    for (const recent of [20, 21, 39, 40]) {
+      query.mockClear();
+      recentCalls = recent;
+      const result = await runAi(request());
+      expect({ recent, result }).toMatchObject({ recent, result: { ok: false, refusal: { code: "rate_limited" }, meta: { throttled: false } } });
+      expect({ recent, rows: inserts().length }).toEqual({ recent, rows: 1 });
+      expect(inserts()[0]).toMatchObject({ ErrorCode: "rate_limited", Outcome: "refused" });
+    }
+  });
+
+  it("above twice the limit turns the call away without writing a row, or reaching a model", async () => {
+    process.env.AI_PROVIDER = "openai_compatible";
+    process.env.AI_BASE_URL = "https://llm.example";
+    process.env.AI_MODEL = "m";
+    for (const recent of [41, 500]) {
+      query.mockClear();
+      recentCalls = recent;
+      const result = await runAi(request());
+      expect(result).toMatchObject({ meta: { callId: null, throttled: true }, ok: false, refusal: { code: "rate_limited" } });
+      expect(inserts()).toHaveLength(0);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("measures twice the limit from AI_RATE_PER_MINUTE", async () => {
+    process.env.AI_RATE_PER_MINUTE = "5";
+    recentCalls = 10;
+    expect(await runAi(request())).toMatchObject({ meta: { throttled: false }, refusal: { code: "rate_limited" } });
+    recentCalls = 11;
+    expect(await runAi(request())).toMatchObject({ meta: { throttled: true }, refusal: { code: "rate_limited" } });
+  });
+
+  it("applies when AI is switched off: a loop of switched-off calls stops writing rows", async () => {
+    delete process.env.AI_ENABLED;
+    recentCalls = 5;
+    expect(await runAi(request())).toMatchObject({ meta: { throttled: false }, refusal: { code: "disabled" } });
+    expect(inserts()).toHaveLength(1);
+    query.mockClear();
+    recentCalls = 41;
+    expect(await runAi(request())).toMatchObject({ meta: { callId: null, throttled: true }, refusal: { code: "rate_limited" } });
+    expect(inserts()).toHaveLength(0);
+  });
+
+  it("applies to every kind of refusal before it: a purpose that isn't allowed, and an input that is too long", async () => {
+    recentCalls = 41;
+    expect(await runAi(request({ purpose: "nope" }))).toMatchObject({ meta: { throttled: true } });
+    expect(await runAi(request({ input: "x".repeat(999) }))).toMatchObject({ meta: { throttled: true } });
+    expect(inserts()).toHaveLength(0);
+  });
+
+  it("says so in a plain sentence", async () => {
+    recentCalls = 41;
+    const result = await runAi(request());
+    expect(result.ok === false && result.refusal.message).toBe("That is too many AI requests in a minute. Wait a moment and try again.");
+  });
+});
+
+describe("calls in flight", () => {
+  beforeEach(() => {
+    process.env.AI_PROVIDER = "openai_compatible";
+    process.env.AI_BASE_URL = "https://llm.example";
+    process.env.AI_MODEL = "m";
+  });
+
+  /** A provider that answers only when told to: each call to it waits on its own gate. */
+  function heldProvider() {
+    const gates: Array<() => void> = [];
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          gates.push(() => resolve(answer('{"echo":"ok"}')));
+        }),
+    );
+    const reached = async (count: number) => {
+      for (let turn = 0; turn < 200 && gates.length < count; turn++) await new Promise((resolve) => setImmediate(resolve));
+      expect(gates).toHaveLength(count);
+    };
+    return { open: () => gates.splice(0).forEach((gate) => gate()), reached };
+  }
+
+  it("lets one person have two in flight, turns the third away without touching the database, and frees the slots as they finish", async () => {
+    const provider = heldProvider();
+    const first = runAi(request());
+    const second = runAi(request());
+    await provider.reached(2);
+    query.mockClear();
+
+    const third = await runAi(request());
+
+    expect(third).toMatchObject({ meta: { callId: null, throttled: true }, ok: false, refusal: { code: "rate_limited" } });
+    expect(query).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    provider.open();
+    expect(await first).toMatchObject({ ok: true });
+    expect(await second).toMatchObject({ ok: true });
+    fetchMock.mockImplementation(async () => answer('{"echo":"ok"}'));
+    expect(await runAi(request())).toMatchObject({ ok: true });
+  });
+
+  it("holds the slot until the row is written, not just until the model answers", async () => {
+    const provider = heldProvider();
+    const first = runAi(request());
+    await provider.reached(1);
+    const second = runAi(request());
+    await provider.reached(2);
+    expect(await runAi(request())).toMatchObject({ meta: { throttled: true } });
+    provider.open();
+    await Promise.all([first, second]);
+    expect(inserts()).toHaveLength(2);
+  });
+
+  it("does not hold up someone else", async () => {
+    const provider = heldProvider();
+    const first = runAi(request());
+    const second = runAi(request());
+    await provider.reached(2);
+    const ada: AiActor = { email: "ada@randazzo.example", kind: "user", name: "Ada Lovelace", role: "director", userId: 7 };
+    const adas = runAi(request({ actor: ada }));
+    await provider.reached(3);
+    provider.open();
+    expect(await adas).toMatchObject({ ok: true });
+    await Promise.all([first, second]);
+  });
+
+  it("gives the slot back when the model fails, when the count fails and when the answer can't be recorded", async () => {
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+    for (let attempt = 0; attempt < 4; attempt++) expect(await runAi(request())).toMatchObject({ refusal: { code: "provider_error" } });
+
+    countShouldFail = true;
+    for (let attempt = 0; attempt < 4; attempt++) await expect(runAi(request())).rejects.toThrow("connection lost");
+    countShouldFail = false;
+
+    fetchMock.mockImplementation(async () => answer('{"echo":"ok"}'));
+    insertShouldFail = true;
+    for (let attempt = 0; attempt < 4; attempt++) await expect(runAi(request())).rejects.toBeInstanceOf(AiAuditError);
+    insertShouldFail = false;
+
+    expect(await runAi(request())).toMatchObject({ ok: true });
+  });
+
+  it("turns a flood of parallel calls away: of twenty at once, two reach the model and the rest get no row", async () => {
+    const provider = heldProvider();
+    const all = Array.from({ length: 20 }, () => runAi(request()));
+    await provider.reached(2);
+    for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setImmediate(resolve));
+    provider.open();
+    const results = await Promise.all(all);
+    expect(results.filter((result) => result.ok)).toHaveLength(2);
+    expect(results.filter((result) => !result.ok && result.meta.throttled)).toHaveLength(18);
+    expect(inserts()).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

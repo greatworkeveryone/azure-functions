@@ -44,6 +44,29 @@ export interface Settled {
 
 export const refused = (code: AiRefusalCode): Settled => ({ code, latencyMs: null, model: null, outputText: null });
 
+/**
+ * The result for a call turned away because the person is sending too many: no row is written
+ * (a flood must not be able to fill a log that can never be purged), nothing is redacted or
+ * sent, and `meta.throttled` tells the route to answer 429.
+ */
+export function throttled<Output>(call: AiCall): AiResult<Output> {
+  return {
+    meta: {
+      callId: null,
+      correlationId: call.correlationId,
+      latencyMs: null,
+      model: null,
+      promptVersion: call.purpose?.promptVersion ?? null,
+      provider: call.config.provider,
+      purpose: call.purposeId,
+      redactionCount: 0,
+      throttled: true,
+    },
+    ok: false,
+    refusal: refusal("rate_limited"),
+  };
+}
+
 export function startCall(request: AiRequest, config: AiConfig, purpose: AiPurpose | undefined): AiCall {
   const input = typeof request.input === "string" ? request.input : "";
   const cap = purpose?.maxInputChars ?? UNKNOWN_PURPOSE_HASH_CHARS;
@@ -118,6 +141,7 @@ export async function settle<Output>(call: AiCall, settled: Settled): Promise<Ai
     provider: call.config.provider,
     purpose: call.purposeId,
     redactionCount: redaction.count,
+    throttled: false,
   };
   return settled.code === null
     ? { meta, ok: true, output: settled.output as Output }
