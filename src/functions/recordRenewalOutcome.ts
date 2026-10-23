@@ -1,6 +1,6 @@
 // POST /api/recordRenewalOutcome   (PLAN §3.6 DECIDE_RENEWAL; WP33)
 //
-//   { leaseEventId, rowVersion, outcome, note?,          (or { tenantId, outcome, ... } when no
+//   { leaseEventId, rowVersion, leaseExpiry, outcome, note?,          (or { tenantId, outcome, ... } when no
 //                                                        renewal is open: see "opened here")
 //     renewed?: { commencement, expiry, baseRentPerAnnum, reviewIntervalMonths?, reviewMethod,
 //                 fixedPercent?, optionsTotal?, optionTermMonths?, optionPeriods? },
@@ -17,6 +17,9 @@
 //   state       referred, else 409 invalid_state
 //   role        director; admin only on a test tenancy (decision 4); anyone else
 //               403 forbidden, ledgered as denied
+//   leaseExpiry the expiry the director saw, required: a decision is made against that
+//               term or not at all, so a second director's (or a decision after an
+//               expiry edit) is 409 expiry_changed and writes nothing (data review S1)
 //   input       400 for a missing or malformed field: renewed needs both dates
 //               (expiry after commencement, commencement after the current
 //               expiry), a starting rent and a method; holdover needs its terms
@@ -123,13 +126,31 @@ export function readRenewalDecision(body: Record<string, unknown>): RenewalDecis
   };
 }
 
+/** The 409 for a decision made against an expiry the lease no longer has (data review S1): another
+ *  director decided first, or the expiry was edited. Nothing is written; the screen reloads. */
+function expiryChanged(expiry: string | null): LeaseEventError {
+  return new LeaseEventError(
+    "expiry_changed",
+    "This lease's expiry has changed since you opened it, so your decision wasn't recorded. Reload to see what was decided, then decide again if you need to.",
+    { expiry },
+  );
+}
+
 /** "Opened here": a referred renewal for the tenancy's current expiry, when none is open or decided for it. */
-async function openRenewalHere(db: Connection, caller: Caller, tenantId: number, leaseEventId: string, correlationId: string): Promise<string> {
+async function openRenewalHere(
+  db: Connection,
+  caller: Caller,
+  tenantId: number,
+  leaseEventId: string,
+  correlationId: string,
+  shownExpiry: string,
+): Promise<string> {
   const tenancy = await lockTenancyForEvent(db, tenantId);
   if (!tenancy) throw new LeaseEventError("not_found", "That tenancy doesn't exist");
   refuseClosedTenancy(tenancy);
   const expiry = sqlDateToIso(tenancy.Expiry);
   if (!expiry) throw new LeaseEventError("no_expiry", "This tenancy has no expiry date, so there is no renewal to decide.");
+  if (expiry !== shownExpiry) throw expiryChanged(expiry);
   if (await openEventForUpdate(db, tenantId, "option_exercise")) {
     throw new LeaseEventError("open_event_exists", "An option exercise is open on this lease. Settle it before deciding a renewal.");
   }
@@ -169,6 +190,8 @@ export async function recordRenewalOutcome(request: HttpRequest, context: Invoca
     const tenantIdToOpen = opening ? readTenantId(body.tenantId) : null;
     let leaseEventId = opening ? randomUUID() : readEventId(body.leaseEventId);
     const rowVersion = opening ? null : readRowVersion(body.rowVersion);
+    // The expiry the director saw: a decision lands on that term or not at all (data review S1).
+    const shownExpiry = readIsoDate(body.leaseExpiry, "leaseExpiry");
     const decision = readRenewalDecision(body);
     const note = readOptionalReason(body.note);
 
@@ -182,12 +205,13 @@ export async function recordRenewalOutcome(request: HttpRequest, context: Invoca
     let done;
     try {
       done = await inTransaction(db, async () => {
-        if (tenantIdToOpen !== null) leaseEventId = await openRenewalHere(db, caller, tenantIdToOpen, leaseEventId, correlationId);
+        if (tenantIdToOpen !== null) leaseEventId = await openRenewalHere(db, caller, tenantIdToOpen, leaseEventId, correlationId, shownExpiry);
         const event = await eventForUpdate(db, leaseEventId);
         if (!event || event.Type !== "renewal") throw new LeaseEventError("not_found", "That renewal doesn't exist");
         if (rowVersion !== null && rowVersionHex(event.Version) !== rowVersion) {
           throw new LeaseEventError("stale", "Someone else changed this renewal since you opened it. Reload to see their change.", { current: toLeaseEventDto(event) });
         }
+        if (sqlDateToIso(event.LeaseExpiry) !== shownExpiry) throw expiryChanged(sqlDateToIso(event.LeaseExpiry));
         const state = String(event.State) as LeaseEventState;
         const tenantId = Number(event.TenantId);
         const ref = { buildingId: event.BuildingId === null ? null : Number(event.BuildingId), leaseEventId, state, tenantId };
