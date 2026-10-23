@@ -54,6 +54,14 @@ const logged = () => Object.fromEntries((inserts()[0][2] ?? []).map((p) => [p.na
 const jobChecks = () => query.mock.calls.filter((c) => String(c[1]).includes("FROM Jobs"));
 let jobFound = true;
 let insertFails = false;
+let recentCalls = 0;
+// AI is on and these purposes are switched on: each has to be listed in AI_PURPOSES_ENABLED (review L3).
+const switchOn = (purposes = "quote_extraction,invoice_extraction") => Object.assign(process.env, { AI_ENABLED: "true", AI_PURPOSES_ENABLED: purposes });
+const useEndpoint = () => Object.assign(process.env, { AI_BASE_URL: "http://10.4.0.7:8000", AI_MODEL: "llama", AI_PROVIDER: "openai_compatible" });
+const until = async (done: () => boolean) => {
+  for (let turn = 0; turn < 500 && !done(); turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  expect(done()).toBe(true);
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -61,8 +69,9 @@ beforeEach(() => {
   token = "token";
   jobFound = true;
   insertFails = false;
+  recentCalls = 0;
   process.env = { ...saved };
-  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_LOG_CONTENT", "AI_TIMEOUT_MS", "AI_RATE_PER_MINUTE"]) delete process.env[name];
+  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_PURPOSES_ENABLED", "AI_TIMEOUT_MS", "AI_RATE_PER_MINUTE"]) delete process.env[name];
   jest.mocked(createRequestConnection).mockResolvedValue({} as never);
   jest.mocked(createServiceRequestConnection).mockResolvedValue({} as never);
   jest.mocked(resolveLedgerActor).mockResolvedValue({ kind: "user", name: "Fay Facilities", role: "facilities", userId: 9 });
@@ -72,7 +81,7 @@ beforeEach(() => {
       return [{ Id: "77" }];
     }
     if (sql.includes("FROM Jobs")) return jobFound ? [{ JobID: 42 }] : [];
-    return [{ Calls: 0 }];
+    return [{ Calls: recentCalls }];
   });
   fetchMock.mockReset();
   global.fetch = fetchMock as unknown as typeof fetch;
@@ -174,7 +183,7 @@ describe("with AI switched off (the default)", () => {
 
 describe("with AI switched on, through the mock provider", () => {
   beforeEach(() => {
-    process.env.AI_ENABLED = "true";
+    switchOn();
   });
 
   it("reads an invoice, and logs one ok row against the job with the prompt version and no text", async () => {
@@ -188,7 +197,20 @@ describe("with AI switched on, through the mock provider", () => {
       ok: true,
     });
     expect(inserts()).toHaveLength(1);
-    expect(logged()).toMatchObject({ InputText: null, Outcome: "ok", OutputText: null, Purpose: "invoice_extraction", PromptVersion: "invoice_extraction@1", RecordId: "42", RecordType: "job" });
+    expect(logged()).toMatchObject({ Outcome: "ok", Purpose: "invoice_extraction", PromptVersion: "invoice_extraction@1", RecordId: "42", RecordType: "job" });
+    expect(Object.keys(logged())).not.toContain("InputText");
+    expect(Object.keys(logged())).not.toContain("OutputText");
+    for (const text of ["INV-10234", "Harbour Lifts", "72 456 123 789", "1,100.00"]) expect(JSON.stringify(logged())).not.toContain(text);
+  });
+
+  it("never keeps the document's text in the log, whatever AI_LOG_CONTENT says", async () => {
+    process.env.AI_LOG_CONTENT = "true";
+    await post({ jobId: 42, kind: "quote", text: `${INVOICE_TEXT}\nQueries to accounts@harbourlifts.example` });
+    expect(Object.keys(logged())).not.toContain("InputText");
+    expect(Object.keys(logged())).not.toContain("OutputText");
+    expect(JSON.stringify(logged())).not.toMatch(/harbourlifts|Harbour Lifts|INV-10234|\[EMAIL\]/);
+    expect(logged()).toMatchObject({ RedactionCount: 1 });
+    expect(String(logged().InputSha256)).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("reads a quote as quote_extraction", async () => {
@@ -204,11 +226,59 @@ describe("with AI switched on, through the mock provider", () => {
     expect(logged()).toMatchObject({ RecordId: null, RecordType: "quote" });
   });
 
-  it("answers 200 with a typed refusal when the rate limit is reached, and does not call the model", async () => {
-    query.mockImplementation(async (_c, sql) => (sql.includes("INSERT INTO") ? [{ Id: "78" }] : sql.includes("FROM Jobs") ? [{ JobID: 42 }] : [{ Calls: 20 }]));
+  it("answers 200 with a typed refusal when the rate limit is reached, logs it, and does not call the model", async () => {
+    useEndpoint();
+    recentCalls = 20;
     const response = await post({ jobId: 42, kind: "quote", text: INVOICE_TEXT });
     expect(response.status).toBe(200);
     expect(body(response)).toMatchObject({ ok: false, refusal: { code: "rate_limited" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logged()).toMatchObject({ ErrorCode: "rate_limited", Outcome: "refused", Purpose: "quote_extraction" });
+  });
+
+  it("answers 429 with Retry-After above twice the limit, with only the code and a sentence, and writes no row and sends nothing", async () => {
+    useEndpoint();
+    recentCalls = 41;
+    const response = await post({ jobId: 42, kind: "quote", text: INVOICE_TEXT });
+    expect(response.status).toBe(429);
+    expect(response.headers).toMatchObject({ "Cache-Control": "no-store", "Retry-After": "60" });
+    expect(body(response)).toEqual({ code: "rate_limited", error: "That is too many AI requests in a minute. Wait a moment and try again." });
+    expect(inserts()).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still answers 200 with a logged refusal at exactly twice the limit", async () => {
+    recentCalls = 40;
+    const response = await post({ kind: "invoice", text: INVOICE_TEXT });
+    expect(response.status).toBe(200);
+    expect(body(response)).toMatchObject({ ok: false, refusal: { code: "rate_limited" }, kind: "invoice" });
+    expect(inserts()).toHaveLength(1);
+  });
+
+  it("answers 429 to a third call while two of this person's calls are still waiting on the model, and writes no row for it", async () => {
+    useEndpoint();
+    const answers: Array<() => void> = [];
+    fetchMock.mockImplementation(
+      () => new Promise<Response>((resolve) => answers.push(() => resolve(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ total: 1100 }) } }] }))))),
+    );
+    const first = post({ jobId: 42, kind: "invoice", text: INVOICE_TEXT });
+    const second = post({ jobId: 42, kind: "quote", text: INVOICE_TEXT });
+    try {
+      await until(() => fetchMock.mock.calls.length === 2);
+
+      const third = await post({ jobId: 42, kind: "invoice", text: INVOICE_TEXT });
+      expect(third.status).toBe(429);
+      expect(third.headers).toMatchObject({ "Retry-After": "60" });
+      expect(body(third)).toMatchObject({ code: "rate_limited" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(inserts()).toHaveLength(0);
+    } finally {
+      // Always let the two go, so a failure above cannot leave their slots held for the tests after it.
+      for (const answer of answers) answer();
+    }
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(inserts()).toHaveLength(2);
   });
 
   it("refuses text longer than the purpose reads, and logs it as refused", async () => {
@@ -238,9 +308,39 @@ describe("with AI switched on, through the mock provider", () => {
   });
 });
 
+describe("AI_PURPOSES_ENABLED: each kind of document is switched on on its own", () => {
+  it.each([
+    ["no purpose listed", "", "quote", "quote_extraction"],
+    ["only another kind listed", "quote_extraction", "invoice", "invoice_extraction"],
+    ["only the other kind listed", "invoice_extraction", "quote", "quote_extraction"],
+    ["only unrelated purposes listed", "echo_test,library_answer", "invoice", "invoice_extraction"],
+  ])("refuses with %s, sends nothing, and logs it as refused under that kind's purpose", async (_label, purposes, kind, purpose) => {
+    useEndpoint();
+    switchOn(purposes);
+    const response = await post({ jobId: 42, kind, text: INVOICE_TEXT });
+    expect(response.status).toBe(200);
+    expect(body(response)).toMatchObject({ kind, ok: false, refusal: { code: "purpose_not_allowed", message: "Floorplan isn't set up to use AI for that." } });
+    expect(body(response).fields).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logged()).toMatchObject({ ErrorCode: "purpose_not_allowed", Outcome: "refused", Purpose: purpose });
+  });
+
+  it("reads the kind that is listed while the other stays off", async () => {
+    switchOn("invoice_extraction");
+    expect(body(await post({ kind: "invoice", text: INVOICE_TEXT }))).toMatchObject({ kind: "invoice", ok: true });
+    expect(body(await post({ kind: "quote", text: INVOICE_TEXT }))).toMatchObject({ kind: "quote", ok: false, refusal: { code: "purpose_not_allowed" } });
+  });
+
+  it("says AI is off before it says the purpose is not listed", async () => {
+    process.env.AI_PURPOSES_ENABLED = "";
+    expect(body(await post({ kind: "quote", text: INVOICE_TEXT }))).toMatchObject({ ok: false, refusal: { code: "disabled" } });
+  });
+});
+
 describe("with a real endpoint", () => {
   beforeEach(() => {
-    Object.assign(process.env, { AI_BASE_URL: "http://10.4.0.7:8000", AI_ENABLED: "true", AI_MODEL: "llama", AI_PROVIDER: "openai_compatible" });
+    switchOn();
+    useEndpoint();
   });
   const modelSays = (content: string) => fetchMock.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content } }] })));
   const sent = () => JSON.parse(String(fetchMock.mock.calls[0][1].body));

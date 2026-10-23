@@ -9,7 +9,7 @@ import { purpose as echoTest } from "./purposes/echoTest";
 
 const fetchMock = jest.fn();
 const config = (env: Record<string, string | undefined> = {}) =>
-  readAiConfig({ AI_BASE_URL: "http://vllm.internal:8000", AI_MODEL: "llama-3.1-8b", AI_PROVIDER: "openai_compatible", ...env });
+  readAiConfig({ AI_BASE_URL: "http://10.4.0.7:8000", AI_MODEL: "llama-3.1-8b", AI_PROVIDER: "openai_compatible", ...env });
 const reply = (content: unknown, init: ResponseInit = {}) => new Response(JSON.stringify({ choices: [{ message: { content } }] }), init);
 
 beforeEach(() => {
@@ -25,7 +25,8 @@ const failureOf = async (run: () => Promise<unknown>) => {
 
 describe("chatCompletionsUrl", () => {
   it.each([
-    ["http://vllm.internal:8000", "http://vllm.internal:8000/v1/chat/completions"],
+    ["http://10.4.0.7:8000", "http://10.4.0.7:8000/v1/chat/completions"],
+    ["http://localhost:11434/", "http://localhost:11434/v1/chat/completions"],
     ["https://llm.example/", "https://llm.example/v1/chat/completions"],
     ["https://llm.example///", "https://llm.example/v1/chat/completions"],
     ["https://llm.example/prefix", "https://llm.example/prefix/v1/chat/completions"],
@@ -36,6 +37,29 @@ describe("chatCompletionsUrl", () => {
   it.each([null, "", "llm.example", "ftp://llm.example", "file:///etc/passwd", "javascript:alert(1)"])("refuses %j", (base) => {
     expect(() => chatCompletionsUrl(base)).toThrow(AiProviderFailure);
   });
+
+  it.each([
+    "http://llm.example",
+    "http://vllm.internal:8000",
+    "http://8.8.8.8:8000",
+    "http://169.254.169.254",
+    "https://169.254.169.254",
+    "https://user:pw@llm.example",
+    "https://llm.example?key=abc",
+  ])("refuses %s as provider_error, with a sentence that says what to change", (base) => {
+    expect.assertions(3);
+    try {
+      chatCompletionsUrl(base);
+    } catch (error) {
+      expect(error).toBeInstanceOf(AiProviderFailure);
+      expect((error as AiProviderFailure).code).toBe("provider_error");
+      expect((error as AiProviderFailure).message).toMatch(/^AI_BASE_URL (must|points at)/);
+    }
+  });
+
+  it("says plainly that plain http is for localhost and private addresses only", () => {
+    expect(() => chatCompletionsUrl("http://llm.example")).toThrow(/must use https\. Plain http is allowed only to localhost or a private address/);
+  });
 });
 
 describe("the request to an openai-compatible endpoint", () => {
@@ -44,7 +68,7 @@ describe("the request to an openai-compatible endpoint", () => {
     await callOpenAiCompatible(config(), echoTest, "hello");
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("http://vllm.internal:8000/v1/chat/completions");
+    expect(url).toBe("http://10.4.0.7:8000/v1/chat/completions");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({
       max_tokens: 100,
@@ -102,12 +126,16 @@ describe("how an openai-compatible call fails", () => {
 
   it("counts the time spent reading the body against the timeout", async () => {
     // Headers arrive at once; the body never does, until the same signal aborts the read (as a real fetch does).
-    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => ({
-      ok: true,
-      status: 200,
-      text: () =>
-        new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
-    }));
+    fetchMock.mockImplementation(
+      async (_url: string, init: RequestInit) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init.signal?.addEventListener("abort", () => controller.error(Object.assign(new Error("aborted"), { name: "AbortError" })));
+            },
+          }),
+        ),
+    );
     const failure = await failureOf(() => callOpenAiCompatible(config({ AI_TIMEOUT_MS: "20" }), echoTest, "hello"));
     expect(failure.code).toBe("timeout");
   });
@@ -121,7 +149,7 @@ describe("how an openai-compatible call fails", () => {
   });
 
   it("fails as provider_error when the endpoint cannot be reached, without its message", async () => {
-    fetchMock.mockRejectedValue(new TypeError("getaddrinfo ENOTFOUND vllm.internal"));
+    fetchMock.mockRejectedValue(new TypeError("getaddrinfo ENOTFOUND llm.internal"));
     const failure = await failureOf(() => callOpenAiCompatible(config(), echoTest, "hello"));
     expect(failure).toMatchObject({ code: "provider_error", message: "The AI endpoint could not be reached" });
   });
@@ -144,9 +172,77 @@ describe("how an openai-compatible call fails", () => {
     expect((await failureOf(() => callOpenAiCompatible(config(), echoTest, "hello"))).code).toBe("provider_error");
   });
 
+  it("accepts an answer just under the size limit", async () => {
+    fetchMock.mockResolvedValue(reply("x".repeat(990_000)));
+    expect((await callOpenAiCompatible(config(), echoTest, "hello")).text).toHaveLength(990_000);
+  });
+
+  it.each(["http://llm.example", "http://vllm.internal:8000", "https://user:pw@llm.example"])("does not call out at all to %s", async (base) => {
+    const failure = await failureOf(() => callOpenAiCompatible(config({ AI_BASE_URL: base }), echoTest, "hello"));
+    expect(failure.message).toMatch(/^AI_BASE_URL must/);
+    expect(failure.message).not.toContain("pw");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not call out at all without a model", async () => {
     await failureOf(() => callOpenAiCompatible(config({ AI_MODEL: "" }), echoTest, "hello"));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// The body is read as it arrives and abandoned at 1 MB, so an endpoint that never stops cannot fill memory (review L4).
+describe("how much of an answer is read", () => {
+  const CHUNK = 100_000;
+  const endless = (chunks: number, headers: Record<string, string> = {}) => {
+    const seen = { cancelled: false, pulled: 0 };
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        seen.cancelled = true;
+      },
+      pull(controller) {
+        seen.pulled += 1;
+        if (seen.pulled > chunks) controller.close();
+        else controller.enqueue(new Uint8Array(CHUNK).fill(120));
+      },
+    });
+    return { response: new Response(body, { headers }), seen };
+  };
+
+  it("stops reading a body that goes on past the limit, and abandons it", async () => {
+    const { response, seen } = endless(1_000);
+    fetchMock.mockResolvedValue(response);
+    const failure = await failureOf(() => callOpenAiCompatible(config(), echoTest, "hello"));
+    expect(failure).toMatchObject({ code: "provider_error", message: "The AI endpoint's answer was far too long" });
+    expect(seen.cancelled).toBe(true);
+    expect(seen.pulled).toBeLessThan(20);
+  });
+
+  it("does not read a body whose declared length is already over the limit", async () => {
+    const { response, seen } = endless(1_000, { "content-length": "5000000" });
+    fetchMock.mockResolvedValue(response);
+    const failure = await failureOf(() => callOpenAiCompatible(config(), echoTest, "hello"));
+    expect(failure.message).toBe("The AI endpoint's answer was far too long");
+    expect(seen.cancelled).toBe(true);
+    expect(seen.pulled).toBeLessThanOrEqual(2);
+  });
+
+  it("puts an answer back together from chunks, including a character split between two of them", async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ choices: [{ message: { content: "caf\u00e9 au lait" } }] }));
+    const cut = bytes.indexOf(0xc3) + 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, cut));
+        controller.enqueue(bytes.slice(cut));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(body));
+    expect((await callOpenAiCompatible(config(), echoTest, "hello")).text).toBe("caf\u00e9 au lait");
+  });
+
+  it("counts bytes, not characters: a short text of wide characters is still bounded", async () => {
+    fetchMock.mockResolvedValue(reply("\u20ac".repeat(400_000)));
+    expect((await failureOf(() => callOpenAiCompatible(config(), echoTest, "hello"))).message).toBe("The AI endpoint's answer was far too long");
   });
 });
 
@@ -163,7 +259,7 @@ describe("callProvider", () => {
   });
 
   it("refuses a name it does not know, and an endpoint with no URL or model, before sending", async () => {
-    for (const env of [{ AI_PROVIDER: "openai" }, { AI_BASE_URL: "" }, { AI_MODEL: "" }]) {
+    for (const env of [{ AI_PROVIDER: "openai" }, { AI_BASE_URL: "" }, { AI_MODEL: "" }, { AI_BASE_URL: "http://llm.example" }]) {
       await failureOf(() => callProvider(config(env), echoTest, "hello"));
     }
     expect(fetchMock).not.toHaveBeenCalled();

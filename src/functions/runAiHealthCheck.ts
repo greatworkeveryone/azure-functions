@@ -8,12 +8,13 @@
 // The answer is 200 whatever the call came to: a refusal (switched off, rate limited,
 // timed out...) is the thing being checked, so it is reported as `ok: false` with its
 // typed code and plain sentence, never as an HTTP error. The call is logged like any
-// other (recordType health_check).
+// other (recordType health_check). The one HTTP error is a person sending far too many
+// calls, or with two already running: 429 with Retry-After, and no row is written.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
-import { resolveAiActor, runAi } from "../ai";
+import { resolveAiActor, runAi, throttledResponse } from "../ai";
 import { outcomeFor } from "../ai/refusals";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
@@ -39,6 +40,8 @@ export async function runAiHealthCheck(request: HttpRequest, context: Invocation
     if (!actor) return unauthorizedResponse();
 
     const result = await runAi({ actor, input: HEALTH_CHECK_INPUT, purpose: "echo_test", recordType: "health_check" });
+    const limited = throttledResponse(result);
+    if (limited) return limited;
     return {
       status: 200,
       headers: { "Cache-Control": "no-store" },

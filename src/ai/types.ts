@@ -65,6 +65,12 @@ export interface AiCallMeta {
   provider: string;
   purpose: string;
   redactionCount: number;
+  /**
+   * True when the call was turned away because the person is sending too many, before anything
+   * was written or sent: no row exists, and a route answers 429 (see ./http.ts). False for every
+   * other result, a refusal that was logged included.
+   */
+  throttled: boolean;
 }
 
 export type AiResult<Output = unknown> =

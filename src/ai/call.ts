@@ -14,10 +14,6 @@ import type { AiActor, AiPurpose, AiRefusalCode, AiRequest, AiResult } from "./t
 // of a refused call's input, so an enormous input cannot make a refusal expensive.
 const UNKNOWN_PURPOSE_HASH_CHARS = 100_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// An answer longer than this many characters per token of the purpose's budget is refused, and
-// only this much of it is ever stored (when content logging is on): a runaway answer cannot fill
-// an append-only table. OutputChars still records its full length.
-const LOGGED_CHARS_PER_TOKEN = 8;
 
 export interface AiCall {
   readonly actor: AiActor;
@@ -37,12 +33,35 @@ export interface Settled {
   code: AiRefusalCode | null;
   latencyMs: number | null;
   model: string | null;
+  /** How long the model's text was, when it sent any. The text itself is never kept. */
+  outputChars: number | null;
   output?: unknown;
-  /** The model's raw text, when it sent any. */
-  outputText: string | null;
 }
 
-export const refused = (code: AiRefusalCode): Settled => ({ code, latencyMs: null, model: null, outputText: null });
+export const refused = (code: AiRefusalCode): Settled => ({ code, latencyMs: null, model: null, outputChars: null });
+
+/**
+ * The result for a call turned away because the person is sending too many: no row is written
+ * (a flood must not be able to fill a log that can never be purged), nothing is redacted or
+ * sent, and `meta.throttled` tells the route to answer 429.
+ */
+export function throttled<Output>(call: AiCall): AiResult<Output> {
+  return {
+    meta: {
+      callId: null,
+      correlationId: call.correlationId,
+      latencyMs: null,
+      model: null,
+      promptVersion: call.purpose?.promptVersion ?? null,
+      provider: call.config.provider,
+      purpose: call.purposeId,
+      redactionCount: 0,
+      throttled: true,
+    },
+    ok: false,
+    refusal: refusal("rate_limited"),
+  };
+}
 
 export function startCall(request: AiRequest, config: AiConfig, purpose: AiPurpose | undefined): AiCall {
   const input = typeof request.input === "string" ? request.input : "";
@@ -76,23 +95,18 @@ export function startCall(request: AiRequest, config: AiConfig, purpose: AiPurpo
 export async function settle<Output>(call: AiCall, settled: Settled): Promise<AiResult<Output>> {
   const { redaction, sha256 } = call.prepared();
   const outcome = settled.code === null ? "ok" : outcomeFor(settled.code);
-  // Content goes in only for a call that reached the model, only when asked for, and only redacted.
-  const keepText = call.config.logContent && outcome !== "refused";
+  // The row says who, which purpose, how big, a hash of the redacted input and how it ended. It never
+  // holds the prompt or the answer: the log is append-only, so text put there could never be removed.
   const entry: AiLogEntry = {
     actor: call.actor,
     correlationId: call.correlationId,
     errorCode: settled.code,
     inputChars: call.input.length,
     inputSha256: sha256,
-    inputText: keepText ? redaction.text : null,
     latencyMs: settled.latencyMs,
     model: settled.model,
     outcome,
-    outputChars: settled.outputText === null ? null : settled.outputText.length,
-    outputText:
-      keepText && settled.outputText !== null
-        ? redactText(settled.outputText.slice(0, (call.purpose?.maxOutputTokens ?? 0) * LOGGED_CHARS_PER_TOKEN)).text
-        : null,
+    outputChars: settled.outputChars,
     promptVersion: call.purpose?.promptVersion ?? "unknown",
     provider: call.config.provider,
     purpose: call.purposeId,
@@ -118,6 +132,7 @@ export async function settle<Output>(call: AiCall, settled: Settled): Promise<Ai
     provider: call.config.provider,
     purpose: call.purposeId,
     redactionCount: redaction.count,
+    throttled: false,
   };
   return settled.code === null
     ? { meta, ok: true, output: settled.output as Output }

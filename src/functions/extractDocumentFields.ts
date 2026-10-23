@@ -12,14 +12,17 @@
 // through runAi like every other, so it is redacted, capped, rate limited and logged
 // (recordType job, recordId the job, or the kind when the form has no job yet).
 //
-// The answer is 200 whatever the call came to: a refusal (AI off, rate limited, timed
-// out, an answer that failed its checks) is `ok: false` with its typed code and a plain
-// sentence, because the browser falls back on its own rules and says so.
+// The answer is 200 whatever the call came to: a refusal (AI off, this kind of document
+// not switched on in AI_PURPOSES_ENABLED, rate limited, timed out, an answer that failed
+// its checks) is `ok: false` with its typed code and a plain sentence, because the
+// browser falls back on its own rules and says so. The one HTTP error is a person
+// sending far too many requests, or with two already running: 429 with Retry-After, and
+// no log row.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
-import { resolveAiActor, runAi } from "../ai";
+import { resolveAiActor, runAi, throttledResponse } from "../ai";
 import { parseExtractionRequest } from "../ai/extractionRequest";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
@@ -67,6 +70,8 @@ export async function extractDocumentFields(request: HttpRequest, context: Invoc
       recordId: jobId === null ? undefined : String(jobId),
       recordType: jobId === null ? kind : "job",
     });
+    const limited = throttledResponse(result);
+    if (limited) return limited;
     const meta = { callId: result.meta.callId, latencyMs: result.meta.latencyMs, model: result.meta.model, promptVersion: result.meta.promptVersion };
     return {
       status: 200,

@@ -7,7 +7,7 @@ describe("readAiConfig: everything off or default when nothing is set", () => {
       apiKey: null,
       baseUrl: null,
       enabled: false,
-      logContent: false,
+      enabledPurposes: [],
       model: null,
       provider: "mock",
       ratePerMinute: 20,
@@ -18,13 +18,47 @@ describe("readAiConfig: everything off or default when nothing is set", () => {
   });
 });
 
-describe("the two switches: only the exact string true turns them on", () => {
-  it.each(["AI_ENABLED", "AI_LOG_CONTENT"])("%s", (name) => {
-    const key = name === "AI_ENABLED" ? "enabled" : "logContent";
-    expect(readAiConfig({ [name]: "true" })[key]).toBe(true);
+describe("the switch: only the exact string true turns AI on", () => {
+  it("AI_ENABLED", () => {
+    expect(readAiConfig({ AI_ENABLED: "true" }).enabled).toBe(true);
     for (const value of ["TRUE", "True", "1", "yes", "on", " true", "true ", "", "false", undefined]) {
-      expect(readAiConfig({ [name]: value })[key]).toBe(false);
+      expect(readAiConfig({ AI_ENABLED: value }).enabled).toBe(false);
     }
+  });
+});
+
+describe("there is no setting that stores prompt or answer text (review M2)", () => {
+  it("ignores AI_LOG_CONTENT altogether: the gateway reads nothing by that name", () => {
+    expect(readAiConfig({ AI_LOG_CONTENT: "true" })).toEqual(readAiConfig({}));
+    expect(readAiConfig({ AI_LOG_CONTENT: "true" })).not.toHaveProperty("logContent");
+    expect(Object.keys(readAiConfig({ AI_ENABLED: "true", AI_LOG_CONTENT: "true" })).join(" ")).not.toMatch(/log|content|text/i);
+  });
+});
+
+describe("AI_PURPOSES_ENABLED: each purpose is switched on separately (review L3)", () => {
+  it("is none at all by default, so turning AI on switches no purpose on", () => {
+    expect(readAiConfig({ AI_ENABLED: "true" }).enabledPurposes).toEqual([]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "" }).enabledPurposes).toEqual([]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: " , ,, " }).enabledPurposes).toEqual([]);
+  });
+
+  it("reads a comma list of purpose ids, trimmed, in order, without repeats", () => {
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "echo_test" }).enabledPurposes).toEqual(["echo_test"]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: " echo_test , quote_extraction,echo_test,library_answer " }).enabledPurposes).toEqual([
+      "echo_test",
+      "quote_extraction",
+      "library_answer",
+    ]);
+  });
+
+  it("drops anything that is not a purpose id, and has no wildcard", () => {
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: "*, all, Echo_Test, echo-test, echo test, 9lives, echo_test;x, ok_id" }).enabledPurposes).toEqual(["all", "ok_id"]);
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: `${"a".repeat(65)}, b` }).enabledPurposes).toEqual(["b"]);
+  });
+
+  it("keeps at most 50, so a stray value cannot grow without limit", () => {
+    const many = Array.from({ length: 80 }, (_, index) => `purpose_${index}`).join(",");
+    expect(readAiConfig({ AI_PURPOSES_ENABLED: many }).enabledPurposes).toHaveLength(50);
   });
 });
 
@@ -77,4 +111,18 @@ describe("isConfigured", () => {
   it("is false for a provider it does not know", () => {
     expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai", AI_BASE_URL: "https://x.example", AI_MODEL: "m" }))).toBe(false);
   });
+
+  it.each(["http://llm.example", "http://vllm.internal:8000", "http://8.8.8.8", "http://169.254.169.254", "https://user:pw@x.example", "https://x.example?k=1", "x.example"])(
+    "is false when the address %s may not be called (review L4)",
+    (url) => {
+      expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai_compatible", AI_BASE_URL: url, AI_MODEL: "m" }))).toBe(false);
+    },
+  );
+
+  it.each(["https://x.example", "https://10.4.0.7:8443", "http://10.4.0.7:8000", "http://192.168.1.20", "http://172.20.0.5:11434", "http://localhost:11434", "http://127.0.0.1:8000"])(
+    "is true when the address %s is https, or http to this machine or a private address",
+    (url) => {
+      expect(isConfigured(readAiConfig({ AI_PROVIDER: "openai_compatible", AI_BASE_URL: url, AI_MODEL: "m" }))).toBe(true);
+    },
+  );
 });

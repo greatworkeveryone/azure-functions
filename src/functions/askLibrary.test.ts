@@ -48,6 +48,12 @@ const body = (r: { jsonBody?: unknown }) => r.jsonBody as Record<string, any>;
 const sentToModel = () => JSON.parse(fetchMock.mock.calls[0][1].body) as { messages: { content: string; role: string }[]; temperature: number };
 const modelSays = (content: string) => new Response(JSON.stringify({ choices: [{ message: { content } }] }));
 const useEndpoint = () => Object.assign(process.env, { AI_BASE_URL: "http://10.4.0.7:8000", AI_MODEL: "llama", AI_PROVIDER: "openai_compatible" });
+// AI is on and this purpose is switched on: each purpose has to be listed in AI_PURPOSES_ENABLED (review L3).
+const switchOn = (purposes = "library_answer") => Object.assign(process.env, { AI_ENABLED: "true", AI_PURPOSES_ENABLED: purposes });
+const until = async (done: () => boolean) => {
+  for (let turn = 0; turn < 500 && !done(); turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  expect(done()).toBe(true);
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -56,7 +62,7 @@ beforeEach(() => {
   insertFails = false;
   recentCalls = 0;
   process.env = { ...saved };
-  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_LOG_CONTENT", "AI_TIMEOUT_MS", "AI_RATE_PER_MINUTE"]) delete process.env[name];
+  for (const name of ["AI_ENABLED", "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_PURPOSES_ENABLED", "AI_TIMEOUT_MS", "AI_RATE_PER_MINUTE"]) delete process.env[name];
   jest.mocked(createRequestConnection).mockResolvedValue({} as never);
   jest.mocked(createServiceRequestConnection).mockResolvedValue({} as never);
   jest.mocked(resolveLedgerActor).mockResolvedValue({ kind: "user", name: "Jo Bloggs", role: "facilities", userId: 41 });
@@ -155,7 +161,7 @@ describe("with AI switched off (the default)", () => {
 
 describe("with AI switched on, on the mock", () => {
   beforeEach(() => {
-    process.env.AI_ENABLED = "true";
+    switchOn();
   });
 
   it("answers from the passages, citing the one it used, and logs one ok row under library_answer", async () => {
@@ -191,17 +197,15 @@ describe("with AI switched on, on the mock", () => {
     expect(body(response).ok).toBe(true);
   });
 
-  it("keeps no text in the log unless AI_LOG_CONTENT is true, and then only the redacted text and none of the browser's ids", async () => {
-    await call(goodBody({ passages: [{ ...KEYS, id: "hostile-id-123", text: "Ring ops@example.com about keys." }] }));
-    expect(row()).toMatchObject({ InputText: null, OutputText: null });
-    query.mockClear();
-
+  it("never keeps the question or the passages in the log, whatever AI_LOG_CONTENT says, and none of the browser's ids", async () => {
     process.env.AI_LOG_CONTENT = "true";
     await call(goodBody({ passages: [{ ...KEYS, id: "hostile-id-123", text: "Ring ops@example.com about keys." }] }));
-    expect(String(row().InputText)).toContain("Ring [EMAIL] about keys.");
-    expect(JSON.stringify(row())).not.toContain("ops@example.com");
-    expect(JSON.stringify(row())).not.toContain("hostile-id-123");
-    expect(row().RedactionCount).toBe(1);
+    expect(Object.keys(row())).not.toContain("InputText");
+    expect(Object.keys(row())).not.toContain("OutputText");
+    const logged = JSON.stringify(row());
+    for (const text of ["ops@example.com", "[EMAIL]", "hostile-id-123", "check a key in", "Key Register", "Mostly two things"]) expect(logged).not.toContain(text);
+    expect(row()).toMatchObject({ InputChars: expect.any(Number), OutputChars: expect.any(Number), RedactionCount: 1 });
+    expect(row().InputSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("gives the browser nothing but the answer: no input, no ids, no log row", async () => {
@@ -214,7 +218,7 @@ describe("with AI switched on, on the mock", () => {
 
 describe("with a real endpoint", () => {
   beforeEach(() => {
-    process.env.AI_ENABLED = "true";
+    switchOn();
     useEndpoint();
   });
 
@@ -309,9 +313,36 @@ describe("with a real endpoint", () => {
   });
 });
 
+describe("AI_PURPOSES_ENABLED: library_answer is switched on on its own", () => {
+  it.each([
+    ["no purpose listed", ""],
+    ["only other purposes listed", "quote_extraction,invoice_extraction,echo_test"],
+  ])("refuses with %s, sends nothing, and logs it as refused under library_answer", async (_label, purposes) => {
+    useEndpoint();
+    switchOn(purposes);
+    const response = await call();
+    expect(response.status).toBe(200);
+    expect(body(response)).toEqual({ ok: false, refusal: { code: "purpose_not_allowed", message: "Floorplan isn't set up to use AI for that." } });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(row()).toMatchObject({ ErrorCode: "purpose_not_allowed", Outcome: "refused", Purpose: "library_answer" });
+  });
+
+  it("answers once it is listed, alone or among others", async () => {
+    for (const purposes of ["library_answer", "echo_test, library_answer"]) {
+      switchOn(purposes);
+      expect(body(await call())).toMatchObject({ ok: true });
+    }
+  });
+
+  it("says AI is off before it says the purpose is not listed", async () => {
+    process.env.AI_PURPOSES_ENABLED = "";
+    expect(body(await call())).toMatchObject({ ok: false, refusal: { code: "disabled" } });
+  });
+});
+
 describe("limits and failures", () => {
   beforeEach(() => {
-    process.env.AI_ENABLED = "true";
+    switchOn();
   });
 
   it("reports a rate limit as ok: false, not as an HTTP error, and sends nothing", async () => {
@@ -321,6 +352,67 @@ describe("limits and failures", () => {
     expect(response.status).toBe(200);
     expect(body(response)).toMatchObject({ ok: false, refusal: { code: "rate_limited" } });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("logs the refusal at the limit, under library_answer", async () => {
+    recentCalls = 20;
+    await call();
+    expect(inserts()).toHaveLength(1);
+    expect(row()).toMatchObject({ ErrorCode: "rate_limited", Outcome: "refused", Purpose: "library_answer" });
+  });
+
+  it("still answers 200 with a logged refusal at exactly twice the limit", async () => {
+    recentCalls = 40;
+    const response = await call();
+    expect(response.status).toBe(200);
+    expect(body(response)).toMatchObject({ ok: false, refusal: { code: "rate_limited" } });
+    expect(inserts()).toHaveLength(1);
+  });
+
+  it("answers 429 with Retry-After above twice the limit, with only the code and a sentence, and writes no row and sends nothing", async () => {
+    useEndpoint();
+    recentCalls = 41;
+    const response = await call();
+    expect(response.status).toBe(429);
+    expect(response.headers).toMatchObject({ "Cache-Control": "no-store", "Retry-After": "60" });
+    expect(body(response)).toEqual({ code: "rate_limited", error: "That is too many AI requests in a minute. Wait a moment and try again." });
+    expect(inserts()).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reads twice the limit from AI_RATE_PER_MINUTE", async () => {
+    process.env.AI_RATE_PER_MINUTE = "5";
+    recentCalls = 10;
+    expect((await call()).status).toBe(200);
+    recentCalls = 11;
+    expect((await call()).status).toBe(429);
+  });
+
+  it("answers 429 to a third call while two of this person's calls are still waiting on the model, and writes no row for it", async () => {
+    useEndpoint();
+    const answers: Array<() => void> = [];
+    fetchMock.mockImplementation(() => new Promise<Response>((resolve) => answers.push(() => resolve(modelSays("Check a key in with a photo [1]")))));
+    const first = call();
+    const second = call();
+    try {
+      await until(() => fetchMock.mock.calls.length === 2);
+
+      const third = await call();
+      expect(third.status).toBe(429);
+      expect(third.headers).toMatchObject({ "Retry-After": "60" });
+      expect(body(third)).toMatchObject({ code: "rate_limited" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(inserts()).toHaveLength(0);
+    } finally {
+      // Always let the two go, so a failure above cannot leave their slots held for the tests after it.
+      for (const answer of answers) answer();
+    }
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(inserts()).toHaveLength(2);
+
+    fetchMock.mockImplementation(async () => modelSays("Check a key in with a photo [1]"));
+    expect(body(await call())).toMatchObject({ ok: true });
   });
 
   it("answers a plain 500 when the answer could not be recorded, and says nothing of why", async () => {

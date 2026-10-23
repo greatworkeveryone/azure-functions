@@ -6,27 +6,52 @@
 // is set, and redirects are refused so it can never be handed to another host.
 // Whatever the endpoint says on a failure is thrown away: AiProviderFailure holds a
 // status code or a short phrase, never the response body, because an error body can
-// echo the prompt.
+// echo the prompt. The answer is read as it arrives and abandoned past 1 MB.
+//
+// Nothing is sent unless AI_BASE_URL passes checkBaseUrl (../baseUrl): https, or http to
+// localhost or a private address only. A refusal is logged with the reason (runAi) and the
+// call fails as provider_error before any network use.
 
+import { checkBaseUrl } from "../baseUrl";
 import { isRecord } from "../validate";
 import { AiProviderFailure } from "../refusals";
 import type { AiConfig } from "../config";
 import type { AiPurpose } from "../types";
 import type { ProviderAnswer } from "./types";
 
-const MAX_RESPONSE_CHARS = 1_000_000;
+const MAX_RESPONSE_BYTES = 1_000_000;
 
-/** `${AI_BASE_URL}/v1/chat/completions`, with any trailing slash on the base removed. http(s) only. */
+/** `${AI_BASE_URL}/v1/chat/completions`, with any trailing slash on the base removed. Throws unless the address may be called. */
 export function chatCompletionsUrl(baseUrl: string | null): string {
-  if (!baseUrl) throw new AiProviderFailure("provider_error", "AI_BASE_URL is not set");
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl);
-  } catch {
-    throw new AiProviderFailure("provider_error", "AI_BASE_URL is not a URL");
+  const checked = checkBaseUrl(baseUrl);
+  if (!checked.ok) throw new AiProviderFailure("provider_error", checked.problem);
+  return `${(baseUrl ?? "").replace(/\/+$/, "")}/v1/chat/completions`;
+}
+
+const tooLong = () => new AiProviderFailure("provider_error", "The AI endpoint's answer was far too long");
+
+/** The body as text, read chunk by chunk: a declared length over the limit is refused unread, and an endless body is cancelled at the limit. */
+async function readBounded(response: Response): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    throw tooLong();
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new AiProviderFailure("provider_error", "AI_BASE_URL is not http or https");
-  return `${baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    bytes += value.byteLength;
+    if (bytes > MAX_RESPONSE_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLong();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
 }
 
 function requestBody(config: AiConfig, purpose: AiPurpose, input: string): string {
@@ -75,9 +100,7 @@ export async function callOpenAiCompatible(config: AiConfig, purpose: AiPurpose,
       signal: controller.signal,
     });
     if (!response.ok) throw new AiProviderFailure("provider_error", `The AI endpoint answered ${response.status}`);
-    const raw = await response.text();
-    if (raw.length > MAX_RESPONSE_CHARS) throw new AiProviderFailure("provider_error", "The AI endpoint's answer was far too long");
-    return { model: config.model, text: answerText(raw) };
+    return { model: config.model, text: answerText(await readBounded(response)) };
   } catch (error) {
     if (error instanceof AiProviderFailure) throw error;
     if (controller.signal.aborted) throw new AiProviderFailure("timeout", `The AI endpoint did not answer within ${config.timeoutMs} ms`);

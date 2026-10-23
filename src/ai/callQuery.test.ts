@@ -70,7 +70,7 @@ describe("queryAiCalls", () => {
     expect(query.mock.calls[1][1]).toBe("SELECT COUNT_BIG(*) AS Total FROM dbo.AiCallLog ");
   });
 
-  it("never selects the stored text, the hash or the actor's id", async () => {
+  it("never selects the hash, the text columns or the actor's id", async () => {
     await queryAiCalls(connection, NO_FILTERS, PAGE);
     const select = String(query.mock.calls[0][1]);
     for (const column of ["InputText", "OutputText", "InputSha256", "ActorUserId"]) expect(select).not.toContain(column);

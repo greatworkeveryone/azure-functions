@@ -15,14 +15,10 @@ export interface AiLogEntry {
   inputChars: number;
   /** SHA-256 (hex) of the redacted input: ties a row to a document without keeping the text. */
   inputSha256: string;
-  /** The redacted input as sent; only when AI_LOG_CONTENT is "true". Append-only: it can never be removed. */
-  inputText: string | null;
   latencyMs: number | null;
   model: string | null;
   outcome: AiOutcome;
   outputChars: number | null;
-  /** The model's text, redacted; only when AI_LOG_CONTENT is "true". */
-  outputText: string | null;
   promptVersion: string;
   provider: string;
   purpose: string;
@@ -33,22 +29,23 @@ export interface AiLogEntry {
 
 export const RATE_WINDOW_SECONDS = 60;
 
-// Same order as the VALUES below and the columns of migration 170.
+// Same order as the VALUES below and the columns of migration 170, less the last two: the log keeps no prompt or
+// answer text (review M2), so migration 170's nullable text columns stay empty and nothing here names them.
 export const AI_CALL_INSERT_COLUMNS = [
   "ActorKind", "ActorUserId", "ActorEmail", "ActorName", "ActorRole", "Purpose", "PromptVersion", "Provider", "Model",
   "InputChars", "OutputChars", "RedactionCount", "LatencyMs", "Outcome", "ErrorCode", "RecordType", "RecordId",
-  "CorrelationId", "InputSha256", "InputText", "OutputText",
+  "CorrelationId", "InputSha256",
 ] as const;
 
 const INSERT_AI_CALL = `INSERT INTO dbo.AiCallLog (${AI_CALL_INSERT_COLUMNS.join(", ")})
   OUTPUT INSERTED.Id
   VALUES (${AI_CALL_INSERT_COLUMNS.map((column) => `@${column}`).join(", ")})`;
 
-// A person is counted by their AppUsers id, else their email, else (a system actor) by name. Calls refused before
-// anything was sent (switched off, too long, rate limited) don't count: the limit is on calls to the model.
+// A person is counted by their AppUsers id, else their email, else (a system actor) by name. Every row counts,
+// whatever its outcome: a refused call is a row in a log that can never be purged, so a loop of them is limited
+// the same as a loop of answered calls.
 const COUNT_RECENT_CALLS = `SELECT COUNT(*) AS Calls FROM dbo.AiCallLog
   WHERE CreatedAt >= DATEADD(SECOND, -${RATE_WINDOW_SECONDS}, SYSUTCDATETIME())
-    AND Outcome IN (N'ok', N'failed')
     AND ((@UserId IS NOT NULL AND ActorUserId = @UserId)
       OR (@UserId IS NULL AND @Email IS NOT NULL AND ActorEmail = @Email)
       OR (@UserId IS NULL AND @Email IS NULL AND ActorKind = @Kind AND ActorName = @Name))`;
@@ -90,15 +87,13 @@ export async function insertAiCall(connection: Connection, entry: AiLogEntry): P
     { name: "RecordId", type: TYPES.NVarChar, value: clip(entry.recordId, "RecordId") },
     { name: "CorrelationId", type: TYPES.UniqueIdentifier, value: entry.correlationId },
     { name: "InputSha256", type: TYPES.VarChar, value: entry.inputSha256 },
-    { name: "InputText", type: TYPES.NVarChar, value: entry.inputText },
-    { name: "OutputText", type: TYPES.NVarChar, value: entry.outputText },
   ];
   const rows = await executeQuery(connection, INSERT_AI_CALL, params);
   const id = rows[0]?.Id;
   return typeof id === "number" ? id : typeof id === "string" && /^\d+$/.test(id) ? Number(id) : null;
 }
 
-/** Calls this person has made to the model in the last 60 seconds. */
+/** Rows this person has in the log for the last 60 seconds: every call, answered or refused. */
 export async function countRecentAiCalls(connection: Connection, actor: AiActor): Promise<number> {
   const rows = await executeQuery(connection, COUNT_RECENT_CALLS, [
     { name: "UserId", type: TYPES.Int, value: actor.userId },

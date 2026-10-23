@@ -8,16 +8,19 @@
 // AiCallLog row all apply. Any signed-in person who can use the Library
 // (ACTION_ROLES.viewDocumentation).
 //
-// The answer is 200 whatever the call came to: "AI is switched off" or "too many
-// requests" is an expected state, so it comes back as `ok: false` with its typed code
-// and plain sentence, as it does for runAiHealthCheck. The model's reply reaches the
-// caller only as sentences with the passage numbers each one cites, every one of which
-// is a passage that was sent. Passage ids are the browser's own labels and are ignored.
+// The answer is 200 whatever the call came to: "AI is switched off", "not switched on
+// for this" or "too many requests in a minute" is an expected state, so it comes back as
+// `ok: false` with its typed code and plain sentence, as it does for runAiHealthCheck.
+// The one HTTP error is a person sending far too many requests, or with two already
+// running: 429 with Retry-After, and no log row. The model's reply reaches the caller
+// only as sentences with the passage numbers each one cites, every one of which is a
+// passage that was sent. Passage ids are the browser's own labels and are ignored.
+// The purpose has to be listed in AI_PURPOSES_ENABLED as well as AI_ENABLED being on.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
-import { resolveAiActor, runAi } from "../ai";
+import { resolveAiActor, runAi, throttledResponse } from "../ai";
 import type { LibraryAnswer } from "../ai/libraryAsk/answer";
 import { buildLibraryInput } from "../ai/libraryAsk/input";
 import { parseAskLibraryBody } from "../ai/libraryAsk/request";
@@ -57,6 +60,8 @@ export async function askLibrary(request: HttpRequest, context: InvocationContex
       purpose: "library_answer",
       recordType: "library_question",
     });
+    const limited = throttledResponse(result);
+    if (limited) return limited;
     return {
       status: 200,
       headers: { "Cache-Control": "no-store" },

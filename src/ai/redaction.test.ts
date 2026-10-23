@@ -95,6 +95,30 @@ describe("Australian phone numbers", () => {
     expect(redact("mobile 0412 345 678")).toBe("mobile [PHONE]");
   });
 
+  it.each([
+    ["P: 8981 1234", "P: [PHONE]"],
+    ["p: 89811234", "p: [PHONE]"],
+    ["F: 8981 2345", "F: [PHONE]"],
+    ["T: 08 8981 1234 | M: 0412 345 678", "T: [PHONE] | M: [PHONE]"],
+    ["M: 8981 1234", "M: [PHONE]"],
+    ["Darwin office P. 8981 1234", "Darwin office P. [PHONE]"],
+    ["jo@example.com | P: 8981 1234 | E: x", "[EMAIL] | P: [PHONE] | E: x"],
+  ])("replaces the number after a one-letter label in %j", (input, expected) => {
+    expect(redact(input)).toBe(expected);
+  });
+
+  it.each([
+    ["a page of a document", "P: 12 of 40"],
+    ["a time", "T: 08:30 start"],
+    ["a measurement", "M: 4.5 kg"],
+    ["a number too short to be a phone", "P: 1234567"],
+    ["a number too long to be a phone", "F: 12345678901234"],
+    ["a letter inside a word", "Step 8981 1234 and APT: 8981 1234x"],
+    ["a label with no number", "P: see the invoice"],
+  ])("leaves %s alone", (_label, input) => {
+    expect(redact(input)).toBe(input);
+  });
+
   it("keeps the words around the number and counts it once", () => {
     const result = redactText("Ph: 08 8941 2345 or 0412 345 678");
     expect(result.text).toBe("Ph: [PHONE] or [PHONE]");
@@ -160,6 +184,60 @@ describe("BSB and account numbers", () => {
   });
 });
 
+describe("BSB and account number together, as bank details are really written (review: redaction misses)", () => {
+  it.each([
+    ["Bank: CBA 062-000 1234 5678", "Bank: CBA [BSB] [ACCOUNT]"],
+    ["062 000 1234 5678", "[BSB] [ACCOUNT]"],
+    ["EFT: 062000 12345678", "EFT: [BSB] [ACCOUNT]"],
+    ["Pay 062 000 1234 5678 by Friday", "Pay [BSB] [ACCOUNT] by Friday"],
+    ["Pay 062\u00a0000\u00a01234\u00a05678 by Friday", "Pay [BSB]\u00a0[ACCOUNT] by Friday"],
+    ["062 000 12345678", "[BSB] [ACCOUNT]"],
+    ["Pay 062-000 1234 5678", "Pay [BSB] [ACCOUNT]"],
+    ["Pay 063-000 123 456 789", "Pay [BSB] [ACCOUNT]"],
+    ["Direct credit to Westpac 033-123 456 789", "Direct credit to Westpac [BSB] [ACCOUNT]"],
+    ["Deposit: 062 000 12345678 ref INV-0042", "Deposit: [BSB] [ACCOUNT] ref INV-0042"],
+    ["Banking details: ANZ 013000 123456789", "Banking details: ANZ [BSB] [ACCOUNT]"],
+    ["Bank details: Commonwealth Bank of Australia, 062 000, 1234 5678", "Bank details: Commonwealth Bank of Australia, [BSB], [ACCOUNT]"],
+    ["Remittance: 062000 1234 5678", "Remittance: [BSB] [ACCOUNT]"],
+    ["BSB 062-000 Account 1234 5678", "BSB [BSB] Account [ACCOUNT]"],
+    ["Account: 062-000 1234 5678", "Account: [BSB] [ACCOUNT]"],
+  ])("replaces both in %j", (input, expected) => {
+    expect(redact(input)).toBe(expected);
+  });
+
+  it("counts a BSB and its account as two details", () => {
+    expect(kinds("EFT: 062000 12345678")).toEqual({ account: 1, bsb: 1 });
+    expect(kinds("062 000 1234 5678")).toEqual({ account: 1, bsb: 1 });
+  });
+
+  it("keeps the supplier's ABN beside the bank details", () => {
+    expect(redact("ABN 51 824 753 556 | EFT: 062000 12345678")).toBe("ABN 51 824 753 556 | EFT: [BSB] [ACCOUNT]");
+    expect(redact("Supplier 51 824 753 556. Bank: CBA 062-000 1234 5678")).toBe("Supplier 51 824 753 556. Bank: CBA [BSB] [ACCOUNT]");
+  });
+
+  it.each([
+    ["an invoice with a spaced date and amount", "Invoice INV-2026-0042 dated 23 10 2026, total $1 062.00 incl GST $96.55"],
+    ["a quote number that is only a BSB's length", "Quote 062 000 123 for the lift"],
+    ["three groups of four", "Order 1234 5678 9012 shipped"],
+    ["a part number", "Part 063-000 in stock"],
+    ["a run-together pair with no bank label", "Ref 062000 12345678"],
+    ["an amount in spaced thousands", "Total 1 234 567 890 over the term"],
+    ["a dollar amount", "Total $1,062,000.00 incl GST"],
+    ["a date and a time", "Dated 23 10 2026 14 05"],
+    ["a three-three-four reference", "Receipt 123 456 7890"],
+    ["a long grouped number that is no bank detail", "Reference 123 456 789 012 345 678"],
+    ["two phone numbers", "Ph 08 8941 2345 or 0412 345 678"],
+    ["a postcode and a state", "Darwin NT 0800 062 000"],
+    ["a bank name alone", "Bank holiday trading hours apply"],
+    ["a label with no numbers", "EFT: details on the invoice"],
+  ])("leaves %s alone", (_label, input) => {
+    const result = redactText(input);
+    expect(result.byKind.bsb).toBe(0);
+    expect(result.byKind.account).toBe(0);
+    expect(result.text).toBe(input.replace("Ph 08 8941 2345 or 0412 345 678", "Ph [PHONE] or [PHONE]"));
+  });
+});
+
 describe("tax file numbers", () => {
   it.each([
     ["TFN: 123 456 782", "TFN: [TFN]"],
@@ -169,6 +247,12 @@ describe("tax file numbers", () => {
     ["tax file no. 876 543 210", "tax file no. [TFN]"],
   ])("replaces a labelled TFN in %j, whatever its checksum", (input, expected) => {
     expect(redact(input)).toBe(expected);
+  });
+
+  it("does not take the end of a longer run of groups for a TFN", () => {
+    expect(isTfnValid("123456782")).toBe(true);
+    expect(redact("Reference 99 111 123 456 782")).toBe("Reference 99 111 123 456 782");
+    expect(redact("Reference 2026 123 456 782")).toBe("Reference 2026 123 456 782");
   });
 
   it("replaces an unlabelled TFN only when it is grouped 3-3-3 and passes the checksum", () => {

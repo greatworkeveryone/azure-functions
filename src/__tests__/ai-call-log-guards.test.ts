@@ -125,9 +125,41 @@ describe("the check itself, on crafted source", () => {
   });
 });
 
+describe("no code writes prompt or answer text into the log (review M2)", () => {
+  const nonTest = sourceFiles;
+
+  it("names neither InputText nor OutputText in any string in the source, or in a script", () => {
+    const scripts = filesUnder(join(ROOT, "scripts"), (name) => /\.(cjs|mjs|js|ts)$/.test(name));
+    const mentions = [...nonTest, ...scripts].filter((full) => {
+      const text = readFileSync(full, "utf8");
+      const code = full.endsWith(".ts") ? literalsOf(text).join("\n") : text;
+      return /\b(InputText|OutputText)\b/.test(code);
+    });
+    expect(mentions.map(rel)).toEqual([]);
+  });
+
+  it("has no setting that would switch it on: AI_LOG_CONTENT is read nowhere", () => {
+    const scripts = filesUnder(join(ROOT, "scripts"), (name) => /\.(cjs|mjs|js|ts)$/.test(name));
+    expect([...nonTest, ...scripts].filter((full) => readFileSync(full, "utf8").includes("AI_LOG_CONTENT")).map(rel)).toEqual([]);
+  });
+
+  it("leaves the two text columns in migration 170 as they are: nullable, and unused", () => {
+    const migration = readFileSync(join(ROOT, "migrations", "170_ai_call_log.sql"), "utf8");
+    expect(migration).toMatch(/InputText\s+NVARCHAR\(MAX\)\s+NULL/);
+    expect(migration).toMatch(/OutputText\s+NVARCHAR\(MAX\)\s+NULL/);
+  });
+
+  it("would catch a write to either column", () => {
+    for (const statement of ["`INSERT INTO dbo.AiCallLog (InputText) VALUES (@Text)`", "'OutputText'", '"InputText = @x"']) {
+      const strings = literalsOf(`const sql = ${statement};`).join("\n");
+      expect(/\b(InputText|OutputText)\b/.test(strings)).toBe(true);
+    }
+  });
+});
+
 describe("nothing but the gateway reaches a model", () => {
   // The gateway's own settings (docs/runbooks/switches.md); AI_PARSE_* belong to the older email parser.
-  const GATEWAY_SETTINGS = /process\.env(?:\.|\[\s*["'`])AI_(?:ENABLED|PROVIDER|BASE_URL|MODEL|API_KEY|LOG_CONTENT|TIMEOUT_MS|RATE_PER_MINUTE)\b/;
+  const GATEWAY_SETTINGS = /process\.env(?:\.|\[\s*["'`])AI_(?:ENABLED|PROVIDER|BASE_URL|MODEL|API_KEY|PURPOSES_ENABLED|TIMEOUT_MS|RATE_PER_MINUTE)\b/;
   const outsideAi = sourceFiles.filter((full) => !rel(full).startsWith("src/ai/"));
 
   it("keeps the providers and the AI settings inside src/ai", () => {
