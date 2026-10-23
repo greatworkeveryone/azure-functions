@@ -1001,10 +1001,12 @@ describe("deleteRegisterTenant", () => {
   });
 
   it("returns 400 when the tenant is referenced by a job", async () => {
-    // The draft facts (D4: every table that refers to the tenancy, under lock),
-    // then the optional sign-off / defects-period read.
+    // The tenancy row (S1-2: every column, under lock), the draft facts (D4: every
+    // table that refers to the tenancy, under lock), then the optional sign-off /
+    // defects-period read.
     db.executeQuery
-      .mockResolvedValueOnce([{ Jobs: 2, LegalName: "Acme", ScheduledRateSteps: "[]" }])
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
+      .mockResolvedValueOnce([{ Jobs: 2, LegalName: "Acme" }])
       .mockResolvedValueOnce([{ DefectsPeriods: 0, SignedOff: 0 }]);
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);
     expect(res.status).toBe(400);
@@ -1013,6 +1015,7 @@ describe("deleteRegisterTenant", () => {
 
   it("deletes the tenant when no jobs reference it", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
       .mockResolvedValueOnce([{ N: 0 }])
       .mockResolvedValueOnce([]);
 
@@ -1027,8 +1030,9 @@ describe("deleteRegisterTenant", () => {
     expect(deleteCall).toBeDefined();
   });
 
-  it("returns 500 when DELETE throws", async () => {
+  it("returns 500 when the read under lock throws", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
       .mockResolvedValueOnce([{ N: 0 }])
       .mockRejectedValueOnce(new Error("locked"));
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);
