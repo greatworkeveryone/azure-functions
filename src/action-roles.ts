@@ -261,7 +261,7 @@ export const ACTION_ROLES = {
   },
   editInspections: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
-    routes: ["createInspection", "applyInspectionOps", "completeInspection", "uploadInspectionAttachment", "raiseJobsFromInspection"],
+    routes: ["createInspection", "applyInspectionOps", "completeInspection", "uploadInspectionAttachment", "raiseJobsFromInspection", "tidyInspectionJobTitles"],
     why: "Create, edit and complete inspections (EDIT_INSPECTIONS_ROLES, inspections.ts).",
   },
   editJobs: {
