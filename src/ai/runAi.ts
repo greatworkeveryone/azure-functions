@@ -46,16 +46,17 @@ export async function runAi<Output = unknown>(request: AiRequest): Promise<AiRes
   const recent = await withServiceConnection((connection) => countRecentAiCalls(connection, call.actor));
   if (recent >= config.ratePerMinute) return settle(call, refused("rate_limited"));
 
+  const sent = call.prepared().redaction.text;
   const startedAt = Date.now();
   let answer: ProviderAnswer;
   try {
-    answer = await callProvider(config, purpose, call.prepared().redaction.text);
+    answer = await callProvider(config, purpose, sent);
   } catch (error) {
     return settle(call, { code: failureCode(error), latencyMs: Date.now() - startedAt, model: intendedModel(config), outputText: null });
   }
   const latencyMs = Date.now() - startedAt;
 
-  const checked = interpretOutput(purpose, answer.text);
+  const checked = interpretOutput(purpose, answer.text, sent);
   if (!checked.ok) return settle(call, { code: "invalid_output", latencyMs, model: answer.model, outputText: answer.text });
   return settle(call, { code: null, latencyMs, model: answer.model, output: checked.value, outputText: answer.text });
 }
