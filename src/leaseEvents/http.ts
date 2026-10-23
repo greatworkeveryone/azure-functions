@@ -53,6 +53,7 @@ export type LeaseEventErrorCode =
   | "open_event_exists"
   | "reason_required"
   | "schedule_conflict"
+  | "schedule_empty"
   | "sod_blocked"
   | "stale"
   | "tenancy_archived"
@@ -74,6 +75,7 @@ const STATUS: Record<LeaseEventErrorCode, number> = {
   open_event_exists: 409,
   reason_required: 400,
   schedule_conflict: 422,
+  schedule_empty: 422,
   sod_blocked: 403,
   stale: 409,
   tenancy_archived: 422,

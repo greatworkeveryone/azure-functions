@@ -45,7 +45,9 @@ const RENEWED = {
   reviewMethod: "cpi",
 };
 const decide = (over: Record<string, unknown>, person: Person = caller) =>
-  recordRenewalOutcome(postRequest({ leaseEventId: "rn-1", rowVersion: world.versionOf("rn-1"), ...over }, person.role), ctx);
+  recordRenewalOutcome(postRequest({ leaseEventId: "rn-1", leaseExpiry: "2027-06-30", rowVersion: world.versionOf("rn-1"), ...over }, person.role), ctx);
+const decideFromTenancy = (over: Record<string, unknown>, person: Person = caller) =>
+  recordRenewalOutcome(postRequest({ leaseExpiry: "2027-06-30", tenantId: 7, ...over }, person.role), ctx);
 
 beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ["nextTick", "setImmediate", "queueMicrotask"] });
@@ -93,6 +95,23 @@ describe("renewed", () => {
   });
 });
 
+describe("renewed on a schedule with nothing in force today (data review S2-2)", () => {
+  it("is refused with a plain reason and writes nothing, rather than reading today's rent as $0", async () => {
+    world.state.tenancy.ScheduledRateSteps = "[]";
+    const before = JSON.stringify(world.state);
+    const res = await decide({ outcome: "renewed", renewed: RENEWED });
+    expect(res.status).toBe(422);
+    expect(body(res)).toMatchObject({ code: "schedule_empty" });
+    expect(body(res).error).toMatch(/today's rent/);
+    expect(JSON.stringify(world.state)).toBe(before);
+  });
+
+  it("is refused too when every row starts after today", async () => {
+    world.state.tenancy.ScheduledRateSteps = JSON.stringify([{ baseRentPerAnnum: 90000, effectiveFrom: "2027-01-01", id: "f1", methodKind: "commencement", ratePercent: 0 }]);
+    expect(body(await decide({ outcome: "renewed", renewed: RENEWED }))).toMatchObject({ code: "schedule_empty" });
+  });
+});
+
 describe("vacating", () => {
   it("creates a draft vacancy available from the expiry; the tenancy stays as it is", async () => {
     const res = await decide({ outcome: "vacating" });
@@ -121,7 +140,7 @@ describe("holdover", () => {
   it("stores holdover once the expiry has passed", async () => {
     world.state.tenancy.Expiry = asDate("2026-09-30");
     world.event("rn-1")!.LeaseExpiry = asDate("2026-09-30");
-    await decide({ holdoverTerms: "Month to month", outcome: "holdover" });
+    await decide({ holdoverTerms: "Month to month", leaseExpiry: "2026-09-30", outcome: "holdover" });
     expect(world.state.tenancy.Status).toBe("holdover");
   });
 
@@ -133,7 +152,7 @@ describe("holdover", () => {
 describe("deciding from the tenancy, with no referral", () => {
   it("opens a referred renewal for the current expiry and decides it in one transaction", async () => {
     world.state.events = [];
-    const res = await recordRenewalOutcome(postRequest({ outcome: "vacating", tenantId: 7 }, "director"), ctx);
+    const res = await decideFromTenancy({ outcome: "vacating" });
     expect(res.status).toBe(200);
     expect(world.state.ledger.map((row) => [row.Action, row.RuleApplied])).toEqual([
       ["lease_event.renewal_referred", "opened_by_director"],
@@ -142,9 +161,34 @@ describe("deciding from the tenancy, with no referral", () => {
   });
 
   it("refuses while a renewal is open or decided for this expiry, or an option exercise is open", async () => {
-    expect(body(await recordRenewalOutcome(postRequest({ outcome: "vacating", tenantId: 7 }, "director"), ctx))).toMatchObject({ code: "open_event_exists" });
+    expect(body(await decideFromTenancy({ outcome: "vacating" }))).toMatchObject({ code: "open_event_exists" });
     world.state.events = [eventRow({ State: "awaiting_approval" })];
-    expect(body(await recordRenewalOutcome(postRequest({ outcome: "vacating", tenantId: 7 }, "director"), ctx))).toMatchObject({ code: "open_event_exists" });
+    expect(body(await decideFromTenancy({ outcome: "vacating" }))).toMatchObject({ code: "open_event_exists" });
+  });
+});
+
+describe("a decision carries the expiry it was made against (data review S1)", () => {
+  it("refuses the second of two directors racing from the tenancy, and writes nothing for it", async () => {
+    world.state.events = [];
+    // Both opened the drawer on the 30/06/2027 expiry; A renews first.
+    expect((await decideFromTenancy({ outcome: "renewed", renewed: RENEWED })).status).toBe(200);
+    const afterA = JSON.stringify({ events: world.state.events, ledger: world.state.ledger, tenancy: world.state.tenancy, vacancies: world.state.vacancies });
+    const res = await decideFromTenancy({ outcome: "vacating" });
+    expect(res.status).toBe(409);
+    expect(body(res)).toMatchObject({ code: "expiry_changed", expiry: "2032-06-30" });
+    expect(JSON.stringify({ events: world.state.events, ledger: world.state.ledger, tenancy: world.state.tenancy, vacancies: world.state.vacancies })).toBe(afterA);
+  });
+
+  it("refuses a referral decided against an expiry it no longer has", async () => {
+    const res = await decide({ leaseExpiry: "2027-03-31", outcome: "vacating" });
+    expect(res.status).toBe(409);
+    expect(body(res)).toMatchObject({ code: "expiry_changed" });
+    expect(world.state.vacancies).toEqual([]);
+  });
+
+  it("needs the expiry shown", async () => {
+    expect((await decide({ leaseExpiry: undefined, outcome: "vacating" })).status).toBe(400);
+    expect((await decideFromTenancy({ leaseExpiry: undefined, outcome: "vacating" })).status).toBe(400);
   });
 });
 

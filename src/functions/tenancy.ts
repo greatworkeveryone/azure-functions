@@ -106,6 +106,10 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
+import { selectWithLeaseOptions } from "../leaseOptionColumns";
+import { concludeLeaseEscalations } from "../leaseEvents/escalations";
+import { closeEventsForEditedExpiry } from "../leaseEvents/expiryEdit";
+import { optionCountsForTextEdit } from "../leaseEvents/optionText";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -708,7 +712,6 @@ const TENANT_COLUMNS = `
   PrimaryContactName, PrimaryContactEmail, PrimaryContactPhone,
   Lot, InformationSheetAsAt, InformationSheetReference,
   Commencement, Expiry, TermMonths, OptionPeriods, OptionNoticeMonths,
-  OptionsTotal, OptionsRemaining, OptionTermMonths,
   RenewalLetterIssueBy, HoldoverTerms,
   RentPerAnnum,
   ReviewType, ReviewIntervalMonths, NextReviewDate, LastReviewDate,
@@ -735,10 +738,11 @@ const TENANT_COLUMNS = `
 `;
 
 // The building register: archived tenancies (D4) only when asked for.
-const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+// The 106 option columns join each select below through selectWithLeaseOptions (data review S2-1).
+const registerSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
-const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+const registerWithArchivedSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
@@ -806,9 +810,9 @@ async function getRegisterTenants(
   try {
     connection = await createRequestConnection(token);
 
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
-      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
+      includeArchived ? registerWithArchivedSql : registerSql,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
     );
 
@@ -915,9 +919,9 @@ async function getRegisterTenant(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (tenantRows.length === 0) {
@@ -1143,14 +1147,24 @@ async function upsertRegisterTenant(
       }
       const actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
-      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId);
+      const closedLeaseEvents: string[] = [];
+      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId, closedLeaseEvents);
       if (refused) return refused;
       resultId = tenantId;
+      for (const leaseEventId of closedLeaseEvents) {
+        await concludeLeaseEscalations(connection, {
+          actor,
+          code: "expiry_changed",
+          leaseEventId,
+          log: (message) => context.warn(message),
+          note: "The lease's expiry was changed, so this no longer applies",
+        });
+      }
     }
 
-    const stored = await executeQuery(
+    const stored = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
@@ -1274,7 +1288,7 @@ const SCHEDULE_TERM_FIELDS: Record<string, string> = {
 const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", "ReviewIntervalMonths"] as const;
 
 const LOCKED_TENANT_COLUMNS = `
-  TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
+  TenantId, BuildingId, Status, Expiry, OptionPeriods, RowVersion, UpdatedByName, UpdatedAt,
   CpiCapPercent, CpiFloorPercent, CpiReferenceQuarterRule, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
@@ -1385,6 +1399,8 @@ async function updateRegisterTenantRow(
   caller: UserRef,
   actor: ledger.LedgerActor,
   tenantId: number,
+  /** Filled with the lease events an expiry edit closed, for their escalations after the commit. */
+  closedLeaseEvents: string[] = [],
 ): Promise<HttpResponseInit | null> {
   await beginTransaction(connection);
   try {
@@ -1452,6 +1468,18 @@ async function updateRegisterTenantRow(
       await commitTransaction(connection);
       return null;
     }
+    // Data review S2-4: the option text and the structured counts move together.
+    const optionCounts = fields.OptionPeriods !== undefined
+      ? await optionCountsForTextEdit(connection, tenantId, fields.OptionPeriods as string | null)
+      : null;
+    if (optionCounts) {
+      setParts.push("OptionsTotal = @OptionsTotal", "OptionsRemaining = @OptionsRemaining", "OptionTermMonths = @OptionTermMonths");
+      updateParams.push(
+        { name: "OptionsTotal", type: TYPES.Int, value: optionCounts.after.total },
+        { name: "OptionsRemaining", type: TYPES.Int, value: optionCounts.after.remaining },
+        { name: "OptionTermMonths", type: TYPES.Int, value: optionCounts.after.termMonths },
+      );
+    }
     const termsChanged = Object.keys(termsAfter).length > 0;
     // A change to what the schedule is computed from clears a sign-off, and the
     // person says why (PLAN WP24). Asked before anything is written.
@@ -1489,6 +1517,35 @@ async function updateRegisterTenantRow(
     }
     if (priorSignOff && clearReason) {
       await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
+    }
+    if (optionCounts) {
+      const counts = (c: { remaining: number | null; termMonths: number | null; total: number | null }) => ({
+        optionsRemaining: c.remaining,
+        optionsTotal: c.total,
+        optionTermMonths: c.termMonths,
+      });
+      await ledger.record(connection, {
+        ...scope,
+        action: "schedule.terms_edit",
+        after: { ...counts(optionCounts.after), optionPeriods: fields.OptionPeriods ?? null },
+        before: { ...counts(optionCounts.before), optionPeriods: (current.OptionPeriods as string | null | undefined) ?? null },
+        ruleApplied: "options_from_text",
+      });
+    }
+    // Data review S2-3: open lease events of the old expiry close with the edit.
+    const oldExpiry = toIsoDate(current.Expiry) ?? null;
+    if (oldExpiry !== null && fields.Expiry !== undefined && (toIsoDate(fields.Expiry as string | null) ?? null) !== oldExpiry) {
+      closedLeaseEvents.push(
+        ...(await closeEventsForEditedExpiry(connection, {
+          actor,
+          buildingId: (current.BuildingId as number | null) ?? null,
+          correlationId: scope.correlationId,
+          editorName: caller.name,
+          newExpiry: toIsoDate(fields.Expiry as string | null) ?? null,
+          oldExpiry,
+          tenantId,
+        })),
+      );
     }
     await commitTransaction(connection);
     return null;
@@ -2139,12 +2196,12 @@ async function getReviewsDue(
       ...(buildingIdParam ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }] : []),
       await showTestParam(request),
     ];
-    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
+    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), OPTION_COLUMNS (one of two constants, leaseOptionColumns.ts), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     // Also expiries and option deadlines from yesterday to 91 days ahead: a
     // wider net than the Darwin-day filter below, which is exact.
-    const rows = await executeQuery(
+    const rows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t
        ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
@@ -2228,9 +2285,9 @@ async function reloadFullTenant(
   // tenant payload back from a mutation. We do the cheaper subset (skip
   // notes/reviews/history) because the frontend re-uses the cached
   // detail-query response for those and only patches the tenant row.
-  const tenantRows = await executeQuery(
+  const tenantRows = await selectWithLeaseOptions(
     connection,
-    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+    (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
