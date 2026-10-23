@@ -14,6 +14,10 @@ import type { AiActor, AiPurpose, AiRefusalCode, AiRequest, AiResult } from "./t
 // of a refused call's input, so an enormous input cannot make a refusal expensive.
 const UNKNOWN_PURPOSE_HASH_CHARS = 100_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// An answer longer than this many characters per token of the purpose's budget is refused, and
+// only this much of it is ever stored (when content logging is on): a runaway answer cannot fill
+// an append-only table. OutputChars still records its full length.
+const LOGGED_CHARS_PER_TOKEN = 8;
 
 export interface AiCall {
   readonly actor: AiActor;
@@ -85,7 +89,10 @@ export async function settle<Output>(call: AiCall, settled: Settled): Promise<Ai
     model: settled.model,
     outcome,
     outputChars: settled.outputText === null ? null : settled.outputText.length,
-    outputText: keepText && settled.outputText !== null ? redactText(settled.outputText).text : null,
+    outputText:
+      keepText && settled.outputText !== null
+        ? redactText(settled.outputText.slice(0, (call.purpose?.maxOutputTokens ?? 0) * LOGGED_CHARS_PER_TOKEN)).text
+        : null,
     promptVersion: call.purpose?.promptVersion ?? "unknown",
     provider: call.config.provider,
     purpose: call.purposeId,

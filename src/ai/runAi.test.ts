@@ -314,6 +314,16 @@ describe("the openai_compatible provider", () => {
     expect(inserts()[0].OutputText).toBeNull();
   });
 
+  it("stores no more of a runaway answer than the purpose could have asked for, and records its full length", async () => {
+    process.env.AI_LOG_CONTENT = "true";
+    const runaway = `{"echo":"${"x".repeat(5_000)}"}`;
+    fetchMock.mockResolvedValue(answer(runaway));
+    await runAi(request());
+    const row = inserts()[0];
+    expect(row).toMatchObject({ ErrorCode: "invalid_output", OutputChars: runaway.length });
+    expect(String(row.OutputText)).toHaveLength(100 * 8);
+  });
+
   it("keeps a refused answer's text, redacted, when AI_LOG_CONTENT is true", async () => {
     process.env.AI_LOG_CONTENT = "true";
     fetchMock.mockResolvedValue(answer("Ring jo@example.com"));
