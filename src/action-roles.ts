@@ -547,8 +547,8 @@ export const ACTION_ROLES = {
   },
   viewMaintenanceOverview: {
     gate: VIEW_FACILITIES_ROLES,
-    routes: ["getMaintenanceCoverage", "getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules"],
-    why: "Defects periods, service schedules and the maintenance overview.",
+    routes: ["getMaintenanceCoverage", "getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules", "getRecurringFaults"],
+    why: "Defects periods, service schedules, the maintenance overview and recurring-fault signals.",
   },
   viewMyobControls: {
     gate: [A.CFO],
