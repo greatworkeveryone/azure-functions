@@ -51,6 +51,23 @@ describe("interpretOutput for a JSON purpose", () => {
   });
 });
 
+describe("interpretOutput and the input the provider was sent", () => {
+  const seen: unknown[][] = [];
+  const watching = definePurpose({ ...asText, validate: (...args) => (seen.push(args), accept("ok")) });
+
+  it("hands the validator the input as well as the answer, so an answer can be checked against what was asked", () => {
+    seen.length = 0;
+    interpretOutput(watching, "  an answer  ", "Passages: 2\nQuestion: what");
+    expect(seen).toEqual([["an answer", "Passages: 2\nQuestion: what"]]);
+  });
+
+  it("hands it no input when it is called without one, which a validator must treat as 'nothing was given'", () => {
+    seen.length = 0;
+    interpretOutput(watching, "an answer");
+    expect(seen).toEqual([["an answer", undefined]]);
+  });
+});
+
 describe("interpretOutput for a text purpose", () => {
   it("hands the validator the trimmed text, unparsed", () => {
     expect(interpretOutput(asText, '  {"echo":"hi"}  ')).toEqual({ ok: true, value: '{"echo":"hi"}' });

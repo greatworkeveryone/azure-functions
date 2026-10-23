@@ -28,8 +28,8 @@ const ROLE_NAMES: readonly string[] = Object.values(AppRole);
 const FEATURE_KEYS = [
   "activity", "aiAssist", "aiDocumentExtraction", "assets", "comms", "complianceReport", "contractorSuggestions",
   "decisionJobs", "documentation", "escalations", "finance", "guidedHelp", "incoming", "inspections", "jobs", "keys",
-  "leaseEvents", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures", "quotes",
-  "recurringFaults", "rentReviews", "tenancySchedule",
+  "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
+  "quotes", "recurringFaults", "rentReviews", "tenancySchedule",
   "tenancyScheduleReport", "tenancyVacancies", "timesheets",
 ] as const;
 

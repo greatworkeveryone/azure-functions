@@ -410,6 +410,13 @@ describe("a purpose of its own", () => {
     expect(await runAi(request({ purpose: "probe" }))).toMatchObject({ ok: true, output: "Hello" });
   });
 
+  it("hands its validator the redacted input the provider was sent, never the original", async () => {
+    const seen: unknown[] = [];
+    use(purposeNamed({ validate: (value, input) => (seen.push(input), { ok: true, value }) }));
+    await runAi(request({ input: "Ring jo@example.com", purpose: "probe" }));
+    expect(seen).toEqual(["Ring [EMAIL]"]);
+  });
+
   it("asks the provider for JSON only when the purpose expects it", async () => {
     process.env.AI_PROVIDER = "openai_compatible";
     process.env.AI_BASE_URL = "https://llm.example";

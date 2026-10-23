@@ -151,6 +151,7 @@ then. The date can't be in the past (services are judged by their next due date 
 stands today). Test tenancies' defects periods stay out unless an admin has Show test
 data on. As for the other reports, check every family residence is marked `residence`
 in Buildings before showing it to anyone.
+Ask the Library (`libraryAsk`, on the Library page) ships hidden. It adds an Ask the Library box: the browser finds the passages of the procedures the person may already read, and always shows them with links; with `AI_ENABLED` on, `askLibrary` also sends the question and those passages (up to five, each capped) through the gateway as `library_answer`, and the box shows a cited answer above them, or says the library doesn't cover it. With `AI_ENABLED` off the box shows the passages and one sentence that answers are switched off, and `askLibrary` is never called. No new setting and no migration: the calls are in `AiCallLog` under `library_answer` (Admin → AI activity), and with `AI_LOG_CONTENT` off no question or passage text is kept. Passages are the browser's own selection and are redacted like any input; the answer is checked to cite only the passages sent, but not proven true, so the passages always sit beside it.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the

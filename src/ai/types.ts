@@ -91,8 +91,13 @@ export interface AiPurpose<Output = unknown> {
   /** `<id>@<whole number>`. Change it whenever the prompt or the validator changes. */
   promptVersion: string;
   systemPrompt: string;
-  /** Gets the parsed JSON (expectsJson) or the trimmed text. Returns only what the purpose trusts. */
-  validate: (value: unknown) => AiValidation<Output>;
+  /**
+   * Gets the parsed JSON (expectsJson) or the trimmed text, and the redacted input the provider was
+   * sent. A purpose whose answer must agree with its input (citations of numbered passages) checks
+   * against it; `input` is absent only when a validator is called outside the gateway, so such a
+   * check fails closed. Returns only what the purpose trusts.
+   */
+  validate: (value: unknown, input?: string) => AiValidation<Output>;
 }
 
 /** Identity helper: lets a purpose file infer its output type from `validate`. */

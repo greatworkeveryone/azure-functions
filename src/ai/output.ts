@@ -16,7 +16,7 @@ function unfence(text: string): string {
   return match ? match[1].trim() : text;
 }
 
-export function interpretOutput<Output>(purpose: AiPurpose<Output>, text: string): AiValidation<Output> {
+export function interpretOutput<Output>(purpose: AiPurpose<Output>, text: string, input?: string): AiValidation<Output> {
   if (text.length > purpose.maxOutputTokens * MAX_CHARS_PER_TOKEN) return refuse("The answer is far longer than the purpose allows.");
   const trimmed = text.trim();
   let value: unknown = trimmed;
@@ -28,7 +28,7 @@ export function interpretOutput<Output>(purpose: AiPurpose<Output>, text: string
     }
   }
   try {
-    const checked = purpose.validate(value);
+    const checked = purpose.validate(value, input);
     return checked && typeof checked === "object" && typeof checked.ok === "boolean" ? checked : refuse("The validator gave no verdict.");
   } catch {
     return refuse("The validator could not read the answer.");
