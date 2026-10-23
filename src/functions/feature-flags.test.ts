@@ -42,6 +42,7 @@ const FRONTEND_FEATURE_KEYS = [
   "decisionJobs",
   "escalations",
   "finance",
+  "guidedHelp",
   "incoming",
   "inspections",
   "jobs",
