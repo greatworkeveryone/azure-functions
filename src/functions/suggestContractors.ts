@@ -17,14 +17,18 @@ import { ACTION_ROLES } from "../action-roles";
 import { authorizeWrite, badRequest, notFound, readJsonBody } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { parseSuggestInput } from "../contractorSuggestions/input";
+import { SUGGEST_LIMIT, tooManyRequests } from "../contractorSuggestions/limits";
 import { resolveRanker } from "../contractorSuggestions/registry";
 import { suggest } from "../contractorSuggestions/suggest";
 import { closeConnection, createRequestConnection } from "../db";
+import { checkRateLimit } from "../rateLimit";
 import { showTestParam } from "../test-data";
 
 export async function suggestContractors(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeWrite(request, ACTION_ROLES.addQuoteContractor.gate);
   if (!auth.ok) return auth.response;
+  const limited = checkRateLimit(`suggestContractors:${auth.caller.oid}`, SUGGEST_LIMIT);
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs);
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parseSuggestInput(body);

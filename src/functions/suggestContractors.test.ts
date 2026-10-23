@@ -2,6 +2,7 @@ import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import { suggest } from "../contractorSuggestions/suggest";
 import { closeConnection, createRequestConnection } from "../db";
+import { _resetRateLimitForTests } from "../rateLimit";
 import { suggestContractors } from "./suggestContractors";
 
 jest.mock("@azure/functions", () => ({
@@ -10,13 +11,14 @@ jest.mock("@azure/functions", () => ({
 }));
 let roles: string[] = [AppRole.FACILITIES];
 let token: string | null = "token";
+let otherOid: string | null = null;
 jest.mock("../auth", () => ({
   ...jest.requireActual("../auth"),
   extractToken: () => token,
   requireRole: async (_r: unknown, allowed: string[]) =>
     jest.requireActual("../auth").rolesPassGate(roles, allowed) ? null : { status: 403 },
   rolesForRequest: async () => roles,
-  verifiedIdentityFromRequest: async () => ({ email: "fay@example.com", name: "Fay Facilities", oid: "fay-oid" }),
+  verifiedIdentityFromRequest: async () => ({ email: "fay@example.com", name: "Fay Facilities", oid: otherOid ?? "fay-oid" }),
 }));
 jest.mock("../db", () => ({
   closeConnection: jest.fn(),
@@ -52,8 +54,10 @@ const RESULT = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetRateLimitForTests();
   roles = [AppRole.FACILITIES];
   token = "token";
+  otherOid = null;
   delete process.env.CONTRACTOR_RANKER;
   suggestMock.mockResolvedValue({ ok: true, value: RESULT });
 });
@@ -157,5 +161,26 @@ describe("suggestContractors: the ranker and test data", () => {
     roles = [AppRole.ADMIN];
     await suggestContractors(request({ context: "assign", jobId: 7 }), context);
     expect(suggestMock.mock.calls[2][3].showTest).toBe(false);
+  });
+});
+
+describe("suggestContractors: how often", () => {
+  it("answers 429 with Retry-After once a person has asked 30 times in a minute, without reading or logging anything more", async () => {
+    for (let ask = 0; ask < 30; ask++) {
+      expect((await suggestContractors(request({ context: "assign", jobId: 7 }), context)).status).toBe(200);
+    }
+    suggestMock.mockClear();
+    const refused = await suggestContractors(request({ context: "assign", jobId: 7 }), context);
+    expect(refused.status).toBe(429);
+    expect(Number((refused.headers as Record<string, string>)["Retry-After"])).toBeGreaterThanOrEqual(1);
+    expect(refused.jsonBody).toEqual({ error: "Too many requests. Try again in a moment." });
+    expect(suggestMock).not.toHaveBeenCalled();
+  });
+
+  it("limits each person on their own", async () => {
+    for (let ask = 0; ask < 30; ask++) await suggestContractors(request({ context: "assign", jobId: 7 }), context);
+    expect((await suggestContractors(request({ context: "assign", jobId: 7 }), context)).status).toBe(429);
+    otherOid = "someone-else-oid";
+    expect((await suggestContractors(request({ context: "assign", jobId: 7 }), context)).status).toBe(200);
   });
 });

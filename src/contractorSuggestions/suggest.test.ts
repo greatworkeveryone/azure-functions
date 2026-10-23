@@ -1,6 +1,6 @@
 import { createFakeDb, type Row } from "../__tests__/fixtures/contractorSuggestionsDb";
 import { FEATURE_SCHEMA_VERSION } from "./features";
-import { MAX_SUGGESTIONS, suggest } from "./suggest";
+import { MAX_SUGGESTIONS, suggest, tidyReasons } from "./suggest";
 import { rulesRanker } from "./rulesRanker";
 import type { Candidate, Ranker, ScoredCandidate } from "./types";
 
@@ -80,6 +80,25 @@ describe("suggest for a job", () => {
     const result = await suggest(connection, { context: "assign", jobId: 7 }, actor, { now: NOW, ranker: rogue, showTest: false });
     expect(result.ok && result.value.candidates.map((candidate) => candidate.contractorId)).toEqual([1]);
     expect(result.ok && result.value.rankerVersion).toBe("rogue@1");
+  });
+
+  it("treats a ranker's output as untrusted: no unscored candidate, and reasons that are few, short and plain", async () => {
+    const wordy: Ranker = {
+      rank: (candidates: readonly Candidate[]): ScoredCandidate[] => [
+        { ...candidates[0], reasons: Array.from({ length: 12 }, (_, index) => ({ caution: index === 0, text: `  Reason ${index} ${"x".repeat(400)}  ` })), score: 3 },
+        { ...candidates[1], reasons: [{ caution: false, text: "Not a number" }], score: Number.NaN },
+        { ...candidates[2], reasons: [{ caution: false, text: "Unbounded" }], score: Number.POSITIVE_INFINITY },
+      ],
+      version: "wordy@1",
+    };
+    const result = await suggest(connection, { context: "assign", jobId: 7 }, actor, { now: NOW, ranker: wordy, showTest: false });
+    expect(result.ok && result.value.candidates.map((candidate) => candidate.contractorId)).toEqual([1]);
+    const reasons = result.ok ? result.value.candidates[0].reasons : [];
+    expect(reasons).toHaveLength(8);
+    expect(reasons[0].caution).toBe(true);
+    expect(reasons.every((reason) => reason.text.length <= 200 && reason.text === reason.text.trim())).toBe(true);
+    const logged = JSON.parse(fake.sentTo(/INSERT INTO dbo\.ContractorSuggestionItems/)[0].params.ReasonsJson as string);
+    expect(logged).toEqual(reasons);
   });
 
   it("leaves out contractors already asked to quote for a quote request, but not for an assignment", async () => {
@@ -216,3 +235,18 @@ function rulesScore(features: Record<string, unknown>): number {
   const { componentsFor } = jest.requireActual("./rulesRanker") as typeof import("./rulesRanker");
   return componentsFor(features as never, { buildingId: 10, buildingRegion: "Darwin", context: "quote_request", jobId: 7, today: "2026-10-23", trade: "Electrical" }).reduce((sum, c) => sum + c.points, 0);
 }
+
+describe("tidyReasons", () => {
+  it("keeps plain sentences in order, trimmed, and drops empty or non-text ones", () => {
+    expect(tidyReasons([{ caution: false, text: " One " }, { caution: true, text: "" }, { caution: false, text: 7 as never }, { caution: true, text: "Two" }])).toEqual([
+      { caution: false, text: "One" },
+      { caution: true, text: "Two" },
+    ]);
+  });
+
+  it("reads anything that is not true as not a caution, and a missing list as none", () => {
+    expect(tidyReasons([{ caution: "yes" as never, text: "A" }])).toEqual([{ caution: false, text: "A" }]);
+    expect(tidyReasons(undefined)).toEqual([]);
+    expect(tidyReasons("nope" as never)).toEqual([]);
+  });
+});

@@ -2,6 +2,7 @@ import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import { recordOutcome } from "../contractorSuggestions/outcome";
 import { closeConnection, createRequestConnection } from "../db";
+import { _resetRateLimitForTests } from "../rateLimit";
 import { recordContractorSuggestionOutcome } from "./recordContractorSuggestionOutcome";
 
 jest.mock("@azure/functions", () => ({
@@ -37,6 +38,7 @@ const request = (body: unknown) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetRateLimitForTests();
   roles = [AppRole.FACILITIES];
   token = "token";
   recordMock.mockResolvedValue({
@@ -126,5 +128,17 @@ describe("recordContractorSuggestionOutcome: the answer", () => {
     const response = await recordContractorSuggestionOutcome(request({ chosenContractorIds: [2], jobId: 7, suggestionSetId: 55 }), context);
     expect(response.status).toBe(500);
     expect(closeConnection).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("recordContractorSuggestionOutcome: how often", () => {
+  it("answers 429 with Retry-After once a person has recorded 60 times in a minute", async () => {
+    const send = () => recordContractorSuggestionOutcome(request({ chosenContractorIds: [2], jobId: 7, suggestionSetId: 55 }), context);
+    for (let sent = 0; sent < 60; sent++) expect((await send()).status).toBe(200);
+    recordMock.mockClear();
+    const refused = await send();
+    expect(refused.status).toBe(429);
+    expect(Number((refused.headers as Record<string, string>)["Retry-After"])).toBeGreaterThanOrEqual(1);
+    expect(recordMock).not.toHaveBeenCalled();
   });
 });

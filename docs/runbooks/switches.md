@@ -100,8 +100,10 @@ confirmed trade, or recent work at the building or in the trade), and it names a
 expired certificate of currency without hiding or blocking anyone. Production buildings carry the
 source region "NT", which is not Darwin, Palmerston or Katherine, so region matching stays
 unknown until a building's service region is recorded. `CONTRACTOR_RANKER` (above) chooses the
-ranker. Read the log with `node scripts/eval-contractor-ranker.cjs` (it reads the local review
-database by default and refuses any other server without `--allow-remote`).
+ranker. Each person may ask 30 times and record 60 times a minute (per instance); beyond that the
+route answers 429 and the app simply shows no suggestions. Read the log with
+`node scripts/eval-contractor-ranker.cjs` (it reads the local review database by default and
+refuses any other server without `--allow-remote`).
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the

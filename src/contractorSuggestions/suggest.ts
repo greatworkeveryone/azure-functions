@@ -9,7 +9,7 @@ import { suggestionContext, loadFeatureVectors, type FeatureScope } from "./cand
 import { logSuggestionSet, type LogActor } from "./eventLog";
 import { canonicalTrade, FEATURE_SCHEMA_VERSION } from "./features";
 import { loadBuilding, loadJob, loadPool, loadRequestedContractorIds, WHO_POOL } from "./load";
-import type { Candidate, Ranker, SuggestionContextKind, SuggestionItem } from "./types";
+import type { Candidate, Ranker, Reason, SuggestionContextKind, SuggestionItem } from "./types";
 
 /** How many suggestions are returned and logged. The screens show the first three. */
 export const MAX_SUGGESTIONS = 5;
@@ -32,6 +32,17 @@ export interface SuggestResult {
 export type SuggestOutcome =
   | { ok: true; value: SuggestResult }
   | { error: string; ok: false; status: 404 };
+
+const MAX_REASONS = 8;
+const MAX_REASON_LENGTH = 200;
+
+/** At most a few lines of plain text, each one a sentence's length: nothing a ranker returns can swamp a screen or a log row. */
+export function tidyReasons(reasons: readonly Reason[] | undefined): Reason[] {
+  return (Array.isArray(reasons) ? reasons : [])
+    .filter((reason) => typeof reason?.text === "string" && reason.text.trim() !== "")
+    .slice(0, MAX_REASONS)
+    .map((reason) => ({ caution: reason.caution === true, text: reason.text.trim().slice(0, MAX_REASON_LENGTH) }));
+}
 
 export async function suggest(
   connection: Connection,
@@ -74,15 +85,18 @@ export async function suggest(
     name: contractor.name,
   }));
 
-  // Whatever a ranker returns, only contractors it was given can be suggested: a learned or LLM
-  // ranker that names someone else (a retired id, an invented one) cannot put them on screen.
+  // Whatever a ranker returns is untrusted: only contractors it was given can be suggested (a learned
+  // or LLM ranker that names someone else, a retired id or an invented one, cannot put them on screen),
+  // each once, with a real score, and with reasons short enough to show and to log.
   const allowed = new Set(candidates.map((candidate) => candidate.contractorId));
   const seen = new Set<number>();
-  const scored = (await options.ranker.rank(candidates, context)).filter((item) => {
-    if (!allowed.has(item.contractorId) || seen.has(item.contractorId)) return false;
-    seen.add(item.contractorId);
-    return true;
-  });
+  const scored = (await options.ranker.rank(candidates, context))
+    .filter((item) => {
+      if (!allowed.has(item.contractorId) || seen.has(item.contractorId) || !Number.isFinite(item.score)) return false;
+      seen.add(item.contractorId);
+      return true;
+    })
+    .map((item) => ({ ...item, reasons: tidyReasons(item.reasons) }));
   const top = scored.slice(0, MAX_SUGGESTIONS);
 
   const suggestionSetId = await logSuggestionSet(

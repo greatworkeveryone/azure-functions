@@ -13,12 +13,16 @@ import { ACTION_ROLES } from "../action-roles";
 import { authorizeWrite, badRequest, notFound, readJsonBody } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { parseOutcomeInput } from "../contractorSuggestions/input";
+import { OUTCOME_LIMIT, tooManyRequests } from "../contractorSuggestions/limits";
 import { recordOutcome } from "../contractorSuggestions/outcome";
 import { closeConnection, createRequestConnection } from "../db";
+import { checkRateLimit } from "../rateLimit";
 
 export async function recordContractorSuggestionOutcome(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeWrite(request, ACTION_ROLES.addQuoteContractor.gate);
   if (!auth.ok) return auth.response;
+  const limited = checkRateLimit(`recordContractorSuggestionOutcome:${auth.caller.oid}`, OUTCOME_LIMIT);
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs);
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parseOutcomeInput(body);
