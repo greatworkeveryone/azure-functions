@@ -142,6 +142,7 @@ export class LeaseEventWorld {
   query(sql: string, params: Param[] = []): Row[] {
     const p = Object.fromEntries(params.map((x) => [x.name, x.value]));
     const OPEN = ["window_not_open", "window_open", "notice_received", "awaiting_approval", "referred"];
+    if (sql.includes("COL_LENGTH('dbo.Tenants', 'OptionsRemaining')")) return [{ Len: 4 }];
     if (/FROM dbo\.Tenants t( WITH \(UPDLOCK, ROWLOCK\))? LEFT JOIN dbo\.Buildings/.test(sql)) {
       return p.TenantId === this.state.tenancy.TenantId ? [clone(this.state.tenancy)] : [];
     }

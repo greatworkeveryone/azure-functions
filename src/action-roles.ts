@@ -441,8 +441,8 @@ export const ACTION_ROLES = {
   rejectOptionNotice: {
     gate: [A.DIRECTOR],
     refused: [A.ADMIN],
-    routes: ["rejectOptionNotice"],
-    why: `Reject a recorded option notice, with a reason (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
+    routes: ["rejectOptionNotice", "correctOptionsRemaining"],
+    why: `Reject a recorded option notice, or correct a lease's options left, each with a reason (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
   },
   revertAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],

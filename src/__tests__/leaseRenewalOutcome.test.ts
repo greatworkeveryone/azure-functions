@@ -91,6 +91,8 @@ describe("renewed", () => {
     expect((await decide({ outcome: "renewed", renewed: { ...RENEWED, baseRentPerAnnum: "lots" } })).status).toBe(400);
     expect((await decide({ outcome: "renewed", renewed: { ...RENEWED, reviewMethod: "fixed" } })).status).toBe(400);
     expect((await decide({ outcome: "renewed", renewed: { ...RENEWED, optionTermMonths: null } })).status).toBe(400);
+    // How many options the new lease grants is a choice, never a silent 0 (data recheck S2).
+    expect((await decide({ outcome: "renewed", renewed: { ...RENEWED, optionsTotal: undefined } })).status).toBe(400);
     expect(world.event("rn-1")).toMatchObject({ State: "referred" });
   });
 });

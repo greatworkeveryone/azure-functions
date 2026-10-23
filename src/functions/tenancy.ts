@@ -739,10 +739,12 @@ const TENANT_COLUMNS = `
 
 // The building register: archived tenancies (D4) only when asked for.
 // The 106 option columns join each select below through selectWithLeaseOptions (data review S2-1).
-const registerSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+// Builders, still named and written as the SQL text, so the D9 guard (test-data-guards) reads each
+// variant's IsTest filter where it always has.
+const REGISTER_SQL = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
-const registerWithArchivedSql = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+const REGISTER_WITH_ARCHIVED_SQL = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
@@ -812,7 +814,7 @@ async function getRegisterTenants(
 
     const tenantRows = await selectWithLeaseOptions(
       connection,
-      includeArchived ? registerWithArchivedSql : registerSql,
+      includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
     );
 

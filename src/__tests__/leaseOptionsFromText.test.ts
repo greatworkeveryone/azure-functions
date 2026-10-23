@@ -58,6 +58,12 @@ describe("deriveOptionsFromText", () => {
     expect(deriveOptionsFromText("1 x 5 years", { remaining: 2, termMonths: 60, total: 2 })).toEqual({ remaining: 1, termMonths: 60, total: 1 });
   });
 
+  it("treats a recorded none (0 of 0) as not recorded, so the text can set the counts again (data recheck S2)", () => {
+    expect(deriveOptionsFromText("2 x 5 years", { remaining: 0, termMonths: null, total: 0 })).toEqual({ remaining: 2, termMonths: 60, total: 2 });
+    // Options taken from a real grant still never come back.
+    expect(deriveOptionsFromText("2 x 5 years", { remaining: 0, termMonths: 60, total: 2 })).toEqual({ remaining: 0, termMonths: 60, total: 2 });
+  });
+
   it("reads Nil and blank as no options, and leaves the counts alone for text it can't read", () => {
     expect(deriveOptionsFromText("Nil", recorded)).toEqual({ remaining: 0, termMonths: null, total: 0 });
     expect(deriveOptionsFromText("  ", recorded)).toEqual({ remaining: 0, termMonths: null, total: 0 });
