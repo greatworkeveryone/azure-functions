@@ -24,6 +24,7 @@ then the real switch.
 | `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
 | `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row From WP26c, an unresolved review row dated on or after it shows as pending (awaiting review) on the schedule until a review applies it | The day WP25/WP26 go live (gate B) |
 | `CPI_SYNC_ENABLED` · `_DRY_RUN` | off | Daily ABS CPI sync into `CpiIndex`; then CPI reviews waiting for their index come back in progress, calculated, even when the ABS fetch fails (WP26) | After a dry run |
+| `CONTRACTOR_RANKER` | `rules` | Which ranker orders the contractor suggestions (the Suggested group when someone picks a contractor to ask for a quote or to assign). Only `rules` is registered: a transparent points ranker (`src/contractorSuggestions/rulesRanker.ts`) whose weights and reasons are in that file. A value that names nothing registered falls back to `rules` and logs a warning, so a typo cannot switch suggestions off or change who is suggested. This is not an on/off switch: the module is the `contractorSuggestions` flag below, and the setting only chooses between rankers. Every set is logged with its ranker version, so a new ranker is judged against `rules@1` from the log (`scripts/eval-contractor-ranker.cjs`) | Leave unset. Set it to a learned or LLM ranker only after that ranker has beaten `rules@1` offline |
 | `PLANNER_SYNC_ENABLED` | off | Microsoft Planner sync, being retired. The only Planner switch: every path that creates, updates or completes a Planner task checks it first, whatever else is set. Until 17 Oct `APP_BASE_URL` doubled as the switch (setting it turned task creation back on through every job save), which is why production kept `APP_BASE_URL` unset and the director approval email went out with no link (jobs-flow N14). That coupling is gone | Leave off |
 | `APP_BASE_URL` | unset: emails have no links | Links only: the director approval email, escalation and decision-request emails and the morning digest link to the record and step they are about (`/jobs?jobId=12&step=quotes`). It switches nothing on, Planner included | Set it with this release, on Connor's yes: `https://floorplan.randazzo.properties` Deployment order: set it in the same release as the J6 backend (18 Oct 2026) — until it is set every escalation email stays pending, no new job gets EscalatedAt and the director packet carries no link; it no longer turns Planner on (that is PLANNER_SYNC_ENABLED). |
 | `PLANNER_UNSIGNED_HOLDBACK_ENABLED` | off | Only matters if Planner sync is on. The nightly timer never raises lease tasks (expiry, option, review) for a tenancy whose schedule is not signed off. This switch also lets it take down the ones already open; off, it leaves them and logs each tenancy with its open task count | Only if Planner sync is turned on, after reading the "not removed" line in the log |
@@ -51,7 +52,7 @@ Coming, not on `sprint/integration` yet: `REVIEW_SANITY_MIN_PERCENT` (−5) and
 ## Feature flags (Admin → Features)
 
 Hidden by default: Assets, Escalations, Rent reviews (`rentReviews`), Finance (CFO workspace),
-Procedures, Decision jobs. A flag only shows the module. The timers behind
+Procedures, Decision jobs, Contractor suggestions. A flag only shows the module. The timers behind
 Escalations and Rent reviews still need their app settings above. Decision jobs
 (`decisionJobs`, Admin / Accounts jobs) need no setting and no migration: set it
 to preview for the director role first, then for everyone. The backend accepts
@@ -89,6 +90,18 @@ St, 2 Godfrey Ct and 27 Lambell Tce would otherwise report as commercial. Before
 the CFO's first run, set each tenancy's lease type and each fee's category in the
 register, or the summary groups those charges as "Rent" and "Other charges"; the
 report's Data gaps panel lists what is missing.
+Contractor suggestions (`contractorSuggestions`, the Suggested group on a job's quote request
+step and on its new purchase order form) ships hidden. It needs migration 171
+(`171_contractor_suggestion_events.sql`, additive: three append-only log tables) applied first;
+no timer, no email, no MYOB. Whoever may request quotes may ask, which includes everyone who may
+raise a purchase order. With nothing recorded yet it says "No suggestions yet for this trade":
+it only suggests a contractor with something recorded for the job (a building assignment, a
+confirmed trade, or recent work at the building or in the trade), and it names a missing or
+expired certificate of currency without hiding or blocking anyone. Production buildings carry the
+source region "NT", which is not Darwin, Palmerston or Katherine, so region matching stays
+unknown until a building's service region is recorded. `CONTRACTOR_RANKER` (above) chooses the
+ranker. Read the log with `node scripts/eval-contractor-ranker.cjs` (it reads the local review
+database by default and refuses any other server without `--allow-remote`).
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
@@ -159,6 +172,15 @@ decisions 1 and 9 (sprint board, decision 15).
 Migration 138 (`138_job_decisions.sql`, jobs A2) is hand-applied after 137, before
 the build that serves respondToJobDecision. Don't renumber it. getJobDecisionRequest
 tolerates a database without it.
+
+Migration 171 (`171_contractor_suggestion_events.sql`, SC-AI3) is applied before the build that
+serves `suggestContractors` and `recordContractorSuggestionOutcome`; without it both answer 500 (the
+app shows a plain "couldn't load suggestions" line and the normal picker still works). It only
+creates `ContractorSuggestionSets`, `ContractorSuggestionItems` and `ContractorSuggestionOutcomes`
+and changes no existing table. The tables are append-only: triggers refuse UPDATE and DELETE, and
+a guard test fails if any code issues one, so removing rows later (a retention rule, an erasure
+request) needs its own migration with a DESTRUCTIVE header. Dry-run it on a restored copy first,
+as for any migration. Don't renumber it.
 
 Procedures (U4): apply migration 142 (`142_procedure_approval_request.sql`) before
 the build that serves `getProcedures` and `requestProcedureApproval`; it adds four
