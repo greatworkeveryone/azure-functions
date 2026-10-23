@@ -63,7 +63,6 @@ const REVIEWED_BLOB_DELETES: Record<string, string[]> = {
   // Removes the blob it uploaded a moment earlier when the register insert did not commit;
   // the key is fresh (randomUUID), and the cleanup re-checks that no RegisterDocuments row references it.
   "functions/document-register.ts": ["deleteBlob"],
-  "functions/inspections.ts": ["deleteBlob"],
   // Same pattern: a fresh key (randomUUID) under major-events/<id>/, and the cleanup re-checks that no MajorEventDocuments row references it.
   "functions/major-events.ts": ["deleteBlob"],
   "functions/purchaseOrders.ts": ["deleteBlob"],

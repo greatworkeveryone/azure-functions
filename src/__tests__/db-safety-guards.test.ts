@@ -81,7 +81,9 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // deleteOther: the four alias-form deletes (removeRoom, removePoint,
   // removeAttachment, the linkRooms fold), invisible to the FROM-only count
   // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.
-  "src/functions/inspections.ts": { deleteBlob: 1, deleteFrom: 6, deleteOther: 4 },
+  // No deleteBlob: point, room, level and photo removal all write their ledger row first
+  // and leave the files in storage (UX fix round 2, B2).
+  "src/functions/inspections.ts": { deleteFrom: 6, deleteOther: 4 },
   // Removes only the blob this same request just uploaded (fresh randomUUID key) when the register insert did not commit,
   // and only after a fresh read finds no RegisterDocuments row referencing it.
   "src/functions/document-register.ts": { deleteBlob: 1 },

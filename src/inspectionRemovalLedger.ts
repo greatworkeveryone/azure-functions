@@ -1,28 +1,57 @@
-// The decision-ledger rows for taking a point, a room or a whole level off a
-// draft inspection. Everything removed goes in `before`, so a removal can be put
-// back by hand. The ledger caps a snapshot, and a level with hundreds of photos
-// is larger than that cap: such a removal is written as several rows of the
-// same action, in the caller's transaction, sharing one correlation id. If any
-// row fails, the op is rejected and nothing is removed (inspections.ts).
+// The decision-ledger rows for taking a photo, a point, a room or a whole level
+// off a draft inspection. Everything removed goes in `before`, so a removal can
+// be put back by hand: the text, the photo records (the files themselves stay in
+// storage), and who added each item and when (points, rooms, photos, and the
+// people who contributed to a level). The ledger caps a snapshot, and a level
+// with hundreds of photos is larger than that cap: such a removal is written as
+// several rows of the same action, in the caller's transaction, sharing one
+// correlation id. If any row fails, the op is rejected and nothing is removed
+// (inspections.ts).
 //
 // One row when it fits (the shape the first version wrote). When it does not:
 //   row 1        the summary: ids, names, counts, `part: 1`, `parts: n`, and for
-//                a level the room list (id, name, description, point and photo counts)
-//   rows 2..n    `part: k`, `parts: n` and a slice of the points, each with its
+//                a level the room list (id, name, description, who added it, point and photo counts)
+//   next rows    more of the room list, then the level's contributors, when they do not fit
+//   last rows    `part: k`, `parts: n` and a slice of the points, each with its
 //                photo records; a point too big for a row has its photo records
 //                spread over consecutive rows, the later slices marked `continued`
-// Every point and photo record appears in exactly one row.
+// Every point, photo record, room and contributor appears in exactly one row.
+//
+// A removal is never refused for size. Splitting works because every piece that
+// goes into a row whole is far smaller than a row: a point's text is capped at
+// 5,000 characters on add and update (inspectionLimits.ts; about 30 KB of JSON
+// at worst, against a 56 KiB row budget), rooms hold at most 500 characters of
+// text and a 200-character name, a level name is at most 100 characters, a
+// photo record is two names of at most 500 characters, and a contributor is a
+// 200-character id and name. Photo records, the only unbounded part, are what a
+// point's slices are cut from.
 
 import { newCorrelationId, record } from "./ledger";
 import { assertLedgerEntry, LEDGER_MAX_SNAPSHOT_BYTES, snapshotBytes } from "./ledger/validate";
 import type { LedgerActor, LedgerEntryInput, LedgerTx } from "./ledger";
 
-export type RemovedPhoto = { blobName: string; fileName: string; id: string };
-export type RemovedPoint = { attachments: RemovedPhoto[]; description: string; id: string };
-export type RemovedRoom = { description: string; id: string; name: string; points: RemovedPoint[] };
+/** When and by whom something was added, as the table holds it (ISO text; null if the row has none). */
+export type AddedStamp = { addedAt: string | null; addedById: string | null; addedByName: string | null };
+export type RemovedPhoto = {
+  blobName: string;
+  fileName: string;
+  id: string;
+  uploadedAt: string | null;
+  uploadedById: string | null;
+  uploadedByName: string | null;
+};
+export type RemovedPoint = AddedStamp & { attachments: RemovedPhoto[]; description: string; id: string };
+export type RemovedRoom = AddedStamp & { description: string; id: string; name: string; points: RemovedPoint[] };
+export type RemovedContributor = { id: string; name: string };
 
 type Json = Record<string, unknown>;
-type SplitPoint = { attachments: RemovedPhoto[]; continued?: true; description?: string; id: string; roomId: string };
+type SplitPoint = Partial<AddedStamp> & {
+  attachments: RemovedPhoto[];
+  continued?: true;
+  description?: string;
+  id: string;
+  roomId: string;
+};
 
 /** Rows are packed to seven eighths of the ledger's own cap, so a field added to
  *  a row later, or a count that gains a digit, cannot tip a full row over it. */
@@ -32,9 +61,11 @@ export const REMOVAL_ROW_BUDGET_BYTES = Math.floor((LEDGER_MAX_SNAPSHOT_BYTES / 
 const WIDEST_COUNT = 99_999;
 
 export interface InspectionRemoval {
-  action: "inspection.level_removed" | "inspection.point_removed" | "inspection.room_removed";
+  action: "inspection.level_removed" | "inspection.photo_removed" | "inspection.point_removed" | "inspection.room_removed";
   /** Fields every row of a split repeats, so each part names what it belongs to. */
   context: Json;
+  /** Level removals: the people recorded as contributors to the level, for rows of their own when split. */
+  contributors: RemovedContributor[];
   /** A point's text is in the summary (point removals) rather than with its photo records. */
   pointTextInSummary: boolean;
   points: (RemovedPoint & { roomId: string })[];
@@ -49,11 +80,14 @@ export interface InspectionRemoval {
 export const photoCount = (points: RemovedPoint[]): number =>
   points.reduce((sum, point) => sum + point.attachments.length, 0);
 
+const stamp = (who: AddedStamp): AddedStamp => ({ addedAt: who.addedAt, addedById: who.addedById, addedByName: who.addedByName });
+
 export function pointRemoval(
-  point: { description: string; id: string; levelName: string; roomId: string; roomName: string },
+  point: AddedStamp & { description: string; id: string; levelName: string; roomId: string; roomName: string },
   photos: RemovedPhoto[],
 ): InspectionRemoval {
   const summary = {
+    ...stamp(point),
     attachmentCount: photos.length,
     description: point.description,
     levelName: point.levelName,
@@ -64,16 +98,43 @@ export function pointRemoval(
   return {
     action: "inspection.point_removed",
     context: { levelName: point.levelName, pointId: point.id, roomId: point.roomId, roomName: point.roomName },
+    contributors: [],
     pointTextInSummary: true,
-    points: [{ attachments: photos, description: point.description, id: point.id, roomId: point.roomId }],
+    points: [{ ...stamp(point), attachments: photos, description: point.description, id: point.id, roomId: point.roomId }],
     roomList: [],
     summary,
     whole: { ...summary, attachments: photos },
   };
 }
 
+/** One photo taken off a point (the file stays in storage). A photo record is a few hundred bytes at most, so it is always one row. */
+export function photoRemoval(photo: RemovedPhoto & { levelName: string; pointId: string; roomId: string; roomName: string }): InspectionRemoval {
+  const whole = {
+    attachmentId: photo.id,
+    blobName: photo.blobName,
+    fileName: photo.fileName,
+    levelName: photo.levelName,
+    pointId: photo.pointId,
+    roomId: photo.roomId,
+    roomName: photo.roomName,
+    uploadedAt: photo.uploadedAt,
+    uploadedById: photo.uploadedById,
+    uploadedByName: photo.uploadedByName,
+  };
+  return {
+    action: "inspection.photo_removed",
+    context: { attachmentId: photo.id, pointId: photo.pointId },
+    contributors: [],
+    pointTextInSummary: false,
+    points: [],
+    roomList: [],
+    summary: whole,
+    whole,
+  };
+}
+
 export function roomRemoval(
-  room: { description: string; id: string; levelId: string; levelName: string; name: string },
+  room: AddedStamp & { description: string; id: string; levelId: string; levelName: string; name: string },
   points: RemovedPoint[],
 ): InspectionRemoval {
   const summary = {
@@ -81,6 +142,9 @@ export function roomRemoval(
     levelId: room.levelId,
     levelName: room.levelName,
     pointCount: points.length,
+    roomAddedAt: room.addedAt,
+    roomAddedById: room.addedById,
+    roomAddedByName: room.addedByName,
     roomDescription: room.description,
     roomId: room.id,
     roomName: room.name,
@@ -88,6 +152,7 @@ export function roomRemoval(
   return {
     action: "inspection.room_removed",
     context: { levelId: room.levelId, levelName: room.levelName, roomId: room.id, roomName: room.name },
+    contributors: [],
     pointTextInSummary: false,
     points: points.map((point) => ({ ...point, roomId: room.id })),
     roomList: [],
@@ -96,10 +161,15 @@ export function roomRemoval(
   };
 }
 
-export function levelRemoval(level: { id: string; name: string }, rooms: RemovedRoom[]): InspectionRemoval {
+export function levelRemoval(
+  level: { addedAt: string | null; id: string; name: string },
+  rooms: RemovedRoom[],
+  contributors: RemovedContributor[],
+): InspectionRemoval {
   const points = rooms.flatMap((room) => room.points);
   const summary = {
     attachmentCount: photoCount(points),
+    levelAddedAt: level.addedAt,
     levelId: level.id,
     levelName: level.name,
     pointCount: points.length,
@@ -108,9 +178,11 @@ export function levelRemoval(level: { id: string; name: string }, rooms: Removed
   return {
     action: "inspection.level_removed",
     context: { levelId: level.id, levelName: level.name },
+    contributors,
     pointTextInSummary: false,
     points: rooms.flatMap((room) => room.points.map((point) => ({ ...point, roomId: room.id }))),
     roomList: rooms.map((room) => ({
+      ...stamp(room),
       attachmentCount: photoCount(room.points),
       description: room.description,
       id: room.id,
@@ -118,7 +190,7 @@ export function levelRemoval(level: { id: string; name: string }, rooms: Removed
       pointCount: room.points.length,
     })),
     summary,
-    whole: { ...summary, rooms },
+    whole: { ...summary, contributors, rooms },
   };
 }
 
@@ -158,7 +230,7 @@ const withCounts = (fields: Json, extra: Json = {}): Json => ({
 /** One point into the rows being filled. A point too big for an empty row goes
  *  in slices of its photo records, each slice naming the point. */
 function addPoint(filler: RowFiller<SplitPoint>, emptyRow: number, point: RemovedPoint & { roomId: string }, withText: boolean): void {
-  const text = withText ? { description: point.description } : {};
+  const text = withText ? { ...stamp(point), description: point.description } : {};
   const whole: SplitPoint = { attachments: point.attachments, id: point.id, roomId: point.roomId, ...text };
   const wholeBytes = snapshotBytes(whole);
   if (emptyRow + wholeBytes <= REMOVAL_ROW_BUDGET_BYTES) {
@@ -200,11 +272,23 @@ export function removalSnapshots(removal: InspectionRemoval): Json[] {
   for (const point of removal.points) addPoint(points, pointEmptyRow, point, !removal.pointTextInSummary);
   const pointRows = points.finish();
 
-  const parts = Math.max(roomRows.length, 1) + pointRows.length;
+  const contributorEmptyRow = snapshotBytes(withCounts(removal.context, { contributors: [] }));
+  const contributors = new RowFiller<Json>(contributorEmptyRow);
+  for (const contributor of removal.contributors) contributors.add(contributor, snapshotBytes(contributor));
+  const contributorRows = contributors.finish();
+
+  const summaryAndRooms = Math.max(roomRows.length, 1);
+  const parts = summaryAndRooms + contributorRows.length + pointRows.length;
   return [
     { ...removal.summary, part: 1, parts, ...(hasRooms ? { rooms: roomRows[0] } : {}) },
     ...roomRows.slice(1).map((chunk, i) => ({ ...removal.context, part: i + 2, parts, rooms: chunk })),
-    ...pointRows.map((chunk, i) => ({ ...removal.context, part: Math.max(roomRows.length, 1) + i + 1, parts, points: chunk })),
+    ...contributorRows.map((chunk, i) => ({ ...removal.context, contributors: chunk, part: summaryAndRooms + i + 1, parts })),
+    ...pointRows.map((chunk, i) => ({
+      ...removal.context,
+      part: summaryAndRooms + contributorRows.length + i + 1,
+      parts,
+      points: chunk,
+    })),
   ];
 }
 

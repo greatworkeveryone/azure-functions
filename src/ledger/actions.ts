@@ -131,6 +131,10 @@ export const LEDGER_ACTIONS = {
   // put back by hand. Routine mid-inspection work, so not an exception.
   "inspection.point_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
 
+  // A single photo taken off a point (UX fix round 2, B2). `before` holds the point, the attachment id,
+  // blobName, fileName and who uploaded it and when. The file itself stays in storage.
+  "inspection.photo_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
   // A room or a whole level taken off a draft inspection (UX review N3 follow-up).
   // Same subject and shape rule as a point: `before` holds the room's name and
   // level (or the level's name) and every point's text with its photo records

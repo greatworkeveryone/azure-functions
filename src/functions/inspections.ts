@@ -25,7 +25,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { isDevOverrideEnabled } from "../jwt";
@@ -37,11 +37,14 @@ import type { LedgerActor } from "../ledger";
 import {
   levelRemoval,
   pointRemoval,
+  photoRemoval,
   recordInspectionRemoval,
   roomRemoval,
+  type RemovedContributor,
   type RemovedPoint,
   type RemovedRoom,
 } from "../inspectionRemovalLedger";
+import { assertPointTextLength, OpRefusal } from "../inspectionLimits";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 
@@ -64,7 +67,10 @@ export function isValidInspectionBlobName(blobName: unknown): boolean {
 // Raw failure text can leak schema/constraint detail to clients, so the per-op
 // rejection reason is generic in production; dev builds keep the real message.
 // The full error is always logged server-side by the caller.
+// An OpRefusal is the exception: its text is written for the person (a length
+// limit, say) and carries no internal detail, so it always goes through.
 export function opRejectionReason(err: unknown): string {
+  if (err instanceof OpRefusal) return err.message;
   if (isDevOverrideEnabled() && err instanceof Error && err.message) return err.message;
   return "Operation could not be applied";
 }
@@ -351,6 +357,14 @@ function toIso(value: unknown): string {
   if (typeof value === "string") return value;
   return new Date().toISOString();
 }
+
+// A timestamp column for the removal ledger: ISO text, or null when the row has none.
+function isoOrNull(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === "string" ? value : null;
+}
+
+const textOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
 async function bumpRevision(connection: any, inspectionId: number): Promise<number> {
   const rows = await executeQuery(
@@ -756,8 +770,11 @@ async function loadRemovedRooms(
   const rows = await executeQuery(
     connection,
     `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+            r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
             p.Id AS PointId, p.Description AS PointDescription,
-            a.Id AS AttachmentId, a.BlobName, a.FileName
+            p.AddedAt AS PointAddedAt, p.AddedById AS PointAddedById, p.AddedByName AS PointAddedByName,
+            a.Id AS AttachmentId, a.BlobName, a.FileName,
+            a.UploadedAt, a.UploadedById, a.UploadedByName
      FROM dbo.InspectionRooms r
      LEFT JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
      LEFT JOIN dbo.InspectionAttachments a ON a.PointId = p.Id
@@ -770,18 +787,40 @@ async function loadRemovedRooms(
   for (const row of rows) {
     let room = rooms.get(row.RoomId);
     if (!room) {
-      room = { description: row.RoomDescription ?? "", id: row.RoomId, name: row.RoomName, points: [] };
+      room = {
+        addedAt: isoOrNull(row.RoomAddedAt),
+        addedById: textOrNull(row.RoomAddedById),
+        addedByName: textOrNull(row.RoomAddedByName),
+        description: row.RoomDescription ?? "",
+        id: row.RoomId,
+        name: row.RoomName,
+        points: [],
+      };
       rooms.set(row.RoomId, room);
     }
     if (row.PointId == null) continue;
     let point = points.get(row.PointId);
     if (!point) {
-      point = { attachments: [], description: row.PointDescription ?? "", id: row.PointId };
+      point = {
+        addedAt: isoOrNull(row.PointAddedAt),
+        addedById: textOrNull(row.PointAddedById),
+        addedByName: textOrNull(row.PointAddedByName),
+        attachments: [],
+        description: row.PointDescription ?? "",
+        id: row.PointId,
+      };
       points.set(row.PointId, point);
       room.points.push(point);
     }
     if (row.AttachmentId != null) {
-      point.attachments.push({ blobName: row.BlobName, fileName: row.FileName, id: row.AttachmentId });
+      point.attachments.push({
+        blobName: row.BlobName,
+        fileName: row.FileName,
+        id: row.AttachmentId,
+        uploadedAt: isoOrNull(row.UploadedAt),
+        uploadedById: textOrNull(row.UploadedById),
+        uploadedByName: textOrNull(row.UploadedByName),
+      });
     }
   }
   return [...rooms.values()];
@@ -864,7 +903,7 @@ async function applyOne(
       // removed here).
       const foundLevel = await executeQuery(
         connection,
-        `SELECT l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
+        `SELECT l.Id AS LevelId, l.Name AS LevelName, l.AddedAt AS LevelAddedAt, i.BuildingId
          FROM dbo.InspectionLevels l
          JOIN dbo.Inspections i ON i.Id = l.InspectionId
          WHERE l.Id = @Id AND l.InspectionId = @InspectionId`,
@@ -875,11 +914,22 @@ async function applyOne(
       );
       if (foundLevel.length > 0) {
         const rooms = await loadRemovedRooms(connection, { levelId: op.levelId });
+        // The people who contributed to the level go too (the cascade drops them).
+        const contributorRows = await executeQuery(
+          connection,
+          `SELECT UserId, UserName FROM dbo.InspectionLevelContributors WHERE LevelId = @LevelId ORDER BY UserName, UserId`,
+          [{ name: "LevelId", type: TYPES.NVarChar, value: op.levelId }],
+        );
+        const contributors: RemovedContributor[] = contributorRows.map((c) => ({ id: c.UserId, name: c.UserName }));
         await recordInspectionRemoval(connection, {
           actor: await loadLedgerActor(connection),
           buildingId: (foundLevel[0].BuildingId as number | null) ?? null,
           inspectionId,
-          removal: levelRemoval({ id: foundLevel[0].LevelId, name: foundLevel[0].LevelName }, rooms),
+          removal: levelRemoval(
+            { addedAt: isoOrNull(foundLevel[0].LevelAddedAt), id: foundLevel[0].LevelId, name: foundLevel[0].LevelName },
+            rooms,
+            contributors,
+          ),
         });
       }
       await executeQuery(
@@ -951,6 +1001,7 @@ async function applyOne(
       const foundRoom = await executeQuery(
         connection,
         `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+                r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
                 l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
          FROM dbo.InspectionRooms r
          JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
@@ -969,6 +1020,9 @@ async function applyOne(
           inspectionId,
           removal: roomRemoval(
             {
+              addedAt: isoOrNull(foundRoom[0].RoomAddedAt),
+              addedById: textOrNull(foundRoom[0].RoomAddedById),
+              addedByName: textOrNull(foundRoom[0].RoomAddedByName),
               description: foundRoom[0].RoomDescription ?? "",
               id: foundRoom[0].RoomId,
               levelId: foundRoom[0].LevelId,
@@ -993,6 +1047,7 @@ async function applyOne(
       return;
     }
     case "addPoint": {
+      assertPointTextLength(op.description, "addPoint");
       await executeQuery(
         connection,
         // INSERT…SELECT scopes the point to a room in THIS inspection: a forged
@@ -1019,6 +1074,7 @@ async function applyOne(
       if (op.patch?.description === undefined) {
         throw new Error("updatePoint requires patch.description");
       }
+      assertPointTextLength(op.patch.description, "updatePoint");
       // JOIN Point → Room → Level → Inspection so the WHERE asserts the
       // point actually lives under the inspection this op claims to mutate.
       await executeQuery(
@@ -1045,7 +1101,8 @@ async function applyOne(
       // blobs stay in storage (never removed here).
       const found = await executeQuery(
         connection,
-        `SELECT p.Id AS PointId, p.RoomId, p.Description, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
+        `SELECT p.Id AS PointId, p.RoomId, p.Description, p.AddedAt, p.AddedById, p.AddedByName,
+                r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
          FROM dbo.InspectionPoints p
          JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
          JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
@@ -1059,7 +1116,8 @@ async function applyOne(
       if (found.length > 0) {
         const photos = await executeQuery(
           connection,
-          `SELECT a.Id, a.BlobName, a.FileName FROM dbo.InspectionAttachments a WHERE a.PointId = @Id`,
+          `SELECT a.Id, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName
+           FROM dbo.InspectionAttachments a WHERE a.PointId = @Id ORDER BY a.UploadedAt, a.Id`,
           [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
         );
         await recordInspectionRemoval(connection, {
@@ -1068,13 +1126,23 @@ async function applyOne(
           inspectionId,
           removal: pointRemoval(
             {
+              addedAt: isoOrNull(found[0].AddedAt),
+              addedById: textOrNull(found[0].AddedById),
+              addedByName: textOrNull(found[0].AddedByName),
               description: found[0].Description ?? "",
               id: found[0].PointId,
               levelName: found[0].LevelName,
               roomId: found[0].RoomId,
               roomName: found[0].RoomName,
             },
-            photos.map((photo) => ({ blobName: photo.BlobName, fileName: photo.FileName, id: photo.Id })),
+            photos.map((photo) => ({
+              blobName: photo.BlobName,
+              fileName: photo.FileName,
+              id: photo.Id,
+              uploadedAt: isoOrNull(photo.UploadedAt),
+              uploadedById: textOrNull(photo.UploadedById),
+              uploadedByName: textOrNull(photo.UploadedByName),
+            })),
           ),
         });
       }
@@ -1126,23 +1194,48 @@ async function applyOne(
       return;
     }
     case "removeAttachment": {
-      // Scope both the BlobName lookup and the DELETE to this inspection via
-      // the Point → Room → Level chain. Without it any attachment Id from
-      // another inspection could be deleted.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first (the photo record, with who uploaded it and when); a
+      // failed ledger write rejects the op and nothing is removed. The file stays
+      // in storage: a photo can be copied onto a job, and only the record goes.
+      // Both the lookup and the DELETE are scoped to this inspection via the
+      // Point → Room → Level chain, so an attachment Id from another inspection
+      // matches nothing.
       const rows = await executeQuery(
         connection,
-        `SELECT a.BlobName
+        `SELECT a.Id, a.PointId, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName,
+                p.RoomId, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
          FROM dbo.InspectionAttachments a
          JOIN dbo.InspectionPoints p ON p.Id = a.PointId
          JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
          JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
          WHERE a.Id = @Id AND l.InspectionId = @InspectionId`,
         [
           { name: "Id",           type: TYPES.NVarChar, value: op.attachmentId },
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      const blobName = rows[0]?.BlobName as string | undefined;
+      if (rows.length > 0) {
+        const photo = rows[0];
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (photo.BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: photoRemoval({
+            blobName: photo.BlobName,
+            fileName: photo.FileName,
+            id: photo.Id,
+            levelName: photo.LevelName,
+            pointId: photo.PointId,
+            roomId: photo.RoomId,
+            roomName: photo.RoomName,
+            uploadedAt: isoOrNull(photo.UploadedAt),
+            uploadedById: textOrNull(photo.UploadedById),
+            uploadedByName: textOrNull(photo.UploadedByName),
+          }),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE a
@@ -1156,11 +1249,6 @@ async function applyOne(
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      // Defence in depth: never destroy a blob outside this feature's prefix,
-      // even if a legacy row catalogued one.
-      if (blobName && blobName.startsWith("inspections/")) {
-        try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
-      }
       return;
     }
     case "linkRooms": {

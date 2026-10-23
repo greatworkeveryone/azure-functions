@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { clearRoleCache } from "../auth";
 import { _resetRateLimitForTests } from "../rateLimit";
+import { OpRefusal } from "../inspectionLimits";
 import { REMOVAL_ROW_BUDGET_BYTES } from "../inspectionRemovalLedger";
 import { LEDGER_MAX_SNAPSHOT_BYTES } from "../ledger";
 import {
@@ -952,10 +953,14 @@ function expectRowsWithinTheLimit(rows: Record<string, unknown>[]): void {
 describe("applyInspectionOps removePoint op (UX review N3)", () => {
   type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
   const REMOVE = { id: "op-rm", inspectionId: 7, createdAt: "", op: { type: "removePoint", pointId: "pt-1" } };
-  const POINT_ROW = { PointId: "pt-1", RoomId: "rm-1", Description: "Cracked tile", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9 };
+  const POINT_ROW = {
+    PointId: "pt-1", RoomId: "rm-1", Description: "Cracked tile", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9,
+    AddedAt: new Date("2026-10-19T22:30:00.000Z"), AddedById: "oid-ada", AddedByName: "Ada Added",
+  };
+  const UPLOAD = { UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader" };
   const PHOTOS = [
-    { Id: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg" },
-    { Id: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg" },
+    { Id: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg", ...UPLOAD },
+    { Id: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg", ...UPLOAD },
   ];
 
   function removeDb(point: Row[], photos: Row[], failLedger = false): void {
@@ -995,11 +1000,15 @@ describe("applyInspectionOps removePoint op (UX review N3)", () => {
       SubjectId: "7",
       SubjectType: "inspection",
     });
+    const uploaded = { uploadedAt: "2026-10-20T01:02:03.000Z", uploadedById: "oid-una", uploadedByName: "Una Uploader" };
     expect(JSON.parse(row.Before as string)).toEqual({
+      addedAt: "2026-10-19T22:30:00.000Z",
+      addedById: "oid-ada",
+      addedByName: "Ada Added",
       attachmentCount: 2,
       attachments: [
-        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1" },
-        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2" },
+        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1", ...uploaded },
+        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2", ...uploaded },
       ],
       description: "Cracked tile",
       levelName: "Ground",
@@ -1085,33 +1094,45 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
   type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
 
   // One row per room x point x photo, as the LEFT JOINs return them.
-  const LOBBY = { RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance" };
+  const ROOM_STAMP = { RoomAddedAt: new Date("2026-10-19T21:00:00.000Z"), RoomAddedById: "oid-rita", RoomAddedByName: "Rita Room" };
+  const LOBBY = { RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", ...ROOM_STAMP };
+  const POINT_STAMP = { PointAddedAt: new Date("2026-10-19T22:30:00.000Z"), PointAddedById: "oid-ada", PointAddedByName: "Ada Added" };
+  const UPLOAD = { UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader" };
+  const NO_POINT = { PointId: null, PointDescription: null, PointAddedAt: null, PointAddedById: null, PointAddedByName: null };
+  const NO_PHOTO = { AttachmentId: null, BlobName: null, FileName: null, UploadedAt: null, UploadedById: null, UploadedByName: null };
   const JOINED: Row[] = [
-    { ...LOBBY, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg" },
-    { ...LOBBY, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg" },
-    { ...LOBBY, PointId: "pt-2", PointDescription: null, AttachmentId: null, BlobName: null, FileName: null },
-    { RoomId: "rm-2", RoomName: "Plant room", RoomDescription: null, PointId: null, PointDescription: null, AttachmentId: null, BlobName: null, FileName: null },
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg", ...UPLOAD },
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg", ...UPLOAD },
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-2", PointDescription: null, ...NO_PHOTO },
+    { RoomId: "rm-2", RoomName: "Plant room", RoomDescription: null, RoomAddedAt: null, RoomAddedById: "oid-rita", RoomAddedByName: "Rita Room", ...NO_POINT, ...NO_PHOTO },
   ];
+  const POINT_OUT = { addedAt: "2026-10-19T22:30:00.000Z", addedById: "oid-ada", addedByName: "Ada Added" };
+  const UPLOAD_OUT = { uploadedAt: "2026-10-20T01:02:03.000Z", uploadedById: "oid-una", uploadedByName: "Una Uploader" };
   const LOBBY_POINTS = [
     {
+      ...POINT_OUT,
       attachments: [
-        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1" },
-        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2" },
+        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1", ...UPLOAD_OUT },
+        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2", ...UPLOAD_OUT },
       ],
       description: "Cracked tile",
       id: "pt-1",
     },
-    { attachments: [], description: "", id: "pt-2" },
+    { ...POINT_OUT, attachments: [], description: "", id: "pt-2" },
   ];
-  const ROOM_ROW = { RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", LevelId: "lv-1", LevelName: "Ground", BuildingId: 9 };
-  const LEVEL_ROW = { LevelId: "lv-1", LevelName: "Ground", BuildingId: 9 };
+  const ROOM_ROW = {
+    RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", LevelId: "lv-1", LevelName: "Ground", BuildingId: 9, ...ROOM_STAMP,
+  };
+  const LEVEL_ROW = { LevelId: "lv-1", LevelName: "Ground", LevelAddedAt: new Date("2026-10-18T00:00:00.000Z"), BuildingId: 9 };
+  const CONTRIBUTORS = [{ UserId: "oid-ada", UserName: "Ada Added" }, { UserId: "oid-bo", UserName: "Bo Builder" }];
 
   /** `failLedger`: true fails every ledger write, a number fails that write (1 = the first). */
-  function removeDb(found: { room?: Row[]; level?: Row[] }, joined: Row[], failLedger: boolean | number = false): void {
+  function removeDb(found: { room?: Row[]; level?: Row[] }, joined: Row[], failLedger: boolean | number = false, contributors: Row[] = []): void {
     let ledgerWrites = 0;
     db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
       if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
       if (sql.includes("LEFT JOIN dbo.InspectionPoints")) return joined;
+      if (sql.includes("FROM dbo.InspectionLevelContributors")) return contributors;
       if (sql.startsWith("SELECT r.Id AS RoomId")) return found.room ?? [];
       if (sql.startsWith("SELECT l.Id AS LevelId")) return found.level ?? [];
       if (sql.includes("INSERT INTO dbo.DecisionLedger")) {
@@ -1161,6 +1182,9 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
         levelName: "Ground",
         pointCount: 2,
         points: LOBBY_POINTS,
+        roomAddedAt: "2026-10-19T21:00:00.000Z",
+        roomAddedById: "oid-rita",
+        roomAddedByName: "Rita Room",
         roomDescription: "Entrance",
         roomId: "rm-1",
         roomName: "Lobby",
@@ -1203,7 +1227,7 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
 
   describe("removeLevel", () => {
     it("logs the level and every room with its points and photos, then removes it", async () => {
-      removeDb({ level: [LEVEL_ROW] }, JOINED);
+      removeDb({ level: [LEVEL_ROW] }, JOINED, false, CONTRIBUTORS);
 
       const res = await removeLevel();
 
@@ -1222,13 +1246,15 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
       });
       expect(JSON.parse(row.Before as string)).toEqual({
         attachmentCount: 2,
+        contributors: [{ id: "oid-ada", name: "Ada Added" }, { id: "oid-bo", name: "Bo Builder" }],
+        levelAddedAt: "2026-10-18T00:00:00.000Z",
         levelId: "lv-1",
         levelName: "Ground",
         pointCount: 2,
         roomCount: 2,
         rooms: [
-          { description: "Entrance", id: "rm-1", name: "Lobby", points: LOBBY_POINTS },
-          { description: "", id: "rm-2", name: "Plant room", points: [] },
+          { addedAt: "2026-10-19T21:00:00.000Z", addedById: "oid-rita", addedByName: "Rita Room", description: "Entrance", id: "rm-1", name: "Lobby", points: LOBBY_POINTS },
+          { addedAt: null, addedById: "oid-rita", addedByName: "Rita Room", description: "", id: "rm-2", name: "Plant room", points: [] },
         ],
       });
       const sqls = sqlsRun();
@@ -1294,6 +1320,9 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
       return { rows, photoIds };
     }
 
+    // The mock rows for these rooms carry no added-by columns, so the records hold null.
+    const NO_STAMP = { addedAt: null, addedById: null, addedByName: null };
+
     type Before = {
       part?: number; parts?: number; rooms?: { id: string }[]; points?: { id: string; description?: string; continued?: boolean; attachments: { id: string }[] }[];
     };
@@ -1336,6 +1365,7 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
       expect(befores.every((b) => b.parts === rows.length)).toBe(true);
       expect(befores[0]).toEqual({
         attachmentCount: 900,
+        levelAddedAt: "2026-10-18T00:00:00.000Z",
         levelId: "lv-1",
         levelName: "Ground",
         part: 1,
@@ -1343,9 +1373,9 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
         pointCount: 9,
         roomCount: 3,
         rooms: [
-          { attachmentCount: 300, description: "", id: "rm-1", name: "Lobby", pointCount: 3 },
-          { attachmentCount: 300, description: "", id: "rm-2", name: "Plant room", pointCount: 3 },
-          { attachmentCount: 300, description: "", id: "rm-3", name: "Stair", pointCount: 3 },
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-1", name: "Lobby", pointCount: 3 },
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-2", name: "Plant room", pointCount: 3 },
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-3", name: "Stair", pointCount: 3 },
         ],
       });
       const { photoSeen, pointOrder, pointText } = tally(befores);
@@ -1382,6 +1412,9 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
         part: 1,
         parts: rows.length,
         pointCount: 1,
+        roomAddedAt: "2026-10-19T21:00:00.000Z",
+        roomAddedById: "oid-rita",
+        roomAddedByName: "Rita Room",
         roomDescription: "Entrance",
         roomId: "rm-1",
         roomName: "Lobby",
@@ -1431,5 +1464,147 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
       expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
       expect(blob.deleteBlob).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ── UX fix round 2, B2: a photo removal is logged first, and the file stays ──
+
+describe("applyInspectionOps removeAttachment op", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const REMOVE = { id: "op-rm", inspectionId: 7, createdAt: "", op: { type: "removeAttachment", attachmentId: "att-1" } };
+  const PHOTO_ROW = {
+    Id: "att-1", PointId: "pt-1", BlobName: "inspections/5d2e8a90-77c1-4f0b-a3d4-000000000001.jpg", FileName: "crack.jpg",
+    UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader",
+    RoomId: "rm-1", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9,
+  };
+
+  function photoDb(photo: Row[], failLedger = false): void {
+    db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
+      if (sql.startsWith("SELECT a.Id, a.PointId")) return photo;
+      if (sql.includes("INSERT INTO dbo.DecisionLedger") && failLedger) throw new Error("ledger down");
+      if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
+      return [];
+    });
+  }
+  const apply = () =>
+    applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [REMOVE] } }), makeContext());
+  const paramsOf = (call: SqlCall): Record<string, unknown> => Object.fromEntries(call[2].map((p) => [p.name, p.value]));
+  const sqlsRun = () => (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+
+  it("logs who removed which photo, from which point, and who uploaded it and when, then removes the record", async () => {
+    photoDb([PHOTO_ROW]);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const row = paramsOf(ledger[0]);
+    expect(row).toMatchObject({
+      Action: "inspection.photo_removed",
+      ActorKind: "user",
+      ActorName: "Test User",
+      ActorRole: "facilities",
+      BuildingId: 9,
+      SubjectId: "7",
+      SubjectType: "inspection",
+    });
+    expect(JSON.parse(row.Before as string)).toEqual({
+      attachmentId: "att-1",
+      blobName: PHOTO_ROW.BlobName,
+      fileName: "crack.jpg",
+      levelName: "Ground",
+      pointId: "pt-1",
+      roomId: "rm-1",
+      roomName: "Lobby",
+      uploadedAt: "2026-10-20T01:02:03.000Z",
+      uploadedById: "oid-una",
+      uploadedByName: "Una Uploader",
+    });
+    const sqls = sqlsRun();
+    const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+    const removed = sqls.findIndex((sql) => sql.startsWith("DELETE a"));
+    expect(logged).toBeGreaterThan(-1);
+    expect(removed).toBeGreaterThan(logged);
+  });
+
+  it("keeps the photo file: nothing is removed from blob storage", async () => {
+    photoDb([PHOTO_ROW]);
+    await apply();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("does not remove the photo when the ledger row cannot be written; the op is rejected", async () => {
+    photoDb([PHOTO_ROW], true);
+
+    const res = await apply();
+
+    const out = res.jsonBody as OpsOut;
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    expect(sqlsRun().some((sql) => sql.startsWith("DELETE a"))).toBe(false);
+    expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("reads and deletes only within the inspection named, and logs nothing for a photo that is not in it", async () => {
+    photoDb([]);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    for (const call of [...callsMatching("FROM dbo.InspectionAttachments a"), ...callsMatching("DELETE a")]) {
+      expect(call[1]).toContain("l.InspectionId = @InspectionId");
+      expect(paramsOf(call)).toMatchObject({ InspectionId: 7 });
+    }
+  });
+});
+
+// ── UX fix round 2, B2 (bug 5): point text is capped at 5,000 characters ─────
+
+describe("applyInspectionOps point text length", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const apply = (op: Row) =>
+    applyInspectionOps(
+      makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [{ id: "op-1", inspectionId: 7, createdAt: "", op }] } }),
+      makeContext(),
+    );
+  const draftDb = () =>
+    mockDb([
+      { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
+      { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
+    ]);
+  const add = (description: string) => ({ type: "addPoint", pointId: "pt-1", roomId: "rm-1", description, addedAt: "2026-10-23T00:00:00.000Z" });
+  const update = (description: string) => ({ type: "updatePoint", pointId: "pt-1", patch: { description } });
+
+  it("accepts exactly 5,000 characters on add and on update", async () => {
+    draftDb();
+    expect(((await apply(add("x".repeat(5000)))).jsonBody as OpsOut).applied).toEqual(["op-1"]);
+    draftDb();
+    expect(((await apply(update("x".repeat(5000)))).jsonBody as OpsOut).applied).toEqual(["op-1"]);
+    expect(callsMatching("INSERT INTO dbo.InspectionPoints")).toHaveLength(1);
+    expect(callsMatching("UPDATE p")).toHaveLength(1);
+  });
+
+  it.each([
+    ["addPoint", add, "INSERT INTO dbo.InspectionPoints"],
+    ["updatePoint", update, "UPDATE p"],
+  ])("refuses 5,001 characters on %s, writes nothing, and says why in the reason", async (_name, build, sqlStart) => {
+    draftDb();
+
+    const out = (await apply(build("x".repeat(5001)))).jsonBody as OpsOut;
+
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    expect(out.rejected?.[0].reason).toMatch(/5001 characters.*limit is 5000/);
+    expect(callsMatching(sqlStart)).toHaveLength(0);
+  });
+
+  it("an over-long note's reason is shown in production, while other failures stay generic", () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Production";
+    expect(opRejectionReason(new OpRefusal("too long"))).toBe("too long");
+    expect(opRejectionReason(new Error("Violation of UNIQUE KEY constraint"))).toBe("Operation could not be applied");
   });
 });
