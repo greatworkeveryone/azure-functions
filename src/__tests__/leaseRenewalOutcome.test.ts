@@ -95,6 +95,23 @@ describe("renewed", () => {
   });
 });
 
+describe("renewed on a schedule with nothing in force today (data review S2-2)", () => {
+  it("is refused with a plain reason and writes nothing, rather than reading today's rent as $0", async () => {
+    world.state.tenancy.ScheduledRateSteps = "[]";
+    const before = JSON.stringify(world.state);
+    const res = await decide({ outcome: "renewed", renewed: RENEWED });
+    expect(res.status).toBe(422);
+    expect(body(res)).toMatchObject({ code: "schedule_empty" });
+    expect(body(res).error).toMatch(/today's rent/);
+    expect(JSON.stringify(world.state)).toBe(before);
+  });
+
+  it("is refused too when every row starts after today", async () => {
+    world.state.tenancy.ScheduledRateSteps = JSON.stringify([{ baseRentPerAnnum: 90000, effectiveFrom: "2027-01-01", id: "f1", methodKind: "commencement", ratePercent: 0 }]);
+    expect(body(await decide({ outcome: "renewed", renewed: RENEWED }))).toMatchObject({ code: "schedule_empty" });
+  });
+});
+
 describe("vacating", () => {
   it("creates a draft vacancy available from the expiry; the tenancy stays as it is", async () => {
     const res = await decide({ outcome: "vacating" });

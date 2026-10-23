@@ -141,6 +141,15 @@ async function renew(connection: Connection, input: RenewalInput, terms: Renewed
   const tenantId = Number(tenancy.TenantId);
   const buildingId = Number(tenancy.BuildingId);
   const steps = parseSteps(tenancy.ScheduledRateSteps as string | null | undefined);
+  // Data review S2-2: with no row in force today, the new lease's commencement row would be the
+  // schedule's only start, and today's rent would read $0 until the new term. Refused rather than
+  // guessed (the safer of the two fixes the review offered): accounts add the current rent first.
+  if (!steps.some((step) => step.effectiveFrom <= input.today)) {
+    throw new LeaseEventError(
+      "schedule_empty",
+      "This tenancy's rent schedule has nothing in force today, so adding the new lease would show today's rent as $0. Add the current rent to the schedule first (its commencement row), then record the renewal.",
+    );
+  }
   const clash = steps.filter((step) => step.effectiveFrom >= terms.commencement).map((step) => step.effectiveFrom).sort()[0];
   if (clash) {
     throw new LeaseEventError(
