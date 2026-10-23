@@ -104,6 +104,15 @@ describe("recordOptionNotice", () => {
     expect(late).toMatchObject({ IsException: true, Reason: "Posted early by the tenant" });
   });
 
+  it("re-dates an event opened before the expiry was edited, so its approval isn't refused as expiry_changed", async () => {
+    world.state.events.push(eventRow({ DeadlineOn: asDate("2026-09-30"), LeaseExpiry: asDate("2027-03-31"), WindowOpensOn: asDate("2026-03-31") }));
+    const res = await record({ rowVersion: world.versionOf() });
+    expect(body(res).event).toMatchObject({ deadlineOn: "2026-12-30", leaseExpiry: "2027-06-30", state: "awaiting_approval", windowOpensOn: "2026-06-30" });
+    world.state.ledger = [];
+    caller = PEOPLE.bo;
+    expect((await approve()).status).toBe(200);
+  });
+
   it("records a late notice against the option that lapsed for this expiry", async () => {
     world.state.events.push(eventRow({ DeadlineOn: asDate("2026-12-30"), Outcome: "lapsed", State: "lapsed" }));
     const res = await record({ reason: "Letter found in the mail room" , noticeDate: "2026-10-22" });

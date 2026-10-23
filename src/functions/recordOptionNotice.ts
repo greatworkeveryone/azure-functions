@@ -17,7 +17,9 @@
 //   event     the tenancy's open option event, else the one that lapsed for this
 //             expiry, else a new one (lease_event.open); one whose notice is
 //             already recorded is 409 invalid_state; a rowVersion sent must be
-//             the event's (409 stale)
+//             the event's (409 stale). The event takes the current expiry and
+//             window with the notice (one opened before the expiry was edited
+//             would otherwise refuse its own approval as expiry_changed)
 //   window    a notice dated inside the window goes for approval
 //             (awaiting_approval, lease_event.notice_recorded); one dated
 //             outside it is recorded with a warning (notice_received,
@@ -186,11 +188,14 @@ export async function recordOptionNotice(request: HttpRequest, context: Invocati
       };
       const leaseEventId = String(event.LeaseEventId);
       const recorded = await markNoticeRecorded(db, leaseEventId, from, to, {
+        deadlineOn: window.deadline,
         lateNotice: !inWindow,
+        leaseExpiry: expiry,
         noticeDate: body.noticeDate,
         noticeDocument: body.noticeDocument,
         recorder: { name: caller.actor.name, userId: caller.actor.userId },
         termsJson: JSON.stringify(terms),
+        windowOpensOn: window.opensAt,
       });
       if (!recorded) throw new LeaseEventError("invalid_state", "This option just moved on, so the notice wasn't recorded.");
       await ledger.record(db, {

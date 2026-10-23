@@ -86,6 +86,12 @@ describe("planLeaseEvents: options", () => {
     expect(plan.unrecordedLapses).toBe(1);
   });
 
+  it("leaves alone an open event dated for an expiry the tenancy no longer has (no stale lapse)", () => {
+    const plan = planLeaseEvents([tenancy()], [event({ deadlineOn: "2026-06-30", leaseExpiry: "2026-12-31", state: "window_open" })], TODAY);
+    expect(plan.actions).toEqual([]);
+    expect(plan.staleEvents).toBe(1);
+  });
+
   it("is idempotent: an event already decided for this expiry opens nothing new", () => {
     for (const state of ["exercised", "rejected", "lapsed", "cancelled"] as const) {
       expect(planLeaseEvents([tenancy()], [event({ state })], TODAY).actions.filter((a) => a.kind === "open_option")).toEqual([]);

@@ -7,6 +7,7 @@
 import type { InvocationContext } from "@azure/functions";
 import { clearRoleCache } from "../auth";
 import { recordRenewalOutcome } from "../functions/recordRenewalOutcome";
+import { wholeTermMonths } from "../leaseEvents/renewal";
 import { parseSteps } from "../scheduledRateStepLogic";
 import { eventRow, LeaseEventWorld, tenancyRow, useLeaseWorld } from "./fixtures/leaseEventWorld";
 import { asDate, postRequest } from "./fixtures/rentReviewFakes";
@@ -72,8 +73,8 @@ describe("renewed", () => {
     const t = world.state.tenancy;
     expect((t.Commencement as Date).toISOString().slice(0, 10)).toBe("2027-07-01");
     expect((t.Expiry as Date).toISOString().slice(0, 10)).toBe("2032-06-30");
-    expect([t.ReviewType, t.ReviewIntervalMonths, t.FixedReviewPercent, t.OptionsTotal, t.OptionsRemaining, t.OptionTermMonths, t.OptionPeriods, t.ScheduleVersion]).toEqual([
-      "CPI", 12, null, 1, 1, 60, "1 x 5 years", 5,
+    expect([t.ReviewType, t.ReviewIntervalMonths, t.FixedReviewPercent, t.OptionsTotal, t.OptionsRemaining, t.OptionTermMonths, t.OptionPeriods, t.ScheduleVersion, t.TermMonths]).toEqual([
+      "CPI", 12, null, 1, 1, 60, "1 x 5 years", 5, 60,
     ]);
     const steps = parseSteps(t.ScheduledRateSteps as string);
     expect(steps.at(-1)).toMatchObject({ baseRentPerAnnum: 118000, effectiveFrom: "2027-07-01", methodKind: "commencement" });
@@ -168,5 +169,13 @@ describe("refusals", () => {
   it("checks the outcome before the database", async () => {
     expect((await decide({ outcome: "sell" })).status).toBe(400);
     expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("wholeTermMonths", () => {
+  it("counts whole months to the day after the expiry, month-end safe, else null", () => {
+    expect(wholeTermMonths("2027-07-01", "2032-06-30")).toBe(60);
+    expect(wholeTermMonths("2027-03-01", "2032-02-29")).toBe(60);
+    expect(wholeTermMonths("2027-07-01", "2032-06-15")).toBeNull();
   });
 });

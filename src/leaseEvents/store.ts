@@ -190,11 +190,16 @@ export interface Person {
 }
 
 export interface RecordedNotice {
+  /** The window the notice was judged against, for the current expiry: an event the
+   *  generator opened before the expiry was edited is re-dated with the notice. */
+  deadlineOn: string;
   lateNotice: boolean;
+  leaseExpiry: string;
   noticeDate: string;
   noticeDocument: string | null;
   recorder: Person;
   termsJson: string;
+  windowOpensOn: string;
 }
 
 /** RECORD_NOTICE: the notice, who recorded it and the term it asks for. A late notice on a
@@ -213,7 +218,8 @@ export async function markNoticeRecorded(
     to,
     `NoticeDate = @NoticeDate, NoticeDocument = @NoticeDocument, LateNotice = @LateNotice, Terms = @Terms,
      RecordedById = @RecordedById, RecordedByName = @RecordedByName, RecordedAt = SYSUTCDATETIME(),
-     Outcome = NULL, DecidedById = NULL, DecidedByName = NULL, DecidedAt = NULL`,
+     Outcome = NULL, DecidedById = NULL, DecidedByName = NULL, DecidedAt = NULL,
+     LeaseExpiry = @LeaseExpiry, WindowOpensOn = @WindowOpensOn, DeadlineOn = @DeadlineOn`,
     [
       { name: "NoticeDate", type: TYPES.Date, value: notice.noticeDate },
       { name: "NoticeDocument", type: TYPES.NVarChar, value: notice.noticeDocument },
@@ -221,6 +227,9 @@ export async function markNoticeRecorded(
       { name: "Terms", type: TYPES.NVarChar, value: notice.termsJson },
       { name: "RecordedById", type: TYPES.Int, value: notice.recorder.userId },
       { name: "RecordedByName", type: TYPES.NVarChar, value: notice.recorder.name },
+      { name: "LeaseExpiry", type: TYPES.Date, value: notice.leaseExpiry },
+      { name: "WindowOpensOn", type: TYPES.Date, value: notice.windowOpensOn },
+      { name: "DeadlineOn", type: TYPES.Date, value: notice.deadlineOn },
     ],
   );
 }

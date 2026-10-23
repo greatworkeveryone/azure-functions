@@ -184,6 +184,7 @@ export class LeaseEventWorld {
         if (column in p) event[column] = p[column];
       }
       if ("NoticeDate" in p) event.NoticeDate = dateOf(p.NoticeDate);
+      for (const column of ["LeaseExpiry", "WindowOpensOn", "DeadlineOn"]) if (column in p) event[column] = dateOf(p[column]);
       if ("Reason" in p) event.OutcomeReason = p.Reason;
       if (sql.includes("RecordedAt = SYSUTCDATETIME()")) event.RecordedAt = new Date();
       if (/DecidedAt = SYSUTCDATETIME\(\)/.test(sql)) event.DecidedAt = new Date();
@@ -196,7 +197,7 @@ export class LeaseEventWorld {
     if (sql.includes("UPDATE dbo.Tenants")) {
       const t = this.state.tenancy;
       const map: Record<string, string> = {
-        Commencement: "Commencement", Expiry: "Expiry", FixedReviewPercent: "FixedReviewPercent", HoldoverTerms: "HoldoverTerms",
+        Commencement: "Commencement", Expiry: "Expiry", TermMonths: "TermMonths", FixedReviewPercent: "FixedReviewPercent", HoldoverTerms: "HoldoverTerms",
         NextReviewDate: "NextReviewDate", OptionPeriods: "OptionPeriods", OptionTermMonths: "OptionTermMonths", OptionsRemaining: "OptionsRemaining",
         OptionsTotal: "OptionsTotal", ReviewIntervalMonths: "ReviewIntervalMonths", ReviewType: "ReviewType", Steps: "ScheduledRateSteps",
       };

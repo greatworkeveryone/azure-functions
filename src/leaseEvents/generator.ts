@@ -105,6 +105,8 @@ export type GeneratorAction =
 
 export interface GeneratorPlan {
   actions: GeneratorAction[];
+  /** Open option events dated for an expiry the tenancy no longer has: left alone. */
+  staleEvents: number;
   /** Tenancies whose option window closed before any event existed: left to the renewal rule. */
   unrecordedLapses: number;
 }
@@ -112,6 +114,12 @@ export interface GeneratorPlan {
 function optionPlan(tenancy: GeneratorTenancy, events: readonly GeneratorEvent[], today: string, plan: GeneratorPlan): void {
   const base = { buildingId: tenancy.buildingId, tenantId: tenancy.tenantId, tenantName: tenancy.tenantName };
   const open = events.find((event) => event.type === "option_exercise" && isOpenLeaseEventState(event.state));
+  if (open && open.leaseExpiry !== tenancy.expiry) {
+    // The expiry was edited after the event opened: its dates no longer hold, so the
+    // generator neither opens its window nor lapses it (recording a notice re-dates it).
+    plan.staleEvents += 1;
+    return;
+  }
   if (open) {
     if ((open.state === "window_not_open" || open.state === "window_open") && open.deadlineOn !== null && today > open.deadlineOn) {
       plan.actions.push({ ...base, date: open.deadlineOn, kind: "lapse", leaseEventId: open.leaseEventId });
@@ -167,7 +175,7 @@ function renewalPlan(tenancy: GeneratorTenancy, events: readonly GeneratorEvent[
 export function planLeaseEvents(tenancies: readonly GeneratorTenancy[], events: readonly GeneratorEvent[], today: string): GeneratorPlan {
   const byTenant = new Map<number, GeneratorEvent[]>();
   for (const event of events) byTenant.set(event.tenantId, [...(byTenant.get(event.tenantId) ?? []), event]);
-  const plan: GeneratorPlan = { actions: [], unrecordedLapses: 0 };
+  const plan: GeneratorPlan = { actions: [], staleEvents: 0, unrecordedLapses: 0 };
   for (const tenancy of tenancies) {
     const own = byTenant.get(tenancy.tenantId) ?? [];
     optionPlan(tenancy, own, today, plan);
@@ -288,6 +296,7 @@ export interface GeneratorReport {
   errors: Array<{ message: string; tenantId: number }>;
   escalationsRaised: number;
   raced: number;
+  staleEvents: number;
   tenancies: number;
   today: string;
   unrecordedLapses: number;
@@ -337,6 +346,7 @@ export async function runLeaseEventsGenerator(run: GeneratorRun): Promise<Genera
     errors: [],
     escalationsRaised: 0,
     raced: 0,
+    staleEvents: plan.staleEvents,
     tenancies: tenancies.length,
     today,
     unrecordedLapses: plan.unrecordedLapses,
@@ -379,6 +389,7 @@ export async function runLeaseEventsGenerator(run: GeneratorRun): Promise<Genera
     `leaseEventsGenerator: ${run.dryRun ? "dry run, nothing written. " : ""}${tenancies.length} tenancies checked on ${today}: ` +
       Object.entries(report.written).map(([kind, n]) => `${kind} ${n}`).join(", ") +
       `; ${report.deferred} past the cap of ${cap}, ${report.unrecordedLapses} windows that closed unrecorded, ` +
+      `${report.staleEvents} option events dated for an old expiry (left alone), ` +
       `${report.raced} raced, ${report.errors.length} failed`,
   );
   return report;

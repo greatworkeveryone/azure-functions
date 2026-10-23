@@ -4,8 +4,9 @@
 //             the new starting rent, written through the schedule engine (the
 //             open-ended row before it is closed there; a schedule that already
 //             has rows on or after it is refused, 422 schedule_conflict); the
-//             tenancy's Commencement, Expiry, review cadence (interval, method,
-//             fixed %) and options (when given) take the new lease's values;
+//             tenancy's Commencement, Expiry, TermMonths (when the term is whole
+//             months), review cadence (interval, method, fixed %) and options (when
+//             given) take the new lease's values;
 //             ScheduleVersion + 1, sign-off kept (D7), NextReviewDate derived,
 //             a stored holdover back to current
 //   vacating  a draft vacancy for the tenancy (dbo.Vacancies, the vacancies
@@ -25,6 +26,7 @@
 import { randomUUID } from "node:crypto";
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
+import { addDaysIso, addMonthsClamped } from "../darwinDate";
 import { executeQuery, type SqlParam, type SqlRow } from "../db";
 import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
@@ -123,6 +125,17 @@ async function updateTenancy(connection: Connection, tenantId: number, sets: str
   return rows[0] ? Number(rows[0].ScheduleVersion) : null;
 }
 
+/** Whole months from the commencement to the day after the expiry, or null when the term isn't whole months. */
+export function wholeTermMonths(commencement: string, expiry: string): number | null {
+  const end = addDaysIso(expiry, 1);
+  for (let months = 1; months <= 600; months += 1) {
+    const candidate = addMonthsClamped(commencement, months);
+    if (candidate === end) return months;
+    if (candidate > end) return null;
+  }
+  return null;
+}
+
 async function renew(connection: Connection, input: RenewalInput, terms: RenewedTerms): Promise<Record<string, unknown>> {
   const { tenancy } = input;
   const tenantId = Number(tenancy.TenantId);
@@ -185,6 +198,11 @@ async function renew(connection: Connection, input: RenewalInput, terms: Renewed
     { name: "ReviewType", type: TYPES.NVarChar, value: reviewType },
     { name: "FixedReviewPercent", options: { precision: 13, scale: 10 }, type: TYPES.Decimal, value: terms.reviewMethod === "fixed" ? terms.fixedPercent : null },
   ];
+  const termMonths = wholeTermMonths(terms.commencement, terms.expiry);
+  if (termMonths !== null) {
+    sets.push("TermMonths = @TermMonths");
+    params.push({ name: "TermMonths", type: TYPES.Int, value: termMonths });
+  }
   if (terms.optionsTotal !== null) {
     sets.push("OptionsTotal = @OptionsTotal", "OptionsRemaining = @OptionsTotal", "OptionTermMonths = @OptionTermMonths");
     params.push({ name: "OptionsTotal", type: TYPES.Int, value: terms.optionsTotal }, { name: "OptionTermMonths", type: TYPES.Int, value: terms.optionTermMonths });
@@ -199,7 +217,7 @@ async function renew(connection: Connection, input: RenewalInput, terms: Renewed
   }
   if (tenancy.Status === "holdover" && terms.expiry >= input.today) sets.push("Status = 'current'");
   const scheduleVersion = await updateTenancy(connection, tenantId, sets, params, { name: input.actor.name, oid: input.actorOid }, true);
-  return { nextReviewDate: next?.after ?? sqlDateToIso(tenancy.NextReviewDate), reviewType, scheduleChanges, scheduleVersion, step, terms };
+  return { nextReviewDate: next?.after ?? sqlDateToIso(tenancy.NextReviewDate), reviewType, scheduleChanges, scheduleVersion, step, termMonths, terms };
 }
 
 async function vacate(connection: Connection, input: RenewalInput): Promise<Record<string, unknown>> {
