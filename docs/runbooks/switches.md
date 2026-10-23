@@ -171,6 +171,7 @@ Archived jobs, Admin / Accounts jobs, jobs the scheduler made and test records (
 Show test data on) are not counted. Spend is approved incoming invoices excluding GST: Floorplan
 holds amounts GST inclusive, so it is 10/11 of them, and a stage-1 approval still waiting on a
 director is not spend yet.
+Smart inspection job lists (`inspectionJobSuggestions`, Create jobs from this inspection) ships hidden and needs no app setting and no migration. With it enabled the panel offers a Suggested jobs view: the browser groups the findings a person selected into jobs and drafts a title for each, the person edits them, and Create jobs sends them through the same `raiseJobsFromInspection` route as before, as `Groups` (one job each, with the person's title and priority; the route refuses `Groups` sent together with `PointIds` or `Mode`, and a backend without this field therefore refuses the request instead of raising a job per finding). With `AI_ENABLED` on, `tidyInspectionJobTitles` also offers Tidy titles: the titles and the findings under them go through the gateway as `inspection_job_titles`, which may only reword titles (one plain title back for each job, in order, at most 80 characters). Findings, groupings and priorities never come from the model. Calls are in `AiCallLog` under `inspection_job_titles` (Admin → AI activity), and with `AI_LOG_CONTENT` off no title or finding text is kept. The route is gated like raising the jobs (`editInspections`).
 
 ## Migrations
 
