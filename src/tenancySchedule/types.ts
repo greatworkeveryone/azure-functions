@@ -2,6 +2,7 @@
 // "Contract (TS1-TS2)" and "TS3 contract (T11)"). The frontend mirrors these types in src/types/; change both.
 
 import type { LeaseType } from "../chargeCategories";
+import type { GstBasis, GstBasisSummary } from "../gstBasis";
 import type { PendingChangeItem, PendingChanges } from "../scheduleChange/pending";
 
 export interface TenancyScheduleUnit {
@@ -58,6 +59,8 @@ export interface TenancyScheduleLease {
   commencement: string | null;
   contact: { email: string | null; name: string | null; phone: string | null } | null;
   expiry: string | null;
+  /** Tenants.GstBasis (m160, T14): whether this lease's charges are entered ex or inc GST; null = not recorded, which the Data gaps panel counts. Figures are never converted. */
+  gstBasis: GstBasis | null;
   leaseCode: string | null;
   /** Tenants.LeaseType (m159); null = not set, which the Data gaps panel counts. */
   leaseType: LeaseType | null;
@@ -83,7 +86,7 @@ export interface TenancyScheduleVacancy {
   units: TenancyScheduleUnit[];
 }
 
-export type TenancyScheduleGapKind = "noContact" | "noExpiry" | "noLeaseType" | "noOccupancy" | "scheduleNotSignedOff";
+export type TenancyScheduleGapKind = "noContact" | "noExpiry" | "noGstBasis" | "noLeaseType" | "noOccupancy" | "scheduleNotSignedOff";
 
 export interface TenancyScheduleGap {
   kinds: TenancyScheduleGapKind[];
@@ -100,6 +103,8 @@ export interface TenancyScheduleSummaryLine extends TenancyScheduleMoney {
 export interface TenancyScheduleSummary {
   bays: { leased: number; other: number; total: number; vacant: number };
   byLabel: TenancyScheduleSummaryLine[];
+  /** The basis of the leases summarised (T14): "ex" or "inc" when they all share one, "mixed" when they differ, "unknown" when none is recorded. */
+  gstBasis: GstBasisSummary;
   leaseCount: number;
   total: TenancyScheduleMoney;
   totalNlaSqm: number;

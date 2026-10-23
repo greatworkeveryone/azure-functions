@@ -239,6 +239,29 @@ describe("lease type (TS3)", () => {
   });
 });
 
+describe("GST basis (T14)", () => {
+  it("reads Tenants.GstBasis, carries it on each lease, flags a lease without one and summarises the building", async () => {
+    query.mockImplementation(async (_c, sql) => {
+      if (sql.includes("dbo.ScheduleChangeRequests") || sql.includes("dbo.RentReviews")) return [];
+      const from = /FROM dbo\.(\w+)/.exec(sql)?.[1];
+      if (from === "Buildings") return [BUILDINGS[1]] as never;
+      if (from === "TenantOccupancies") return OCCUPANCIES;
+      if (from === "Tenants") return [tenantRow(1, 3, { GstBasis: "inc" }), tenantRow(2, 3, { GstBasis: null })];
+      return [];
+    });
+    const r = await getTenancySchedule(request("?buildingId=3"), ctx);
+    expect(r.status).toBe(200);
+    const tenantsSql = query.mock.calls.map(([, sql]) => sql).find((sql) => /FROM dbo\.Tenants t\b/.test(sql) && sql.includes("t.IdNo"));
+    expect(tenantsSql).toContain("t.GstBasis");
+    const [inc, none] = body(r).buildings[0].leases;
+    expect(inc.gstBasis).toBe("inc");
+    expect(none.gstBasis).toBeNull();
+    expect(body(r).buildings[0].gaps.filter((g: { kinds: string[] }) => g.kinds.includes("noGstBasis")).map((g: { tenantId: number }) => g.tenantId)).toEqual([2]);
+    expect(body(r).buildings[0].summary.gstBasis).toBe("mixed");
+    expect(body(r).portfolio.gstBasis).toBe("mixed");
+  });
+});
+
 describe("failure", () => {
   it("returns a 500 without the raw error and still closes the connection", async () => {
     query.mockRejectedValue(new Error("boom with secret detail"));

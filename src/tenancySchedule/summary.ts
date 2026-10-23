@@ -6,6 +6,7 @@
 // carBayRent fees and a car-bay-only lease's rent ("Car bay rent").
 
 import { FEE_CATEGORIES, LEASE_TYPES, leaseTypeLabel } from "../chargeCategories";
+import { summariseGstBasis } from "../gstBasis";
 import { money, r2, RENT_RELIEF } from "./charges";
 import type { TenancyScheduleChargeKind, TenancyScheduleLease, TenancyScheduleSummary, TenancyScheduleSummaryLine } from "./types";
 
@@ -53,6 +54,7 @@ export function summarise({ bays, leases, totalNla, vacantNla }: SummaryInput): 
   return {
     bays: { ...bays },
     byLabel: linesOf(leases, totalNla),
+    gstBasis: summariseGstBasis(leases.map((lease) => lease.gstBasis)),
     leaseCount: leases.length,
     total: money(
       leases.reduce((total, lease) => total + lease.total.annual, 0),

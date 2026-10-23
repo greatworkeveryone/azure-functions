@@ -99,6 +99,7 @@ export const TENANCY_OTHER_COLUMNS: Readonly<Record<string, string>> = {
   CreatedAt: "audit",
   CreatedById: "audit",
   CreatedByName: "audit",
+  GstBasis: "how its money figures read (ex or inc GST, migration 160): a basis the New tenancy form may set, not content; kept in the ledger copy",
   InfoSheetVersion: "counter: its lease clauses are InfoSheetSections",
   IsTest: "test-data flag: set at creation",
   LegalName: "the name: set at creation",

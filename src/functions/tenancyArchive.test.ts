@@ -368,7 +368,7 @@ describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft
   });
 
   it("a column the rule has never heard of with something in it is content, so a new column can't be deleted unseen", async () => {
-    tenantRow = { ...tenantRow, GstBasis: "inclusive" };
+    tenantRow = { ...tenantRow, SomeFutureColumn: "anything" };
     const res = await handlers[name](post(body), ctx);
     expect(res.status).toBe(409);
     expect(res.jsonBody.contains).toEqual(["other details"]);
@@ -376,7 +376,7 @@ describe.each(["deleteRegisterTenant", "deleteTenant"])("%s: only an empty draft
   });
 
   it("a column the rule has never heard of that is empty doesn't stop a delete", async () => {
-    tenantRow = { ...tenantRow, GstBasis: null };
+    tenantRow = { ...tenantRow, SomeFutureColumn: null };
     expect((await handlers[name](post(body), ctx)).status).toBe(200);
   });
 
