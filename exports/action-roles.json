@@ -610,6 +610,12 @@
     "cfo",
     "director"
   ],
+  "viewOperationsReports": [
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "viewPayments": [
     "accounts",
     "accounts_manager",

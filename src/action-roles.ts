@@ -555,6 +555,11 @@ export const ACTION_ROLES = {
     routes: ["getMyobControls", "getMyobActivity", "reconcileMyob", "getMyobLab"],
     why: "Read the MYOB controls, the Activity view and reconciliation (SPR-M4), and the MYOB lab (plan M5).",
   },
+  viewOperationsReports: {
+    gate: [A.CFO, A.FACILITIES_APPROVAL],
+    routes: ["getMaintenanceSpendReport"],
+    why: "The operations reports in Tools → Reports (maintenance spend first): the CFO, directors and admin, and facilities managers. Reads only, commercial buildings only.",
+  },
   viewPayments: {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.DIRECTOR],
     routes: ["getPayments"],

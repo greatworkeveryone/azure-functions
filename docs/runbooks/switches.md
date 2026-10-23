@@ -89,6 +89,17 @@ St, 2 Godfrey Ct and 27 Lambell Tce would otherwise report as commercial. Before
 the CFO's first run, set each tenancy's lease type and each fee's category in the
 register, or the summary groups those charges as "Rent" and "Other charges"; the
 report's Data gaps panel lists what is missing.
+Maintenance spend report (`maintenanceSpendReport`, Tools → Reports) ships hidden. Set
+it to enabled for director, cfo, admin and facilities_manager once the backend with
+`getMaintenanceSpendReport` is deployed. No app setting and no migration: it reads
+`Jobs` and `JobInvoices` and writes nothing. It counts approved invoices (`approved`
+and `director_approved`) on commercial buildings by invoice date in Darwin time, or by
+approval date when an invoice has none (the page says how many), ex GST: Floorplan
+keeps each invoice as one total including GST, so GST is taken out at an eleventh.
+Test jobs and invoices stay out unless an admin has Show test data on, so on the local
+review database, whose demo invoices are all test records, it shows figures only with
+that on. As for the Tenancy Schedule report, check every family residence is marked
+`residence` in Buildings before showing it to anyone.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
