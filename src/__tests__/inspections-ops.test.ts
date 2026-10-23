@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { clearRoleCache } from "../auth";
 import { _resetRateLimitForTests } from "../rateLimit";
+import { REMOVAL_ROW_BUDGET_BYTES } from "../inspectionRemovalLedger";
+import { LEDGER_MAX_SNAPSHOT_BYTES } from "../ledger";
 import {
   applyInspectionOps,
   completeInspection,
@@ -921,6 +923,30 @@ describe("applyInspectionOps addLevel op with a free-text name (IN3)", () => {
 });
 
 
+// ── Splitting a removal across ledger rows ───────────────────────────────────
+
+let photoSeq = 0;
+/** A photo record as the attachments query returns it, with a realistic blob name. */
+function photoRow(n: number = ++photoSeq): { Id: string; BlobName: string; FileName: string } {
+  return {
+    Id: `0f8b2c1e-4d3a-4b5c-9e7f-${String(n).padStart(12, "0")}`,
+    BlobName: `inspections/7/5d2e8a90-77c1-4f0b-a3d4-${String(n).padStart(12, "0")}-site-photo-${n}.jpg`,
+    FileName: `site-photo-${n}.jpg`,
+  };
+}
+
+/** Every row under the ledger's own cap (and inside the margin), all one operation. */
+function expectRowsWithinTheLimit(rows: Record<string, unknown>[]): void {
+  for (const row of rows) {
+    const bytes = Buffer.byteLength(row.Before as string, "utf8");
+    expect(bytes).toBeLessThanOrEqual(REMOVAL_ROW_BUDGET_BYTES);
+    expect(bytes).toBeLessThan(LEDGER_MAX_SNAPSHOT_BYTES);
+  }
+  expect(new Set(rows.map((row) => row.CorrelationId)).size).toBe(1);
+  expect(rows[0].CorrelationId).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(new Set(rows.map((row) => row.Action)).size).toBe(1);
+}
+
 // ── N3: every point removal is written to the decision ledger ────────────────
 
 describe("applyInspectionOps removePoint op (UX review N3)", () => {
@@ -1007,6 +1033,36 @@ describe("applyInspectionOps removePoint op (UX review N3)", () => {
     expect(sqls).toContain("ROLLBACK TRANSACTION op_sp");
   });
 
+  it("writes a small removal as one row with no part markers", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+    await apply();
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const before = JSON.parse(paramsOf(ledger[0]).Before as string);
+    expect(before).not.toHaveProperty("parts");
+    expect(before).not.toHaveProperty("part");
+  });
+
+  it("splits a point with hundreds of photos over several rows instead of refusing it", async () => {
+    const many = Array.from({ length: 700 }, (_, i) => photoRow(i));
+    removeDb([POINT_ROW], many);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const rows = callsMatching("INSERT INTO dbo.DecisionLedger").map((call) => paramsOf(call));
+    expect(rows.length).toBeGreaterThan(2);
+    const befores = rows.map((row) => JSON.parse(row.Before as string));
+    expectRowsWithinTheLimit(rows);
+    expect(befores[0]).toMatchObject({ attachmentCount: 700, description: "Cracked tile", part: 1, parts: rows.length, pointId: "pt-1" });
+    const slices = befores.slice(1).flatMap((before) => before.points);
+    expect(slices.every((slice: { id: string }) => slice.id === "pt-1")).toBe(true);
+    expect(slices.map((slice: { attachments: unknown[] }) => slice.attachments.length).reduce((a: number, b: number) => a + b, 0)).toBe(700);
+    expect(slices.flatMap((slice: { attachments: { id: string }[] }) => slice.attachments.map((a) => a.id))).toEqual(many.map((p) => p.Id));
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    expect(sqls.map((sql) => sql.includes("INSERT INTO dbo.DecisionLedger")).lastIndexOf(true)).toBeLessThan(sqls.findIndex((sql) => sql.startsWith("DELETE p")));
+  });
+
   it("writes no ledger row for a point that is not in this inspection", async () => {
     removeDb([], []);
     const res = await apply();
@@ -1050,13 +1106,18 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
   const ROOM_ROW = { RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", LevelId: "lv-1", LevelName: "Ground", BuildingId: 9 };
   const LEVEL_ROW = { LevelId: "lv-1", LevelName: "Ground", BuildingId: 9 };
 
-  function removeDb(found: { room?: Row[]; level?: Row[] }, joined: Row[], failLedger = false): void {
+  /** `failLedger`: true fails every ledger write, a number fails that write (1 = the first). */
+  function removeDb(found: { room?: Row[]; level?: Row[] }, joined: Row[], failLedger: boolean | number = false): void {
+    let ledgerWrites = 0;
     db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
       if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
       if (sql.includes("LEFT JOIN dbo.InspectionPoints")) return joined;
       if (sql.startsWith("SELECT r.Id AS RoomId")) return found.room ?? [];
       if (sql.startsWith("SELECT l.Id AS LevelId")) return found.level ?? [];
-      if (sql.includes("INSERT INTO dbo.DecisionLedger") && failLedger) throw new Error("ledger down");
+      if (sql.includes("INSERT INTO dbo.DecisionLedger")) {
+        ledgerWrites += 1;
+        if (failLedger === true || failLedger === ledgerWrites) throw new Error("ledger down");
+      }
       if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
       return [];
     });
@@ -1204,6 +1265,171 @@ describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () 
       expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
       expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
       expect(callsMatching("LEFT JOIN dbo.InspectionPoints")).toHaveLength(0);
+    });
+  });
+
+  // ── Too big for one ledger row: written as several, never refused ──────────
+  describe("a removal larger than one ledger row", () => {
+    type Point = { id: string; description: string; photos: number };
+    type RoomSpec = { id: string; name: string; points: Point[] };
+
+    /** The LEFT JOIN result for these rooms: one row per room x point x photo. */
+    function joinedFor(rooms: RoomSpec[]): { rows: Row[]; photoIds: Map<string, string[]> } {
+      const rows: Row[] = [];
+      const photoIds = new Map<string, string[]>();
+      for (const room of rooms) {
+        const head = { RoomId: room.id, RoomName: room.name, RoomDescription: null };
+        if (room.points.length === 0) rows.push({ ...head, PointId: null, PointDescription: null, AttachmentId: null, BlobName: null, FileName: null });
+        for (const point of room.points) {
+          const ids: string[] = [];
+          photoIds.set(point.id, ids);
+          if (point.photos === 0) rows.push({ ...head, PointId: point.id, PointDescription: point.description, AttachmentId: null, BlobName: null, FileName: null });
+          for (let i = 0; i < point.photos; i += 1) {
+            const photo = photoRow();
+            ids.push(photo.Id);
+            rows.push({ ...head, PointId: point.id, PointDescription: point.description, AttachmentId: photo.Id, BlobName: photo.BlobName, FileName: photo.FileName });
+          }
+        }
+      }
+      return { rows, photoIds };
+    }
+
+    type Before = {
+      part?: number; parts?: number; rooms?: { id: string }[]; points?: { id: string; description?: string; continued?: boolean; attachments: { id: string }[] }[];
+    };
+    const ledgerRows = () => callsMatching("INSERT INTO dbo.DecisionLedger").map((call) => paramsOf(call));
+    const beforesOf = (rows: Record<string, unknown>[]): Before[] => rows.map((row) => JSON.parse(row.Before as string));
+
+    /** Every point and photo record from the detail rows: how often each id turns up. */
+    function tally(befores: Before[]) {
+      const photoSeen = new Map<string, number>();
+      const pointText = new Map<string, number>();
+      const pointOrder: string[] = [];
+      for (const before of befores.slice(1)) {
+        for (const point of before.points ?? []) {
+          if (!pointOrder.includes(point.id)) pointOrder.push(point.id);
+          if (point.description !== undefined) pointText.set(point.id, (pointText.get(point.id) ?? 0) + 1);
+          for (const att of point.attachments) photoSeen.set(att.id, (photoSeen.get(att.id) ?? 0) + 1);
+        }
+      }
+      return { photoSeen, pointOrder, pointText };
+    }
+
+    it("splits a level of about 900 photos in 3 rooms into rows under the limit that hold every record once", async () => {
+      const rooms: RoomSpec[] = ["Lobby", "Plant room", "Stair"].map((name, r) => ({
+        id: `rm-${r + 1}`,
+        name,
+        points: [0, 1, 2].map((p) => ({ id: `pt-${r + 1}${p + 1}`, description: `Finding ${r + 1}.${p + 1}`, photos: 100 })),
+      }));
+      const { rows: joined, photoIds } = joinedFor(rooms);
+      removeDb({ level: [LEVEL_ROW] }, joined);
+
+      const res = await removeLevel();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const rows = ledgerRows();
+      expect(rows.length).toBeGreaterThanOrEqual(3);
+      expect(rows[0]).toMatchObject({ Action: "inspection.level_removed", BuildingId: 9, SubjectId: "7", SubjectType: "inspection" });
+      expectRowsWithinTheLimit(rows);
+      const befores = beforesOf(rows);
+      expect(befores.map((b) => b.part)).toEqual(rows.map((_, i) => i + 1));
+      expect(befores.every((b) => b.parts === rows.length)).toBe(true);
+      expect(befores[0]).toEqual({
+        attachmentCount: 900,
+        levelId: "lv-1",
+        levelName: "Ground",
+        part: 1,
+        parts: rows.length,
+        pointCount: 9,
+        roomCount: 3,
+        rooms: [
+          { attachmentCount: 300, description: "", id: "rm-1", name: "Lobby", pointCount: 3 },
+          { attachmentCount: 300, description: "", id: "rm-2", name: "Plant room", pointCount: 3 },
+          { attachmentCount: 300, description: "", id: "rm-3", name: "Stair", pointCount: 3 },
+        ],
+      });
+      const { photoSeen, pointOrder, pointText } = tally(befores);
+      expect(pointOrder).toEqual([...photoIds.keys()]);
+      expect([...pointText.values()]).toEqual(Array(9).fill(1));
+      expect(photoSeen.size).toBe(900);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+      expect([...photoSeen.keys()].sort()).toEqual([...photoIds.values()].flat().sort());
+      for (const before of befores.slice(1)) {
+        expect(before).toMatchObject({ levelId: "lv-1", levelName: "Ground" });
+        expect(before.points?.every((point) => "roomId" in point)).toBe(true);
+      }
+      const sqls = sqlsRun();
+      expect(sqls.map((sql) => sql.includes("INSERT INTO dbo.DecisionLedger")).lastIndexOf(true)).toBeLessThan(sqls.findIndex(DELETE_LEVEL));
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("splits the photos of one point of about 600 across rows, each slice naming its point", async () => {
+      const { rows: joined, photoIds } = joinedFor([{ id: "rm-1", name: "Lobby", points: [{ id: "pt-9", description: "Water damage", photos: 600 }] }]);
+      removeDb({ room: [ROOM_ROW] }, joined);
+
+      const res = await removeRoom();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const rows = ledgerRows();
+      expect(rows.length).toBeGreaterThan(2);
+      expect(rows[0].Action).toBe("inspection.room_removed");
+      expectRowsWithinTheLimit(rows);
+      const befores = beforesOf(rows);
+      expect(befores[0]).toEqual({
+        attachmentCount: 600,
+        levelId: "lv-1",
+        levelName: "Ground",
+        part: 1,
+        parts: rows.length,
+        pointCount: 1,
+        roomDescription: "Entrance",
+        roomId: "rm-1",
+        roomName: "Lobby",
+      });
+      const slices = befores.slice(1).flatMap((before) => before.points ?? []);
+      expect(slices.length).toBe(rows.length - 1);
+      expect(slices.every((slice) => slice.id === "pt-9")).toBe(true);
+      expect(slices.map((slice) => slice.continued === true)).toEqual(slices.map((_, i) => i > 0));
+      expect(slices.map((slice) => slice.description)).toEqual(slices.map((_, i) => (i === 0 ? "Water damage" : undefined)));
+      const { photoSeen } = tally(befores);
+      expect(photoSeen.size).toBe(600);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+      expect(slices.flatMap((slice) => slice.attachments.map((a) => a.id))).toEqual(photoIds.get("pt-9"));
+    });
+
+    it("keeps small points whole beside a big one, in order", async () => {
+      const { rows: joined } = joinedFor([
+        { id: "rm-1", name: "Lobby", points: [
+          { id: "pt-a", description: "Small", photos: 2 },
+          { id: "pt-b", description: "Big", photos: 500 },
+          { id: "pt-c", description: "Also small", photos: 1 },
+        ] },
+      ]);
+      removeDb({ room: [ROOM_ROW] }, joined);
+
+      await removeRoom();
+
+      const befores = beforesOf(ledgerRows());
+      const { photoSeen, pointOrder, pointText } = tally(befores);
+      expect(pointOrder).toEqual(["pt-a", "pt-b", "pt-c"]);
+      expect([...pointText.entries()]).toEqual([["pt-a", 1], ["pt-b", 1], ["pt-c", 1]]);
+      expect(photoSeen.size).toBe(503);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+    });
+
+    it("rejects the whole op and removes nothing when a later part fails to write", async () => {
+      const { rows: joined } = joinedFor([{ id: "rm-1", name: "Lobby", points: [{ id: "pt-9", description: "Water damage", photos: 900 }] }]);
+      removeDb({ room: [ROOM_ROW] }, joined, 3);
+
+      const res = await removeRoom();
+
+      const out = res.jsonBody as OpsOut;
+      expect(out.applied).toEqual([]);
+      expect(out.rejected).toHaveLength(1);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(3);
+      expect(sqlsRun().some(DELETE_ROOM)).toBe(false);
+      expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
     });
   });
 });

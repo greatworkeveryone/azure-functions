@@ -32,9 +32,16 @@ import { isDevOverrideEnabled } from "../jwt";
 import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import type { LedgerActor } from "../ledger";
+import {
+  levelRemoval,
+  pointRemoval,
+  recordInspectionRemoval,
+  roomRemoval,
+  type RemovedPoint,
+  type RemovedRoom,
+} from "../inspectionRemovalLedger";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 
@@ -736,12 +743,6 @@ export async function applyInspectionOps(
   }
 }
 
-type RemovedPhoto = { blobName: string; fileName: string; id: string };
-type RemovedPoint = { attachments: RemovedPhoto[]; description: string; id: string };
-type RemovedRoom = { description: string; id: string; name: string; points: RemovedPoint[] };
-
-const photoCount = (points: RemovedPoint[]): number => points.reduce((sum, point) => sum + point.attachments.length, 0);
-
 // What deleting a room, or every room of a level, takes with it through the
 // ON DELETE CASCADE foreign keys: the rooms' text, their points' text and the
 // photo records. Read before the DELETE so the ledger row can hold it. The
@@ -857,9 +858,10 @@ async function applyOne(
     case "removeLevel": {
       // ON DELETE CASCADE handles rooms → points → attachments + contributors.
       // Like removePoint, the removal is written to the decision ledger in this
-      // transaction first, with every room, point and photo record in Before; a
-      // failed ledger write rejects the op and nothing is deleted. The photo
-      // blobs stay in storage (never removed here).
+      // transaction first, with every room, point and photo record in Before (as
+      // several rows when it is too big for one); a failed ledger write rejects
+      // the op and nothing is deleted. The photo blobs stay in storage (never
+      // removed here).
       const foundLevel = await executeQuery(
         connection,
         `SELECT l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
@@ -873,20 +875,11 @@ async function applyOne(
       );
       if (foundLevel.length > 0) {
         const rooms = await loadRemovedRooms(connection, { levelId: op.levelId });
-        const points = rooms.flatMap((room) => room.points);
-        await record(connection, {
-          action: "inspection.level_removed",
+        await recordInspectionRemoval(connection, {
           actor: await loadLedgerActor(connection),
-          before: {
-            attachmentCount: photoCount(points),
-            levelId: foundLevel[0].LevelId,
-            levelName: foundLevel[0].LevelName,
-            pointCount: points.length,
-            roomCount: rooms.length,
-            rooms,
-          },
           buildingId: (foundLevel[0].BuildingId as number | null) ?? null,
-          subject: { id: inspectionId, type: "inspection" },
+          inspectionId,
+          removal: levelRemoval({ id: foundLevel[0].LevelId, name: foundLevel[0].LevelName }, rooms),
         });
       }
       await executeQuery(
@@ -970,22 +963,20 @@ async function applyOne(
       );
       if (foundRoom.length > 0) {
         const [room] = await loadRemovedRooms(connection, { roomId: op.roomId });
-        const points = room?.points ?? [];
-        await record(connection, {
-          action: "inspection.room_removed",
+        await recordInspectionRemoval(connection, {
           actor: await loadLedgerActor(connection),
-          before: {
-            attachmentCount: photoCount(points),
-            levelId: foundRoom[0].LevelId,
-            levelName: foundRoom[0].LevelName,
-            pointCount: points.length,
-            points,
-            roomDescription: foundRoom[0].RoomDescription ?? "",
-            roomId: foundRoom[0].RoomId,
-            roomName: foundRoom[0].RoomName,
-          },
           buildingId: (foundRoom[0].BuildingId as number | null) ?? null,
-          subject: { id: inspectionId, type: "inspection" },
+          inspectionId,
+          removal: roomRemoval(
+            {
+              description: foundRoom[0].RoomDescription ?? "",
+              id: foundRoom[0].RoomId,
+              levelId: foundRoom[0].LevelId,
+              levelName: foundRoom[0].LevelName,
+              name: foundRoom[0].RoomName,
+            },
+            room?.points ?? [],
+          ),
         });
       }
       await executeQuery(
@@ -1048,9 +1039,10 @@ async function applyOne(
     }
     case "removePoint": {
       // Every removal is written to the decision ledger in this same transaction,
-      // with the point's text and its photo records in Before: if the ledger row
-      // cannot be written the op is rolled back to its savepoint and rejected, so
-      // nothing goes unlogged. The photo blobs stay in storage (never removed here).
+      // with the point's text and its photo records in Before (as several rows when
+      // it is too big for one): if the ledger cannot be written the op is rolled
+      // back to its savepoint and rejected, so nothing goes unlogged. The photo
+      // blobs stay in storage (never removed here).
       const found = await executeQuery(
         connection,
         `SELECT p.Id AS PointId, p.RoomId, p.Description, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
@@ -1070,20 +1062,20 @@ async function applyOne(
           `SELECT a.Id, a.BlobName, a.FileName FROM dbo.InspectionAttachments a WHERE a.PointId = @Id`,
           [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
         );
-        await record(connection, {
-          action: "inspection.point_removed",
+        await recordInspectionRemoval(connection, {
           actor: await loadLedgerActor(connection),
-          before: {
-            attachmentCount: photos.length,
-            attachments: photos.map((photo) => ({ blobName: photo.BlobName, fileName: photo.FileName, id: photo.Id })),
-            description: found[0].Description ?? "",
-            levelName: found[0].LevelName,
-            pointId: found[0].PointId,
-            roomId: found[0].RoomId,
-            roomName: found[0].RoomName,
-          },
           buildingId: (found[0].BuildingId as number | null) ?? null,
-          subject: { id: inspectionId, type: "inspection" },
+          inspectionId,
+          removal: pointRemoval(
+            {
+              description: found[0].Description ?? "",
+              id: found[0].PointId,
+              levelName: found[0].LevelName,
+              roomId: found[0].RoomId,
+              roomName: found[0].RoomName,
+            },
+            photos.map((photo) => ({ blobName: photo.BlobName, fileName: photo.FileName, id: photo.Id })),
+          ),
         });
       }
       await executeQuery(

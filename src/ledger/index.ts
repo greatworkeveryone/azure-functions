@@ -7,7 +7,7 @@ import type { LedgerEntryInput, LedgerTx } from "./types";
 
 export * from "./actions";
 export type * from "./types";
-export { assertLedgerEntry, LedgerValidationError } from "./validate";
+export { assertLedgerEntry, LEDGER_MAX_SNAPSHOT_BYTES, LedgerValidationError, snapshotBytes } from "./validate";
 
 export function newCorrelationId(): string {
   return randomUUID();

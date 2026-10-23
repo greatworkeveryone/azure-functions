@@ -1,5 +1,5 @@
 import { LEDGER_ACTIONS, LedgerValidationError } from "./index";
-import { assertLedgerEntry } from "./validate";
+import { assertLedgerEntry, LEDGER_MAX_SNAPSHOT_BYTES, snapshotBytes } from "./validate";
 import type { LedgerEntryInput } from "./types";
 
 const user = { kind: "user" as const, name: "Sam Accounts", role: "accounts_manager", userId: 7 };
@@ -62,6 +62,15 @@ describe("assertLedgerEntry", () => {
     circular.self = circular;
     expect(() => assertLedgerEntry(entry({ before: circular }))).toThrow(/JSON-serialisable/);
     expect(() => assertLedgerEntry(entry({ after: "x".repeat(70 * 1024) }))).toThrow(/exceeds/);
+  });
+
+  it("counts a snapshot in UTF-8 bytes against the exported cap, and no more", () => {
+    expect(LEDGER_MAX_SNAPSHOT_BYTES).toBe(64 * 1024);
+    expect(snapshotBytes({ a: "é" })).toBe(Buffer.byteLength('{"a":"é"}', "utf8"));
+    expect(snapshotBytes(undefined)).toBe(0);
+    const room = LEDGER_MAX_SNAPSHOT_BYTES - snapshotBytes({ v: "" });
+    expect(() => assertLedgerEntry(entry({ before: { v: "x".repeat(room) } }))).not.toThrow();
+    expect(() => assertLedgerEntry(entry({ before: { v: "x".repeat(room + 1) } }))).toThrow(/exceeds/);
   });
 });
 
