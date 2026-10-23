@@ -135,7 +135,7 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { INFO_SHEET_RATE_LIMIT, infoSheetPositionOf, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
+import { INFO_SHEET_RATE_LIMIT, infoSheetPositionOf, infoSheetRestoreOf, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
@@ -3209,8 +3209,13 @@ async function upsertInfoSheetSectionHandler(
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
     const position = infoSheetPositionOf(body);
     if (typeof position === "object") return position;
+    const restore = infoSheetRestoreOf(body);
+    if (typeof restore === "object") return restore;
 
     connection = await createRequestConnection(token);
+    // An Undo (Restore) is ledgered, in the same transaction, with what it put back and where.
+    const actor = restore ? await resolveLedgerActor(request, connection) : null;
+    if (restore && !actor) return unauthorizedResponse();
     // D11: under the row lock and at the version shown (409 when stale). Only the
     // section's own fields change; its rows stay as stored. A section that isn't
     // there is a 404 unless IsNew (then it goes at Position, as Undo puts one back);
@@ -3219,8 +3224,8 @@ async function upsertInfoSheetSectionHandler(
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
-      ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertSection", position, section },
+      ledger: actor ? { action: "tenancy.info_sheet_section_restore", actor } : null,
+      op: { isNew: body.IsNew === true, kind: "upsertSection", position, restore, section },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3326,8 +3331,13 @@ async function upsertInfoSheetRowHandler(
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
     const position = infoSheetPositionOf(body);
     if (typeof position === "object") return position;
+    const restore = infoSheetRestoreOf(body);
+    if (typeof restore === "object") return restore;
 
     connection = await createRequestConnection(token);
+    // An Undo (Restore) is ledgered, in the same transaction, with what it put back and where.
+    const actor = restore ? await resolveLedgerActor(request, connection) : null;
+    if (restore && !actor) return unauthorizedResponse();
     // D11: under the row lock and at the version shown (409 when stale). A row
     // that isn't there is a 404 unless IsNew (then it goes at Position, as Undo
     // puts one back), a missing section a 404, and a column that isn't a JSON
@@ -3336,8 +3346,8 @@ async function upsertInfoSheetRowHandler(
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
-      ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertRow", position, row, sectionId },
+      ledger: actor ? { action: "tenancy.info_sheet_row_restore", actor } : null,
+      op: { isNew: body.IsNew === true, kind: "upsertRow", position, restore, row, sectionId },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;

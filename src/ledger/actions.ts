@@ -150,9 +150,13 @@ export const LEDGER_ACTIONS = {
   // An info sheet section or row taken off (D11). Before holds only the entry removed and its position;
   // one too big for a ledger row is split across several rows of the same correlation id (S3-6, infoSheetLedger.ts).
   "tenancy.info_sheet_row_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // Undo putting back what was just taken off (D11 re-check S3-2). After holds the entry and where it went. An
+  // exception like the removal it answers, so the removal and its Undo show together in Decisions & exceptions.
+  "tenancy.info_sheet_row_restore": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   // Rows added to an info sheet in one bulk add (D11 re-check S2-3). After holds only the rows added.
   "tenancy.info_sheet_rows_added": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.info_sheet_section_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.info_sheet_section_restore": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   // Test data (D9): an admin marks a record as test data, or back. An
   // exception: it decides whether the record may leave Floorplan.
   "test_data.flag": { exception: true, reasonRequired: true, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },

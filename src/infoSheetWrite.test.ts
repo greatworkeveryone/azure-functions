@@ -120,6 +120,20 @@ describe("editInfoSheet", () => {
     expect(JSON.parse(first.json).map((entry: { id: string }) => entry.id)).toEqual(["back", "a", "b", "c"]);
   });
 
+  // S3-2: what Undo put back is returned for the ledger: the entry as stored and the place it actually took.
+  it("names what a restore put back and where, clamped to the list; an ordinary add names nothing", () => {
+    const row = { body: "back", displayOrder: 0, id: "r-back", subheader: "Back" };
+    const section = { displayOrder: 1, id: "back", legacy: "kept", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Back" };
+    const restoredRow = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 1, restore: true, row, sectionId: "c" });
+    expect(restoredRow).toEqual(expect.objectContaining({ ok: true, restored: { position: 1, row, sectionId: "c", sectionTitle: "C" } }));
+    const past = editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 99, restore: true, row, sectionId: "c" });
+    expect(past).toEqual(expect.objectContaining({ restored: expect.objectContaining({ position: 2 }) }));
+    const restoredSection = editInfoSheet(STORED, { isNew: true, kind: "upsertSection", position: 1, restore: true, section });
+    expect(restoredSection).toEqual(expect.objectContaining({ ok: true, restored: { position: 1, section } }));
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertRow", position: 1, row, sectionId: "c" })).toEqual(expect.objectContaining({ restored: null }));
+    expect(editInfoSheet(STORED, { isNew: true, kind: "upsertSection", section })).toEqual(expect.objectContaining({ restored: null }));
+  });
+
   it("ignores a position for something that isn't new", () => {
     const edit = editInfoSheet(STORED, { isNew: false, kind: "upsertRow", position: 0, row: { body: "z", displayOrder: 1, id: "r3", subheader: "U" }, sectionId: "c" });
     if (!edit.ok) throw new Error("expected ok");

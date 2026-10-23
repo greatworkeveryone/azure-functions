@@ -341,6 +341,103 @@ describe("a new entry can say where it goes, for Undo (S2-4)", () => {
   });
 });
 
+// S3-2 (D11 re-check): Undo put an entry back without a trace, so Decisions & exceptions
+// still showed a deletion that had been undone. A restore (`Restore: true` on a new entry)
+// is ledgered, in the same transaction, as what was put back and where.
+describe("Undo is ledgered (S3-2)", () => {
+  const row = { body: "Office safe", displayOrder: 0, id: "row-back", subheader: "Spare" };
+  const section = { displayOrder: 1, id: "sec-back", rows: [{ body: "x", displayOrder: 0, id: "rb", subheader: "X" }], title: "Parking" };
+  const restoreRow = (extra: Record<string, unknown> = {}) =>
+    handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 0, Restore: true, Row: row, SectionId: "sec-1", TenantId: 1, ...extra }), ctx);
+  const restoreSection = (extra: Record<string, unknown> = {}) =>
+    handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Position: 1, Restore: true, Section: section, TenantId: 1, ...extra }), ctx);
+  const ledgered = () => ledger.record.mock.calls.map((call: unknown[]) => call[1] as { action: string; after?: unknown; before?: unknown; correlationId?: string });
+
+  it("a restored row is ledgered with the row and where it went, before the commit", async () => {
+    expect((await restoreRow()).status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "tenancy.info_sheet_row_restore",
+        after: { position: 0, row, sectionId: "sec-1", sectionTitle: "Keys" },
+        buildingId: 5,
+        subject: { id: 1, type: "tenancy" },
+        tenantId: 1,
+      }),
+    );
+    expect(ledgered()[0].before).toBeUndefined();
+    expect(ledger.record.mock.invocationCallOrder[0]).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("a restored section is ledgered with the section, its rows and where it went", async () => {
+    expect((await restoreSection()).status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "tenancy.info_sheet_section_restore", after: { position: 1, section }, tenantId: 1 }),
+    );
+  });
+
+  it("records the place it actually went when Position was past the end", async () => {
+    await restoreRow({ Position: 99 });
+    expect(ledgered()[0].after).toEqual(expect.objectContaining({ position: 2 }));
+  });
+
+  it("an ordinary add is still not ledgered: only a restore is", async () => {
+    await handlers.upsertInfoSheetRow(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Row: row, SectionId: "sec-1", TenantId: 1 }), ctx);
+    await handlers.upsertInfoSheetSection(makeRequest({ BuildingId: 5, InfoSheetVersion: 4, IsNew: true, Section: section, TenantId: 1 }), ctx);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Restore without IsNew", { IsNew: undefined }],
+    ["Restore on an edit (IsNew false)", { IsNew: false }],
+    ["Restore that isn't true or false", { Restore: "true" }],
+    ["Restore as null", { Restore: null }],
+  ])("answers 400 for %s, before touching the database", async (_label, extra) => {
+    expect((await restoreRow(extra)).status).toBe(400);
+    expect((await restoreSection(extra)).status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("a stale Undo (409) writes nothing and ledgers nothing", async () => {
+    expect((await restoreRow({ InfoSheetVersion: 3 })).status).toBe(409);
+    expect((await restoreSection({ InfoSheetVersion: 3 })).status).toBe(409);
+    expect(written()).toBeUndefined();
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("an Undo that can't be put back (the section is gone, the id is already there) ledgers nothing", async () => {
+    expect((await restoreRow({ SectionId: "gone" })).status).toBe(404);
+    expect((await restoreRow({ Row: { ...row, id: "row-1" } })).status).toBe(409);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("rolls back, putting nothing back, when the ledger write fails", async () => {
+    ledger.record.mockRejectedValueOnce(new Error("ledger down"));
+    expect((await restoreRow()).status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("is the tenancy desk's, like the other writes", async () => {
+    auth.requireRole.mockResolvedValue({ jsonBody: { error: "Forbidden" }, status: 403 });
+    expect((await restoreRow()).status).toBe(403);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("a restored section too big for one ledger row is split across several, with one correlation id, losing nothing", async () => {
+    ledger.newCorrelationId.mockReturnValue("11111111-2222-4333-8444-555555555555");
+    const huge = { ...section, rows: [1, 2, 3].map((n) => ({ body: "z".repeat(40_000), displayOrder: n, id: `h${n}`, subheader: "Clause" })) };
+    expect((await restoreSection({ Section: huge })).status).toBe(200);
+    const rows = ledgered();
+    expect(rows.length).toBeGreaterThan(2);
+    expect(new Set(rows.map((entry) => entry.correlationId))).toEqual(new Set(["11111111-2222-4333-8444-555555555555"]));
+    const parts = rows.map((entry) => entry.after as { json: string; part: number; parts: number });
+    expect(JSON.parse(parts.map((part) => part.json).join(""))).toEqual({ position: 1, section: huge });
+  });
+});
+
 describe("upsertInfoSheetSection on an empty sheet", () => {
   it("starts the list", async () => {
     sheet = { ...sheet, InfoSheetSections: null };

@@ -43,6 +43,17 @@ export function infoSheetPositionOf(body: Record<string, unknown>): number | und
     : { jsonBody: { error: "Position must be a whole number, counting from 0" }, status: 400 };
 }
 
+/**
+ * Whether this write puts back an entry Undo has just taken off (`Restore`), which is then
+ * ledgered. Only a new entry can be restored: anything else naming it is a 400.
+ */
+export function infoSheetRestoreOf(body: Record<string, unknown>): boolean | { status: 400; jsonBody: { error: string } } {
+  if (body.Restore === undefined) return false;
+  if (typeof body.Restore !== "boolean") return { jsonBody: { error: "Restore must be true or false" }, status: 400 };
+  if (body.Restore && body.IsNew !== true) return { jsonBody: { error: "Restore is for putting back an entry: it goes with IsNew" }, status: 400 };
+  return body.Restore;
+}
+
 const LOCKED_SHEET = `SELECT InfoSheetSections, InfoSheetVersion, UpdatedAt, UpdatedByName
   FROM dbo.Tenants WITH (UPDLOCK, ROWLOCK)
  WHERE TenantId = @TenantId AND BuildingId = @BuildingId`;
@@ -74,8 +85,16 @@ export interface InfoSheetWrite {
   caller: { id: string; name: string };
   /** The version the client was shown; every write names it (D11 review). */
   expectedVersion: number;
-  /** Deletes are ledgered with the entry removed, a bulk add with the rows added (S3-6). */
-  ledger: { action: "tenancy.info_sheet_row_delete" | "tenancy.info_sheet_rows_added" | "tenancy.info_sheet_section_delete"; actor: LedgerActor } | null;
+  /** Deletes are ledgered with the entry removed, a bulk add with the rows added (S3-6), an Undo with the entry put back (S3-2). */
+  ledger: {
+    action:
+      | "tenancy.info_sheet_row_delete"
+      | "tenancy.info_sheet_row_restore"
+      | "tenancy.info_sheet_rows_added"
+      | "tenancy.info_sheet_section_delete"
+      | "tenancy.info_sheet_section_restore";
+    actor: LedgerActor;
+  } | null;
   op: InfoSheetOp;
   tenantId: number;
 }
@@ -119,7 +138,7 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
       await recordInfoSheetChange(connection, {
         action: write.ledger.action,
         actor: write.ledger.actor,
-        after: edit.added ?? ledgerAfter(op),
+        after: edit.restored ?? edit.added ?? ledgerAfter(op),
         before: edit.removed,
         buildingId: write.buildingId,
         subject: { id: write.tenantId, type: "tenancy" },

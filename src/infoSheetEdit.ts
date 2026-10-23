@@ -11,7 +11,8 @@ import type { InfoSheetRow, InfoSheetSection } from "./infoSheetLogic";
 // keeps its stored rows; rows change only through row edits. An edit for a section or row
 // that is no longer there is a 404 unless it says it is new, so a stale screen can't bring
 // back what a colleague took off. A new entry may say where it goes (`position`, Undo).
-// What a delete took off, and what a bulk add put on, is returned for the ledger (S3-6).
+// What a delete took off, what Undo put back and what a bulk add put on is returned for the
+// ledger (S3-6, S3-2).
 
 /** A row as a bulk add sends it: its place is the server's to give when it names none. */
 export type InfoSheetNewRow = Omit<InfoSheetRow, "displayOrder"> & { displayOrder?: number };
@@ -27,10 +28,14 @@ export type InfoSheetOp =
   | { additions: InfoSheetAddition[]; kind: "addRows" }
   | { kind: "deleteRow"; rowId: string; sectionId: string }
   | { kind: "deleteSection"; sectionId: string }
-  | { isNew: boolean; kind: "upsertRow"; position?: number; row: InfoSheetRow; sectionId: string }
-  | { isNew: boolean; kind: "upsertSection"; position?: number; section: InfoSheetSection };
+  | { isNew: boolean; kind: "upsertRow"; position?: number; restore?: boolean; row: InfoSheetRow; sectionId: string }
+  | { isNew: boolean; kind: "upsertSection"; position?: number; restore?: boolean; section: InfoSheetSection };
 
-/** What a delete took off, as stored, and the place it held in its list (a section's among the sections, a row's among its section's rows). */
+/**
+ * What a delete took off, or what Undo put back (`restore` on a new entry): the entry as
+ * stored, and the place it held in its list (a section's among the sections, a row's
+ * among its section's rows).
+ */
 export type InfoSheetRemoved =
   | { position: number; row: unknown; sectionId: string; sectionTitle: unknown }
   | { position: number; section: unknown };
@@ -41,7 +46,7 @@ export interface InfoSheetAdded {
 }
 
 export type InfoSheetEdit =
-  | { added: InfoSheetAdded | null; json: string; ok: true; removed: InfoSheetRemoved | null; sections: InfoSheetSection[] }
+  | { added: InfoSheetAdded | null; json: string; ok: true; removed: InfoSheetRemoved | null; restored: InfoSheetRemoved | null; sections: InfoSheetSection[] }
   | { error: string; ok: false; status: 404 | 409 | 422 };
 
 const UNSAFE = "This tenancy's info sheet is stored in a form that can't be changed safely, so nothing was changed. Ask an admin to look at it.";
@@ -61,11 +66,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const idOf = (value: unknown): unknown => (isRecord(value) ? value.id : undefined);
 const refuse = (status: 404 | 409 | 422, error: string): InfoSheetEdit => ({ error, ok: false, status });
 
-/** `items` with `item` put in at `position` (the end when none is given, or when it is past the end). */
-function insertedAt<T>(items: T[], item: T, position: number | undefined): T[] {
-  const at = position === undefined ? items.length : Math.min(position, items.length);
-  return [...items.slice(0, at), item, ...items.slice(at)];
-}
+/** The place a new entry takes in a list of `length`: where it asks, or the end when it names none or names one past the end. */
+const placeIn = (length: number, position: number | undefined): number => (position === undefined ? length : Math.min(position, length));
+
+const insertedAt = <T>(items: T[], item: T, place: number): T[] => [...items.slice(0, place), item, ...items.slice(place)];
 
 /** A row as a bulk add stores it: the fields this code knows, in the order it was entered after the rows already there. */
 const storedRow = (row: InfoSheetNewRow, order: number): InfoSheetRow => ({
@@ -116,7 +120,7 @@ function addRows(elements: { raw: string; value: unknown }[], additions: InfoShe
     for (const row of addition.rows) taken.add(row.id);
   }
   const json = `[${raws.join(",")}]`;
-  return { added: { additions: added }, json, ok: true, removed: null, sections: JSON.parse(json) as InfoSheetSection[] };
+  return { added: { additions: added }, json, ok: true, removed: null, restored: null, sections: JSON.parse(json) as InfoSheetSection[] };
 }
 
 /** The column after one change, with every other entry as stored; or why not. */
@@ -128,6 +132,7 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
   const at = elements.findIndex((element) => idOf(element.value) === sectionId);
   const raws = elements.map((element) => element.raw);
   let removed: InfoSheetRemoved | null = null;
+  let restored: InfoSheetRemoved | null = null;
 
   if (op.kind === "deleteSection") {
     if (at === -1) return refuse(404, NO_SECTION);
@@ -138,7 +143,10 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     if (at !== -1 && op.isNew) return refuse(409, ALREADY);
     if (at === -1) {
       // A new section may arrive with its first rows (bulk add, or Undo), and goes where it says (Undo).
-      raws.splice(op.position === undefined ? raws.length : Math.min(op.position, raws.length), 0, JSON.stringify({ ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] }));
+      const place = placeIn(raws.length, op.position);
+      const stored = { ...op.section, rows: Array.isArray(op.section.rows) ? op.section.rows : [] };
+      raws.splice(place, 0, JSON.stringify(stored));
+      if (op.restore) restored = { position: place, section: stored };
     } else {
       const current = elements[at].value;
       if (!isRecord(current)) return refuse(422, UNSAFE);
@@ -160,10 +168,12 @@ export function editInfoSheet(raw: unknown, op: InfoSheetOp): InfoSheetEdit {
     } else {
       if (rowAt === -1 && !op.isNew) return refuse(404, NO_ROW);
       if (rowAt !== -1 && op.isNew) return refuse(409, ALREADY);
-      nextRows = rowAt === -1 ? insertedAt(rows, op.row, op.position) : rows.map((row, index) => (index === rowAt ? op.row : row));
+      const place = placeIn(rows.length, op.position);
+      nextRows = rowAt === -1 ? insertedAt(rows, op.row, place) : rows.map((row, index) => (index === rowAt ? op.row : row));
+      if (rowAt === -1 && op.restore) restored = { position: place, row: op.row, sectionId: op.sectionId, sectionTitle: section.title };
     }
     raws[at] = JSON.stringify({ ...section, rows: nextRows });
   }
   const json = `[${raws.join(",")}]`;
-  return { added: null, json, ok: true, removed, sections: JSON.parse(json) as InfoSheetSection[] };
+  return { added: null, json, ok: true, removed, restored, sections: JSON.parse(json) as InfoSheetSection[] };
 }
