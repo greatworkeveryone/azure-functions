@@ -136,6 +136,7 @@ Test jobs and invoices stay out unless an admin has Show test data on, so on the
 review database, whose demo invoices are all test records, it shows figures only with
 that on. As for the Tenancy Schedule report, check every family residence is marked
 `residence` in Buildings before showing it to anyone.
+Read this document (`aiDocumentExtraction`, the quote and invoice forms) ships hidden. With it enabled, a form that has a PDF attached offers Read this document: the browser reads the PDF's text layer, Floorplan's own rules find the ABN, total, GST, number and dates, and the form's empty fields are filled and marked Check until the person edits or confirms them. It needs no migration and no app setting of its own, and never approves, submits or sends anything. The model step (`extractDocumentFields`, purposes `quote_extraction@1` and `invoice_extraction@1`) runs only when `AI_ENABLED` is `"true"` as well; with it unset the rules still work and the form says nothing about AI. Each model call is one `AiCallLog` row (recordType `job`, or `quote` / `invoice` when the form has no job yet). The route is gated like adding a quote or an invoice (`createQuote`, `createInvoice`: the same list). The text of the PDF's first five pages, up to 12,000 characters, is what the model sees, after the redaction above.
 Asking for a decision (`requestJobDecision`, `getJobDecisionRequest`,
 `withdrawJobDecisionRequest`, slice A1) needs migration 137 and no app setting.
 The endpoints do not read the flag (it only shows the module). Reminders and the
