@@ -3,6 +3,7 @@
 // command-centre .harness/TENANCY-SCHEDULE-REPORT-2026-10-22.md ("Contract (TS1-TS2)", "TS3 contract (T11)").
 
 import { isLeaseType } from "../chargeCategories";
+import { isGstBasis } from "../gstBasis";
 import { addDaysIso, addMonthsClamped } from "../darwinDate";
 import type { SqlRow } from "../db";
 import { parseInfoSheetSections } from "../infoSheetLogic";
@@ -135,6 +136,7 @@ function buildLease({ bays, occupancies, pending, row }: LeaseParts, asOf: strin
     commencement,
     contact: contactOf(row),
     expiry,
+    gstBasis: isGstBasis(row.GstBasis) ? row.GstBasis : null,
     leaseCode: text(row.IdNo),
     leaseType,
     legalName: String(row.LegalName ?? "").trim(),
@@ -179,6 +181,7 @@ function gapsOf(leases: readonly TenancyScheduleLease[]): TenancyScheduleGap[] {
     if (lease.nlaSqm <= 0) kinds.push("noOccupancy");
     if (lease.contact === null) kinds.push("noContact");
     if (lease.leaseType === null) kinds.push("noLeaseType");
+    if (lease.gstBasis === null) kinds.push("noGstBasis");
     if (!lease.scheduleSignedOff) kinds.push("scheduleNotSignedOff");
     return kinds.length > 0 ? [{ kinds, name: lease.tradingName ?? lease.legalName, tenantId: lease.tenantId }] : [];
   });

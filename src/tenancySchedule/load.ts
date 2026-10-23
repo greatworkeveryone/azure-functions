@@ -30,7 +30,7 @@ const BUILDINGS_SQL = `SELECT b.BuildingID, b.BuildingName, b.BuildingAddress, b
  ORDER BY b.BuildingName, b.BuildingID`;
 
 const TENANTS_SQL = `SELECT t.TenantId, t.BuildingId, t.IdNo, t.LegalName, t.TradingName,
-       t.PrimaryContactName, t.PrimaryContactEmail, t.PrimaryContactPhone, t.LeaseType,
+       t.PrimaryContactName, t.PrimaryContactEmail, t.PrimaryContactPhone, t.LeaseType, t.GstBasis,
        t.Commencement, t.Expiry, t.TermMonths, t.OptionPeriods, t.Status, t.RentPerAnnum,
        t.CpiRegion, t.CpiCapPercent, t.CpiFloorPercent, t.ReviewRatchet,
        t.ScheduledRateSteps, t.CarparkScheduleGroups, t.MiscFees, t.RentReliefs, t.InfoSheetSections,

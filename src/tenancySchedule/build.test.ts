@@ -435,16 +435,16 @@ describe("summary", () => {
 });
 
 describe("gaps and pending changes", () => {
-  it("lists tenancies missing an expiry, an occupancy, a contact, a lease type or a sign-off", () => {
+  it("lists tenancies missing an expiry, an occupancy, a contact, a lease type, a GST basis or a sign-off", () => {
     const r = build();
     expect(zeta(r).gaps).toEqual([
-      { kinds: ["noLeaseType"], name: "Acme Coffee", tenantId: 11 },
-      { kinds: ["noContact", "noLeaseType", "scheduleNotSignedOff"], name: "Bright Ltd", tenantId: 12 },
-      { kinds: ["noExpiry", "noContact", "noLeaseType", "scheduleNotSignedOff"], name: "Evolve Ltd", tenantId: 15 },
+      { kinds: ["noLeaseType", "noGstBasis"], name: "Acme Coffee", tenantId: 11 },
+      { kinds: ["noContact", "noLeaseType", "noGstBasis", "scheduleNotSignedOff"], name: "Bright Ltd", tenantId: 12 },
+      { kinds: ["noExpiry", "noContact", "noLeaseType", "noGstBasis", "scheduleNotSignedOff"], name: "Evolve Ltd", tenantId: 15 },
     ]);
     expect(r.buildings[0].gaps).toEqual([
-      { kinds: ["noLeaseType"], name: "Fresh Co", tenantId: 21 },
-      { kinds: ["noOccupancy", "noLeaseType"], name: "No Units Pty", tenantId: 22 },
+      { kinds: ["noLeaseType", "noGstBasis"], name: "Fresh Co", tenantId: 21 },
+      { kinds: ["noOccupancy", "noLeaseType", "noGstBasis"], name: "No Units Pty", tenantId: 22 },
     ]);
   });
 
@@ -571,6 +571,57 @@ describe("lease type and charge categories (TS3)", () => {
   it("keeps a review's applies-to naming Rent and the fee titles", () => {
     const l = lease(build("2025-06-30", rowsOf(A2)), 11);
     expect(l.reviews[0].appliesTo).toEqual(expect.arrayContaining(["Rent", "Storage cage", "Power recharge", "Extra bay (Level 1)"]));
+  });
+});
+
+describe("GST basis (T14)", () => {
+  const rowsOf = (...rows: Record<string, unknown>[]): TenancyScheduleData => data({ tenants: rows as TenancyScheduleData["tenants"] });
+  const zetaOnly = (...rows: Record<string, unknown>[]) => build(ASOF, rowsOf(...rows));
+
+  it("carries each lease's basis as entered, and null when none is recorded or the stored value is off the list", () => {
+    const r = zetaOnly(tenant({ ...A, GstBasis: "ex" }), tenant({ ...B, GstBasis: "inc" }), tenant({ ...E }), tenant({ ...A, GstBasis: "gross", TenantId: 16 }));
+    expect([11, 12, 15, 16].map((tenantId) => lease(r, tenantId).gstBasis)).toEqual(["ex", "inc", null, null]);
+  });
+
+  it("changes no figure: the same lease totals the same on either basis", () => {
+    const ex = lease(zetaOnly(tenant({ ...A, GstBasis: "ex" })), 11);
+    const inc = lease(zetaOnly(tenant({ ...A, GstBasis: "inc" })), 11);
+    const none = lease(zetaOnly(tenant({ ...A })), 11);
+    expect(ex.total).toEqual(none.total);
+    expect(inc.total).toEqual(none.total);
+    expect(ex.charges).toEqual(none.charges);
+  });
+
+  it("flags a lease with no basis as a gap (leases only, not vacancies), and clears it once recorded", () => {
+    const r = zetaOnly(tenant({ ...A, GstBasis: "ex" }), tenant({ ...B }), tenant({ ...C }), tenant({ ...D }), tenant({ ...E, GstBasis: "inc" }));
+    expect(zeta(r).gaps.filter((g) => g.kinds.includes("noGstBasis")).map((g) => g.tenantId)).toEqual([12]);
+    expect(zeta(r).vacancies.map((v) => v.tenantId)).toEqual([13, 14]);
+  });
+
+  it("summarises a building as ex, inc, mixed or unknown", () => {
+    const basis = (...bases: (string | null)[]) =>
+      zeta(zetaOnly(...bases.map((GstBasis, i) => tenant({ ...A, GstBasis, TenantId: 30 + i })))).summary.gstBasis;
+    expect(basis("ex", "ex")).toBe("ex");
+    expect(basis("inc")).toBe("inc");
+    expect(basis("ex", "inc")).toBe("mixed");
+    expect(basis(null, null)).toBe("unknown");
+    expect(zeta(zetaOnly(tenant({ ...C }))).summary.gstBasis).toBe("unknown");
+  });
+
+  it("calls a building mixed, not ex or inc, when one lease has no basis recorded", () => {
+    const r = zetaOnly(tenant({ ...A, GstBasis: "ex" }), tenant({ ...B, GstBasis: null }));
+    expect(zeta(r).summary.gstBasis).toBe("mixed");
+  });
+
+  it("summarises the portfolio across buildings, and each building on its own", () => {
+    const f = (GstBasis: string | null) => tenant({ ...F, GstBasis });
+    const exEx = build(ASOF, rowsOf(tenant({ ...A, GstBasis: "ex" }), f("ex")));
+    expect(exEx.portfolio.gstBasis).toBe("ex");
+    const split = build(ASOF, rowsOf(tenant({ ...A, GstBasis: "ex" }), f("inc")));
+    expect(zeta(split).summary.gstBasis).toBe("ex");
+    expect(split.buildings.find((b) => b.buildingId === 2)!.summary.gstBasis).toBe("inc");
+    expect(split.portfolio.gstBasis).toBe("mixed");
+    expect(build().portfolio.gstBasis).toBe("unknown");
   });
 });
 

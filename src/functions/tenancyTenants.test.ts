@@ -770,6 +770,122 @@ describe("upsertRegisterTenant — lease type", () => {
   });
 });
 
+// ── upsertRegisterTenant: GST basis (T14, m160) ─────────────────────────────
+
+describe("upsertRegisterTenant — GST basis", () => {
+  const storedRow = (over: Record<string, unknown> = {}) => [
+    { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
+  ];
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+  const tenantOf = (res: { jsonBody?: unknown }) => (res.jsonBody as { tenant: { gstBasis: unknown } }).tenant;
+
+  it.each(["ex", "inc"])("stores %p, shows it on the tenant, and ledgers nothing (a label is not a schedule term)", async (basis) => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: basis }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: basis, RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/GstBasis = @GstBasis/);
+    expect(updateCall()?.[1]).not.toMatch(/ScheduleVersion/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: basis })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).toHaveBeenCalled();
+    expect(tenantOf(res).gstBasis).toBe(basis);
+  });
+
+  it("clears the basis with null", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ GstBasis: "ex" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: null }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: null }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/GstBasis = @GstBasis/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: null })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(tenantOf(res).gstBasis).toBeNull();
+  });
+
+  it("leaves the basis alone when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ GstBasis: "inc" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: "inc" }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Comments: "edited" }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/Comments = @Comments/);
+    expect(updateCall()?.[1]).not.toMatch(/GstBasis/);
+    expect(updateCall()?.[2].map((p) => p.name)).not.toContain("GstBasis");
+    expect(tenantOf(res).gstBasis).toBe("inc");
+  });
+
+  it.each([["gross"], [""], ["EX"], ["Inc"], [1], [true], [{}]])("refuses %p as a GST basis with a 400 and writes nothing", async (basis) => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: basis }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe("GstBasis must be one of ex, inc, or null");
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("refuses an invalid basis on create too", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, GstBasis: "gross", LegalName: "Acme" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("takes a basis on create, and none when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 42 }])
+      .mockResolvedValueOnce([{ TenantId: 42, BuildingId: 5, LegalName: "Acme", GstBasis: "inc", Status: "current" }]);
+    const created = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, GstBasis: "inc", LegalName: "Acme" }), ctx);
+    expect(created.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants"));
+    expect(insert?.[1]).toMatch(/@GstBasis/);
+    expect(insert?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: "inc" })]));
+    expect(tenantOf(created).gstBasis).toBe("inc");
+
+    db.executeQuery.mockClear();
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 43 }])
+      .mockResolvedValueOnce([{ TenantId: 43, BuildingId: 5, LegalName: "Beta", Status: "current" }]);
+    const bare = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, LegalName: "Beta" }), ctx);
+    expect(db.executeQuery.mock.calls[0][2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: null })]));
+    expect(tenantOf(bare).gstBasis).toBeNull();
+  });
+
+  it("keeps the RowVersion check: a stale write of a basis is a 409 and changes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([
+      lockedRow({ RowVersion: Buffer.from("00000000000007d2", "hex"), UpdatedByName: "Priya Accounts" }),
+    ]);
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: "ex", RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(409);
+    expect(updateCall()).toBeUndefined();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("reads GstBasis on the register list, and shows a stored value off the list as not recorded", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        { TenantId: 1, BuildingId: 5, LegalName: "A", GstBasis: "ex", Status: "current" },
+        { TenantId: 2, BuildingId: 5, LegalName: "B", GstBasis: "inc", Status: "current" },
+        { TenantId: 3, BuildingId: 5, LegalName: "C", GstBasis: null, Status: "current" },
+        { TenantId: 4, BuildingId: 5, LegalName: "D", GstBasis: "gross", Status: "current" },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
+    const tenantRows = (res.jsonBody as { tenants: Array<{ gstBasis: unknown }> }).tenants;
+    expect(db.executeQuery.mock.calls[0][1]).toMatch(/\bGstBasis\b/);
+    expect(tenantRows.map((t) => t.gstBasis)).toEqual(["ex", "inc", null, null]);
+  });
+});
+
 // ── upsertRegisterTenant: review terms and next review (PLAN WP23b) ─────────
 
 describe("upsertRegisterTenant — review terms and next review", () => {
