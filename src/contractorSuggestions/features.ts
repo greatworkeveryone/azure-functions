@@ -10,7 +10,8 @@
 
 import { SERVICE_REGIONS } from "../contractorCoverage";
 import { normaliseAssetCategory } from "../assetRegister";
-import { addDaysIso, addMonthsClamped, daysBetweenIso } from "../darwinDate";
+import { CERTIFICATE_WARNING_DAYS, certificateNotices, type InsuranceState } from "../complianceReport/insuranceEvidence";
+import { addMonthsClamped, daysBetweenIso } from "../darwinDate";
 import type { CertificateStatus, FeatureVector } from "./types";
 
 /**
@@ -19,8 +20,8 @@ import type { CertificateStatus, FeatureVector } from "./types";
  */
 export const FEATURE_SCHEMA_VERSION = "cs-features@1";
 
-/** A certificate this close to expiry (or closer) is "expiring", as on the schedule warnings. */
-export const EXPIRING_WITHIN_DAYS = 30;
+/** A certificate this close to expiry (or closer) is "expiring": the shared rule's window, as on the schedule warnings. */
+export const EXPIRING_WITHIN_DAYS = CERTIFICATE_WARNING_DAYS;
 
 const DARWIN_UTC_OFFSET = "+09:30"; // Darwin has no daylight saving.
 
@@ -95,42 +96,30 @@ function listMatch(recorded: readonly string[] | undefined, wanted: string | nul
 
 const STATUS_SEVERITY: Record<CertificateStatus, number> = { expired: 4, missing: 3, expiring: 2, unknown: 1, valid: 0 };
 
+/** The shared rule's name for how a kind of insurance reads, in the vector's own words. */
+const STATUS_OF_STATE: Record<InsuranceState, CertificateStatus> = { expired: "expired", expiring: "expiring", missing: "missing", recorded: "valid", undated: "unknown" };
+
 interface CertificateState {
   daysToExpiry: number | null;
   status: CertificateStatus;
 }
 
 /**
- * The contractor's certificates of currency as they stand on `today` for this
- * building, the same reading the schedule warnings use: a certificate scoped to
- * another building does not count here, one issued in the future is not yet in
- * effect, and per insurance type the latest expiry stands in for the type (a
- * renewal supersedes the old one). The worst type decides the status; the days
- * are to the earliest recorded expiry.
+ * The contractor's certificates of currency as they stand on `today` for this building,
+ * read by the one rule the Compliance report and the schedule warnings use
+ * (complianceReport/insuranceEvidence.ts, pinned by the vectors both repos share): each
+ * insurance type is judged on its own, and the worst decides the status. The days are to
+ * the earliest recorded expiry of a certificate in effect.
  */
 export function certificateState(certificates: readonly CertificateRecord[], buildingId: number, today: string): CertificateState {
-  const byType = new Map<string, CertificateRecord[]>();
-  for (const cert of certificates) {
-    if (cert.buildingId !== null && cert.buildingId !== buildingId) continue;
-    const key = (cert.insuranceType ?? "").trim().toLocaleLowerCase("en-AU");
-    byType.set(key, [...(byType.get(key) ?? []), cert]);
-  }
-  if (byType.size === 0) return { daysToExpiry: null, status: "missing" };
-
-  const soon = addDaysIso(today, EXPIRING_WITHIN_DAYS);
   let worst: CertificateStatus = "valid";
   let earliestExpiry: string | null = null;
-  for (const group of byType.values()) {
-    const inEffect = group.filter((cert) => !cert.issuedOn || cert.issuedOn <= today);
-    const standing = [...inEffect].sort((a, b) => (b.expiresOn ?? "").localeCompare(a.expiresOn ?? ""))[0];
-    let status: CertificateStatus;
-    if (!standing) status = "missing";
-    else if (!standing.expiresOn) status = "unknown";
-    else if (standing.expiresOn < today) status = "expired";
-    else if (standing.expiresOn <= soon) status = "expiring";
-    else status = "valid";
+  for (const notice of certificateNotices(certificates, today, buildingId)) {
+    const status = STATUS_OF_STATE[notice.state];
     if (STATUS_SEVERITY[status] > STATUS_SEVERITY[worst]) worst = status;
-    if (standing?.expiresOn && (earliestExpiry === null || standing.expiresOn < earliestExpiry)) earliestExpiry = standing.expiresOn;
+    // A certificate not yet in effect reads as missing and says nothing about when cover ends.
+    const expiry = notice.state === "missing" ? null : notice.document?.expiresOn;
+    if (expiry && (earliestExpiry === null || expiry < earliestExpiry)) earliestExpiry = expiry;
   }
   return { daysToExpiry: earliestExpiry === null ? null : daysBetweenIso(today, earliestExpiry), status: worst };
 }
