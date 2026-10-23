@@ -511,6 +511,8 @@ describe("upsertRegisterTenant — write integrity", () => {
     db.executeQuery
       .mockResolvedValueOnce([lockedRow({ Expiry: new Date("2020-06-30T00:00:00Z") })])
       .mockResolvedValueOnce([])
+      // An expiry edit looks for lease events of the old expiry (data review S2-3): none here (no table).
+      .mockResolvedValueOnce([{ Id: null }])
       .mockResolvedValueOnce(storedRow({ Expiry: new Date("2031-06-30T00:00:00Z") }));
     const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Expiry: "2031-06-30" }), ctx);
     expect((res.jsonBody as { tenant: { status: string } }).tenant.status).toBe("current");

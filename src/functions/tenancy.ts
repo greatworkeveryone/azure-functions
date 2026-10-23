@@ -107,6 +107,8 @@ import {
 } from "../tenancyScheduleWrite";
 import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
 import { selectWithLeaseOptions } from "../leaseOptionColumns";
+import { concludeLeaseEscalations } from "../leaseEvents/escalations";
+import { closeEventsForEditedExpiry } from "../leaseEvents/expiryEdit";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
@@ -1144,9 +1146,19 @@ async function upsertRegisterTenant(
       }
       const actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
-      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId);
+      const closedLeaseEvents: string[] = [];
+      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId, closedLeaseEvents);
       if (refused) return refused;
       resultId = tenantId;
+      for (const leaseEventId of closedLeaseEvents) {
+        await concludeLeaseEscalations(connection, {
+          actor,
+          code: "expiry_changed",
+          leaseEventId,
+          log: (message) => context.warn(message),
+          note: "The lease's expiry was changed, so this no longer applies",
+        });
+      }
     }
 
     const stored = await selectWithLeaseOptions(
@@ -1386,6 +1398,8 @@ async function updateRegisterTenantRow(
   caller: UserRef,
   actor: ledger.LedgerActor,
   tenantId: number,
+  /** Filled with the lease events an expiry edit closed, for their escalations after the commit. */
+  closedLeaseEvents: string[] = [],
 ): Promise<HttpResponseInit | null> {
   await beginTransaction(connection);
   try {
@@ -1490,6 +1504,21 @@ async function updateRegisterTenantRow(
     }
     if (priorSignOff && clearReason) {
       await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
+    }
+    // Data review S2-3: open lease events of the old expiry close with the edit.
+    const oldExpiry = toIsoDate(current.Expiry) ?? null;
+    if (oldExpiry !== null && fields.Expiry !== undefined && (toIsoDate(fields.Expiry as string | null) ?? null) !== oldExpiry) {
+      closedLeaseEvents.push(
+        ...(await closeEventsForEditedExpiry(connection, {
+          actor,
+          buildingId: (current.BuildingId as number | null) ?? null,
+          correlationId: scope.correlationId,
+          editorName: caller.name,
+          newExpiry: toIsoDate(fields.Expiry as string | null) ?? null,
+          oldExpiry,
+          tenantId,
+        })),
+      );
     }
     await commitTransaction(connection);
     return null;
