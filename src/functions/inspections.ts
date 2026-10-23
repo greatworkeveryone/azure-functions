@@ -736,6 +736,56 @@ export async function applyInspectionOps(
   }
 }
 
+type RemovedPhoto = { blobName: string; fileName: string; id: string };
+type RemovedPoint = { attachments: RemovedPhoto[]; description: string; id: string };
+type RemovedRoom = { description: string; id: string; name: string; points: RemovedPoint[] };
+
+const photoCount = (points: RemovedPoint[]): number => points.reduce((sum, point) => sum + point.attachments.length, 0);
+
+// What deleting a room, or every room of a level, takes with it through the
+// ON DELETE CASCADE foreign keys: the rooms' text, their points' text and the
+// photo records. Read before the DELETE so the ledger row can hold it. The
+// caller has already tied the room or level to this inspection.
+async function loadRemovedRooms(
+  connection: any,
+  scope: { roomId: string } | { levelId: string },
+): Promise<RemovedRoom[]> {
+  const byRoom = "roomId" in scope;
+  const SCOPE_SQL = byRoom ? "r.Id = @ScopeId" : "r.LevelId = @ScopeId";
+  const rows = await executeQuery(
+    connection,
+    `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+            p.Id AS PointId, p.Description AS PointDescription,
+            a.Id AS AttachmentId, a.BlobName, a.FileName
+     FROM dbo.InspectionRooms r
+     LEFT JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
+     LEFT JOIN dbo.InspectionAttachments a ON a.PointId = p.Id
+     WHERE ${SCOPE_SQL}
+     ORDER BY r.SortOrder, r.AddedAt, r.Id, p.SortOrder, p.AddedAt, p.Id, a.UploadedAt, a.Id`,
+    [{ name: "ScopeId", type: TYPES.NVarChar, value: byRoom ? scope.roomId : scope.levelId }],
+  );
+  const rooms = new Map<string, RemovedRoom>();
+  const points = new Map<string, RemovedPoint>();
+  for (const row of rows) {
+    let room = rooms.get(row.RoomId);
+    if (!room) {
+      room = { description: row.RoomDescription ?? "", id: row.RoomId, name: row.RoomName, points: [] };
+      rooms.set(row.RoomId, room);
+    }
+    if (row.PointId == null) continue;
+    let point = points.get(row.PointId);
+    if (!point) {
+      point = { attachments: [], description: row.PointDescription ?? "", id: row.PointId };
+      points.set(row.PointId, point);
+      room.points.push(point);
+    }
+    if (row.AttachmentId != null) {
+      point.attachments.push({ blobName: row.BlobName, fileName: row.FileName, id: row.AttachmentId });
+    }
+  }
+  return [...rooms.values()];
+}
+
 async function applyOne(
   connection: any,
   inspectionId: number,
@@ -806,6 +856,39 @@ async function applyOne(
     }
     case "removeLevel": {
       // ON DELETE CASCADE handles rooms → points → attachments + contributors.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first, with every room, point and photo record in Before; a
+      // failed ledger write rejects the op and nothing is deleted. The photo
+      // blobs stay in storage (never removed here).
+      const foundLevel = await executeQuery(
+        connection,
+        `SELECT l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionLevels l
+         JOIN dbo.Inspections i ON i.Id = l.InspectionId
+         WHERE l.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.levelId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundLevel.length > 0) {
+        const rooms = await loadRemovedRooms(connection, { levelId: op.levelId });
+        const points = rooms.flatMap((room) => room.points);
+        await record(connection, {
+          action: "inspection.level_removed",
+          actor: await loadLedgerActor(connection),
+          before: {
+            attachmentCount: photoCount(points),
+            levelId: foundLevel[0].LevelId,
+            levelName: foundLevel[0].LevelName,
+            pointCount: points.length,
+            roomCount: rooms.length,
+            rooms,
+          },
+          buildingId: (foundLevel[0].BuildingId as number | null) ?? null,
+          subject: { id: inspectionId, type: "inspection" },
+        });
+      }
       await executeQuery(
         connection,
         `DELETE FROM dbo.InspectionLevels WHERE Id = @Id AND InspectionId = @InspectionId`,
@@ -870,6 +953,41 @@ async function applyOne(
       return;
     }
     case "removeRoom": {
+      // Same ledger-first rule as removeLevel and removePoint: the room's text,
+      // its level, and each point's text and photo records go in Before.
+      const foundRoom = await executeQuery(
+        connection,
+        `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+                l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE r.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.roomId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundRoom.length > 0) {
+        const [room] = await loadRemovedRooms(connection, { roomId: op.roomId });
+        const points = room?.points ?? [];
+        await record(connection, {
+          action: "inspection.room_removed",
+          actor: await loadLedgerActor(connection),
+          before: {
+            attachmentCount: photoCount(points),
+            levelId: foundRoom[0].LevelId,
+            levelName: foundRoom[0].LevelName,
+            pointCount: points.length,
+            points,
+            roomDescription: foundRoom[0].RoomDescription ?? "",
+            roomId: foundRoom[0].RoomId,
+            roomName: foundRoom[0].RoomName,
+          },
+          buildingId: (foundRoom[0].BuildingId as number | null) ?? null,
+          subject: { id: inspectionId, type: "inspection" },
+        });
+      }
       await executeQuery(
         connection,
         `DELETE r

@@ -131,6 +131,13 @@ export const LEDGER_ACTIONS = {
   // put back by hand. Routine mid-inspection work, so not an exception.
   "inspection.point_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
 
+  // A room or a whole level taken off a draft inspection (UX review N3 follow-up).
+  // Same subject and shape rule as a point: `before` holds the room's name and
+  // level (or the level's name) and every point's text with its photo records
+  // (id, blobName, fileName), because the delete cascades to all of them.
+  "inspection.room_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+  "inspection.level_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
   // Tenancy archive (D4): a tenancy or a lease document leaves the register
   // without being destroyed; only an empty draft is ever hard-deleted.
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
