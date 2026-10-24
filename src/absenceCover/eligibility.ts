@@ -25,6 +25,7 @@ export type Ineligible =
   | "admin"
   | "capability"
   | "creator"
+  | "dormant"
   | "money_limit"
   | "owner"
   | "raiser";
@@ -34,6 +35,7 @@ export const INELIGIBLE_TEXT: Record<Ineligible, string> = {
   admin: "is admin, who approves nothing real",
   capability: "cannot do this kind of work",
   creator: "added it",
+  dormant: "has not been seen signing in for weeks",
   money_limit: "has no authority for that amount",
   owner: "is the person who is away",
   raiser: "raised or asked for it",
@@ -67,6 +69,8 @@ function moneyRefusal(item: CoverItem, person: DirectoryUser, context: CoverCont
 export function ineligibleReason(item: CoverItem, person: DirectoryUser, context: CoverContext): Ineligible | null {
   if (person.userId === item.ownerUserId) return "owner";
   if (context.absentIds.has(person.userId)) return "absent";
+  // Not away, but the trusted sign-in log has not seen them for its whole window: nobody can say they are in.
+  if (context.dormantIds.has(person.userId)) return "dormant";
   if (adminRefusal([person.role], item.isTest)) return "admin";
   if (item.raisedByUserId !== null && item.raisedByUserId === person.userId) return "raiser";
   if (item.capability && !holdsCapability(person.role, item.capability)) return "capability";

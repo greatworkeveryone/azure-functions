@@ -15,6 +15,9 @@ import type { Mover } from "./types";
 export const moveDecision: Mover = async (connection, { actorName, detail, from, itemId, reason, takeBack, to }) => {
   const request = await getRequestRow(connection, Number(itemId), { forUpdate: true });
   if (!request || request.state !== "pending" || !request.decisionMakers.userIds.includes(from.userId)) return false;
+  // The version the screen or the plan read: a request someone else has changed since (another manager
+  // moved it first) is theirs now, not ours to move on the strength of a stale picture.
+  if (typeof detail.rowVersion === "string" && detail.rowVersion !== "" && detail.rowVersion !== request.rowVersion) return false;
   const asked = request.decisionMakers.userIds.filter((id) => !(takeBack && id === from.userId));
   const userIds = asked.includes(to.userId) ? asked : [...asked, to.userId];
   const updated = await executeQuery(
@@ -40,7 +43,7 @@ export const moveDecision: Mover = async (connection, { actorName, detail, from,
     [
       { name: "JobID", type: TYPES.Int, value: Number(detail.jobId ?? request.jobId) },
       { name: "CreatedBy", type: TYPES.NVarChar, value: actorName },
-      { name: "Text", type: TYPES.NVarChar, value: `The decision request now goes to ${to.name} (${from.name} is away): ${reason}`.slice(0, 2000) },
+      { name: "Text", type: TYPES.NVarChar, value: `The decision request now goes to ${to.name}: ${reason}`.slice(0, 2000) },
     ],
   );
   return true;

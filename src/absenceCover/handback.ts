@@ -5,17 +5,28 @@
 // pushed up its escalation ladder, or a notice about a quote, cannot, and says so.
 
 import { TYPES, type Connection } from "tedious";
+import type { Capability } from "../action-roles";
 import { executeQuery } from "../db";
 import { inTransaction } from "../rentReview/store";
 import type { CoverCaller } from "./access";
 import { getCoverAction, insertCoverAction, listRecentActions, type CoverActionRow } from "./coverActionStore";
 import { coverError } from "./errors";
 import { probeEmailColumns } from "./inventory/emails";
-import { canTakeBack, MOVE_KIND_OF, MOVERS } from "./moves/domain";
+import { holdsCapability } from "./eligibility";
+import { canTakeBackMove, MOVE_KIND_OF, MOVERS } from "./moves/domain";
+import { MoveRefused } from "./moves/types";
 import { loadAbsences } from "./view";
 import type { AbsenceKind, ItemType } from "./types";
 
 const HANDBACK_DAYS = 30;
+
+/** What a person must still hold to have a moved item back, by item type. */
+const TAKE_BACK_CAPABILITY: Partial<Record<ItemType, Capability>> = {
+  decision_request: "respondToDecision",
+  email: "promoteEmail",
+  escalation: "viewEscalations",
+  job: "editJobs",
+};
 
 export interface HandbackItemDto {
   absenceKind: AbsenceKind;
@@ -102,7 +113,7 @@ export async function buildHandback(connection: Connection, caller: CoverCaller)
         absenceKind: row.absenceKind,
         action: row.action as "escalated" | "reassigned",
         at: row.createdAt.toISOString(),
-        canTakeBack: withCover && row.action === "reassigned" && canTakeBack(MOVE_KIND_OF[row.itemType]),
+        canTakeBack: withCover && canTakeBackMove(row.action, row.itemType),
         coverActionId: row.coverActionId,
         coverName: row.toUserId === null ? "the next person up" : (names.get(row.toUserId) ?? "a colleague"),
         itemId: row.itemId,
@@ -119,15 +130,20 @@ export async function buildHandback(connection: Connection, caller: CoverCaller)
 export async function takeBackItem(connection: Connection, caller: CoverCaller, coverActionId: number): Promise<{ coverActionId: number }> {
   const row = await getCoverAction(connection, coverActionId);
   if (!row || row.fromUserId !== caller.userId || row.dryRun) throw coverError.notFound("That move is not one of yours.");
-  if (row.action !== "reassigned") throw coverError.refused("cannot_take_back", "This was pushed up to the next person rather than handed to a cover, so it cannot be taken back here.");
+  if (row.action !== "reassigned" && !canTakeBackMove(row.action, row.itemType)) throw coverError.refused("cannot_take_back", "This was pushed up to the next person rather than handed to a cover, so it cannot be taken back here.");
   const mover = MOVERS[MOVE_KIND_OF[row.itemType]];
   if (!mover || row.toUserId === null) throw coverError.refused("cannot_take_back", "This only told someone, so there is nothing to take back.");
+  // The work must still be work their role may do: a take-back is a move too.
+  const capability = TAKE_BACK_CAPABILITY[row.itemType];
+  if (capability && !caller.roles.some((role) => holdsCapability(role, capability))) {
+    throw coverError.refused("cannot_take_back", "Your role can no longer do this kind of work, so ask a manager to take it back.");
+  }
   const already = await executeQuery(connection, `SELECT 1 AS Found FROM dbo.CoverActions WHERE RelatedActionId = @Id AND Action = N'taken_back'`, [
     { name: "Id", type: TYPES.BigInt, value: coverActionId },
   ]);
   if (already.length > 0) throw coverError.changed("You have already taken this back.");
   const coverName = (await executeQuery(connection, `SELECT DisplayName FROM dbo.AppUsers WHERE UserID = @Id`, [{ name: "Id", type: TYPES.Int, value: row.toUserId }]))[0]?.DisplayName;
-  const reason = `${caller.name} is back and took this back`;
+  const reason = `${caller.name} took this back`;
   const id = await inTransaction(connection, async () => {
     const moved = await mover(connection, {
       actorName: caller.name,
@@ -138,7 +154,7 @@ export async function takeBackItem(connection: Connection, caller: CoverCaller, 
       takeBack: true,
       to: { name: caller.name, userId: caller.userId },
     });
-    if (!moved) return null;
+    if (!moved) throw new MoveRefused();
     return insertCoverAction(connection, {
       absenceKind: row.absenceKind,
       absenceRef: row.absenceRef,
@@ -158,6 +174,9 @@ export async function takeBackItem(connection: Connection, caller: CoverCaller, 
       runId: null,
       toUserId: caller.userId,
     });
+  }).catch((error: unknown) => {
+    if (error instanceof MoveRefused) return null;
+    throw error;
   });
   if (id === null) throw coverError.changed(`This is no longer with ${coverName ?? "the cover"} (it may be finished), so there is nothing to take back.`);
   return { coverActionId: id };

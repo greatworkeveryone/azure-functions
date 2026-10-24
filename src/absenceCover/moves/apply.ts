@@ -16,10 +16,11 @@ import { EscalationError } from "../../escalation/errors";
 import { roleLabel } from "../../escalation/roles";
 import { inTransaction } from "../../rentReview/store";
 import { insertCoverAction } from "../coverActionStore";
+import { neutralReason } from "../absence";
 import { COVER_ACTOR_NAME, type AbsentPerson, type CoverActionKind, type CoverItem } from "../types";
 import { MOVERS } from "./domain";
 import { raiseCoverNotice } from "./notice";
-import type { MoveActor } from "./types";
+import { MoveRefused, type MoveActor } from "./types";
 
 export interface ApplyInput {
   absent: Pick<AbsentPerson, "kind" | "name" | "ref" | "returnDate" | "userId">;
@@ -72,7 +73,7 @@ async function pushUpTheLadder(connection: Connection, input: ApplyInput): Promi
       escalationId: Number(input.item.id),
       expectedRowVersion: typeof input.item.detail.rowVersion === "string" ? input.item.detail.rowVersion : undefined,
       mode: "next_level",
-      note: `${input.absent.name} is away. ${input.reasonText}`.slice(0, 1900),
+      note: neutralReason(input.absent),
     });
   } catch (error) {
     if (error instanceof EscalationError && (error.code === "no_further_level" || error.code === "stale" || error.code === "not_live")) {
@@ -106,14 +107,17 @@ export async function applyCoverAction(connection: Connection, input: ApplyInput
         detail: item.detail,
         from: { name: input.absent.name, userId: input.absent.userId },
         itemId: item.id,
-        reason: input.reasonText,
+        reason: neutralReason(input.absent),
         to: cover,
       });
-      if (!ok) return null;
+      if (!ok) throw new MoveRefused();
     }
     const coverActionId = await insertCoverAction(connection, ledgerRowFor(input, cover.userId));
     announce = await raiseCoverNotice(connection, { coverActionId, deepLink: item.deepLink, toUserId: cover.userId });
     return coverActionId;
+  }).catch((error: unknown) => {
+    if (error instanceof MoveRefused) return null;
+    throw error;
   });
   if (moved === null) return { reason: "changed", status: "skipped" };
   return { announce, coverActionId: moved, status: "applied", toUserId: cover.userId };

@@ -78,6 +78,7 @@ export const context = (over: Partial<CoverContext> = {}): CoverContext => ({
   absentIds: new Set([1]),
   delegates: [],
   directory: DIRECTORY,
+  dormantIds: new Set<number>(),
   links: [],
   moneyFacts: FACTS,
   today: TODAY,

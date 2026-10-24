@@ -87,6 +87,28 @@ describe("moveDecision", () => {
     expect(sqls()[1]).toContain("N'comment'");
   });
 
+  it("reports false, having already written the makers, when the escalation turns out stale: the caller must roll back", async () => {
+    decisions.getRequestRow.mockResolvedValue(request());
+    db.executeQuery.mockResolvedValueOnce([{ RequestId: 5 }]);
+    store.findLiveEscalation.mockResolvedValue({ escalationId: 40, level: 1, rowVersion: "ev" });
+    store.updateEscalation.mockResolvedValue(false);
+    expect(await moveDecision(conn, args({ itemId: "5" }))).toBe(false);
+    expect(sqls()[0]).toContain("UPDATE dbo.JobDecisionRequests");
+  });
+
+  it("writes nothing when the request changed since the manager's screen was read (two managers tapping at once get one cover)", async () => {
+    decisions.getRequestRow.mockResolvedValue(request());
+    expect(await moveDecision(conn, args({ detail: { rowVersion: Buffer.from("other").toString("base64") }, itemId: "5" }))).toBe(false);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("goes ahead when the version the view read is still the request's", async () => {
+    decisions.getRequestRow.mockResolvedValue(request());
+    db.executeQuery.mockResolvedValueOnce([{ RequestId: 5 }]).mockResolvedValueOnce([]);
+    store.findLiveEscalation.mockResolvedValue(null);
+    expect(await moveDecision(conn, args({ detail: { rowVersion: Buffer.from("rv").toString("base64") }, itemId: "5" }))).toBe(true);
+  });
+
   it("leaves an escalation that has moved up to the manager alone", async () => {
     decisions.getRequestRow.mockResolvedValue(request());
     db.executeQuery.mockResolvedValueOnce([{ RequestId: 5 }]).mockResolvedValueOnce([]);

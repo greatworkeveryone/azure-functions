@@ -8,7 +8,20 @@ jest.mock("../db", () => ({ executeQuery: jest.fn() }));
 jest.mock("./coverActionStore", () => ({ getCoverAction: jest.fn(), insertCoverAction: jest.fn(), listRecentActions: jest.fn() }));
 jest.mock("./view", () => ({ loadAbsences: jest.fn() }));
 jest.mock("./inventory/emails", () => ({ probeEmailColumns: jest.fn() }));
-jest.mock("../rentReview/store", () => ({ inTransaction: async (_c: unknown, work: () => Promise<unknown>) => work() }));
+const txLog: string[] = [];
+jest.mock("../rentReview/store", () => ({
+  inTransaction: async (_c: unknown, work: () => Promise<unknown>) => {
+    txLog.push("begin");
+    try {
+      const out = await work();
+      txLog.push("commit");
+      return out;
+    } catch (error) {
+      txLog.push("rollback");
+      throw error;
+    }
+  },
+}));
 jest.mock("./moves/domain", () => {
   const actual = jest.requireActual("./moves/domain");
   return { ...actual, MOVERS: { ...actual.MOVERS, job_assignee: jest.fn(), decision_makers: jest.fn() } };
@@ -114,11 +127,34 @@ describe("takeBackItem", () => {
   });
 
   it("explains that something pushed up its ladder, or only told, cannot be taken back", async () => {
-    store.getCoverAction.mockResolvedValue(row({ action: "escalated" }));
+    store.getCoverAction.mockResolvedValue(row({ action: "escalated", itemId: "40", itemType: "escalation" }));
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
     store.getCoverAction.mockResolvedValue(row({ itemType: "approval" }));
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
     expect(store.insertCoverAction).not.toHaveBeenCalled();
+  });
+
+  it.each([["job", "user"], ["decision_request", "user"], ["email", "user"]])("refuses a take-back of a %s when the person's role no longer holds what the work needs (%s)", async (itemType, role) => {
+    store.getCoverAction.mockResolvedValue(row({ itemType: itemType as never }));
+    await expect(takeBackItem(conn, { ...fay, roles: [role] }, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
+    expect(store.insertCoverAction).not.toHaveBeenCalled();
+  });
+
+  it("lets a person take back work their role still holds, and checks every role they have", async () => {
+    expect(await takeBackItem(conn, { ...fay, roles: ["user", "facilities"] }, 100)).toEqual({ coverActionId: 555 });
+  });
+
+  it("lets a job the ladder gave to someone higher up be taken back: it changed hands, it was not pushed up in place", async () => {
+    store.getCoverAction.mockResolvedValue(row({ action: "escalated" }));
+    expect(await takeBackItem(conn, fay, 100)).toEqual({ coverActionId: 555 });
+    expect(domain.MOVERS.job_assignee).toHaveBeenCalled();
+  });
+
+  it("offers the take-back button for it in the handback, and not for an escalation pushed up its own ladder", async () => {
+    store.listRecentActions.mockResolvedValue([row({ action: "escalated", coverActionId: 1 }), row({ action: "escalated", coverActionId: 2, itemId: "40", itemType: "escalation", toUserId: null })]);
+    db.executeQuery.mockReset().mockResolvedValueOnce([{ Holder: 2, Id: 12 }]).mockResolvedValueOnce([{ Holder: null, Id: 40 }]);
+    const items = (await buildHandback(conn, fay)).items;
+    expect(items.map((item) => [item.itemType, item.canTakeBack])).toEqual([["job", true], ["escalation", false]]);
   });
 
   it("is a conflict when it was already taken back", async () => {
@@ -127,8 +163,10 @@ describe("takeBackItem", () => {
   });
 
   it("is a conflict, writing no row, when it is no longer with the cover", async () => {
+    txLog.length = 0;
     domain.MOVERS.job_assignee.mockResolvedValue(false);
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ status: 409 });
     expect(store.insertCoverAction).not.toHaveBeenCalled();
+    expect(txLog).toEqual(["begin", "rollback"]);
   });
 });

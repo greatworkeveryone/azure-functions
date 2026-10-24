@@ -13,6 +13,8 @@ export type CoverMode = "dry-run" | "live" | "off";
 export const DEFAULT_INACTIVITY_DAYS = 3;
 export const MAX_INACTIVITY_DAYS = 30;
 export const DEFAULT_MAX_ACTIONS = 50;
+/** A run where more than this share of active staff look absent from their sign-ins alone is not trusted (database-safety rule 2). */
+export const MAX_INACTIVE_SHARE = 0.2;
 
 export function coverMode(env: NodeJS.ProcessEnv = process.env): CoverMode {
   if (env.ABSENCE_COVER_DRY_RUN === "true") return "dry-run";

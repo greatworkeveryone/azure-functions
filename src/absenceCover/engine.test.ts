@@ -39,6 +39,44 @@ beforeEach(() => {
   apply.applyCoverAction.mockImplementation(async () => ({ announce: jest.fn(async () => undefined), coverActionId: 5, status: "applied", toUserId: 2 }));
 });
 
+describe("runAbsenceCover: unexpected volume of inactivity", () => {
+  const inactive = (userId: number) => absent({ endDate: null, kind: "inactive", name: `Person ${userId}`, ref: `inactive:2026-10-20`, returnDate: null, userId });
+
+  function crowd(people: ReturnType<typeof inactive>[]) {
+    const ctx = context();
+    const items = [item({ dueAt: soon("2026-10-28"), id: "1" })];
+    const plan = planCover({ absent: people, context: ctx, items, latest: new Map() });
+    view.loadLiveView.mockResolvedValue({ absent: people, context: ctx, inactivityAvailable: true, items, plan });
+  }
+
+  it("aborts, writes nothing and says why when more than 20% of active staff look absent from their sign-ins", async () => {
+    crowd([inactive(1), inactive(3)]); // 2 of 9 active staff
+    const log = jest.fn();
+    const report = await run({ log });
+    expect(report.aborted).toMatch(/2 of 9 active staff look absent from their sign-ins/);
+    expect(apply.applyCoverAction).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("aborted"));
+    expect(report).toMatchObject({ moved: 0, suggested: 0 });
+  });
+
+  it("carries on at exactly 20% or below", async () => {
+    crowd([inactive(1)]);
+    expect((await run({})).aborted).toBeNull();
+  });
+
+  it("does not count people on leave towards the limit: booked leave is not unexpected", async () => {
+    const ctx = context();
+    const people = [absent(), absent({ name: "B", ref: "leave:2", userId: 3 }), absent({ name: "C", ref: "leave:3", userId: 4 })];
+    view.loadLiveView.mockResolvedValue({ absent: people, context: ctx, inactivityAvailable: true, items: [], plan: { alreadyHandled: 0, entries: [], notStranded: 0, stayed: 0 } });
+    expect((await run({})).aborted).toBeNull();
+  });
+
+  it("aborts a dry run too, so the dry run shows the same thing the live run would do", async () => {
+    crowd([inactive(1), inactive(3)]);
+    expect((await run({ mode: "dry-run" })).aborted).not.toBeNull();
+  });
+});
+
 describe("runAbsenceCover: a business day only", () => {
   it("does nothing on a weekend and reads nothing", async () => {
     const report = await run({ now: SATURDAY });
@@ -56,7 +94,7 @@ describe("runAbsenceCover: a business day only", () => {
   });
 
   it("reports an empty day when nobody is away", async () => {
-    view.loadLiveView.mockResolvedValue({ absent: [], inactivityAvailable: false, items: [], plan: { alreadyHandled: 0, entries: [], notStranded: 0, stayed: 0 } });
+    view.loadLiveView.mockResolvedValue({ absent: [], context: context(), inactivityAvailable: false, items: [], plan: { alreadyHandled: 0, entries: [], notStranded: 0, stayed: 0 } });
     expect(await run()).toMatchObject({ absent: 0, items: 0, moved: 0, suggested: 0 });
     expect(apply.applyCoverAction).not.toHaveBeenCalled();
   });

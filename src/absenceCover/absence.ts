@@ -22,14 +22,28 @@
 // "Approved before the start" uses the leave request's last change time as the
 // approval time: an approved request is only ever changed to withdraw it.
 
-import { addBusinessDays, isBusinessDay, type Holidays } from "../escalation/businessTime";
+import { addBusinessDays, isBusinessDay, previousBusinessDay, type Holidays } from "../escalation/businessTime";
 import { addDaysIso } from "../darwinDate";
 import type { AbsentPerson } from "./types";
+
+/**
+ * The only words about an absence that other people read: a job's history, a decision's comment,
+ * an escalation's note, an email's assignment reason. First name, and the day they are back when
+ * known; never the kind of absence (planned or not, which implies sick leave) and never a sign-in
+ * date. The detail stays in the ledger and on the manager's Covering screen.
+ */
+export function neutralReason(person: { name: string; returnDate: string | null }): string {
+  const first = person.name.trim().split(/\s+/)[0] || "them";
+  if (person.returnDate === null) return `Covering while ${first} is unavailable`;
+  return `Covering while ${first} is away until ${displayDate(person.returnDate).slice(0, 5)}`;
+}
 
 export interface LeaveFact {
   /** Darwin date the request was approved (its last change). */
   approvedOn: string;
   endDate: string;
+  /** Total hours requested, as booked. */
+  hours: number;
   kind: string;
   requestId: number;
   startDate: string;
@@ -63,6 +77,10 @@ export function quietBusinessDays(lastSeenOn: string, today: string, holidays: H
 }
 
 /** The leave covering today, run on through leave that follows it straight away. */
+/** Single-day leave under this many hours (a dentist's hour) leaves the person in: not an absence. */
+const PART_DAY_HOURS = 4;
+const isPartDay = (leave: LeaveFact): boolean => leave.startDate === leave.endDate && leave.hours < PART_DAY_HOURS;
+
 function leaveRun(person: LeaveFact[], today: string, holidays: Holidays): { covering: LeaveFact; end: string } | null {
   const covering = person
     .filter((leave) => leave.startDate <= today && today <= leave.endDate)
@@ -101,6 +119,8 @@ function onLeave(staff: StaffFact, run: { covering: LeaveFact; end: string }, ho
 }
 
 export interface DetectInput {
+  /** Darwin date of the newest access-log event of anyone: how we tell the log is still being written. Null when there is none. */
+  accessLogNewestOn: string | null;
   accessLoggingOn: boolean;
   holidays: Holidays;
   inactivityDays: number;
@@ -113,21 +133,42 @@ export interface DetectInput {
 
 export interface Detection {
   absent: AbsentPerson[];
-  /** False when access logging is off: no one can be called inactive. */
+  /** False when access logging is off or its log looks stale: no one can be called inactive. */
   inactivityAvailable: boolean;
+  /** Why inactivity is unavailable: switched off, or no sign-in by anyone since before the last business day. */
+  inactivityReason: "off" | "stale" | null;
+  /** Not on leave and not seen at all in the trusted log's window: not away, but not to be chosen as a cover. */
+  dormantIds: number[];
+}
+
+/**
+ * The log is trusted only while somebody, anybody, has signed in since the last business day. If
+ * logging was off for a while, or writes fail quietly, every sign-in looks old at once and the whole
+ * office would look inactive.
+ */
+function inactivityReason(input: DetectInput): Detection["inactivityReason"] {
+  if (!input.accessLoggingOn) return "off";
+  const lastBusinessDay = previousBusinessDay(addDaysIso(input.today, -1), input.holidays);
+  return input.accessLogNewestOn === null || input.accessLogNewestOn < lastBusinessDay ? "stale" : null;
 }
 
 export function detectAbsences(input: DetectInput): Detection {
   const absent: AbsentPerson[] = [];
+  const reason = inactivityReason(input);
+  const dormantIds: number[] = [];
   for (const staff of input.staff) {
-    const mine = input.leaves.filter((leave) => leave.userId === staff.userId);
+    const mine = input.leaves.filter((leave) => leave.userId === staff.userId && !isPartDay(leave));
     const run = leaveRun(mine, input.today, input.holidays);
     if (run) {
       absent.push(onLeave(staff, run, input.holidays));
       continue;
     }
     const lastSeen = input.lastSeenOn.get(staff.userId);
-    if (!input.accessLoggingOn || lastSeen === undefined) continue;
+    if (reason !== null) continue;
+    if (lastSeen === undefined) {
+      dormantIds.push(staff.userId);
+      continue;
+    }
     const quiet = quietBusinessDays(lastSeen, input.today, input.holidays);
     if (quiet < input.inactivityDays) continue;
     absent.push({
@@ -147,5 +188,5 @@ export function detectAbsences(input: DetectInput): Detection {
       userId: staff.userId,
     });
   }
-  return { absent: absent.sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId), inactivityAvailable: input.accessLoggingOn };
+  return { absent: absent.sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId), dormantIds, inactivityAvailable: reason === null, inactivityReason: reason };
 }

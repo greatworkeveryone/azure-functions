@@ -86,9 +86,9 @@ export interface CoverItem {
 }
 
 export type MoveDecision =
-  | { action: "move"; reasonCode: "due_before_return" | "urgent_inactive" | "urgent_unplanned" }
+  | { action: "move"; reasonCode: "due_before_return" | "urgent_unplanned" }
   | { action: "stay"; reasonCode: "personal" }
-  | { action: "suggest"; reasonCode: "back_in_time" | "due_after_return" | "inactive_not_urgent" | "no_due_date" };
+  | { action: "suggest"; reasonCode: "back_in_time" | "due_after_return" | "inactive_suggest_only" | "no_due_date" };
 
 export interface CoverDelegate {
   coverDelegateId: number;
@@ -110,6 +110,8 @@ export interface CoverContext {
   absentIds: ReadonlySet<number>;
   delegates: readonly CoverDelegate[];
   directory: readonly DirectoryUser[];
+  /** Not away, but unseen in the trusted sign-in log for its whole window (45 days): never chosen as a cover. */
+  dormantIds: ReadonlySet<number>;
   links: readonly ReportingLink[];
   /** For money items. */
   moneyFacts: import("../approvalAuthority").AuthorityFacts | null;

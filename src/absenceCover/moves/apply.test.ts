@@ -77,6 +77,15 @@ describe("applyCoverAction: a move", () => {
     expect(notice.raiseCoverNotice).not.toHaveBeenCalled();
   });
 
+  it("rolls back, never commits, when a mover has already written part of a move and then finds the row stale (a decision's makers changed, its escalation did not)", async () => {
+    domain.MOVERS.job_assignee.mockImplementation(async () => {
+      log.push("partial write");
+      return false;
+    });
+    expect(await applyCoverAction(conn, input())).toEqual({ reason: "changed", status: "skipped" });
+    expect(log).toEqual(["begin", "partial write", "rollback"]);
+  });
+
   it("rolls the whole move back when the ledger row cannot be written", async () => {
     store.insertCoverAction.mockRejectedValueOnce(new Error("ledger down"));
     await expect(applyCoverAction(conn, input())).rejects.toThrow("ledger down");
@@ -93,6 +102,33 @@ describe("applyCoverAction: a move", () => {
   it("needs a cover, and a type that can be moved", async () => {
     await expect(applyCoverAction(conn, input({ cover: null }))).rejects.toThrow("A move needs a cover");
     await expect(applyCoverAction(conn, input({ item: item({ move: "none", type: "leave_approval" }) }))).rejects.toThrow("cannot be moved from here");
+  });
+});
+
+describe("applyCoverAction: what other people can read", () => {
+  const SENSITIVE = /planned|unplanned|sick|personal|signed in|sign-in|business days|not signed|leave kind/i;
+
+  it("gives the item's own history a neutral reason: first name and the date back, never the kind of absence, and keeps the detail for the ledger", async () => {
+    await applyCoverAction(conn, input({ reasonText: "It falls due before they are back. Away on leave that was not planned, until 30/10/2026." }));
+    const args = domain.MOVERS.job_assignee.mock.calls[0][1];
+    expect(args.reason).toBe("Covering while Fay is away until 02/11");
+    expect(args.reason).not.toMatch(SENSITIVE);
+    expect(store.insertCoverAction.mock.calls[0][1].reasonText).toContain("not planned");
+  });
+
+  it("says unavailable, with no date and no sign-in detail, for someone who only stopped signing in", async () => {
+    await applyCoverAction(conn, input({ absent: absent({ endDate: null, kind: "inactive", reason: "Has not signed in since 20/10/2026 (3 business days)", returnDate: null }), reasonText: "Has not signed in since 20/10/2026." }));
+    const args = domain.MOVERS.job_assignee.mock.calls[0][1];
+    expect(args.reason).toBe("Covering while Fay is unavailable");
+    expect(args.reason).not.toMatch(SENSITIVE);
+  });
+
+  it("gives the escalation's note the same neutral reason, not the absence's", async () => {
+    engine.escalateFurther.mockResolvedValue({ next: { targetRole: "director", targetUserId: null }, previous: {} });
+    await applyCoverAction(conn, input({ action: "escalated", item: item({ id: "40", move: "escalation_retarget", type: "escalation" }), reasonText: "Away on leave that was not planned, until 30/10/2026." }));
+    const note = engine.escalateFurther.mock.calls[0][1].note;
+    expect(note).toBe("Covering while Fay is away until 02/11");
+    expect(note).not.toMatch(SENSITIVE);
   });
 });
 

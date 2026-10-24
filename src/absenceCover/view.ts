@@ -19,6 +19,7 @@ export interface LiveView {
   context: CoverContext;
   holidays: Holidays;
   inactivityAvailable: boolean;
+  inactivityReason: "off" | "stale" | null;
   items: CoverItem[];
   plan: Plan;
   state: CoverState;
@@ -37,6 +38,7 @@ export interface Absences {
   context: CoverContext;
   holidays: Holidays;
   inactivityAvailable: boolean;
+  inactivityReason: "off" | "stale" | null;
   now: Date;
   state: CoverState;
   today: string;
@@ -49,6 +51,7 @@ export async function loadAbsences(connection: Connection, options: ViewOptions 
   const logging = options.accessLoggingOn ?? accessLoggingOn();
   const state = await loadCoverState(connection, today, logging);
   const detection = detectAbsences({
+    accessLogNewestOn: state.accessLogNewestOn,
     accessLoggingOn: logging,
     holidays,
     inactivityDays: options.inactivityDays ?? inactivityDays(),
@@ -61,15 +64,16 @@ export async function loadAbsences(connection: Connection, options: ViewOptions 
     absentIds: new Set(detection.absent.map((person) => person.userId)),
     delegates: state.delegates,
     directory: state.directory,
+    dormantIds: new Set(detection.dormantIds),
     links: state.links,
     moneyFacts: state.facts,
     today,
   };
-  return { absent: detection.absent, context, holidays, inactivityAvailable: detection.inactivityAvailable, now, state, today };
+  return { absent: detection.absent, context, holidays, inactivityAvailable: detection.inactivityAvailable, inactivityReason: detection.inactivityReason, now, state, today };
 }
 
 export async function loadLiveView(connection: Connection, options: ViewOptions = {}): Promise<LiveView> {
-  const { absent, context, holidays, inactivityAvailable, now, state, today } = await loadAbsences(connection, options);
+  const { absent, context, holidays, inactivityAvailable, inactivityReason, now, state, today } = await loadAbsences(connection, options);
   const items =
     absent.length === 0
       ? []
@@ -82,5 +86,5 @@ export async function loadLiveView(connection: Connection, options: ViewOptions 
         });
   const latest = items.length === 0 ? new Map() : await latestActionsByItem(connection);
   const plan = planCover({ absent, context, items, latest });
-  return { absent, context, holidays, inactivityAvailable, items, plan, state, today };
+  return { absent, context, holidays, inactivityAvailable, inactivityReason, items, plan, state, today };
 }

@@ -30,6 +30,7 @@ function view(items: CoverItem[], over: { absent?: ReturnType<typeof absent>[]; 
     context: ctx,
     holidays: new Set(),
     inactivityAvailable: true,
+    inactivityReason: null,
     items,
     plan: planCover({ absent: away, context: ctx, items, latest: new Map() }),
     state: { directory: DIRECTORY } as LiveView["state"],
@@ -74,9 +75,9 @@ describe("buildOverview: who is away", () => {
   it("says which calendar return dates use and whether sign-in tracking is on", async () => {
     expect((await buildOverview(conn, director, view([]), "live")).calendar).toBe("weekends_only");
     process.env.ESCALATION_HOLIDAYS = "2026-12-25";
-    const result = await buildOverview(conn, director, { ...view([]), inactivityAvailable: false }, "live");
+    const result = await buildOverview(conn, director, { ...view([]), inactivityAvailable: false, inactivityReason: "stale" }, "live");
     expect(result.calendar).toBe("holidays");
-    expect(result.inactivity).toEqual({ available: false, days: 3 });
+    expect(result.inactivity).toEqual({ available: false, days: 3, reason: "stale" });
   });
 });
 
@@ -119,6 +120,7 @@ describe("buildOverview: what moved", () => {
       row({ action: "taken_back", coverActionId: 4, fromUserId: 7, relatedActionId: 2, toUserId: 1 }),
       row({ coverActionId: 2 }),
       row({ action: "escalated", coverActionId: 5, itemId: "40", itemType: "escalation", toUserId: null }),
+      row({ action: "escalated", coverActionId: 6, itemId: "15" }),
     ]);
     const result = await buildOverview(conn, manager, view([]), "live");
     expect(store.listRecentActions).toHaveBeenCalledWith(conn, 14);
@@ -126,6 +128,7 @@ describe("buildOverview: what moved", () => {
       [3, false, true, "Sam Facilities"],
       [2, true, true, "Sam Facilities"],
       [5, false, false, null],
+      [6, false, true, "Sam Facilities"],
     ]);
     expect(result.moved[0]).toMatchObject({ absenceKind: "planned", at: "2026-10-26T03:00:00.000Z", from: { name: "Fay Facilities", userId: 1 }, label: "Job #13", returnDate: "2026-11-02" });
   });

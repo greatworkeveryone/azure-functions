@@ -5,7 +5,7 @@
 // director or the CFO sees more).
 
 import { holidayCalendarConfigured, inactivityDays, type CoverMode } from "./config";
-import { canTakeBack, isMovable, MOVE_KIND_OF } from "./moves/domain";
+import { canTakeBackMove, isMovable } from "./moves/domain";
 import { inTeamOf, type CoverCaller } from "./access";
 import { listRecentActions, type CoverActionRow } from "./coverActionStore";
 import type { PlanEntry } from "./plan";
@@ -72,7 +72,7 @@ export interface MovedDto {
 export interface OverviewDto {
   away: AwayDto[];
   calendar: "holidays" | "weekends_only";
-  inactivity: { available: boolean; days: number };
+  inactivity: { available: boolean; days: number; reason: "off" | "stale" | null };
   mode: CoverMode;
   moved: MovedDto[];
   suggested: SuggestionDto[];
@@ -113,7 +113,7 @@ function movedOf(row: CoverActionRow, names: ReadonlyMap<number, string>, takenB
     absenceKind: row.absenceKind,
     action: row.action as "escalated" | "reassigned",
     at: row.createdAt.toISOString(),
-    canTakeBack: row.action === "reassigned" && canTakeBack(MOVE_KIND_OF[row.itemType]),
+    canTakeBack: canTakeBackMove(row.action, row.itemType),
     coverActionId: row.coverActionId,
     from: { name: names.get(row.fromUserId) ?? "Former staff member", userId: row.fromUserId },
     itemId: row.itemId,
@@ -158,7 +158,7 @@ export async function buildOverview(connection: Connection, caller: CoverCaller,
       };
     }),
     calendar: holidayCalendarConfigured() ? "holidays" : "weekends_only",
-    inactivity: { available: view.inactivityAvailable, days: inactivityDays() },
+    inactivity: { available: view.inactivityAvailable, days: inactivityDays(), reason: view.inactivityReason },
     mode,
     moved: moved.map((row) => movedOf(row, names, takenBack)),
     suggested: entries.map((entry) => suggestionOf(entry, mode)),

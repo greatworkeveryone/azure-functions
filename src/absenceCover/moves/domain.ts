@@ -20,6 +20,16 @@ export const MOVERS: Partial<Record<MoveKind, Mover>> = {
 /** A move that changes who holds the item can be handed back; a notice only told someone. */
 export const canTakeBack = (kind: MoveKind): boolean => MOVERS[kind] !== undefined;
 
+/**
+ * Whether a ledger row's move can be handed back. A hand-over to a cover can; so can one the ladder made
+ * of a job, a decision or an email, which still changed hands. An escalation pushed up its own ladder
+ * was superseded in place and cannot, and a notice only told someone.
+ */
+export function canTakeBackMove(action: string, itemType: ItemType): boolean {
+  if (!canTakeBack(MOVE_KIND_OF[itemType])) return false;
+  return action === "reassigned" || (action === "escalated" && itemType !== "escalation");
+}
+
 /** Whether the engine can carry the move out itself. */
 export const isMovable = (kind: MoveKind): boolean => kind === "notice" || MOVERS[kind] !== undefined;
 

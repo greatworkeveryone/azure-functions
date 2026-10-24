@@ -24,7 +24,7 @@ const run = (registration?.[1] as { handler: (timer: Timer, context: InvocationC
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const report = (over: Record<string, unknown> = {}) => ({
-  absent: 2, alreadyHandled: 0, businessDay: true, deferred: 0, dryRun: false, errors: [], escalated: 1, items: 9, moved: 4, notStranded: 0, raced: 0, stayed: 0, suggested: 3, wouldMove: 0, ...over,
+  aborted: null, absent: 2, alreadyHandled: 0, businessDay: true, deferred: 0, dryRun: false, errors: [], escalated: 1, items: 9, moved: 4, notStranded: 0, raced: 0, stayed: 0, suggested: 3, wouldMove: 0, ...over,
 });
 const KEYS = ["ABSENCE_COVER_ENABLED", "ABSENCE_COVER_DRY_RUN", "ABSENCE_COVER_MAX_ACTIONS", "ABSENCE_INACTIVITY_DAYS", "ACCESS_LOG_ENABLED"] as const;
 const SAVED = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
@@ -108,6 +108,14 @@ describe("failing loudly", () => {
     process.env.ABSENCE_COVER_ENABLED = "true";
     runAbsenceCover.mockResolvedValue(report({ errors: [{ item: "job:12", message: "deadlock" }] }));
     await expect(run({} as Timer, ctx)).rejects.toThrow("1 item(s) failed; first: job:12: deadlock");
+    expect(Sentry.captureException).toHaveBeenCalled();
+    expect(db.closeConnection).toHaveBeenCalled();
+  });
+
+  it("fails the run loudly, naming why, when the engine aborted for unexpected volume", async () => {
+    process.env.ABSENCE_COVER_ENABLED = "true";
+    runAbsenceCover.mockResolvedValue(report({ aborted: "2 of 9 active staff look absent from their sign-ins, which is too many to trust" }));
+    await expect(run({} as Timer, ctx)).rejects.toThrow("aborted: 2 of 9 active staff look absent");
     expect(Sentry.captureException).toHaveBeenCalled();
     expect(db.closeConnection).toHaveBeenCalled();
   });

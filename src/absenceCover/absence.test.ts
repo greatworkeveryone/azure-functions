@@ -1,11 +1,12 @@
 /// <reference types="jest" />
 import { NO_HOLIDAYS } from "../escalation/businessTime";
 import { DIRECTORY, TODAY } from "../__tests__/fixtures/absenceCover";
-import { detectAbsences, displayDate, quietBusinessDays, returnDateAfter, type DetectInput, type LeaveFact } from "./absence";
+import { detectAbsences, displayDate, neutralReason, quietBusinessDays, returnDateAfter, type DetectInput, type LeaveFact } from "./absence";
 
 const leave = (over: Partial<LeaveFact> = {}): LeaveFact => ({
   approvedOn: "2026-10-01",
   endDate: "2026-10-30",
+  hours: 38,
   kind: "annual_leave",
   requestId: 11,
   startDate: "2026-10-26",
@@ -15,6 +16,7 @@ const leave = (over: Partial<LeaveFact> = {}): LeaveFact => ({
 
 const detect = (over: Partial<DetectInput> = {}) =>
   detectAbsences({
+    accessLogNewestOn: TODAY,
     accessLoggingOn: true,
     holidays: NO_HOLIDAYS,
     inactivityDays: 3,
@@ -68,6 +70,16 @@ describe("detectAbsences: leave", () => {
 
   it("ignores leave that has not started and leave that has ended", () => {
     expect(detect({ leaves: [leave({ startDate: "2026-10-27" }), leave({ endDate: "2026-10-23", requestId: 12, startDate: "2026-10-19" })] }).absent).toEqual([]);
+  });
+
+  it("does not call someone away for an hour or two off: single-day leave under four hours is not an absence", () => {
+    expect(detect({ leaves: [leave({ approvedOn: "2026-10-26", endDate: "2026-10-26", hours: 2, kind: "personal_leave" })] }).absent).toEqual([]);
+    expect(detect({ leaves: [leave({ endDate: "2026-10-26", hours: 3.99 })] }).absent).toEqual([]);
+  });
+
+  it("does call them away for a half day or more, and for any run of days", () => {
+    expect(detect({ leaves: [leave({ endDate: "2026-10-26", hours: 4 })] }).absent).toHaveLength(1);
+    expect(detect({ leaves: [leave({ endDate: "2026-10-27", hours: 3 })] }).absent).toHaveLength(1);
   });
 
   it("treats the first and the last day of the leave as away", () => {
@@ -124,6 +136,51 @@ describe("detectAbsences: no sign-in", () => {
     expect(detect().inactivityAvailable).toBe(true);
   });
 
+  describe("a stale access log", () => {
+    const quiet = { lastSeenOn: new Map([[7, "2026-10-20"]]) };
+
+    it("is trusted when its newest event is from the last business day or today", () => {
+      expect(detect({ ...quiet, accessLogNewestOn: "2026-10-23" }).absent.map((person) => person.userId)).toEqual([7]);
+      expect(detect({ ...quiet, accessLogNewestOn: TODAY }).inactivityAvailable).toBe(true);
+    });
+
+    it("is not trusted when its newest event is older, or there is none: nobody is called inactive, and it says why", () => {
+      for (const newest of ["2026-10-22", "2026-10-01", null]) {
+        const result = detect({ ...quiet, accessLogNewestOn: newest });
+        expect(result.absent).toEqual([]);
+        expect(result.inactivityAvailable).toBe(false);
+        expect(result.inactivityReason).toBe("stale");
+      }
+    });
+
+    it("says off, not stale, when logging is switched off", () => {
+      expect(detect({ accessLoggingOn: false, accessLogNewestOn: null }).inactivityReason).toBe("off");
+      expect(detect().inactivityReason).toBeNull();
+    });
+
+    it("still finds leave while the log is stale", () => {
+      expect(detect({ accessLogNewestOn: null, leaves: [leave()] }).absent).toHaveLength(1);
+    });
+  });
+
+  describe("dormant people: nothing in the log for the whole window", () => {
+    it("lists, as dormant, anyone not on leave the trusted log has not seen in its window: they are not away, but nobody should hand them work", () => {
+      const result = detect({ lastSeenOn: new Map([[7, TODAY]]), leaves: [leave()] });
+      expect(result.dormantIds).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 8, 9]));
+      expect(result.dormantIds).not.toContain(7);
+      expect(result.dormantIds).not.toContain(1); // on leave
+    });
+
+    it("lists no one while the log cannot be trusted: logging off, or stale", () => {
+      expect(detect({ accessLoggingOn: false }).dormantIds).toEqual([]);
+      expect(detect({ accessLogNewestOn: null }).dormantIds).toEqual([]);
+    });
+
+    it("does not make a dormant person absent: there is nothing to cover for them", () => {
+      expect(detect({ lastSeenOn: new Map([[7, TODAY]]) }).absent).toEqual([]);
+    });
+  });
+
   it("never calls away someone the log has not seen at all", () => {
     expect(detect({ lastSeenOn: new Map() }).absent).toEqual([]);
   });
@@ -138,6 +195,20 @@ describe("detectAbsences: no sign-in", () => {
 it("lists people by name", () => {
   const { absent } = detect({ lastSeenOn: new Map([[7, "2026-10-01"], [3, "2026-10-01"]]), leaves: [leave()] });
   expect(absent.map((person) => person.name)).toEqual(["Ann Accounts", "Fay Facilities", "Sam Facilities"]);
+});
+
+describe("neutralReason: the only words other people read", () => {
+  it("is the first name and the date they are back, for leave", () => {
+    expect(neutralReason({ name: "Fay Facilities", returnDate: "2026-11-02" })).toBe("Covering while Fay is away until 02/11");
+  });
+
+  it("is unavailable, with no date, when nobody knows when they are back", () => {
+    expect(neutralReason({ name: "Fay Facilities", returnDate: null })).toBe("Covering while Fay is unavailable");
+  });
+
+  it("copes with a single name", () => {
+    expect(neutralReason({ name: "Cher", returnDate: null })).toBe("Covering while Cher is unavailable");
+  });
 });
 
 it("writes dates as DD/MM/YYYY", () => {

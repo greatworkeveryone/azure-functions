@@ -44,6 +44,7 @@ export async function absenceCoverTimer(_timer: Timer, context: InvocationContex
       onError: (error, entry) =>
         Sentry.captureException(error, { extra: { context: `absenceCoverTimer ${entry.item.type}:${entry.item.id}` } }),
     });
+    if (report.aborted !== null) throw new Error(`Cover while away aborted: ${report.aborted}`);
     if (report.errors.length > 0) {
       throw new Error(`Cover while away: ${report.errors.length} item(s) failed; first: ${report.errors[0].item}: ${report.errors[0].message}`);
     }
