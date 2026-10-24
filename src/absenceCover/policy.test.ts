@@ -40,9 +40,9 @@ describe("decideMove: due after they are back", () => {
     ["high", "unplanned", { action: "move", reasonCode: "urgent_unplanned" }],
     ["medium", "unplanned", { action: "suggest", reasonCode: "due_after_return" }],
     ["low", "unplanned", { action: "suggest", reasonCode: "due_after_return" }],
-    ["high", "inactive", { action: "move", reasonCode: "urgent_inactive" }],
-    ["medium", "inactive", { action: "suggest", reasonCode: "inactive_not_urgent" }],
-    ["low", "inactive", { action: "suggest", reasonCode: "inactive_not_urgent" }],
+    ["high", "inactive", { action: "suggest", reasonCode: "inactive_suggest_only" }],
+    ["medium", "inactive", { action: "suggest", reasonCode: "inactive_suggest_only" }],
+    ["low", "inactive", { action: "suggest", reasonCode: "inactive_suggest_only" }],
   ] as const)("%s importance, %s absence", (importance, kind, expected) => {
     expect(decideMove(item({ dueAt: dueOn("2026-11-10"), importance }), away(kind))).toEqual(expected);
   });
@@ -54,17 +54,23 @@ describe("decideMove: no due date", () => {
     ["medium", "planned", { action: "suggest", reasonCode: "no_due_date" }],
     ["high", "unplanned", { action: "move", reasonCode: "urgent_unplanned" }],
     ["medium", "unplanned", { action: "suggest", reasonCode: "no_due_date" }],
-    ["high", "inactive", { action: "move", reasonCode: "urgent_inactive" }],
-    ["medium", "inactive", { action: "suggest", reasonCode: "inactive_not_urgent" }],
+    ["high", "inactive", { action: "suggest", reasonCode: "inactive_suggest_only" }],
+    ["medium", "inactive", { action: "suggest", reasonCode: "inactive_suggest_only" }],
   ] as const)("%s importance, %s absence", (importance, kind, expected) => {
     expect(decideMove(item({ dueAt: null, importance }), away(kind))).toEqual(expected);
+  });
+});
+
+describe("decideMove: inactivity only ever suggests", () => {
+  it.each(IMPORTANCES.flatMap((importance) => [true, false].map((overdue) => [importance, overdue] as const)))("a %s item, overdue %s, is never moved automatically for someone who has not signed in", (importance, overdue) => {
+    expect(decideMove(item({ dueAt: overdue ? dueOn("2026-10-01") : dueOn("2026-12-01"), importance }), away("inactive"))).toEqual({ action: "suggest", reasonCode: "inactive_suggest_only" });
   });
 });
 
 describe("decideMove: an unknown return", () => {
   it("never says something falls due before someone who has not signed in returns", () => {
     expect(fallsDueBeforeReturn({ dueAt: dueOn("2026-10-20") }, { returnDate: null })).toBe(false);
-    expect(decideMove(item({ dueAt: dueOn("2026-10-20"), importance: "medium" }), away("inactive"))).toEqual({ action: "suggest", reasonCode: "inactive_not_urgent" });
+    expect(decideMove(item({ dueAt: dueOn("2026-10-20"), importance: "medium" }), away("inactive"))).toEqual({ action: "suggest", reasonCode: "inactive_suggest_only" });
   });
 });
 

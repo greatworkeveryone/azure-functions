@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { Connection } from "tedious";
 import { todayInDarwin } from "../darwinDate";
 import { holidaysFromEnv, isBusinessDay } from "../escalation/businessTime";
-import { type CoverMode } from "./config";
+import { MAX_INACTIVE_SHARE, type CoverMode } from "./config";
 import { applyCoverAction } from "./moves/apply";
 import type { PlanEntry } from "./plan";
 import { loadLiveView } from "./view";
@@ -32,6 +32,8 @@ export interface RunOptions {
 }
 
 export interface RunReport {
+  /** Why the run did nothing: too many people looked absent from their sign-ins to trust. Null for a normal run. */
+  aborted: string | null;
   absent: number;
   alreadyHandled: number;
   businessDay: boolean;
@@ -50,7 +52,7 @@ export interface RunReport {
 }
 
 const EMPTY: Omit<RunReport, "businessDay" | "dryRun"> = {
-  absent: 0, alreadyHandled: 0, deferred: 0, errors: [], escalated: 0, inactivityAvailable: false, items: 0, moved: 0, notStranded: 0, raced: 0, stayed: 0, suggested: 0, wouldMove: 0,
+  aborted: null, absent: 0, alreadyHandled: 0, deferred: 0, errors: [], escalated: 0, inactivityAvailable: false, items: 0, moved: 0, notStranded: 0, raced: 0, stayed: 0, suggested: 0, wouldMove: 0,
 };
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -85,6 +87,14 @@ export async function runAbsenceCover(options: RunOptions): Promise<RunReport> {
   report.alreadyHandled = plan.alreadyHandled;
   report.notStranded = plan.notStranded;
   report.stayed = plan.stayed;
+
+  const inactive = view.absent.filter((person) => person.kind === "inactive").length;
+  const active = view.context.directory.length;
+  if (active > 0 && inactive / active > MAX_INACTIVE_SHARE) {
+    report.aborted = `${inactive} of ${active} active staff look absent from their sign-ins, which is too many to trust (limit ${MAX_INACTIVE_SHARE * 100}%); check that access logging is working`;
+    log(`absenceCover: aborted: ${report.aborted}`);
+    return report;
+  }
 
   const runId = randomUUID();
   let written = 0;

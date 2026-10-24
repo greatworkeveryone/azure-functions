@@ -30,6 +30,7 @@ function view(items: CoverItem[], over: { absent?: ReturnType<typeof absent>[]; 
     context: ctx,
     holidays: new Set(),
     inactivityAvailable: true,
+    inactivityReason: null,
     items,
     plan: planCover({ absent: away, context: ctx, items, latest: new Map() }),
     state: { directory: DIRECTORY } as LiveView["state"],
@@ -74,9 +75,9 @@ describe("buildOverview: who is away", () => {
   it("says which calendar return dates use and whether sign-in tracking is on", async () => {
     expect((await buildOverview(conn, director, view([]), "live")).calendar).toBe("weekends_only");
     process.env.ESCALATION_HOLIDAYS = "2026-12-25";
-    const result = await buildOverview(conn, director, { ...view([]), inactivityAvailable: false }, "live");
+    const result = await buildOverview(conn, director, { ...view([]), inactivityAvailable: false, inactivityReason: "stale" }, "live");
     expect(result.calendar).toBe("holidays");
-    expect(result.inactivity).toEqual({ available: false, days: 3 });
+    expect(result.inactivity).toEqual({ available: false, days: 3, reason: "stale" });
   });
 });
 

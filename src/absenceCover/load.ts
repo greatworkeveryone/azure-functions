@@ -21,6 +21,8 @@ export interface CoverState {
   directory: DirectoryUser[];
   emailColumns: EmailColumns;
   facts: AuthorityFacts;
+  /** Darwin date of the newest access-log event of anyone; null when there is none (or logging is off). */
+  accessLogNewestOn: string | null;
   lastSeenOn: Map<number, string>;
   leaves: LeaveFact[];
   links: LeaveLink[];
@@ -59,6 +61,13 @@ async function loadLastSeen(connection: Connection): Promise<Map<number, string>
   return new Map(rows.map((row) => [Number(row.UserID), todayInDarwin(row.LastAt as Date)]));
 }
 
+/** When anybody last signed in: tells a quiet office from a log that has stopped being written. */
+async function loadNewestEvent(connection: Connection): Promise<string | null> {
+  const rows = await executeQuery(connection, `SELECT MAX(At) AS NewestAt FROM dbo.AccessEvents`);
+  const newest = rows[0]?.NewestAt;
+  return newest instanceof Date ? todayInDarwin(newest) : null;
+}
+
 export async function loadCoverState(connection: Connection, today: string, accessLoggingOn: boolean): Promise<CoverState> {
   const people = await loadPeople(connection);
   return {
@@ -66,6 +75,7 @@ export async function loadCoverState(connection: Connection, today: string, acce
     directory: await listActiveUsers(connection),
     emailColumns: await probeEmailColumns(connection),
     facts: await loadApprovalFacts(connection, null),
+    accessLogNewestOn: accessLoggingOn ? await loadNewestEvent(connection) : null,
     lastSeenOn: accessLoggingOn ? await loadLastSeen(connection) : new Map(),
     leaves: await loadLeaves(connection, today),
     links: people.links,

@@ -86,9 +86,9 @@ export interface CoverItem {
 }
 
 export type MoveDecision =
-  | { action: "move"; reasonCode: "due_before_return" | "urgent_inactive" | "urgent_unplanned" }
+  | { action: "move"; reasonCode: "due_before_return" | "urgent_unplanned" }
   | { action: "stay"; reasonCode: "personal" }
-  | { action: "suggest"; reasonCode: "back_in_time" | "due_after_return" | "inactive_not_urgent" | "no_due_date" };
+  | { action: "suggest"; reasonCode: "back_in_time" | "due_after_return" | "inactive_suggest_only" | "no_due_date" };
 
 export interface CoverDelegate {
   coverDelegateId: number;

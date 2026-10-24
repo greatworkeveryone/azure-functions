@@ -50,8 +50,15 @@ describe("loadCoverState", () => {
   it("reads when each person was last seen, as a Darwin day, over the last 45 days", async () => {
     answer([], [{ LastAt: new Date("2026-10-22T20:00:00Z"), UserID: 7 }]);
     const state = await loadCoverState(conn, "2026-10-26", true);
-    expect(sqlOf(/AccessEvents/)).toContain("DATEADD(day, -45, SYSUTCDATETIME())");
+    expect(sqlOf(/GROUP BY u\.UserID/)).toContain("DATEADD(day, -45, SYSUTCDATETIME())");
     expect(state.lastSeenOn).toEqual(new Map([[7, "2026-10-23"]]));
+  });
+
+  it("reads the Darwin day of the newest event of anyone, to tell a quiet office from a log that stopped", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (/MAX\(At\) AS NewestAt/.test(sql) ? [{ NewestAt: new Date("2026-10-25T20:00:00Z") }] : []));
+    expect((await loadCoverState(conn, "2026-10-26", true)).accessLogNewestOn).toBe("2026-10-26");
+    db.executeQuery.mockImplementation(async () => []);
+    expect((await loadCoverState(conn, "2026-10-26", true)).accessLogNewestOn).toBeNull();
   });
 
   it("does not read the access log at all when access logging is off", async () => {

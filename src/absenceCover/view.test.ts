@@ -13,7 +13,7 @@ const conn = {} as never;
 
 const NOW = new Date("2026-10-26T03:00:00Z"); // Monday 12:30 in Darwin
 const state = (over: Record<string, unknown> = {}) => ({
-  delegates: [], directory: DIRECTORY, emailColumns: { assignedToUserId: false }, facts: FACTS, lastSeenOn: new Map(),
+  accessLogNewestOn: "2026-10-26", delegates: [], directory: DIRECTORY, emailColumns: { assignedToUserId: false }, facts: FACTS, lastSeenOn: new Map(),
   leaves: [{ approvedOn: "2026-10-01", endDate: "2026-10-30", kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }],
   links: [], staff: [], ...over,
 });
@@ -41,6 +41,14 @@ describe("loadAbsences", () => {
     const off = await loadAbsences(conn, { accessLoggingOn: false, inactivityDays: 3, now: NOW });
     expect(off.absent).toEqual([]);
     expect(off.inactivityAvailable).toBe(false);
+  });
+
+  it("does not call anyone inactive while the access log looks stale, and says so", async () => {
+    load.loadCoverState.mockResolvedValue(state({ accessLogNewestOn: "2026-10-20", leaves: [], lastSeenOn: new Map([[7, "2026-10-14"]]) }));
+    const stale = await loadAbsences(conn, { accessLoggingOn: true, inactivityDays: 3, now: NOW });
+    expect(stale.absent).toEqual([]);
+    expect(stale.inactivityAvailable).toBe(false);
+    expect(stale.inactivityReason).toBe("stale");
   });
 
   it("reads the switches from the environment when it is not told", async () => {

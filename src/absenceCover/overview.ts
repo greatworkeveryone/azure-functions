@@ -72,7 +72,7 @@ export interface MovedDto {
 export interface OverviewDto {
   away: AwayDto[];
   calendar: "holidays" | "weekends_only";
-  inactivity: { available: boolean; days: number };
+  inactivity: { available: boolean; days: number; reason: "off" | "stale" | null };
   mode: CoverMode;
   moved: MovedDto[];
   suggested: SuggestionDto[];
@@ -158,7 +158,7 @@ export async function buildOverview(connection: Connection, caller: CoverCaller,
       };
     }),
     calendar: holidayCalendarConfigured() ? "holidays" : "weekends_only",
-    inactivity: { available: view.inactivityAvailable, days: inactivityDays() },
+    inactivity: { available: view.inactivityAvailable, days: inactivityDays(), reason: view.inactivityReason },
     mode,
     moved: moved.map((row) => movedOf(row, names, takenBack)),
     suggested: entries.map((entry) => suggestionOf(entry, mode)),

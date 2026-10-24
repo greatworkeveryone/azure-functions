@@ -15,6 +15,7 @@ const leave = (over: Partial<LeaveFact> = {}): LeaveFact => ({
 
 const detect = (over: Partial<DetectInput> = {}) =>
   detectAbsences({
+    accessLogNewestOn: TODAY,
     accessLoggingOn: true,
     holidays: NO_HOLIDAYS,
     inactivityDays: 3,
@@ -122,6 +123,33 @@ describe("detectAbsences: no sign-in", () => {
     expect(result.absent).toEqual([]);
     expect(result.inactivityAvailable).toBe(false);
     expect(detect().inactivityAvailable).toBe(true);
+  });
+
+  describe("a stale access log", () => {
+    const quiet = { lastSeenOn: new Map([[7, "2026-10-20"]]) };
+
+    it("is trusted when its newest event is from the last business day or today", () => {
+      expect(detect({ ...quiet, accessLogNewestOn: "2026-10-23" }).absent.map((person) => person.userId)).toEqual([7]);
+      expect(detect({ ...quiet, accessLogNewestOn: TODAY }).inactivityAvailable).toBe(true);
+    });
+
+    it("is not trusted when its newest event is older, or there is none: nobody is called inactive, and it says why", () => {
+      for (const newest of ["2026-10-22", "2026-10-01", null]) {
+        const result = detect({ ...quiet, accessLogNewestOn: newest });
+        expect(result.absent).toEqual([]);
+        expect(result.inactivityAvailable).toBe(false);
+        expect(result.inactivityReason).toBe("stale");
+      }
+    });
+
+    it("says off, not stale, when logging is switched off", () => {
+      expect(detect({ accessLoggingOn: false, accessLogNewestOn: null }).inactivityReason).toBe("off");
+      expect(detect().inactivityReason).toBeNull();
+    });
+
+    it("still finds leave while the log is stale", () => {
+      expect(detect({ accessLogNewestOn: null, leaves: [leave()] }).absent).toHaveLength(1);
+    });
   });
 
   it("never calls away someone the log has not seen at all", () => {
