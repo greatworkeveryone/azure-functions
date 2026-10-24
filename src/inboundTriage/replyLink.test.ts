@@ -39,6 +39,8 @@ describe("linking a reply to the send it answers", () => {
 
     const [, selectSql, selectParams] = db.executeQuery.mock.calls[0];
     expect(selectSql).toContain("AND LinkedSendId IS NULL");
+    // A forged From must not be shown as answering a send: only authenticated senders are linked.
+    expect(selectSql).toContain("SenderAuthenticated = 1");
     expect(JSON.parse(selectParams[0].value)).toEqual(["<m1@x>", "<m2@x>"]);
     const [, updateSql, updateParams] = db.executeQuery.mock.calls[1];
     expect(updateSql).toContain("WHERE EmailID = @EmailId AND LinkedSendId IS NULL");

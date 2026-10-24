@@ -55,7 +55,7 @@ describe("getTriageQueue", () => {
   });
 
   it("answers the items uncached and closes the connection", async () => {
-    queue.mockResolvedValue([{ category: null, emailId: 1, fromAddress: null, fromName: null, intent: "other", lane: "both", mailbox: null, receivedAt: null, subject: "s", suggestions: [], urgency: null }]);
+    queue.mockResolvedValue([{ category: null, emailId: 1, fromAddress: null, fromName: null, intent: "other", lane: "both", mailbox: null, receivedAt: null, senderVerified: true, subject: "s", suggestions: [], urgency: null }]);
     const response = await getTriageQueue(request(), context);
     expect(response.jsonBody).toMatchObject({ items: [{ emailId: 1 }] });
     expect(response.headers).toMatchObject({ "Cache-Control": "no-store" });

@@ -20,7 +20,7 @@ jest.mock("../inboundTriage/routingView", () => ({ loadRouting: jest.fn() }));
 const load = jest.mocked(loadRouting);
 const context = { error: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const request = (query = "emailIds=1,2") => new HttpRequest({ method: "GET", url: `http://localhost/api/getEmailRouting?${query}` });
-const VIEW = { assignedAt: null, assignedBy: null, assignee: null, emailId: 1, linkedSendSubject: null, mailbox: null, reasons: [], state: "none" as const, suggestions: [] };
+const VIEW = { assignedAt: null, assignedBy: null, assignee: null, emailId: 1, linkedSendSubject: null, mailbox: null, reasons: [], senderVerified: true, state: "none" as const, suggestions: [] };
 
 beforeEach(() => {
   jest.clearAllMocks();

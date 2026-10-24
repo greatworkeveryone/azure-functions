@@ -7,7 +7,7 @@
 import type { Connection } from "tedious";
 import { todayInDarwin } from "../darwinDate";
 import { readWithAi } from "./aiStep";
-import { buildingByName, buildingNameById, loadJob, matchSender, tenancyById, tenancyByName, type NamedJob } from "./load";
+import { buildingByName, buildingNameById, loadJob, matchSender, UNKNOWN_SENDER, tenancyById, tenancyByName, type NamedJob } from "./load";
 import { linkedSendFor } from "./replyLink";
 import { rulesWork, toddlerWork } from "./workInference";
 import type { LinkedSend, TriageContext, Work } from "./types";
@@ -25,6 +25,8 @@ export interface TriageEmail {
   matchedJobId: number | null;
   receivedAt: Date | null;
   referenceIds: string | null;
+  /** Emails.SenderAuthenticated: true only when Exchange verified the From address; null when it was never checked. */
+  senderAuthenticated: boolean | null;
   subject: string | null;
 }
 
@@ -37,6 +39,8 @@ export async function readWork(email: TriageEmail): Promise<Work> {
   }
   return (await readWithAi(email.emailId, email.subject, email.body, rules)) ?? rules;
 }
+
+const sameAddress = (a: string | null, b: string | null): boolean => a !== null && b !== null && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export interface BuiltContext {
   context: TriageContext;
@@ -53,8 +57,12 @@ async function safeLinkedSend(connection: Connection, email: TriageEmail): Promi
 }
 
 export async function buildContext(connection: Connection, email: TriageEmail, work: Work, now: Date): Promise<BuiltContext> {
-  const linkedSend = await safeLinkedSend(connection, email);
-  const sender = await matchSender(connection, email.fromAddress);
+  // A From address Exchange could not verify may be anyone's. Nothing that rests on who sent the email is
+  // looked up for it: not the tenancy or contractor it claims to be, nor the send it claims to answer.
+  const senderVerified = email.senderAuthenticated === true;
+  const linkedSend = senderVerified ? await safeLinkedSend(connection, email) : null;
+  const sender = senderVerified ? await matchSender(connection, email.fromAddress) : UNKNOWN_SENDER;
+  const replyVerified = linkedSend !== null && sameAddress(linkedSend.recipientEmail, email.fromAddress);
   const jobId = email.matchedJobId ?? work.jobNumber;
   const namedJob = jobId ? await loadJob(connection, jobId) : null;
   const namedTenancy = work.tenancyName ? await tenancyByName(connection, work.tenancyName) : null;
@@ -78,7 +86,9 @@ export async function buildContext(connection: Connection, email: TriageEmail, w
       linkedSend: linkedSend ? { ...linkedSend, recipientEmail: null } : null,
       mailbox: email.mailbox,
       matchedJobId: namedJob?.jobId ?? null,
+      replyVerified,
       senderKind: sender.kind,
+      senderVerified,
       tenancyId,
       tenancyName: tenancy?.name ?? null,
       today: todayInDarwin(now),

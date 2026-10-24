@@ -17,12 +17,14 @@ export interface RoutingView {
   mailbox: string | null;
   /** Plain sentences, most telling first. */
   reasons: string[];
+  /** Exchange verified the From address. False: the email may not be from who it says, and was not given out automatically. */
+  senderVerified: boolean;
   state: RoutingState;
   suggestions: Suggestion[];
 }
 
 const EMAILS_SQL = `SELECT e.EmailID, e.Mailbox, e.AssignedToUserId, e.AssignedAt, e.AssignedBy, e.AssignmentReason, e.LinkedSendSubject,
-    u.DisplayName AS AssigneeName,
+    u.DisplayName AS AssigneeName, CASE WHEN e.SenderAuthenticated = 1 THEN 1 ELSE 0 END AS SenderVerified,
     (SELECT TOP (1) s.Decision FROM dbo.EmailRoutingSets s WHERE s.EmailId = e.EmailID ORDER BY s.SetId DESC) AS LatestDecision
   FROM dbo.Emails e
   LEFT JOIN dbo.AppUsers u ON u.UserID = e.AssignedToUserId
@@ -61,6 +63,7 @@ export async function loadRouting(connection: Connection, emailIds: readonly num
       linkedSendSubject: (row.LinkedSendSubject as string | null) ?? null,
       mailbox: (row.Mailbox as string | null) ?? null,
       reasons: assigned && typeof row.AssignmentReason === "string" ? row.AssignmentReason.split("\n").filter((line: string) => line.trim() !== "") : [],
+      senderVerified: Number(row.SenderVerified) === 1,
       state: assigned ? "assigned" : row.LatestDecision === "queued" ? "needs_triage" : "none",
       suggestions: [],
     });
@@ -98,6 +101,7 @@ export interface QueueItem {
   lane: Lane;
   mailbox: string | null;
   receivedAt: string | null;
+  senderVerified: boolean;
   subject: string | null;
   suggestions: Suggestion[];
   urgency: string | null;
@@ -106,6 +110,7 @@ export interface QueueItem {
 export const QUEUE_PAGE = 50;
 
 const QUEUE_SQL = `SELECT TOP (${QUEUE_PAGE}) e.EmailID, e.Mailbox, e.FromAddress, e.FromName, e.Subject, e.ReceivedAt,
+    CASE WHEN e.SenderAuthenticated = 1 THEN 1 ELSE 0 END AS SenderVerified,
     s.Intent, s.Category, s.Lane, s.Urgency
   FROM dbo.Emails e
   JOIN dbo.EmailRoutingSets s ON s.SetId = (SELECT MAX(SetId) FROM dbo.EmailRoutingSets WHERE EmailId = e.EmailID)
@@ -131,6 +136,7 @@ export async function loadQueue(connection: Connection, lanes: readonly Lane[], 
     lane: row.Lane as Lane,
     mailbox: (row.Mailbox as string | null) ?? null,
     receivedAt: row.ReceivedAt ? new Date(row.ReceivedAt as Date | string).toISOString() : null,
+    senderVerified: Number(row.SenderVerified) === 1,
     subject: (row.Subject as string | null) ?? null,
     suggestions: views.get(Number(row.EmailID))?.suggestions ?? [],
     urgency: (row.Urgency as string | null) ?? null,

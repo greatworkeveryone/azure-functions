@@ -72,8 +72,10 @@ const CONTRACTOR_BY_EMAIL_SQL = `SELECT TOP (2) ContractorID FROM dbo.Contractor
 const STAFF_BY_EMAIL_SQL = `SELECT TOP (1) UserID FROM dbo.AppUsers WHERE Email = @Address AND IsActive = 1`;
 
 /** Who the sender is, by exact address: a tenancy's contact, a contractor, or one of our own staff. A sender who matches several tenancies resolves to a building only when they share one. */
+export const UNKNOWN_SENDER: SenderMatch = { buildingId: null, contractorId: null, kind: "unknown", tenancyId: null, tenancyName: null };
+
 export async function matchSender(connection: Connection, address: string | null): Promise<SenderMatch> {
-  const none: SenderMatch = { buildingId: null, contractorId: null, kind: "unknown", tenancyId: null, tenancyName: null };
+  const none = UNKNOWN_SENDER;
   const value = address?.trim();
   if (!value) return none;
   const param = { name: "Address", type: TYPES.NVarChar, value };

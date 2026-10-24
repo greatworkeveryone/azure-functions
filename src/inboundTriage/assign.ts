@@ -47,7 +47,7 @@ const fail = (status: 400 | 404 | 409, error: string): AssignResult => ({ error,
 function manualContext(emailId: number, mailbox: string | null, today: string): TriageContext {
   return {
     buildingId: null, buildingName: null, category: null, contractorId: null, emailId, intent: "other", lane: "both",
-    linkedSend: null, mailbox, matchedJobId: null, senderKind: "unknown", tenancyId: null, tenancyName: null, today, urgency: null,
+    linkedSend: null, mailbox, matchedJobId: null, replyVerified: false, senderKind: "unknown", senderVerified: false, tenancyId: null, tenancyName: null, today, urgency: null,
   };
 }
 

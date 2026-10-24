@@ -94,7 +94,19 @@ export interface TriageContext {
   linkedSend: LinkedSend | null;
   mailbox: string | null;
   matchedJobId: number | null;
+  /**
+   * The email answers a send, from the address that send went to, and its sender was verified. Only then
+   * may the reply link alone put the email with whoever sent the send: a Message-ID is not a secret
+   * (a forwarded notice carries it), so the link proves nothing about who is writing.
+   */
+  replyVerified: boolean;
   senderKind: SenderKind;
+  /**
+   * Exchange's SPF, DKIM and DMARC result for the From address (Emails.SenderAuthenticated). When false
+   * or never checked, nothing about the sender is believed: no tenancy or contractor match, no reply
+   * link, and the email is never assigned automatically.
+   */
+  senderVerified: boolean;
   tenancyId: number | null;
   tenancyName: string | null;
   /** Today in Darwin, YYYY-MM-DD: the date every "days" feature was measured from. */

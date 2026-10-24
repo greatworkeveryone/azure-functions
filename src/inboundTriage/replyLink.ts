@@ -40,9 +40,13 @@ export async function storeLink(connection: Connection, emailId: number, send: L
 
 const REPLIES_SQL = `SELECT EmailID, InReplyTo, ReferenceIds FROM dbo.Emails
    WHERE MessageID IN (SELECT [value] FROM OPENJSON(@MessageIds)) AND LinkedSendId IS NULL
-     AND (InReplyTo IS NOT NULL OR ReferenceIds IS NOT NULL)`;
+     AND (InReplyTo IS NOT NULL OR ReferenceIds IS NOT NULL)
+     AND SenderAuthenticated = 1`;
 
-/** After a page of mail is stored: link each reply among these message ids. Returns how many were linked. */
+/**
+ * After a page of mail is stored: link each reply among these message ids. Only an authenticated sender's
+ * reply is linked: a forged From must not be shown as answering a send. Returns how many were linked.
+ */
 export async function linkReplies(connection: Connection, messageIds: readonly string[]): Promise<number> {
   if (messageIds.length === 0) return 0;
   const rows = await executeQuery(connection, REPLIES_SQL, [{ name: "MessageIds", type: TYPES.NVarChar, value: JSON.stringify(messageIds) }]);
