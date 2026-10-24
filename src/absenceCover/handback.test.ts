@@ -134,6 +134,16 @@ describe("takeBackItem", () => {
     expect(store.insertCoverAction).not.toHaveBeenCalled();
   });
 
+  it.each([["job", "user"], ["decision_request", "user"], ["email", "user"]])("refuses a take-back of a %s when the person's role no longer holds what the work needs (%s)", async (itemType, role) => {
+    store.getCoverAction.mockResolvedValue(row({ itemType: itemType as never }));
+    await expect(takeBackItem(conn, { ...fay, roles: [role] }, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
+    expect(store.insertCoverAction).not.toHaveBeenCalled();
+  });
+
+  it("lets a person take back work their role still holds, and checks every role they have", async () => {
+    expect(await takeBackItem(conn, { ...fay, roles: ["user", "facilities"] }, 100)).toEqual({ coverActionId: 555 });
+  });
+
   it("lets a job the ladder gave to someone higher up be taken back: it changed hands, it was not pushed up in place", async () => {
     store.getCoverAction.mockResolvedValue(row({ action: "escalated" }));
     expect(await takeBackItem(conn, fay, 100)).toEqual({ coverActionId: 555 });
