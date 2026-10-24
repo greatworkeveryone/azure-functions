@@ -68,11 +68,11 @@ describe("the usage source", () => {
     expect(validate).not.toMatch(/\b(userId|oid|email)\b/i);
   });
 
-  it("deletes only in the purge, and only the two raw tables", () => {
+  it("deletes only in the purge, and only the raw tables and the daily totals past their own retention, never devices", () => {
     const deleting = usageSources.filter((file) => /DELETE\s+FROM/i.test(readFileSync(file, "utf8"))).map((file) => relative(ROOT, file));
     expect(deleting).toEqual([join("src", "usage", "purge.ts")]);
     const purge = readFileSync(join(ROOT, "src", "usage", "purge.ts"), "utf8");
-    expect([...purge.matchAll(/DELETE\s+FROM\s+(dbo\.\w+)/gi)].map((m) => m[1])).toEqual(["dbo.UsageViews", "dbo.UsageSessions"]);
+    expect([...purge.matchAll(/DELETE\s+FROM\s+(dbo\.\w+)/gi)].map((m) => m[1]).sort()).toEqual(["dbo.UsageDaily", "dbo.UsageSessions", "dbo.UsageViews"]);
   });
 
   it("never selects stored text from the other logs it reads", () => {

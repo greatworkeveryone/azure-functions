@@ -7,7 +7,7 @@ jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMe
 jest.mock("../usage/rollup", () => ({ ...jest.requireActual("../usage/rollup"), rollUpDays: jest.fn(async () => ({ days: 3, inserted: 2, updated: 5 })) }));
 jest.mock("../usage/purge", () => ({
   ...jest.requireActual("../usage/purge"),
-  purgeUsage: jest.fn(async (_c: unknown, o: { dryRun: boolean }) => ({ cutoffDay: "2026-04-27", dryRun: o.dryRun, sessionsDeleted: 0, sessionsEligible: 0, viewsDeleted: 0, viewsEligible: 0 })),
+  purgeUsage: jest.fn(async (_c: unknown, o: { dryRun: boolean }) => ({ cutoffDay: "2026-04-27", dailyCutoffDay: "2024-10-24", dailyDeleted: 0, dailyEligible: 0, dryRun: o.dryRun, sessionsDeleted: 0, sessionsEligible: 0, viewsDeleted: 0, viewsEligible: 0 })),
 }));
 
 import { createServiceRequestConnection } from "../db";
@@ -19,7 +19,7 @@ import { usageRollupTimer } from "./usageRollupTimer";
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const timer = { isPastDue: false } as unknown as Timer;
-const KEYS = ["USAGE_TRACKING_ENABLED", "USAGE_PURGE_ENABLED", "USAGE_PURGE_DRY_RUN", "USAGE_RETENTION_DAYS"] as const;
+const KEYS = ["USAGE_TRACKING_ENABLED", "USAGE_PURGE_ENABLED", "USAGE_PURGE_DRY_RUN", "USAGE_RETENTION_DAYS", "USAGE_DAILY_RETENTION_DAYS"] as const;
 const saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
 
 beforeEach(() => {
@@ -73,19 +73,26 @@ describe("usagePurgeTimer", () => {
     process.env.USAGE_PURGE_ENABLED = "true";
     process.env.USAGE_RETENTION_DAYS = "90";
     await usagePurgeTimer(timer, ctx);
-    expect(jest.mocked(purgeUsage).mock.calls[0][1]).toMatchObject({ dryRun: false, retentionDays: 90 });
+    expect(jest.mocked(purgeUsage).mock.calls[0][1]).toMatchObject({ dailyRetentionDays: 730, dryRun: false, retentionDays: 90 });
+  });
+
+  it("passes the daily retention too, never shorter than the raw retention", async () => {
+    process.env.USAGE_PURGE_ENABLED = "true";
+    process.env.USAGE_DAILY_RETENTION_DAYS = "1095";
+    await usagePurgeTimer(timer, ctx);
+    expect(jest.mocked(purgeUsage).mock.calls[0][1]).toMatchObject({ dailyRetentionDays: 1095 });
   });
 
   it("only counts with USAGE_PURGE_DRY_RUN, even when the purge is also enabled", async () => {
     process.env.USAGE_PURGE_ENABLED = "true";
     process.env.USAGE_PURGE_DRY_RUN = "true";
     await usagePurgeTimer(timer, ctx);
-    expect(jest.mocked(purgeUsage).mock.calls[0][1]).toMatchObject({ dryRun: true, retentionDays: 180 });
+    expect(jest.mocked(purgeUsage).mock.calls[0][1]).toMatchObject({ dailyRetentionDays: 730, dryRun: true, retentionDays: 180 });
   });
 
   it("raises a Sentry warning when it reaches its per-run cap", async () => {
     process.env.USAGE_PURGE_ENABLED = "true";
-    jest.mocked(purgeUsage).mockResolvedValueOnce({ cutoffDay: "x", dryRun: false, sessionsDeleted: 0, sessionsEligible: 0, viewsDeleted: 200_000, viewsEligible: 300_000 });
+    jest.mocked(purgeUsage).mockResolvedValueOnce({ cutoffDay: "x", dryRun: false, dailyCutoffDay: "x", dailyDeleted: 0, dailyEligible: 0, sessionsDeleted: 0, sessionsEligible: 0, viewsDeleted: 200_000, viewsEligible: 300_000 });
     await usagePurgeTimer(timer, ctx);
     expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringMatching(/per-run cap/), { level: "warning" });
   });
