@@ -30,6 +30,8 @@ export const TIMER_NAMES = [
   "tenancyCpiSyncTimer",
   "tenancyReviewScheduleTimer",
   "timesheetSyncTimer",
+  "usagePurgeTimer",
+  "usageRollupTimer",
 ] as const;
 export type TimerName = (typeof TIMER_NAMES)[number];
 

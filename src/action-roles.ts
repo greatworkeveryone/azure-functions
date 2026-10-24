@@ -524,6 +524,21 @@ export const ACTION_ROLES = {
     routes: ["listAiCalls"],
     why: "Admin → AI activity: the log of every AI call (who, which purpose, how big, how it ended): admin and directors, as Settings and rollout controls (viewAdmin). No route returns stored text.",
   },
+  viewUsageAnalytics: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi"],
+    why: "Audit log → Usage: who uses Floorplan, for how long, on what kind of device, plus the email and AI breakdowns (PLAN §14): admin and directors. The CFO is refused these routes and has the Finance view instead (usage/scope.ts holds the scope).",
+  },
+  viewFinanceUsageAnalytics: {
+    gate: [A.CFO],
+    routes: ["getUsageFinance"],
+    why: "Audit log → Usage → Finance usage: accounts, accounts manager, CFO and admin people, MYOB calls and money decisions only (PLAN §14): the CFO, with admin and directors through the hierarchy. The server holds the CFO to that scope whatever filters are sent.",
+  },
+  manageUsageAnalytics: {
+    gate: [A.ADMIN],
+    routes: ["labelUsageDevice", "runUsageRollup"],
+    why: "Name a shared device (\"Facilities tablet\") and run the usage roll-up now (PLAN §14): admin only.",
+  },
   viewFinanceControlsPack: { gate: [A.CFO, A.DIRECTOR], routes: ["getFinanceControlsPack"], why: "Read the CFO controls matrix and sign-off history (WP55)." },
   signFinanceControlsPack: { gate: [A.CFO], match: "exact", routes: ["signFinanceControlsPack"], why: "The CFO records her review of the current controls pack; this enables no MYOB writes." },
   manageApprovalLimits: {

@@ -31,7 +31,7 @@ const FEATURE_KEYS = [
   "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
   "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
   "quotes", "recurringFaults", "rentReviews", "tenancySchedule",
-  "tenancyScheduleReport", "tenancyVacancies", "timesheets",
+  "tenancyScheduleReport", "tenancyVacancies", "timesheets", "usageAnalytics",
 ] as const;
 
 export async function getFeatureFlags(

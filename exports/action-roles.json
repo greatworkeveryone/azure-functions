@@ -346,6 +346,9 @@
   "manageTestData": [
     "admin"
   ],
+  "manageUsageAnalytics": [
+    "admin"
+  ],
   "manageVarianceMargin": [
     "cfo"
   ],
@@ -636,6 +639,11 @@
     "cfo",
     "director"
   ],
+  "viewFinanceUsageAnalytics": [
+    "admin",
+    "cfo",
+    "director"
+  ],
   "viewInspections": [
     "admin",
     "director",
@@ -807,6 +815,10 @@
     "facilities",
     "facilities_manager",
     "user"
+  ],
+  "viewUsageAnalytics": [
+    "admin",
+    "director"
   ],
   "viewUserManagement": [
     "admin",

@@ -66,6 +66,7 @@ const FRONTEND_FEATURE_KEYS = [
   "tenancyScheduleReport",
   "tenancyVacancies",
   "timesheets",
+  "usageAnalytics",
 ];
 
 beforeEach(() => {
