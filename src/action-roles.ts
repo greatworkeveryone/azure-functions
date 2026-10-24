@@ -34,6 +34,7 @@ import { MANAGE_DEFECTS_PERIODS_ROLES, MANAGE_SERVICE_SCHEDULES_ROLES, VIEW_FACI
 import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
+import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
 export interface ActionRoles {
   /** The allowlist the handler's gate is given. */
@@ -536,7 +537,22 @@ export const ACTION_ROLES = {
     routes: [],
     why: "Every escalation in the business (ALL_ESCALATION_ROLES, getEscalations?view=all).",
   },
-  viewLeave: { gate: [A.USER], routes: ["getLeaveRequests", "createLeaveRequest", "decideLeaveRequest"], why: "Own leave and server-filtered review queue; per-record authority is enforced." },
+  viewLeave: {
+    gate: [A.USER],
+    routes: ["getLeaveRequests", "createLeaveRequest", "decideLeaveRequest", "getCoverDelegates", "saveCoverDelegate", "archiveCoverDelegate", "getMyHandback", "takeBackCoverItem"],
+    why: "Own leave and server-filtered review queue; per-record authority is enforced. Also who covers for you while you are away (AW1): you, your manager or your team's manager nominate, and you take back what moved while you were away.",
+  },
+  viewAbsenceCover: {
+    gate: roles(VIEW_COVER_ROLES),
+    routes: ["getCoverOverview"],
+    why: "The Covering screen: who is away, what is waiting on them and what moved (AW1, VIEW_COVER_ROLES). A manager sees their own team; the CFO and directors see more.",
+  },
+  manageAbsenceCover: {
+    gate: roles(MANAGE_COVER_ROLES),
+    refused: [A.ADMIN],
+    routes: ["decideCoverItem"],
+    why: "Move an item to its cover, or keep it where it is (AW1). The gate admits admin through the hierarchy and the handler refuses it: admin arranges nobody's work (decision 4). Live only: nothing moves while ABSENCE_COVER_ENABLED is unset or in dry run.",
+  },
   manageStaffReporting: { gate: [A.CFO,A.DIRECTOR], routes: ["getStaffReporting", "saveStaffReporting"], why: "CFO reporting controls for leave routing; no money or timesheet authority changes." },
   viewBuildingRegister: {
     gate: VIEW_ASSETS_ROLES,
@@ -581,8 +597,8 @@ export const ACTION_ROLES = {
   },
   viewJobs: {
     gate: JOB_READ,
-    routes: ["getJobs", "getJob"],
-    why: "Read jobs, their history and their packet.",
+    routes: ["getJobs", "getJob", "getCoverNotes"],
+    why: "Read jobs, their history and their packet, and who is covering a job while its owner is away.",
   },
   viewKeys: {
     gate: [A.FACILITIES, A.FACILITIES_APPROVAL],

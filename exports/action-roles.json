@@ -253,6 +253,12 @@
     "cfo",
     "director"
   ],
+  "manageAbsenceCover": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "manageAccessProfiles": [
     "admin"
   ],
@@ -499,6 +505,13 @@
     "admin",
     "director",
     "facilities",
+    "facilities_manager"
+  ],
+  "viewAbsenceCover": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
     "facilities_manager"
   ],
   "viewAccessLog": [
