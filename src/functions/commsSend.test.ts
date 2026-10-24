@@ -4,6 +4,7 @@ import * as events from "../comms/events";
 import type { AdminIdentity } from "../comms/identityStore";
 import * as identityStore from "../comms/identityStore";
 import * as jobStore from "../comms/store";
+import * as userStore from "../comms/userSignatureStore";
 import { record } from "../ledger";
 import { _resetRateLimitForTests } from "../rateLimit";
 import { previewCorrespondence } from "./previewCorrespondence";
@@ -31,14 +32,10 @@ jest.mock("../db", () => ({
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn() }));
 jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn() }));
-jest.mock("../comms/identityStore", () => ({
-  ...jest.requireActual("../comms/identityStore"),
-  findUserByOid: jest.fn(),
-  readIdentity: jest.fn(),
-  readUserSignature: jest.fn(),
-}));
+jest.mock("../comms/identityStore", () => ({ ...jest.requireActual("../comms/identityStore"), readIdentity: jest.fn() }));
+jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn(), readUserSignature: jest.fn() }));
 
-const idStore = jest.mocked(identityStore);
+const idStore = { ...jest.mocked(identityStore), ...jest.mocked(userStore) };
 const jobs = jest.mocked(jobStore);
 const context = { error: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const post = (body: unknown) => new HttpRequest({ body: { string: typeof body === "string" ? body : JSON.stringify(body) }, headers: { "Content-Type": "application/json" }, method: "POST", url: "http://localhost/api/x" });

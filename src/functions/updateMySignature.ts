@@ -11,7 +11,7 @@ import type { Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
 import { AppRole, errorResponse } from "../auth";
 import { authorizeActor, badRequest, forbidden, noStore, notFound } from "../comms/actor";
-import { findUserById, findUserByOid, writeUserSignature } from "../comms/identityStore";
+import { findUserById, findUserByOid, writeUserSignature } from "../comms/userSignatureStore";
 import { unexpectedKey, wholeId } from "../comms/request";
 import { parseUserSignature } from "../comms/signature";
 import { closeConnection, createRequestConnection } from "../db";

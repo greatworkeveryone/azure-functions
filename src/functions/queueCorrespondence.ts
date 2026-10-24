@@ -16,7 +16,7 @@ import { readJsonBody } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { authorizeActor, badRequest, noStore } from "../comms/actor";
 import { approvalThreshold, fromAddress, fromName } from "../comms/config";
-import { findUserByOid } from "../comms/identityStore";
+import { findUserByOid } from "../comms/userSignatureStore";
 import { checkRecipients, writeJob } from "../comms/queueJob";
 import { parseQueueInput } from "../comms/request";
 import { prepareSender } from "../comms/senderSetup";

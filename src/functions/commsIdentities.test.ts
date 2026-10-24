@@ -2,6 +2,7 @@ import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import type { AdminIdentity } from "../comms/identityStore";
 import * as identityStore from "../comms/identityStore";
+import * as userStore from "../comms/userSignatureStore";
 import { _resetRateLimitForTests } from "../rateLimit";
 import { getMySignature } from "./getMySignature";
 import { listCommsIdentities } from "./listCommsIdentities";
@@ -22,18 +23,20 @@ jest.mock("../auth", () => ({
 jest.mock("../db", () => ({ closeConnection: jest.fn(), createRequestConnection: jest.fn(async () => ({})), executeQuery: jest.fn() }));
 jest.mock("../comms/identityStore", () => ({
   ...jest.requireActual("../comms/identityStore"),
-  findUserById: jest.fn(),
-  findUserByOid: jest.fn(),
   insertIdentity: jest.fn(),
   listIdentities: jest.fn(),
   readIdentity: jest.fn(),
-  readUserSignature: jest.fn(),
   setIdentityArchived: jest.fn(),
   updateIdentity: jest.fn(),
+}));
+jest.mock("../comms/userSignatureStore", () => ({
+  findUserById: jest.fn(),
+  findUserByOid: jest.fn(),
+  readUserSignature: jest.fn(),
   writeUserSignature: jest.fn(),
 }));
 
-const store = jest.mocked(identityStore);
+const store = { ...jest.mocked(identityStore), ...jest.mocked(userStore) };
 const context = { error: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const get = () => new HttpRequest({ method: "GET", url: "http://localhost/api/x" });
 const post = (body: unknown) => new HttpRequest({ body: { string: typeof body === "string" ? body : JSON.stringify(body) }, headers: { "Content-Type": "application/json" }, method: "POST", url: "http://localhost/api/x" });

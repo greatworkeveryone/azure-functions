@@ -1,6 +1,7 @@
 import { record } from "../ledger";
 import { appendEvent } from "./events";
 import { settleJob, sqlQueueStore } from "./queueStore";
+import * as queries from "./queueQueries";
 import * as store from "./store";
 import type { JobRow } from "./types";
 
@@ -13,11 +14,12 @@ jest.mock("../db", () => ({
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("./events", () => ({ appendEvent: jest.fn() }));
 jest.mock("./store");
+jest.mock("./queueQueries");
 
-const s = jest.mocked(store);
+const s = { ...jest.mocked(store), ...jest.mocked(queries) };
 const conn = {} as never;
 const job = (status: JobRow["status"]) => ({ correspondenceId: 41, status }) as JobRow;
-const tally = (over: Partial<store.JobTally> = {}): store.JobTally => ({ blocked: 0, failed: 0, pending: 0, recipients: 3, sent: 3, ...over });
+const tally = (over: Partial<queries.JobTally> = {}): queries.JobTally => ({ blocked: 0, failed: 0, pending: 0, recipients: 3, sent: 3, ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();

@@ -6,7 +6,8 @@ import type { HttpResponseInit } from "@azure/functions";
 import type { Connection } from "tedious";
 import { badRequest, forbidden, notFound, type CommsActor } from "./actor";
 import { resolveReplyTo, type ResolvedReplyTo } from "./identity";
-import { findUserByOid, readIdentity, readUserSignature } from "./identityStore";
+import { readIdentity } from "./identityStore";
+import { findUserByOid, readUserSignature } from "./userSignatureStore";
 import type { EmailContent } from "./request";
 import { composeSignature, type Signature, type SignatureActor } from "./signature";
 

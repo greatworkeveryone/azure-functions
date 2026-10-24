@@ -10,14 +10,13 @@ import {
   claimRecipient,
   completeJob,
   countRecentAttempts,
-  moveJob,
-  readJob,
   readQueue,
   recoverStale,
   refreshCounts,
   saveDraftIds,
   setRecipientOutcome,
-} from "./store";
+} from "./queueQueries";
+import { moveJob, readJob } from "./store";
 import type { QueueStore } from "./worker";
 
 export const TIMER_ACTOR = "commsSendTimer";

@@ -1,5 +1,5 @@
 import { MailSendError, type MailSender } from "./graphSend";
-import type { RecipientOutcome } from "./store";
+import type { RecipientOutcome } from "./queueQueries";
 import type { JobRow, QueueItem, RecipientRow, RecipientStatus } from "./types";
 import { RETRY_WAIT_MINUTES, runCommsQueue, type QueueStore, type WorkerOptions } from "./worker";
 

@@ -1,7 +1,7 @@
 import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import * as events from "../comms/events";
-import * as identityStore from "../comms/identityStore";
+import * as userStore from "../comms/userSignatureStore";
 import * as jobStore from "../comms/store";
 import type { JobRow } from "../comms/types";
 import { record } from "../ledger";
@@ -30,7 +30,7 @@ jest.mock("../db", () => ({
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn(), readEvents: jest.fn() }));
 jest.mock("../comms/store", () => ({ cancelWaitingRecipients: jest.fn(), moveJob: jest.fn(), readJob: jest.fn(), readRecipients: jest.fn() }));
-jest.mock("../comms/identityStore", () => ({ ...jest.requireActual("../comms/identityStore"), findUserByOid: jest.fn() }));
+jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn() }));
 
 const jobs = jest.mocked(jobStore);
 const context = { error: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
@@ -53,7 +53,7 @@ beforeEach(() => {
   jobs.readJob.mockResolvedValue(job());
   jobs.moveJob.mockResolvedValue(true);
   jobs.cancelWaitingRecipients.mockResolvedValue(30);
-  jest.mocked(identityStore.findUserByOid).mockResolvedValue({ displayName: "Mo Manager", email: "mo@randazzo.properties", userId: 3 });
+  jest.mocked(userStore.findUserByOid).mockResolvedValue({ displayName: "Mo Manager", email: "mo@randazzo.properties", userId: 3 });
 });
 
 describe("approveCorrespondence", () => {

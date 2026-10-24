@@ -17,7 +17,7 @@ import type { CommsMode } from "./config";
 import { MAX_ATTEMPTS, STALE_SENDING_MINUTES } from "./config";
 import { MailSendError, toSendError, type MailSender } from "./graphSend";
 import type { QueueItem } from "./types";
-import type { RecipientOutcome } from "./store";
+import type { RecipientOutcome } from "./queueQueries";
 import type { RecipientStatus } from "./types";
 
 /** What the worker needs from the database; sqlQueueStore binds it to a connection. */

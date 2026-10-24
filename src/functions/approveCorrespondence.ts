@@ -12,7 +12,7 @@ import { readJsonBody } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { authorizeActor, badRequest, conflict, forbidden, noStore, notFound } from "../comms/actor";
 import { approveJob } from "../comms/decide";
-import { findUserByOid } from "../comms/identityStore";
+import { findUserByOid } from "../comms/userSignatureStore";
 import { unexpectedKey, wholeId } from "../comms/request";
 import { readJob } from "../comms/store";
 import { closeConnection, createRequestConnection } from "../db";

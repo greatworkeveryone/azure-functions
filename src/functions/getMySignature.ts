@@ -10,7 +10,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { errorResponse } from "../auth";
 import { authorizeActor, noStore } from "../comms/actor";
 import { isOrgAddress } from "../comms/identity";
-import { findUserByOid, readUserSignature } from "../comms/identityStore";
+import { findUserByOid, readUserSignature } from "../comms/userSignatureStore";
 import { composeSignature } from "../comms/signature";
 import { closeConnection, createRequestConnection } from "../db";
 
