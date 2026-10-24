@@ -16,7 +16,7 @@ export type UsageScope = "all" | "finance";
 export const FINANCE_USER_ROLES: readonly string[] = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.ADMIN];
 
 /** The modules the Finance view reports a person's time in (module keys are the navigation's: constants/nav in the frontend). */
-export const FINANCE_MODULE_KEYS: readonly string[] = ["finance", "admin/myob", "payroll", "timesheets"];
+export const FINANCE_MODULE_KEYS: readonly string[] = ["finance", "finance/controls", "admin/myob", "payroll", "timesheets"];
 
 /** DecisionLedger codes that are money decisions: the prefix before the dot. LIKE patterns, so a literal underscore is escaped. */
 export const FINANCE_ACTION_LIKE: readonly string[] = [

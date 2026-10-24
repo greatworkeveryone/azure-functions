@@ -25,7 +25,7 @@ describe("the finance scope", () => {
   });
 
   it("reports time in finance pages only, with no facilities module", () => {
-    expect(FINANCE_MODULE_KEYS).toEqual(["finance", "admin/myob", "payroll", "timesheets"]);
+    expect(FINANCE_MODULE_KEYS).toEqual(["finance", "finance/controls", "admin/myob", "payroll", "timesheets"]);
   });
 });
 
