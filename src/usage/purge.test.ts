@@ -70,6 +70,8 @@ describe("purgeUsage: selection", () => {
     expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM dbo\.UsageViews v WHERE v\.SessionId = s\.SessionId\)/);
     expect(sql).toMatch(/s\.LastHeartbeatAt < @CutoffUtc/);
     expect(sql).toMatch(/FROM dbo\.UsageDaily d/);
+    // only this person's own roll-up for the day counts, never anyone else's
+    expect(sql).toMatch(/d\.UserId = s\.UserId/);
   });
 });
 

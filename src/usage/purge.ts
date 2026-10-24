@@ -6,7 +6,7 @@ import { addDays, dayStartUtc, darwinDay } from "./days";
 // retention window, chosen positively: a view goes only when its person's roll-up for its Darwin day
 // exists, was made after the day ended and after the session's last heartbeat (so nothing is lost
 // that the roll-up has not counted). A session goes only when it is past the window, has no views
-// left and its Darwin day has been rolled up after it ended. Devices are
+// left and that person's own roll-up for its Darwin day was made after it ended (nobody else's counts). Devices are
 // never deleted. A person's daily totals (UsageDaily) go once their whole day is older than the daily retention
 // (USAGE_DAILY_RETENTION_DAYS, always at least the raw retention), whole days at a time. Whether anything is deleted is the caller's choice (USAGE_PURGE_ENABLED, with
 // USAGE_PURGE_DRY_RUN to count only); a run deletes at most MAX_PER_RUN rows of each kind.
@@ -49,7 +49,7 @@ const ELIGIBLE_SESSIONS = `
    AND NOT EXISTS (SELECT 1 FROM dbo.UsageViews v WHERE v.SessionId = s.SessionId)
    AND EXISTS (
      SELECT 1 FROM dbo.UsageDaily d
-      WHERE d.Day = CAST(DATEADD(MINUTE, 570, s.StartedAt) AS DATE) AND d.RolledUpAt >= DATEADD(MINUTE, -570, DATEADD(DAY, 1, CAST(d.Day AS DATETIME2(3)))))`;
+      WHERE d.Day = CAST(DATEADD(MINUTE, 570, s.StartedAt) AS DATE) AND d.UserId = s.UserId AND d.RolledUpAt >= DATEADD(MINUTE, -570, DATEADD(DAY, 1, CAST(d.Day AS DATETIME2(3)))))`;
 
 const count = async (connection: Connection, sql: string, cutoffUtc: Date): Promise<number> => {
   const rows = await executeQuery(connection, `SELECT COUNT_BIG(*) AS N ${sql}`, [{ name: "CutoffUtc", type: TYPES.DateTime2, value: cutoffUtc }]);
