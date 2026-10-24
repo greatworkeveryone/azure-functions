@@ -5,7 +5,8 @@ import { FINANCE_ACTION_LIKE, FINANCE_MODULE_KEYS, FINANCE_USER_ROLES, type Usag
 import { loadUsagePeople, peopleParams, type UsagePersonDto } from "./people";
 
 // Finance usage (PLAN §14): the CFO's view. Her own team's use of Floorplan (accounts,
-// accounts_manager, cfo and admin people, time in finance pages only), the money decisions recorded
+// accounts_manager, cfo and admin people, time in finance pages only: totals, calendar and device classes
+// are summed from the finance modules' rows, never from the all-modules totals), the money decisions recorded
 // in the DecisionLedger, and MYOB calls by operation, outcome and person. No other role's activity
 // and no other module appears for the CFO, whatever filters the request carries (scope.ts).
 
@@ -49,10 +50,7 @@ export async function loadUsageFinance(connection: Connection, period: UsagePeri
       WHERE d.ModuleKey IN (SELECT value FROM OPENJSON(@Keys)) AND LOWER(u.Role) IN (SELECT value FROM OPENJSON(@Roles))
         AND d.Day >= CAST(@From AS DATE) AND d.Day <= CAST(@To AS DATE) AND (@UserId IS NULL OR d.UserId = @UserId)
       GROUP BY d.ModuleKey ORDER BY SUM(d.ActiveSeconds) DESC`,
-    [
-      ...peopleParams(period, { roles, userId: filter.userId }),
-      { name: "Keys", type: TYPES.NVarChar, value: JSON.stringify(FINANCE_MODULE_KEYS) },
-    ],
+    peopleParams(period, { moduleKeys: FINANCE_MODULE_KEYS, roles, userId: filter.userId }),
   );
 
   const utc: SqlParam[] = [

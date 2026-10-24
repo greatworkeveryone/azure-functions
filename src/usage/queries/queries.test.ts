@@ -112,6 +112,21 @@ describe("people", () => {
     }
   });
 
+  it("adds up only the allowed modules when they are given, in every query, never the all-modules totals", async () => {
+    rows([], [], [], []);
+    await loadUsagePeople(conn, period, { moduleKeys: ["finance", "admin/myob"], roles: null, userId: null });
+    for (let i = 0; i < 4; i += 1) {
+      expect(paramsOf(i).find((p) => p.name === "Keys")?.value).toBe('["finance","admin/myob"]');
+      expect(sqlOf(i)).toMatch(/d\.ModuleKey IN \(SELECT value FROM OPENJSON\(@Keys\)\)/);
+    }
+  });
+
+  it("sends no module list, so the all-modules totals are used, when there is no restriction", async () => {
+    rows([], [], [], []);
+    await loadUsagePeople(conn, period, { moduleKeys: null, roles: null, userId: null });
+    expect(paramsOf(0).find((p) => p.name === "Keys")?.value).toBeNull();
+  });
+
   it("applies no narrowing for null, as null parameters", async () => {
     rows([], [], [], []);
     await loadUsagePeople(conn, period, { moduleKeys: null, roles: null, userId: null });
@@ -209,8 +224,9 @@ describe("finance", () => {
   it("limits people to the finance roles and time to the finance modules, with every value bound", async () => {
     empty();
     await loadUsageFinance(conn, period, { role: null, scope: "finance", userId: null });
-    const moduleSql = query.mock.calls.map((_c, i) => i).find((i) => /d\.ModuleKey IN/.test(sqlOf(i))) as number;
+    const moduleSql = query.mock.calls.map((_c, i) => i).find((i) => /GROUP BY d\.ModuleKey/.test(sqlOf(i))) as number;
     expect(jsonParam(moduleSql, "Keys")).toEqual([...FINANCE_MODULE_KEYS]);
+    for (let i = 0; i < 4; i += 1) expect(jsonParam(i, "Keys")).toEqual([...FINANCE_MODULE_KEYS]);
     expect(jsonParam(moduleSql, "Roles")).toEqual([...FINANCE_USER_ROLES]);
     for (let i = 0; i < query.mock.calls.length; i += 1) expect(sqlOf(i)).not.toMatch(/facilities|inspections|'finance'|accounts_manager/);
   });
