@@ -27,6 +27,10 @@ then the real switch.
 | `COMMS_MAX_PER_MINUTE` | 25 | Most messages the queue starts in a minute, counted from the recipients' own attempt times so overlapping runs share it; the rest wait for the next run. A whole number from 1 to 120; anything else uses 25. Exchange allows about 30 a minute per mailbox | Leave at 25 |
 | `COMMS_APPROVAL_THRESHOLD` | 20 | A send to more recipients than this (after removing repeated addresses) waits in `awaiting_approval` until a manager, the CFO or a director who is not the person who queued it approves it; admin approves nothing real. A whole number from 0 to 2000; anything else uses 20 | Leave at 20 |
 | `COMMS_FOOTER_ADDRESS` | unset: no address | A postal address printed in every email's footer under the company name. Unset, the footer shows the company name, why the person is receiving the notice, and who replies go to | Once RP gives the address to print |
+| `ABSENCE_COVER_ENABLED` | off | The `absenceCoverTimer` (every 30 minutes, Monday to Friday UTC; AW1, PLAN §13) finds who is away today (approved leave, leave that was not planned, or no sign-in for `ABSENCE_INACTIVITY_DAYS` business days while not on leave) and moves their outstanding work to a cover: the delegate they nominated, else their reporting-line manager, else their team's manager, else up the escalation ladder. Work that falls due before they are back moves; so does urgent or high-value work when the absence was unplanned or the person has not signed in; the rest is listed on the Covering screen for a manager to move or keep. It works on the Darwin date and skips a day that is not a business day. A move changes only who has the item, through that item's own columns and history (a job's assignee with an `assignment_change` entry, a decision request's people asked, an escalation's target, an email's assignee), in one transaction with its append-only `dbo.CoverActions` row and the cover's in-app notice (policy `cover.moved`, so the email goes through the existing escalation notifier and honours `DEV_EMAIL_OVERRIDE`). Nothing is ever approved, answered or decided, and admin is never a cover for a real record. Needs migration 177. Off, it logs "off" and does not touch the database, and the manager's one-tap Move and Keep are refused too (409 `cover_switched_off`): nothing moves while it is unset. The person's own take-back always works. Pair with the `absenceCover` flag | After a dry run: the first live run moves everything already overdue on anyone who is away |
+| `ABSENCE_COVER_DRY_RUN` | off | Wins over `ABSENCE_COVER_ENABLED`. The run writes `suggested` rows only (marked as a dry run, saying "would have moved this") and moves nothing; the Covering screen shows them as what would move and disables Move and Keep. A suggestion is not written twice for one absence | First, and read the `TimerRuns.Counts` (`wouldMove`, `suggested`, `deferred`) and the Covering screen |
+| `ABSENCE_INACTIVITY_DAYS` | 3 | Completed business days with no sign-in (from `AccessEvents`) that count as away, for someone not on leave. Only people the access log has seen at least once are ever called away, and only while access logging is on (`ACCESS_LOG_ENABLED` is not `"false"`): otherwise the Covering screen says inactivity detection is unavailable. A whole number from 1 to 30; anything else uses 3. An inactive person has no known return date, so only high-importance items move automatically; the rest are suggested | Leave at 3 |
+| `ABSENCE_COVER_MAX_ACTIONS` | 50 | Most ledger rows (moves and suggestions) one run writes, most urgent first (importance, then due date); the rest wait for the next run (`TimerRuns.Counts.deferred`). A whole number above 0; anything else uses 50 | Leave at 50 |
 | `REVIEW_WINDOW_DAYS` | 60 | Days before its date a scheduled rent review becomes due | Leave at 60 |
 | `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
 | `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row From WP26c, an unresolved review row dated on or after it shows as pending (awaiting review) on the schedule until a review applies it | The day WP25/WP26 go live (gate B) |
@@ -74,6 +78,7 @@ Coming, not on `sprint/integration` yet: `REVIEW_SANITY_MIN_PERCENT` (−5) and
 
 Hidden by default: Assets, Escalations, Rent reviews (`rentReviews`), Finance (CFO workspace),
 Procedures, Decision jobs, Contractor suggestions, Inbound triage. A flag only shows the module. The timers behind
+Procedures, Decision jobs, Contractor suggestions, Cover while away (`absenceCover`). A flag only shows the module. The timers behind
 Escalations and Rent reviews still need their app settings above. Decision jobs
 (`decisionJobs`, Admin / Accounts jobs) need no setting and no migration: set it
 to preview for the director role first, then for everyone. The backend accepts
@@ -318,3 +323,20 @@ procedure in the subject) and the library reads "Awaiting approval by {name}".
 `job.next_step` (seeded active): a decision's next step goes to its owner, then the owner's manager (16 business hours), then a director. Kill switch: set its Active to 0. Answers still work and the step is recorded and handed on, but it isn't chased or emailed.
 
 `schedule.change_ratification` (seeded active): a requested rent relief goes to the directors; 16h per rung.
+
+Cover while away (`absenceCover`, AW1, PLAN §13) ships hidden. On, Leave and Settings show "Who covers
+for me" (the person, their reporting-line manager or their team's manager nominates a colleague for
+dates, optionally for one leave request), managers, the CFO and directors get a Covering screen
+(who is away and why, what would move and to whom, what has moved, with one-tap Move or Keep), a job
+says "Covered by Y while X is away until DD/MM", and the person gets a handback on return with a
+one-tap take-back. It needs migration 177 (`177_absence_cover.sql`, additive: `CoverDelegates`, the
+append-only `CoverActions`, the `cover.moved` notice policy) applied first. Which path the ledger table
+took (a real append-only ledger or the trigger fallback) is in the migration's header; on the fallback,
+run its one `DENY UPDATE, DELETE` line by hand. Nothing moves until `ABSENCE_COVER_ENABLED` is
+`"true"`: with the flag on and the switches off the screens list who is away and what would move, and
+say that automatic cover is switched off. Public holidays: the return date skips weekends, and the
+holidays in `ESCALATION_HOLIDAYS` when that is set (the screen says which). Not covered yet: leave
+approvals (listed and a cover suggested, but who approves follows the reporting line, which the CFO or a
+director edits), timesheet approvals (any manager in the role can approve, so nothing is assigned to a
+person), role-wide decision requests, invoices and purchase orders awaiting approval, and an escalation
+pushed up its ladder or a quote notice cannot be taken back.

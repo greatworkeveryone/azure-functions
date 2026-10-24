@@ -37,6 +37,7 @@ const post = (value: unknown): HttpRequest => ({ json: async () => value }) as u
 // The keys of command-centre src/constants/features.ts. A key missing here makes
 // Admin -> Features answer 400 and the module can never be switched on.
 const FRONTEND_FEATURE_KEYS = [
+  "absenceCover",
   "activity",
   "aiAssist",
   "aiDocumentExtraction",
