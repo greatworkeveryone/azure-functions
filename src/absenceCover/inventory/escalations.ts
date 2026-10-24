@@ -5,6 +5,7 @@
 //   job.next_step          a step handed to its owner; it follows the job
 //   *_notice               "did you agree to this?" to a named manager: only they can answer
 //   cover.moved            a notice about cover itself: never covered in turn
+//   authority, no role     nothing says which role holds the authority it needs, so no cover can be shown fit
 
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
@@ -37,6 +38,7 @@ export async function loadEscalationItems(connection: Connection, userIds: reado
        FROM dbo.Escalations e
       WHERE e.Status IN (N'open', N'acknowledged') AND e.TargetUserId IN (${placeholders})
         AND e.PolicyKey NOT IN (${NEVER_COVERED_LIST})
+        AND NOT (e.Kind = N'authority' AND e.TargetRole IS NULL)
         AND ${NOT_TEST_SUBJECT_SQL}`,
     [
       ...userParams,

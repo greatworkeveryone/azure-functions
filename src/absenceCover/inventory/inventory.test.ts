@@ -122,6 +122,12 @@ describe("escalations", () => {
     expect(lastSql()).toContain("e.Status IN (N'open', N'acknowledged')");
   });
 
+  it("leaves out an authority escalation with no target role: nobody could be shown to hold the authority it needs", async () => {
+    answer([/dbo\.Escalations/, []]);
+    await loadEscalationItems(conn, [1]);
+    expect(lastSql()).toContain("NOT (e.Kind = N'authority' AND e.TargetRole IS NULL)");
+  });
+
   it("maps an attention escalation to an item the cover needs inbox access for", async () => {
     answer([/dbo\.Escalations/, [escalation()]]);
     const [row] = await loadEscalationItems(conn, [1]);
