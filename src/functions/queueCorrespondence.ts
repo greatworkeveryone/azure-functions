@@ -3,9 +3,10 @@
 // Creates a send job: one message per recipient, from the one Randazzo Properties sender, with the
 // reply-to the caller chose (an identity their role may use, or their own company address) and a
 // signature the server composes (the identity's team signature, or the caller's own). A request that
-// carries signature text, a sender or another person's details is refused. A job to more recipients than
-// COMMS_APPROVAL_THRESHOLD (default 20) waits for a manager (approveCorrespondence); a smaller one is
-// queued. Recipients with a missing merge field are stored blocked and named; if none can be sent
+// carries signature text, a sender or another person's details is refused. A job waits for a manager (approveCorrespondence)
+// when it is to more recipients than COMMS_APPROVAL_THRESHOLD (default 20), or when this sender's recipients
+// across all their jobs in the last 24 hours would go over it (so splitting a send doesn't dodge it); the
+// answer says why in words (approvalNote). A smaller one is queued. Recipients with a missing merge field are stored blocked and named; if none can be sent
 // nothing is created. Nothing goes out here: the queue timer sends, and only when COMMS_SEND_ENABLED
 // is "true". Same roles as sending (ACTION_ROLES.sendEmail).
 
@@ -61,7 +62,7 @@ export async function queueCorrespondence(request: HttpRequest, context: Invocat
     }
     const user = await findUserByOid(connection, actor.oid);
     const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold());
-    return { headers: noStore, jsonBody: { ...queued, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.status === "awaiting_approval" }, status: 201 };
+    return { headers: noStore, jsonBody: { ...queued, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.approvalReason !== null }, status: 201 };
   } catch (error) {
     context.error("queueCorrespondence failed:", error instanceof Error ? error.message : error);
     return errorResponse("Could not queue the email", error);

@@ -31,7 +31,7 @@ jest.mock("../db", () => ({
 }));
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn() }));
-jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn() }));
+jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn(), recentRecipientCount: jest.fn() }));
 jest.mock("../comms/identityStore", () => ({ ...jest.requireActual("../comms/identityStore"), readIdentity: jest.fn() }));
 jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn(), readUserSignature: jest.fn() }));
 
@@ -68,6 +68,7 @@ beforeEach(() => {
   idStore.findUserByOid.mockResolvedValue({ displayName: "Fay Facilities", email, userId: 7 });
   idStore.readUserSignature.mockResolvedValue({ jobTitle: "Accounts officer", phone: "08 8900 0000", updatedAt: null });
   jobs.insertJob.mockResolvedValue(41);
+  jobs.recentRecipientCount.mockResolvedValue(0);
   jobs.insertRecipient.mockResolvedValue(1);
 });
 
@@ -159,6 +160,53 @@ describe("queueCorrespondence: the approval threshold", () => {
   it("records a duplicate address once and says so", async () => {
     const response = await queueCorrespondence(post(request({ recipients: [recipient(1), recipient(1)] })), context);
     expect(response.jsonBody).toMatchObject({ duplicatesDropped: 1, queued: 1 });
+  });
+});
+
+describe("queueCorrespondence: the threshold counts a sender's last 24 hours, so a send can't be split", () => {
+  it("asks for the creator's own total, from the token, inside the job's transaction", async () => {
+    await queueCorrespondence(post(request()), context);
+    expect(jobs.recentRecipientCount).toHaveBeenCalledWith(expect.anything(), "fay-oid");
+    expect(jobs.recentRecipientCount.mock.invocationCallOrder[0]).toBeLessThan(jobs.insertJob.mock.invocationCallOrder[0]);
+    const db = jest.requireMock("../db") as { beginTransaction: jest.Mock };
+    expect(db.beginTransaction.mock.invocationCallOrder[0]).toBeLessThan(jobs.recentRecipientCount.mock.invocationCallOrder[0]);
+  });
+
+  it("puts a small send to a manager when this sender's earlier sends in the last 24 hours take them over", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(18);
+    const response = await queueCorrespondence(post(request({}, 5)), context);
+    expect(response.jsonBody).toMatchObject({ approvalReason: "recent", recentRecipients: 18, requiresApproval: true, status: "awaiting_approval" });
+    expect((response.jsonBody as { approvalNote: string }).approvalNote).toBe(
+      "You have already sent to 18 people in the last 24 hours. With these 5 that is over 20, so a manager approves this one first.",
+    );
+    expect(jobs.insertJob.mock.calls[0][2]).toBe("awaiting_approval");
+    expect(jobs.insertJob.mock.calls[0][3]).toBe(true);
+    expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ detail: expect.stringContaining("18 in the last 24 hours"), toStatus: "awaiting_approval" }));
+  });
+
+  it("queues it when the total is exactly the threshold, and says nothing about approval", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(15);
+    const response = await queueCorrespondence(post(request({}, 5)), context);
+    expect(response.jsonBody).toMatchObject({ approvalNote: null, approvalReason: null, requiresApproval: false, status: "queued" });
+  });
+
+  it("gives the size reason, not the 24 hour one, for a single large send", async () => {
+    const response = await queueCorrespondence(post(request({}, 21)), context);
+    expect(response.jsonBody).toMatchObject({ approvalReason: "size", requiresApproval: true });
+    expect((response.jsonBody as { approvalNote: string }).approvalNote).toBe("This goes to 21 people, which is over 20, so a manager approves it first.");
+  });
+
+  it("follows COMMS_APPROVAL_THRESHOLD", async () => {
+    process.env.COMMS_APPROVAL_THRESHOLD = "30";
+    jobs.recentRecipientCount.mockResolvedValue(25);
+    expect((await queueCorrespondence(post(request({}, 6)), context)).jsonBody).toMatchObject({ approvalReason: "recent", status: "awaiting_approval" });
+    expect((await queueCorrespondence(post(request({}, 5)), context)).jsonBody).toMatchObject({ status: "queued" });
+  });
+
+  it("records the reason in the ledger row", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(18);
+    await queueCorrespondence(post(request({}, 5)), context);
+    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ after: expect.objectContaining({ approvalReason: "recent", recentRecipients: 18, status: "awaiting_approval" }) }));
   });
 });
 
