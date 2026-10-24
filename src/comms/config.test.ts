@@ -31,7 +31,7 @@ describe("the numbers and addresses", () => {
     expect(fromAddress({})).toBe("notices@randazzo.properties");
     expect(fromName({})).toBe("Randazzo Properties");
     expect(fromAddress({ COMMS_FROM_ADDRESS: " other@randazzo.properties " } as NodeJS.ProcessEnv)).toBe("other@randazzo.properties");
-    expect(footerAddress({})).toBeNull();
+    expect(footerAddress({})).toBe("GPO Box 551, Darwin NT 0801");
     expect(footerAddress({ COMMS_FOOTER_ADDRESS: "1 Example St" } as NodeJS.ProcessEnv)).toBe("1 Example St");
   });
 });

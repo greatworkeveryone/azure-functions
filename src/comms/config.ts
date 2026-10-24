@@ -8,7 +8,7 @@
 //   COMMS_MAX_PER_MINUTE    most messages one minute may send (default 25; Exchange allows
 //                           about 30 a minute per mailbox)
 //   COMMS_APPROVAL_THRESHOLD  a job to more recipients than this waits for a manager (default 20)
-//   COMMS_FOOTER_ADDRESS    optional postal address for the email footer; none is shown if unset
+//   COMMS_FOOTER_ADDRESS    postal address for the email footer; defaults to RP's (Connor, 24 Oct)
 //
 // DEV_EMAIL_OVERRIDE rewrites every recipient through resolveRecipient (src/email-recipient.ts).
 
@@ -16,6 +16,7 @@ export type CommsMode = "dry-run" | "live" | "off";
 
 export const DEFAULT_FROM_ADDRESS = "notices@randazzo.properties";
 export const DEFAULT_FROM_NAME = "Randazzo Properties";
+export const DEFAULT_FOOTER_ADDRESS = "GPO Box 551, Darwin NT 0801";
 export const DEFAULT_MAX_PER_MINUTE = 25;
 export const DEFAULT_APPROVAL_THRESHOLD = 20;
 /** Staff sign in with, and may reply from, an address on this domain. */
@@ -53,6 +54,6 @@ export function fromName(env: NodeJS.ProcessEnv = process.env): string {
   return env.COMMS_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
 }
 
-export function footerAddress(env: NodeJS.ProcessEnv = process.env): string | null {
-  return env.COMMS_FOOTER_ADDRESS?.trim() || null;
+export function footerAddress(env: NodeJS.ProcessEnv = process.env): string {
+  return env.COMMS_FOOTER_ADDRESS?.trim() || DEFAULT_FOOTER_ADDRESS;
 }
