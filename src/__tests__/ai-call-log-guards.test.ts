@@ -187,8 +187,8 @@ describe("migration 170 only ever appends", () => {
   const migrations = filesUnder(join(ROOT, "migrations"), (name) => name.endsWith(".sql"));
   const touching = migrations.filter((full) => readFileSync(full, "utf8").includes("AiCallLog"));
 
-  it("is the only migration that names the table so far", () => {
-    expect(touching.map((full) => relative(join(ROOT, "migrations"), full))).toEqual(["170_ai_call_log.sql"]);
+  it("is the only migration that creates or changes the table: 177 names it in a comment only, as the pattern its own ledger follows", () => {
+    expect(touching.map((full) => relative(join(ROOT, "migrations"), full))).toEqual(["170_ai_call_log.sql", "177_absence_cover.sql"]);
   });
 
   it.each(touching.map(rel))("%s holds no statement that changes or removes rows, drops the table or its trigger, or switches the trigger off", (path) => {
