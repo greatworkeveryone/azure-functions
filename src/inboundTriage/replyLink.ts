@@ -1,5 +1,5 @@
 // Inbound email triage (EB3): linking a reply to the send it answers. The send core's lookup is
-// behind sendLookup.ts (a stub until EB1 lands); this file is only what to do with its answer.
+// behind sendLookup.ts (EB1's recipient rows); this file is only what to do with its answer.
 // Linking never throws into the sync: a failed lookup leaves the email unlinked, and triage tries
 // again for any email it handles.
 
