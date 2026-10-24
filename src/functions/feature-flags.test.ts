@@ -43,6 +43,7 @@ const FRONTEND_FEATURE_KEYS = [
   "assets",
   "comms", "complianceReport", "contractorSuggestions",
   "decisionJobs",
+  "emailSending",
   "escalations",
   "finance",
   "guidedHelp",
