@@ -89,6 +89,56 @@ describe("renewGraphSubscription", () => {
   });
 });
 
+describe("renewGraphSubscription: extra mailboxes (EB3)", () => {
+  const EXTRA = ["accounts@example.test", "facilities@example.test"];
+  const byMailbox = (mailbox: string) => db.executeQuery.mock.calls.filter((c: unknown[]) => /SELECT SubscriptionID/.test(String(c[1])) && (c[2] as { value: unknown }[])[0].value === mailbox);
+
+  afterEach(() => {
+    delete process.env.INBOUND_EXTRA_MAILBOXES;
+  });
+
+  it("renews or creates only the main mailbox's subscription when no extra mailbox is set", async () => {
+    await renewGraphSubscription({} as Timer, ctx);
+    expect(graph.graphCreateSubscription).toHaveBeenCalledTimes(1);
+    expect(graph.graphCreateSubscription).toHaveBeenCalledWith("inbox@example.test", expect.any(String), "secret-state");
+  });
+
+  it("gives each extra mailbox its own subscription, so its mail arrives as promptly as the main one's", async () => {
+    process.env.INBOUND_EXTRA_MAILBOXES = EXTRA.join(",");
+    await renewGraphSubscription({} as Timer, ctx);
+    expect(graph.graphCreateSubscription.mock.calls.map((c: unknown[]) => c[0])).toEqual(["inbox@example.test", ...EXTRA]);
+    const merges = db.executeQuery.mock.calls.filter((c: unknown[]) => /MERGE dbo\.GraphSubscriptions/.test(String(c[1])));
+    expect(merges.map((c: unknown[]) => (c[2] as { name: string; value: unknown }[]).find((p) => p.name === "Mailbox")?.value)).toEqual(["inbox@example.test", ...EXTRA]);
+    expect(byMailbox("accounts@example.test")).toHaveLength(1);
+  });
+
+  it("renews an extra mailbox's stored subscription by its own id", async () => {
+    process.env.INBOUND_EXTRA_MAILBOXES = EXTRA[0];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string, params: { value: unknown }[]) => (/SELECT SubscriptionID/.test(sql) ? [{ SubscriptionID: `sub-for-${String(params[0].value)}` }] : []));
+    await renewGraphSubscription({} as Timer, ctx);
+    expect(graph.graphRenewSubscription.mock.calls.map((c: unknown[]) => c[0])).toEqual(["sub-for-inbox@example.test", "sub-for-accounts@example.test"]);
+  });
+
+  it("does not stop at an extra mailbox that fails: the others are renewed, and the run still ends in error so it is recorded", async () => {
+    process.env.INBOUND_EXTRA_MAILBOXES = EXTRA.join(",");
+    existing = [{ SubscriptionID: "sub-1" }];
+    graph.graphRenewSubscription.mockImplementation(async (id: string) => {
+      if (graph.graphRenewSubscription.mock.calls.length === 2) throw Object.assign(new Error("Graph renewSubscription failed: 403"), { status: 403 });
+      return `2026-10-17T03:00:0${id.length % 9}Z`;
+    });
+    await expect(renewGraphSubscription({} as Timer, ctx)).rejects.toThrow("could not renew the subscription for accounts@example.test");
+    expect(graph.graphRenewSubscription).toHaveBeenCalledTimes(3);
+  });
+
+  it("a failing main mailbox is still thrown at once, before any extra is touched", async () => {
+    process.env.INBOUND_EXTRA_MAILBOXES = EXTRA[0];
+    existing = [{ SubscriptionID: "sub-1" }];
+    graph.graphRenewSubscription.mockRejectedValue(Object.assign(new Error("Graph renewSubscription failed: 503"), { status: 503 }));
+    await expect(renewGraphSubscription({} as Timer, ctx)).rejects.toThrow(/503/);
+    expect(graph.graphRenewSubscription).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("setupGraphSubscription", () => {
   it("stores the new subscription with its resource and client-state hash", async () => {
     const req = { headers: { get: () => null } } as unknown as HttpRequest;

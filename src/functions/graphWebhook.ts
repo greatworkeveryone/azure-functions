@@ -6,6 +6,7 @@ import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse,
 import { graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
+import { readInboundConfig } from "../inboundTriage/config";
 import { checkRateLimit } from "../rateLimit";
 import { runTimer } from "../timerRuns";
 
@@ -172,6 +173,53 @@ export async function setupGraphSubscription(
 // no longer knows the stored one (404: it expired or was deleted) it creates a
 // replacement. Any other failure throws, so runTimer records it (DL-12/13).
 
+// Renews or creates the subscription for one mailbox.
+async function renewMailboxSubscription(
+  conn: Connection,
+  mailbox: string,
+  notificationUrl: string,
+  clientState: string,
+  context: InvocationContext,
+): Promise<void> {
+  const rows = await executeQuery(
+    conn,
+    `SELECT SubscriptionID FROM dbo.GraphSubscriptions WHERE Mailbox = @Mailbox`,
+    [{ name: "Mailbox", type: TYPES.NVarChar, value: mailbox }],
+  );
+
+  const replace = async (why: string) => {
+    const created = await graphCreateSubscription(mailbox, notificationUrl, clientState);
+    await storeSubscription(conn, mailbox, clientState, created);
+    context.log(`renewGraphSubscription: ${why}, created ${created.subscriptionId}`);
+  };
+
+  if (!rows[0]) {
+    await replace("no subscription found");
+    return;
+  }
+
+  const subscriptionId = rows[0].SubscriptionID as string;
+  let newExpiresAt: string;
+  try {
+    newExpiresAt = await graphRenewSubscription(subscriptionId);
+  } catch (err: unknown) {
+    if ((err as { status?: unknown } | null)?.status !== 404) throw err;
+    await replace(`Graph no longer has ${subscriptionId}`);
+    return;
+  }
+
+  await executeQuery(
+    conn,
+    `UPDATE dbo.GraphSubscriptions SET ExpiresAt = @ExpiresAt WHERE SubscriptionID = @SubscriptionID`,
+    [
+      { name: "ExpiresAt", type: TYPES.DateTime2, value: new Date(newExpiresAt) },
+      { name: "SubscriptionID", type: TYPES.NVarChar, value: subscriptionId },
+    ],
+  );
+
+  context.log(`renewGraphSubscription: renewed ${subscriptionId}, expires ${newExpiresAt}`);
+}
+
 export async function renewGraphSubscription(
   _myTimer: unknown,
   context: InvocationContext,
@@ -192,43 +240,20 @@ export async function renewGraphSubscription(
     const conn = await createServiceRequestConnection();
     connection = conn;
 
-    const rows = await executeQuery(
-      conn,
-      `SELECT SubscriptionID FROM dbo.GraphSubscriptions WHERE Mailbox = @Mailbox`,
-      [{ name: "Mailbox", type: TYPES.NVarChar, value: mailbox }],
-    );
+    await renewMailboxSubscription(conn, mailbox, notificationUrl, clientState, context);
 
-    const replace = async (why: string) => {
-      const created = await graphCreateSubscription(mailbox, notificationUrl, clientState);
-      await storeSubscription(conn, mailbox, clientState, created);
-      context.log(`renewGraphSubscription: ${why}, created ${created.subscriptionId}`);
-    };
-
-    if (!rows[0]) {
-      await replace("no subscription found");
-      return;
+    // EB3: each extra mailbox (INBOUND_EXTRA_MAILBOXES, empty by default) gets its own subscription so its mail
+    // arrives as promptly as the main one's. One that fails does not stop the others; the run still ends in error.
+    const failed: string[] = [];
+    for (const extra of readInboundConfig().extraMailboxes) {
+      try {
+        await renewMailboxSubscription(conn, extra, notificationUrl, clientState, context);
+      } catch (err: any) {
+        failed.push(extra);
+        context.error(`renewGraphSubscription: ${extra} failed:`, err.message);
+      }
     }
-
-    const subscriptionId = rows[0].SubscriptionID as string;
-    let newExpiresAt: string;
-    try {
-      newExpiresAt = await graphRenewSubscription(subscriptionId);
-    } catch (err: unknown) {
-      if ((err as { status?: unknown } | null)?.status !== 404) throw err;
-      await replace(`Graph no longer has ${subscriptionId}`);
-      return;
-    }
-
-    await executeQuery(
-      conn,
-      `UPDATE dbo.GraphSubscriptions SET ExpiresAt = @ExpiresAt WHERE SubscriptionID = @SubscriptionID`,
-      [
-        { name: "ExpiresAt", type: TYPES.DateTime2, value: new Date(newExpiresAt) },
-        { name: "SubscriptionID", type: TYPES.NVarChar, value: subscriptionId },
-      ],
-    );
-
-    context.log(`renewGraphSubscription: renewed ${subscriptionId}, expires ${newExpiresAt}`);
+    if (failed.length > 0) throw new Error(`renewGraphSubscription: could not renew the subscription for ${failed.join(", ")}`);
   } catch (err: any) {
     context.error("renewGraphSubscription failed:", err.message);
     throw err;
