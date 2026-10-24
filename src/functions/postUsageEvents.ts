@@ -14,6 +14,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, rolesForRequest, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
+import { readCappedBody } from "../usage/body";
 import { usageTrackingOn } from "../usage/config";
 import { usageFlagEnabledFor } from "../usage/flag";
 import { storeUsageBatch, userIdForOid } from "../usage/ingest";
@@ -31,8 +32,9 @@ export async function postUsageEvents(request: HttpRequest, context: InvocationC
   const oid = oidFromToken(token);
   if (!oid) return NO_CONTENT;
 
-  const text = await request.text();
-  if (text.length > MAX_BODY_CHARS) return { jsonBody: { error: "That batch is too large" }, status: 413 };
+  const read = await readCappedBody(request, MAX_BODY_CHARS);
+  if ("tooLarge" in read) return { jsonBody: { error: "That batch is too large" }, status: 413 };
+  const { text } = read;
   let body: unknown;
   try {
     body = JSON.parse(text);

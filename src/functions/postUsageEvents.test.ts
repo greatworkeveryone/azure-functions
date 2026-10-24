@@ -119,6 +119,33 @@ describe("postUsageEvents: the usageAnalytics flag", () => {
 });
 
 describe("postUsageEvents: caps", () => {
+  it("answers 413 from the Content-Length header alone, without reading the body", async () => {
+    const request = new HttpRequest({ body: { string: JSON.stringify(good()) }, headers: { "content-length": "90000", "content-type": "application/json" }, method: "POST", url: "http://localhost/api/postUsageEvents" });
+    const text = jest.spyOn(request, "text");
+    const body = jest.spyOn(request, "body", "get");
+    expect((await postUsageEvents(request, ctx)).status).toBe(413);
+    expect(text).not.toHaveBeenCalled();
+    expect(body).not.toHaveBeenCalled();
+    expect(createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("stops reading a body that has no length and grows past the cap, and answers 413", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(3000));
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 50) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const request = new HttpRequest({ body: { string: "" }, method: "POST", url: "http://localhost/api/postUsageEvents" });
+    Object.defineProperty(request, "body", { value: stream });
+    expect((await postUsageEvents(request, ctx)).status).toBe(413);
+    expect(pulled).toBeLessThan(10);
+    expect(createRequestConnection).not.toHaveBeenCalled();
+  });
+
   it("answers 413 for a body over the size cap, before parsing", async () => {
     expect((await postUsageEvents(post(null, "x".repeat(9000)), ctx)).status).toBe(413);
     expect(createRequestConnection).not.toHaveBeenCalled();

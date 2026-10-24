@@ -56,7 +56,7 @@ describe("the usage source", () => {
 
   it("never reads the request's address, user agent or location headers", () => {
     for (const file of usageSources) {
-      expect({ file: relative(ROOT, file), hit: /user-agent|x-forwarded-for|x-azure-clientip|clientIp|cf-ipcountry|headers\.get\(\s*["'](?!authorization)/i.test(readFileSync(file, "utf8")) }).toEqual({ file: relative(ROOT, file), hit: false });
+      expect({ file: relative(ROOT, file), hit: /user-agent|x-forwarded-for|x-azure-clientip|clientIp|cf-ipcountry|headers\.get\(\s*["'](?!authorization|content-length)/i.test(readFileSync(file, "utf8")) }).toEqual({ file: relative(ROOT, file), hit: false });
     }
   });
 
