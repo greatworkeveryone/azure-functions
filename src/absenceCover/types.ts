@@ -110,6 +110,8 @@ export interface CoverContext {
   absentIds: ReadonlySet<number>;
   delegates: readonly CoverDelegate[];
   directory: readonly DirectoryUser[];
+  /** Not away, but unseen in the trusted sign-in log for its whole window (45 days): never chosen as a cover. */
+  dormantIds: ReadonlySet<number>;
   links: readonly ReportingLink[];
   /** For money items. */
   moneyFacts: import("../approvalAuthority").AuthorityFacts | null;

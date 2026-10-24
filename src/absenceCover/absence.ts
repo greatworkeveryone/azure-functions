@@ -119,6 +119,8 @@ export interface Detection {
   inactivityAvailable: boolean;
   /** Why inactivity is unavailable: switched off, or no sign-in by anyone since before the last business day. */
   inactivityReason: "off" | "stale" | null;
+  /** Not on leave and not seen at all in the trusted log's window: not away, but not to be chosen as a cover. */
+  dormantIds: number[];
 }
 
 /**
@@ -135,6 +137,7 @@ function inactivityReason(input: DetectInput): Detection["inactivityReason"] {
 export function detectAbsences(input: DetectInput): Detection {
   const absent: AbsentPerson[] = [];
   const reason = inactivityReason(input);
+  const dormantIds: number[] = [];
   for (const staff of input.staff) {
     const mine = input.leaves.filter((leave) => leave.userId === staff.userId);
     const run = leaveRun(mine, input.today, input.holidays);
@@ -143,7 +146,11 @@ export function detectAbsences(input: DetectInput): Detection {
       continue;
     }
     const lastSeen = input.lastSeenOn.get(staff.userId);
-    if (reason !== null || lastSeen === undefined) continue;
+    if (reason !== null) continue;
+    if (lastSeen === undefined) {
+      dormantIds.push(staff.userId);
+      continue;
+    }
     const quiet = quietBusinessDays(lastSeen, input.today, input.holidays);
     if (quiet < input.inactivityDays) continue;
     absent.push({
@@ -163,5 +170,5 @@ export function detectAbsences(input: DetectInput): Detection {
       userId: staff.userId,
     });
   }
-  return { absent: absent.sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId), inactivityAvailable: reason === null, inactivityReason: reason };
+  return { absent: absent.sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId), dormantIds, inactivityAvailable: reason === null, inactivityReason: reason };
 }

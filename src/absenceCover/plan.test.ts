@@ -88,6 +88,12 @@ describe("planCover", () => {
       expect(result.notStranded).toBe(1);
     });
 
+    it("keeps it when the only others who could approve are dormant: not seen signing in for weeks", () => {
+      const result = plan([quote], [], { absentIds: new Set([1, 2, 3, 6, 8]), dormantIds: new Set([4, 5]) });
+      expect(result.entries).toHaveLength(1);
+      expect(result.notStranded).toBe(0);
+    });
+
     it("keeps it when everyone who could approve is away", () => {
       const everyone = new Set([1, 2, 3, 4, 5, 6, 8]);
       const result = plan([quote], [], { absentIds: everyone });

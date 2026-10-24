@@ -64,6 +64,7 @@ export async function loadAbsences(connection: Connection, options: ViewOptions 
     absentIds: new Set(detection.absent.map((person) => person.userId)),
     delegates: state.delegates,
     directory: state.directory,
+    dormantIds: new Set(detection.dormantIds),
     links: state.links,
     moneyFacts: state.facts,
     today,

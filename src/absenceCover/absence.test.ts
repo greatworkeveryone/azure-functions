@@ -152,6 +152,24 @@ describe("detectAbsences: no sign-in", () => {
     });
   });
 
+  describe("dormant people: nothing in the log for the whole window", () => {
+    it("lists, as dormant, anyone not on leave the trusted log has not seen in its window: they are not away, but nobody should hand them work", () => {
+      const result = detect({ lastSeenOn: new Map([[7, TODAY]]), leaves: [leave()] });
+      expect(result.dormantIds).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 8, 9]));
+      expect(result.dormantIds).not.toContain(7);
+      expect(result.dormantIds).not.toContain(1); // on leave
+    });
+
+    it("lists no one while the log cannot be trusted: logging off, or stale", () => {
+      expect(detect({ accessLoggingOn: false }).dormantIds).toEqual([]);
+      expect(detect({ accessLogNewestOn: null }).dormantIds).toEqual([]);
+    });
+
+    it("does not make a dormant person absent: there is nothing to cover for them", () => {
+      expect(detect({ lastSeenOn: new Map([[7, TODAY]]) }).absent).toEqual([]);
+    });
+  });
+
   it("never calls away someone the log has not seen at all", () => {
     expect(detect({ lastSeenOn: new Map() }).absent).toEqual([]);
   });

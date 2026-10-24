@@ -40,6 +40,11 @@ describe("ineligibleReason: the order of the checks", () => {
     expect(ineligibleReason(item({ isTest: true }), admin, ctx)).toBeNull();
   });
 
+  it("refuses someone the sign-in log has not seen for weeks: they are not away, but nobody can say they are in", () => {
+    expect(ineligibleReason(item(), max, context({ dormantIds: new Set([2]) }))).toBe("dormant");
+    expect(ineligibleReason(item({ capability: null, minRole: "director" }), director, context({ dormantIds: new Set([4]) }))).toBe("dormant");
+  });
+
   it("checks that someone who is away is refused before anything else about them", () => {
     expect(ineligibleReason(item({ raisedByUserId: 2 }), max, context({ absentIds: new Set([1, 2]) }))).toBe("absent");
   });
@@ -81,6 +86,11 @@ describe("someoneElseCanCover", () => {
 
   it("is true while anyone who is in could approve", () => {
     expect(someoneElseCanCover(quote, context())).toBe(true);
+  });
+
+  it("is false when the only people who could approve are dormant: a quote is not covered by someone nobody has seen for weeks", () => {
+    expect(someoneElseCanCover(quote, context({ absentIds: new Set([1, 2, 3, 6, 8]), dormantIds: new Set([4, 5]) }))).toBe(false);
+    expect(someoneElseCanCover(quote, context({ absentIds: new Set([1, 2, 3, 6, 8]), dormantIds: new Set([4]) }))).toBe(true);
   });
 
   it("is false when every person who could approve is away", () => {

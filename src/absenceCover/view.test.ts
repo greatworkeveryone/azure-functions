@@ -13,7 +13,7 @@ const conn = {} as never;
 
 const NOW = new Date("2026-10-26T03:00:00Z"); // Monday 12:30 in Darwin
 const state = (over: Record<string, unknown> = {}) => ({
-  accessLogNewestOn: "2026-10-26", delegates: [], directory: DIRECTORY, emailColumns: { assignedToUserId: false }, facts: FACTS, lastSeenOn: new Map(),
+  accessLogNewestOn: "2026-10-26", delegates: [], directory: DIRECTORY, emailColumns: { assignedToUserId: false }, facts: FACTS, lastSeenOn: new Map(DIRECTORY.map((person) => [person.userId, "2026-10-26"])),
   leaves: [{ approvedOn: "2026-10-01", endDate: "2026-10-30", kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }],
   links: [], staff: [], ...over,
 });
@@ -49,6 +49,14 @@ describe("loadAbsences", () => {
     expect(stale.absent).toEqual([]);
     expect(stale.inactivityAvailable).toBe(false);
     expect(stale.inactivityReason).toBe("stale");
+  });
+
+  it("marks someone the log has not seen in its window as dormant, never as away", async () => {
+    load.loadCoverState.mockResolvedValue(state({ lastSeenOn: new Map([[2, "2026-10-26"]]) }));
+    const result = await loadAbsences(conn, { accessLoggingOn: true, inactivityDays: 3, now: NOW });
+    expect(result.absent.map((person) => person.userId)).toEqual([1]);
+    expect(result.context.dormantIds.has(4)).toBe(true);
+    expect(result.context.dormantIds.has(2)).toBe(false);
   });
 
   it("reads the switches from the environment when it is not told", async () => {

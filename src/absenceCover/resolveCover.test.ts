@@ -39,6 +39,12 @@ describe("resolveCover: the order", () => {
     expect(found(resolveCover(item(), absent(), context({ absentIds: new Set([1, 2]) })))).toMatchObject({ source: "team_manager", userId: 8 });
   });
 
+  it("skips a dormant person, down the order, and says why", () => {
+    const resolution = found(resolveCover(item(), absent(), context({ delegates: [delegate()], dormantIds: new Set([7]) })));
+    expect(resolution.skipped).toEqual([{ name: "Sam Facilities", reason: "has not been seen signing in for weeks", source: "delegate", userId: 7 }]);
+    expect(resolution.userId).toBe(2);
+  });
+
   it("goes up the escalation ladder when the whole team is away, and calls it escalated", () => {
     const resolution = found(resolveCover(item(), absent(), context({ absentIds: new Set([1, 2, 8]) })));
     expect(resolution).toMatchObject({ action: "escalated", role: "cfo", source: "ladder", userId: 5 });
