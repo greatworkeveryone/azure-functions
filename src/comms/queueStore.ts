@@ -16,7 +16,7 @@ import {
   saveDraftIds,
   setRecipientOutcome,
 } from "./queueQueries";
-import { moveJob, readJob } from "./store";
+import { cancelWaitingRecipients, moveJob, readJob } from "./store";
 import type { QueueStore } from "./worker";
 
 export const TIMER_ACTOR = "commsSendTimer";
@@ -27,9 +27,13 @@ export const TIMER_ACTOR = "commsSendTimer";
  */
 export async function settleJob(connection: Connection, correspondenceId: number): Promise<void> {
   await inTransaction(connection, async () => {
-    const tally = await refreshCounts(connection, correspondenceId);
-    if (tally.pending > 0 || tally.recipients === 0) return txOk(undefined);
+    let tally = await refreshCounts(connection, correspondenceId);
     const job = await readJob(connection, correspondenceId);
+    // A recipient in flight when its job was cancelled may have been put back for a retry: it never goes.
+    if (job?.status === "cancelled" && tally.pending > 0 && (await cancelWaitingRecipients(connection, correspondenceId)) > 0) {
+      tally = await refreshCounts(connection, correspondenceId);
+    }
+    if (tally.pending > 0 || tally.recipients === 0) return txOk(undefined);
     if (!job || (job.status !== "queued" && job.status !== "sending")) return txOk(undefined);
     const status = tally.sent > 0 ? "sent" : "failed";
     if (!(await completeJob(connection, correspondenceId, status))) return txOk(undefined);

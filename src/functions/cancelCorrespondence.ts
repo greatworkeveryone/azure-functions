@@ -1,8 +1,9 @@
 // POST /api/cancelCorrespondence  { correspondenceId }
 //
-// Stops a send before it goes out: the person who queued it, or a manager, the CFO or a director,
-// may cancel it while it is a draft, awaiting approval or queued. Every recipient still waiting is
-// cancelled; once the first message has gone the send can't be cancelled (409). Same roles as sending
+// Stops a send: the person who queued it, or a manager, the CFO or a director, may cancel it while it
+// is a draft, awaiting approval, queued or still going out. Every recipient still waiting is cancelled and
+// the queue claims no more of them; the answer says how many had already gone. Once it has finished it
+// can't be cancelled (409). Same roles as sending
 // (ACTION_ROLES.sendEmail); the handler adds the creator-or-manager check.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
@@ -37,7 +38,7 @@ export async function cancelCorrespondence(request: HttpRequest, context: Invoca
     const user = await findUserByOid(connection, actor.oid);
     const decided = await cancelJob(connection, job, actor, user?.userId ?? null);
     if (!decided.ok) return conflict(decided.error);
-    return { headers: noStore, jsonBody: { correspondenceId: id, status: decided.status }, status: 200 };
+    return { headers: noStore, jsonBody: { correspondenceId: id, sent: decided.sent, status: decided.status, unsent: decided.unsent }, status: 200 };
   } catch (error) {
     context.error("cancelCorrespondence failed:", error instanceof Error ? error.message : error);
     return errorResponse("Could not cancel the send", error);
