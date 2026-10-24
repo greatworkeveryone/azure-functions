@@ -5,8 +5,7 @@
 // director or the CFO sees more).
 
 import { holidayCalendarConfigured, inactivityDays, type CoverMode } from "./config";
-import { canTakeBack } from "./moves/domain";
-import { isMovable, MOVE_KIND_OF } from "./moves/domain";
+import { canTakeBack, isMovable, MOVE_KIND_OF } from "./moves/domain";
 import { inTeamOf, type CoverCaller } from "./access";
 import { listRecentActions, type CoverActionRow } from "./coverActionStore";
 import type { PlanEntry } from "./plan";
@@ -47,6 +46,8 @@ export interface SuggestionDto {
   itemId: string;
   itemType: ItemType;
   label: string;
+  /** This kind of item can be moved from here at all (a leave approval cannot). */
+  movable: boolean;
   owner: PersonRef;
   reason: string;
   whyNot: string | null;
@@ -100,6 +101,7 @@ function suggestionOf(entry: PlanEntry, mode: CoverMode): SuggestionDto {
     itemId: item.id,
     itemType: item.type,
     label: item.label,
+    movable: isMovable(item.move),
     owner: { name: absent.name, userId: absent.userId },
     reason: entry.reasonText,
     whyNot: blocked,

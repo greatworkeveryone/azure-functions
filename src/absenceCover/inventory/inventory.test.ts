@@ -200,9 +200,9 @@ describe("emails", () => {
   });
 
   it("detects which assignment columns exist", async () => {
-    answer([/COL_LENGTH/, [{ At: null, By: 10, Reason: null, ToUser: 4 }]]);
+    answer([/COL_LENGTH/, [{ HasAssignedAt: null, HasAssignedBy: 10, HasAssignedTo: 4, HasReason: null }]]);
     expect(await probeEmailColumns(conn)).toEqual({ assignedAt: false, assignedBy: true, assignedToUserId: true, assignmentReason: false });
-    answer([/COL_LENGTH/, [{ At: null, By: null, Reason: null, ToUser: null }]]);
+    answer([/COL_LENGTH/, [{ HasAssignedAt: null, HasAssignedBy: null, HasAssignedTo: null, HasReason: null }]]);
     expect((await probeEmailColumns(conn)).assignedToUserId).toBe(false);
   });
 

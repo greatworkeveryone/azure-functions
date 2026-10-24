@@ -24,15 +24,15 @@ export interface EmailColumns {
 export async function probeEmailColumns(connection: Connection): Promise<EmailColumns> {
   const rows = await executeQuery(
     connection,
-    `SELECT COL_LENGTH(N'dbo.Emails', N'AssignedToUserId') AS ToUser, COL_LENGTH(N'dbo.Emails', N'AssignedAt') AS At,
-            COL_LENGTH(N'dbo.Emails', N'AssignedBy') AS By, COL_LENGTH(N'dbo.Emails', N'AssignmentReason') AS Reason`,
+    `SELECT COL_LENGTH(N'dbo.Emails', N'AssignedToUserId') AS HasAssignedTo, COL_LENGTH(N'dbo.Emails', N'AssignedAt') AS HasAssignedAt,
+            COL_LENGTH(N'dbo.Emails', N'AssignedBy') AS HasAssignedBy, COL_LENGTH(N'dbo.Emails', N'AssignmentReason') AS HasReason`,
   );
   const row = rows[0] ?? {};
   return {
-    assignedAt: row.At != null,
-    assignedBy: row.By != null,
-    assignedToUserId: row.ToUser != null,
-    assignmentReason: row.Reason != null,
+    assignedAt: row.HasAssignedAt != null,
+    assignedBy: row.HasAssignedBy != null,
+    assignedToUserId: row.HasAssignedTo != null,
+    assignmentReason: row.HasReason != null,
   };
 }
 
