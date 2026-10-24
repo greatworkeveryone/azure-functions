@@ -27,7 +27,7 @@ export interface IdentityInput {
 }
 
 const COLUMNS = `IdentityId, Address, DisplayName, TeamLabel, AllowedRoles, SignatureLines, SignaturePhone, SignatureEmail, IsActive,
-  CONVERT(VARCHAR(16), Version, 2) AS RowVersion, CreatedAt, CreatedBy, UpdatedAt, UpdatedBy, ArchivedAt, ArchivedBy`;
+  CONVERT(VARCHAR(16), CAST(Version AS VARBINARY(8)), 2) AS RowVersion, CreatedAt, CreatedBy, UpdatedAt, UpdatedBy, ArchivedAt, ArchivedBy`;
 
 const iso = (value: unknown): string | null => (value ? new Date(value as Date).toISOString() : null);
 

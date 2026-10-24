@@ -17,7 +17,7 @@ const JOB_COLUMNS = `c.CorrespondenceId, c.Kind, c.Subject, c.BodyMarkdown, c.Te
   c.CreatedByOid, c.CreatedByName, c.CreatedByEmail, c.CreatedByRole, c.Status, c.RequiresApproval,
   c.RecipientCount, c.SentCount, c.FailedCount, c.BlockedCount,
   c.ApprovedByOid, c.ApprovedByName, c.ApprovedAt, c.CancelledByName, c.CancelledAt, c.QueuedAt, c.CompletedAt,
-  CONVERT(VARCHAR(16), c.Version, 2) AS RowVersion, c.CreatedAt`;
+  CONVERT(VARCHAR(16), CAST(c.Version AS VARBINARY(8)), 2) AS RowVersion, c.CreatedAt`;
 
 const RECIPIENT_FIELDS = [
   "RecipientId", "CorrespondenceId", "Address", "Name", "RecipientType", "RecipientRefId", "MergeValues", "Status",
