@@ -17,6 +17,7 @@ const ROOT = join(__dirname, "..", "..");
 const ALLOWED_FILES: Record<string, string> = {
   "src/ai/callLog.ts": "inserts a row per call and counts a person's recent ones",
   "src/ai/callQuery.ts": "reads a page of rows for Admin → AI activity",
+  "src/usage/queries/ai.ts": "reads counts by purpose, outcome and day (no text, no person) for Audit log → Usage",
 };
 
 // Statements that change or remove rows, the table, or its protection.

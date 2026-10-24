@@ -100,6 +100,11 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
   "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
   "src/functions/vacancies.ts": { deleteFrom: 1 },
+  // REVIEWED (UA1, 24 Oct 2026): the usage purge. Three deletes, all opt-in (USAGE_PURGE_ENABLED), selected positively and in
+  // batches: raw UsageViews past retention whose person-day is rolled up after the day ended and after the session's last
+  // heartbeat, then UsageSessions past retention with no views left whose day is rolled up, then a person's UsageDaily totals go only as whole days older than USAGE_DAILY_RETENTION_DAYS (default 730, never below the raw days),
+  // never UsageDevices. See src/usage/purge.ts and usagePurgeTimer.ts.
+  "src/usage/purge.ts": { deleteFrom: 3 },
   "src/functions/workRequests.ts": { deleteFrom: 1 },
   // REVIEWED (D4, 17 Oct 2026): the one tenancy hard delete, shared by
   // deleteRegisterTenant and deleteTenant. See TENANCY_DRAFT_DELETE below.

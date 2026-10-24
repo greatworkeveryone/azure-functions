@@ -31,6 +31,10 @@ then the real switch.
 | `ABSENCE_COVER_DRY_RUN` | off | Wins over `ABSENCE_COVER_ENABLED`. The run writes `suggested` rows only (marked as a dry run, saying "would have moved this") and moves nothing; the Covering screen shows them as what would move and disables Move and Keep. A suggestion is not written twice for one absence | First, and read the `TimerRuns.Counts` (`wouldMove`, `suggested`, `deferred`) and the Covering screen |
 | `ABSENCE_INACTIVITY_DAYS` | 3 | Completed business days with no sign-in (from `AccessEvents`) that count as away, for someone not on leave. Only people the access log has seen at least once are ever called away, and only while access logging is on (`ACCESS_LOG_ENABLED` is not `"false"`): otherwise the Covering screen says inactivity detection is unavailable. A whole number from 1 to 30; anything else uses 3. Inactivity only ever produces suggestions for a manager, never an automatic move. It is skipped, and the Covering screen says so, while the access log looks stale (no sign-in by anyone since before the last business day). A run in which more than 20% of active staff look absent from their sign-ins alone is aborted, writes nothing, fails the timer run and goes to Sentry: check that access logging is working before turning it back on. Someone the log has not seen for its whole 45-day window is never chosen as a cover, though they are not treated as away. Staff are told in What's new and the Timesheets and Leave help that managers can see when they last signed in. Single-day leave under four hours is not an absence | Leave at 3 |
 | `ABSENCE_COVER_MAX_ACTIONS` | 50 | Most ledger rows (moves and suggestions) one run writes, most urgent first (importance, then due date); the rest wait for the next run (`TimerRuns.Counts.deferred`). A whole number above 0; anything else uses 50 | Leave at 50 |
+| `USAGE_TRACKING_ENABLED` | off | Usage analytics (UA1, PLAN §14). On, `getUsageStatus` tells the browser to record and `postUsageEvents` stores what it sends: which pages are used (a module and a route pattern, never an id or a query string), for how long (heartbeats while the page is visible and in use), on what kind of device (phone, tablet or desktop, browser and OS family, a random device id kept in the browser) and who (from the token). Never what a person types, page content, record contents or a location. Off, the browser sends nothing and no row is written. Also lets the nightly `usageRollupTimer` (15:30 UTC) refresh `UsageDaily`. Needs migration 178 and the `usageAnalytics` flag enabled for the roles to be recorded. Tell staff first (What's new and the guided help say so once the flag is on) | Connor says yes, after migration 178 |
+| `USAGE_RETENTION_DAYS` | 180 | Days raw usage rows (`UsageSessions`, `UsageViews`) are kept before the purge may remove them. A whole number from 30 to 3650; anything else uses 180. The daily roll-ups (`UsageDaily`) outlive it (see `USAGE_DAILY_RETENTION_DAYS`) and the device list is kept. The hour-by-weekday heatmap, the median session and the per-device figures read raw rows, so they cover this window; everything else reads the roll-up | Leave at 180 |
+| `USAGE_DAILY_RETENTION_DAYS` | 730 | Days a person's daily totals (`UsageDaily`: active time per person, day, page and kind of device, which the People view and its calendar show by name) are kept before the purge may remove them, a whole day at a time. A whole number from 30 to 3650; anything else uses 730; never shorter than `USAGE_RETENTION_DAYS`, so a day's totals outlive its raw rows. Staff are told in What's new and the guided help (raw records 6 months, daily totals 2 years): change the wording there if you change the default | Leave at 730 |
+| `USAGE_PURGE_ENABLED` · `USAGE_PURGE_DRY_RUN` | off | The `usagePurgeTimer` (16:30 UTC daily) deletes raw `UsageViews` and `UsageSessions` rows older than `USAGE_RETENTION_DAYS`, and only rows whose Darwin day is already rolled up after the day ended (and after the session's last heartbeat); a session only once it has no views left. It also deletes a person's `UsageDaily` totals once the whole day is older than `USAGE_DAILY_RETENTION_DAYS`, five whole days at a time, and never touches `UsageDevices`. It deletes at most 200,000 rows of each kind a run (reaching that raises a Sentry warning) and logs and stores its counts in `TimerRuns`. `USAGE_PURGE_DRY_RUN` wins over `USAGE_PURGE_ENABLED`: it counts what it would delete, raw and daily, and deletes nothing | After a dry run whose counts look right |
 | `REVIEW_WINDOW_DAYS` | 60 | Days before its date a scheduled rent review becomes due | Leave at 60 |
 | `REVIEW_SANITY_MIN_PERCENT` · `_MAX_PERCENT` | −5 · 15 | A review whose % falls outside the band needs a second person (C5); a director can override with a reason. A value that isn't a % from −100 to 100, or a min above the max, falls back to the default | Leave as is |
 | `REVIEW_WORKFLOW_LIVE_FROM` | unset | `YYYY-MM-DD` the workflow went live: reviews dated on or after it are settled only by the workflow, earlier ones by their keyed schedule row From WP26c, an unresolved review row dated on or after it shows as pending (awaiting review) on the schedule until a review applies it | The day WP25/WP26 go live (gate B) |
@@ -78,7 +82,7 @@ Coming, not on `sprint/integration` yet: `REVIEW_SANITY_MIN_PERCENT` (−5) and
 
 Hidden by default: Assets, Escalations, Rent reviews (`rentReviews`), Finance (CFO workspace),
 Procedures, Decision jobs, Contractor suggestions, Inbound triage. A flag only shows the module. The timers behind
-Procedures, Decision jobs, Contractor suggestions, Cover while away (`absenceCover`). A flag only shows the module. The timers behind
+Procedures, Decision jobs, Contractor suggestions, Cover while away (`absenceCover`), Usage analytics (`usageAnalytics`). A flag only shows the module. The timers behind
 Escalations and Rent reviews still need their app settings above. Decision jobs
 (`decisionJobs`, Admin / Accounts jobs) need no setting and no migration: set it
 to preview for the director role first, then for everyone. The backend accepts
@@ -340,3 +344,20 @@ approvals (listed and a cover suggested, but who approves follows the reporting 
 director edits), timesheet approvals (any manager in the role can approve, so nothing is assigned to a
 person), role-wide decision requests, invoices and purchase orders awaiting approval, and an escalation
 pushed up its ladder or a quote notice cannot be taken back.
+
+## Usage analytics
+
+Usage analytics (`usageAnalytics`, UA1, PLAN §14) ships hidden and recording is off. The flag does two
+things for the roles it is enabled for: their browsers ask `getUsageStatus` whether to record, and
+the Usage tab appears in the Audit log for those who may see it. Recording needs migration 178
+(`178_usage_analytics.sql`, additive: `UsageDevices`, `UsageSessions`, `UsageViews`, `UsageDaily`) and
+`USAGE_TRACKING_ENABLED` set to `true`; with either missing the browser sends nothing and no row is
+written. To record everyone, enable the flag for every role; the tab itself is further limited by
+capability: admin and directors see Overview, People, Devices, Modules, Email and AI; the CFO sees
+Finance usage only (accounts, accounts manager, CFO and admin people, time in finance pages, MYOB calls
+and money decisions), and the server holds her to that whatever filters the request carries; everyone
+else is refused. An admin can name a shared device ("Facilities tablet") and run the roll-up now. Staff
+are told in What's new and in the Overview guide (shown once the flag is enabled for them) that
+Floorplan records which pages are used, for how long and on what kind of device, never what they type,
+and that admins and directors can see it. This is transparency, not legal advice: Connor may want
+RP's HR or legal view before switching recording on.
