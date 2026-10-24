@@ -4,16 +4,18 @@
 // in them, from the sign-in the token proves. The person is never in the body. Any signed-in role.
 //
 //   204  stored, or dropped on purpose: tracking is off (USAGE_TRACKING_ENABLED is not "true"), the
-//        token's person has no active row, or the batch named someone else's session
+//        token's person has no active row, the usageAnalytics flag is not enabled for their role, or the
+//        batch named someone else's session
 //   400  the batch is malformed (see usage/validate.ts)   413  body too large
 //   429  too many batches from this person lately
 //
 // Nothing here reads or stores what a person typed, page content, record contents or a location.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, rolesForRequest, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
 import { usageTrackingOn } from "../usage/config";
+import { usageFlagEnabledFor } from "../usage/flag";
 import { storeUsageBatch, userIdForOid } from "../usage/ingest";
 import { allowUsageBatch } from "../usage/rateLimit";
 import { MAX_BODY_CHARS, parseUsageBatch } from "../usage/validate";
@@ -45,6 +47,7 @@ export async function postUsageEvents(request: HttpRequest, context: InvocationC
     connection = await createRequestConnection(token);
     const userId = await userIdForOid(connection, oid);
     if (userId === null) return NO_CONTENT;
+    if (!(await usageFlagEnabledFor(connection, await rolesForRequest(request)))) return NO_CONTENT;
     if (!allowUsageBatch(userId)) return { headers: { "Retry-After": "60" }, jsonBody: { error: "Too many usage batches. Try again shortly." }, status: 429 };
     const startedAt = parsed.batch.views.reduce((first, view) => (view.enteredAt < first ? view.enteredAt : first), new Date());
     await storeUsageBatch(connection, userId, parsed.batch, startedAt);

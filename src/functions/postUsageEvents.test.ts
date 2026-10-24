@@ -13,12 +13,16 @@ jest.mock("../auth", () => ({
   errorResponse: (message: string) => ({ jsonBody: { error: message }, status: 500 }),
   extractToken: () => token,
   oidFromToken: () => oid,
+  rolesForRequest: async () => roles,
   requireRole: async (_r: unknown, allowed: string[]) => (jest.requireActual("../auth").rolesPassGate(roles, allowed) ? null : { status: 403 }),
 }));
 jest.mock("../db", () => ({ closeConnection: jest.fn(), createRequestConnection: jest.fn(async () => ({})) }));
+let flagOn = true;
+jest.mock("../usage/flag", () => ({ usageFlagEnabledFor: jest.fn(async () => flagOn) }));
 jest.mock("../usage/ingest", () => ({ storeUsageBatch: jest.fn(async () => "stored"), userIdForOid: jest.fn(async () => 7) }));
 
 import { createRequestConnection } from "../db";
+import { usageFlagEnabledFor } from "../usage/flag";
 import { storeUsageBatch, userIdForOid } from "../usage/ingest";
 
 const ctx = { error: jest.fn() } as unknown as InvocationContext;
@@ -37,6 +41,7 @@ beforeEach(() => {
   roles = [AppRole.FACILITIES];
   token = "token";
   oid = "oid-1";
+  flagOn = true;
   process.env.USAGE_TRACKING_ENABLED = "true";
 });
 afterAll(() => {
@@ -91,6 +96,25 @@ describe("postUsageEvents: who it records", () => {
     oid = null;
     expect((await postUsageEvents(post(good()), ctx)).status).toBe(204);
     expect(createRequestConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("postUsageEvents: the usageAnalytics flag", () => {
+  it("writes nothing for a role the flag is not enabled for, even from a client that sends anyway", async () => {
+    flagOn = false;
+    expect((await postUsageEvents(post(good()), ctx)).status).toBe(204);
+    expect(storeUsageBatch).not.toHaveBeenCalled();
+  });
+
+  it("looks the flag up for the caller's own roles", async () => {
+    roles = [AppRole.FACILITIES];
+    await postUsageEvents(post(good()), ctx);
+    expect(jest.mocked(usageFlagEnabledFor).mock.calls[0][1]).toEqual([AppRole.FACILITIES]);
+  });
+
+  it("checks before it counts the batch against the rate limit", async () => {
+    flagOn = false;
+    for (let i = 0; i < MAX_BATCHES_PER_WINDOW + 5; i += 1) expect((await postUsageEvents(post(good()), ctx)).status).toBe(204);
   });
 });
 
