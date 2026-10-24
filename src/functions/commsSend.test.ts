@@ -3,6 +3,7 @@ import { AppRole } from "../auth";
 import * as events from "../comms/events";
 import type { AdminIdentity } from "../comms/identityStore";
 import * as identityStore from "../comms/identityStore";
+import * as records from "../comms/recipientRecords";
 import * as jobStore from "../comms/store";
 import * as userStore from "../comms/userSignatureStore";
 import { record } from "../ledger";
@@ -31,7 +32,8 @@ jest.mock("../db", () => ({
 }));
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn() }));
-jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn() }));
+jest.mock("../comms/recipientRecords", () => ({ resolveRecipientRecord: jest.fn() }));
+jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn(), recentRecipientCount: jest.fn() }));
 jest.mock("../comms/identityStore", () => ({ ...jest.requireActual("../comms/identityStore"), readIdentity: jest.fn() }));
 jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn(), readUserSignature: jest.fn() }));
 
@@ -68,6 +70,8 @@ beforeEach(() => {
   idStore.findUserByOid.mockResolvedValue({ displayName: "Fay Facilities", email, userId: 7 });
   idStore.readUserSignature.mockResolvedValue({ jobTitle: "Accounts officer", phone: "08 8900 0000", updatedAt: null });
   jobs.insertJob.mockResolvedValue(41);
+  jobs.recentRecipientCount.mockResolvedValue(0);
+  jest.mocked(records.resolveRecipientRecord).mockResolvedValue({ ok: true });
   jobs.insertRecipient.mockResolvedValue(1);
 });
 
@@ -159,6 +163,88 @@ describe("queueCorrespondence: the approval threshold", () => {
   it("records a duplicate address once and says so", async () => {
     const response = await queueCorrespondence(post(request({ recipients: [recipient(1), recipient(1)] })), context);
     expect(response.jsonBody).toMatchObject({ duplicatesDropped: 1, queued: 1 });
+  });
+});
+
+describe("queueCorrespondence: the threshold counts a sender's last 24 hours, so a send can't be split", () => {
+  it("asks for the creator's own total, from the token, inside the job's transaction", async () => {
+    await queueCorrespondence(post(request()), context);
+    expect(jobs.recentRecipientCount).toHaveBeenCalledWith(expect.anything(), "fay-oid");
+    expect(jobs.recentRecipientCount.mock.invocationCallOrder[0]).toBeLessThan(jobs.insertJob.mock.invocationCallOrder[0]);
+    const db = jest.requireMock("../db") as { beginTransaction: jest.Mock };
+    expect(db.beginTransaction.mock.invocationCallOrder[0]).toBeLessThan(jobs.recentRecipientCount.mock.invocationCallOrder[0]);
+  });
+
+  it("puts a small send to a manager when this sender's earlier sends in the last 24 hours take them over", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(18);
+    const response = await queueCorrespondence(post(request({}, 5)), context);
+    expect(response.jsonBody).toMatchObject({ approvalReason: "recent", recentRecipients: 18, requiresApproval: true, status: "awaiting_approval" });
+    expect((response.jsonBody as { approvalNote: string }).approvalNote).toBe(
+      "You have already sent to 18 people in the last 24 hours. With these 5 that is over 20, so a manager approves this one first.",
+    );
+    expect(jobs.insertJob.mock.calls[0][2]).toBe("awaiting_approval");
+    expect(jobs.insertJob.mock.calls[0][3]).toBe(true);
+    expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ detail: expect.stringContaining("18 in the last 24 hours"), toStatus: "awaiting_approval" }));
+  });
+
+  it("queues it when the total is exactly the threshold, and says nothing about approval", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(15);
+    const response = await queueCorrespondence(post(request({}, 5)), context);
+    expect(response.jsonBody).toMatchObject({ approvalNote: null, approvalReason: null, requiresApproval: false, status: "queued" });
+  });
+
+  it("gives the size reason, not the 24 hour one, for a single large send", async () => {
+    const response = await queueCorrespondence(post(request({}, 21)), context);
+    expect(response.jsonBody).toMatchObject({ approvalReason: "size", requiresApproval: true });
+    expect((response.jsonBody as { approvalNote: string }).approvalNote).toBe("This goes to 21 people, which is over 20, so a manager approves it first.");
+  });
+
+  it("follows COMMS_APPROVAL_THRESHOLD", async () => {
+    process.env.COMMS_APPROVAL_THRESHOLD = "30";
+    jobs.recentRecipientCount.mockResolvedValue(25);
+    expect((await queueCorrespondence(post(request({}, 6)), context)).jsonBody).toMatchObject({ approvalReason: "recent", status: "awaiting_approval" });
+    expect((await queueCorrespondence(post(request({}, 5)), context)).jsonBody).toMatchObject({ status: "queued" });
+  });
+
+  it("records the reason in the ledger row", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(18);
+    await queueCorrespondence(post(request({}, 5)), context);
+    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ after: expect.objectContaining({ approvalReason: "recent", recentRecipients: 18, status: "awaiting_approval" }) }));
+  });
+});
+
+describe("queueCorrespondence: recipients are resolved from the server's records (review M3)", () => {
+  const resolve = () => jest.mocked(records.resolveRecipientRecord);
+
+  it("asks about each recipient by the type, id and address in the request, before storing anything", async () => {
+    await queueCorrespondence(post(request({ recipients: [recipient(1), recipient(2, { recipientRefId: 9, recipientType: "contractor" }), recipient(3, { recipientRefId: undefined, recipientType: "manual" })] })), context);
+    expect(resolve().mock.calls.map(([, claim]) => ({ address: claim.address, recipientRefId: claim.recipientRefId, recipientType: claim.recipientType }))).toEqual([
+      { address: "pat1@example.com", recipientRefId: "1", recipientType: "tenancy" },
+      { address: "pat2@example.com", recipientRefId: "9", recipientType: "contractor" },
+      { address: "pat3@example.com", recipientRefId: null, recipientType: "manual" },
+    ]);
+    expect(resolve().mock.invocationCallOrder[0]).toBeLessThan(jobs.insertRecipient.mock.invocationCallOrder[0]);
+  });
+
+  it("stores a recipient whose address isn't the record's contact blocked, with the reason, and queues the rest", async () => {
+    resolve().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ code: "address_mismatch", detail: "That address isn't the recorded contact for that record", ok: false });
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.jsonBody).toMatchObject({ blocked: 1, queued: 1, status: "queued" });
+    expect(jobs.insertRecipient.mock.calls[1][3]).toEqual({ detail: "That address isn't the recorded contact for that record", errorCode: "address_mismatch", status: "blocked" });
+  });
+
+  it("refuses a typed address that is a test record's contact, and a test tenancy, the same way", async () => {
+    resolve().mockResolvedValueOnce({ code: "test_record", detail: "That address belongs to a test record", ok: false }).mockResolvedValueOnce({ code: "test_record", detail: "That tenancy is a test record", ok: false });
+    expect((await queueCorrespondence(post(request({}, 3)), context)).jsonBody).toMatchObject({ blocked: 2, queued: 1 });
+    expect(jobs.insertRecipient.mock.calls.map((call) => call[3].errorCode)).toEqual(["test_record", "test_record", null]);
+  });
+
+  it("creates nothing when no recipient resolves, and says why", async () => {
+    resolve().mockResolvedValue({ code: "address_mismatch", detail: "That address isn't the recorded contact for that record", ok: false });
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.jsonBody)).toContain("recorded contact");
+    expect(jobs.insertJob).not.toHaveBeenCalled();
   });
 });
 

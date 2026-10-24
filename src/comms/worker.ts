@@ -16,14 +16,16 @@ import { composeForRecipient } from "./compose";
 import type { CommsMode } from "./config";
 import { MAX_ATTEMPTS, STALE_SENDING_MINUTES } from "./config";
 import { MailSendError, toSendError, type MailSender } from "./graphSend";
-import type { QueueItem } from "./types";
+import type { Resolution } from "./recipientRecords";
+import type { QueueItem, RecipientRow } from "./types";
 import type { RecipientOutcome } from "./queueQueries";
 import type { RecipientStatus } from "./types";
 
 /** What the worker needs from the database; sqlQueueStore binds it to a connection. */
 export interface QueueStore {
   claim(recipientId: number): Promise<boolean>;
-  isTestTenancy(tenancyId: number): Promise<boolean>;
+  /** What the server's own records say about this recipient: the record, its stored contact and whether it is a test record. */
+  resolve(recipient: RecipientRow): Promise<Resolution>;
   markJobSending(correspondenceId: number): Promise<void>;
   /** Records the outcome and its event together; false when the recipient was no longer in `from`. */
   outcome(item: QueueItem, from: RecipientStatus, outcome: RecipientOutcome): Promise<boolean>;
@@ -109,16 +111,18 @@ async function handle(item: QueueItem, options: WorkerOptions, live: boolean, no
     return "blocked";
   }
 
-  // A recipient tied to a test record never leaves (D9). A tenancy recipient always carries its id.
-  const ref = recipient.recipientType === "tenancy" ? (recipient.recipientRefId ?? "") : null;
+  // The egress guard reads the server's own resolution of the recipient, never the request's type or address:
+  // a test record never leaves (D9), and an address must be the stored contact of the record it names.
+  const resolution = await store.resolve(recipient);
   try {
-    // A tenancy recipient with no usable id can't be shown to be a non-test record, so it doesn't go.
-    const tenancyId = ref === null ? null : /^[1-9]\d{0,9}$/.test(ref) ? Number(ref) : NaN;
-    const isTest = tenancyId === null ? false : Number.isNaN(tenancyId) || (await store.isTestTenancy(tenancyId));
-    assertMayLeave("email", { isTest });
+    assertMayLeave("email", { isTest: !resolution.ok && resolution.code === "test_record" });
   } catch (error) {
     if (!(error instanceof TestDataEgressError)) throw error;
-    await store.outcome(item, from, { errorCode: "test_record", status: "blocked" });
+    await store.outcome(item, from, { detail: resolution.ok ? null : resolution.detail, errorCode: "test_record", status: "blocked" });
+    return "blocked";
+  }
+  if (!resolution.ok) {
+    await store.outcome(item, from, { detail: resolution.detail, errorCode: resolution.code, status: "blocked" });
     return "blocked";
   }
 

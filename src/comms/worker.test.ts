@@ -34,12 +34,16 @@ interface Fake extends QueueStore {
   recent: number;
   settled: number[];
   stale: number[];
+  /** Recipients the server's records say are not the stored contact, by recipient id. */
+  mismatched: Set<number>;
+  resolved: RecipientRow[];
+  testContacts: Set<string>;
   testTenancies: Set<number>;
 }
 
 function fakeStore(items: QueueItem[]): Fake {
   const fake: Fake = {
-    calls: [], items, jobStatus: { 1: "queued" }, outcomes: [], recent: 0, settled: [], stale: [], testTenancies: new Set(),
+    calls: [], items, jobStatus: { 1: "queued" }, outcomes: [], recent: 0, settled: [], stale: [], mismatched: new Set(), resolved: [], testContacts: new Set(), testTenancies: new Set(),
     async claim(id) {
       fake.calls.push(`claim:${id}`);
       const item = fake.items.find((entry) => entry.recipient.recipientId === id);
@@ -47,7 +51,15 @@ function fakeStore(items: QueueItem[]): Fake {
       item.recipient = { ...item.recipient, attempts: item.recipient.attempts + 1, status: "sending" };
       return true;
     },
-    async isTestTenancy(id) { return fake.testTenancies.has(id); },
+    // Stands for the server's own records: only the stored type, id and address are asked, never anything from the request.
+    async resolve(recipientRow) {
+      fake.resolved.push(recipientRow);
+      if (recipientRow.recipientType === "tenancy" && !/^[1-9]\d*$/.test(recipientRow.recipientRefId ?? "")) return { code: "unknown_record", detail: "No such record to send to", ok: false };
+      if (recipientRow.recipientType === "tenancy" && fake.testTenancies.has(Number(recipientRow.recipientRefId))) return { code: "test_record", detail: "That tenancy is a test record", ok: false };
+      if (recipientRow.recipientType === "manual" && fake.testContacts.has(recipientRow.address)) return { code: "test_record", detail: "That address belongs to a test record", ok: false };
+      if (fake.mismatched.has(recipientRow.recipientId)) return { code: "address_mismatch", detail: "That address isn't the recorded contact for that record", ok: false };
+      return { ok: true };
+    },
     async markJobSending(id) { fake.calls.push(`job-sending:${id}`); fake.jobStatus[id] = "sending"; },
     async outcome(item, from, outcome) {
       fake.outcomes.push({ from, id: item.recipient.recipientId, outcome });
@@ -353,11 +365,38 @@ describe("the egress guard: test records never leave", () => {
     expect(sender.drafts).toEqual([]);
   });
 
-  it("does not look up the tenancy for a contractor or a staff recipient", async () => {
-    const store = fakeStore([item({ recipientRefId: null, recipientType: "contractor" })]);
-    store.isTestTenancy = jest.fn(async () => true);
-    expect(await run(store, fakeSender())).toMatchObject({ sent: 1 });
-    expect(store.isTestTenancy).not.toHaveBeenCalled();
+  it("blocks an address that is not the record's stored contact, whatever the request called it, and sends nothing", async () => {
+    const store = fakeStore([item({ address: "someone-else@example.com" }), item()]);
+    store.mismatched.add(store.items[0].recipient.recipientId);
+    const sender = fakeSender();
+    const report = await run(store, sender);
+    expect(report).toMatchObject({ blocked: 1, sent: 1 });
+    expect(store.outcomes[0].outcome).toMatchObject({ detail: "That address isn't the recorded contact for that record", errorCode: "address_mismatch", status: "blocked" });
+    expect(sender.drafts.map((draft) => draft.to)).not.toContain("someone-else@example.com");
+  });
+
+  it("blocks a typed address that is a test record's contact, and does not call it a tenancy", async () => {
+    const store = fakeStore([item({ address: "test.contact@example.com", recipientRefId: null, recipientType: "manual" })]);
+    store.testContacts.add("test.contact@example.com");
+    const sender = fakeSender();
+    expect(await run(store, sender)).toMatchObject({ blocked: 1, sent: 0 });
+    expect(store.outcomes[0].outcome).toMatchObject({ detail: "That address belongs to a test record", errorCode: "test_record", status: "blocked" });
+    expect(sender.drafts).toEqual([]);
+  });
+
+  it("asks the server's resolution about every recipient, whatever its type, before anything is sent", async () => {
+    const store = fakeStore([item({ recipientRefId: "5" }), item({ recipientRefId: "6", recipientType: "contractor" }), item({ recipientRefId: "7", recipientType: "staff" }), item({ recipientRefId: null, recipientType: "manual" })]);
+    const sender = fakeSender();
+    expect(await run(store, sender)).toMatchObject({ sent: 4 });
+    expect(store.resolved.map((row) => row.recipientType)).toEqual(["tenancy", "contractor", "staff", "manual"]);
+  });
+
+  it("never sends to a recipient the server can't resolve to a record", async () => {
+    const store = fakeStore([item({ recipientRefId: "abc" })]);
+    const sender = fakeSender();
+    expect(await run(store, sender)).toMatchObject({ blocked: 1 });
+    expect(store.outcomes[0].outcome).toMatchObject({ errorCode: "unknown_record", status: "blocked" });
+    expect(sender.drafts).toEqual([]);
   });
 });
 

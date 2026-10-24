@@ -2,6 +2,7 @@ import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { AppRole } from "../auth";
 import * as events from "../comms/events";
 import * as userStore from "../comms/userSignatureStore";
+import * as queries from "../comms/queueQueries";
 import * as jobStore from "../comms/store";
 import type { JobRow } from "../comms/types";
 import { record } from "../ledger";
@@ -29,6 +30,7 @@ jest.mock("../db", () => ({
 }));
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn(), readEvents: jest.fn() }));
+jest.mock("../comms/queueQueries", () => ({ refreshCounts: jest.fn() }));
 jest.mock("../comms/store", () => ({ cancelWaitingRecipients: jest.fn(), moveJob: jest.fn(), readJob: jest.fn(), readRecipients: jest.fn() }));
 jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn() }));
 
@@ -53,6 +55,7 @@ beforeEach(() => {
   jobs.readJob.mockResolvedValue(job());
   jobs.moveJob.mockResolvedValue(true);
   jobs.cancelWaitingRecipients.mockResolvedValue(30);
+  jest.mocked(queries.refreshCounts).mockResolvedValue({ blocked: 0, failed: 0, pending: 0, recipients: 30, sent: 0 });
   jest.mocked(userStore.findUserByOid).mockResolvedValue({ displayName: "Mo Manager", email: "mo@randazzo.properties", userId: 3 });
 });
 
@@ -121,11 +124,23 @@ describe("cancelCorrespondence", () => {
   it("lets the person who queued a send cancel it, and every waiting recipient with it", async () => {
     const response = await cancelCorrespondence(post({ correspondenceId: 41 }), context);
     expect(response.status).toBe(200);
-    expect(response.jsonBody).toEqual({ correspondenceId: 41, status: "cancelled" });
-    expect(jobs.moveJob).toHaveBeenCalledWith(expect.anything(), 41, ["draft", "awaiting_approval", "queued"], "cancelled", { cancelledBy: "Mo Manager" });
+    expect(response.jsonBody).toEqual({ correspondenceId: 41, sent: 0, status: "cancelled", unsent: 30 });
+    expect(jobs.moveJob).toHaveBeenCalledWith(expect.anything(), 41, ["draft", "awaiting_approval", "queued", "sending"], "cancelled", { cancelledBy: "Mo Manager" });
     expect(jobs.cancelWaitingRecipients).toHaveBeenCalledWith(expect.anything(), 41);
     expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ fromStatus: "queued", toStatus: "cancelled", type: "job" }));
     expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.cancel", before: { status: "queued" } }));
+  });
+
+  it("can cancel a send while it is going out: the waiting recipients stop, and how many went is recorded", async () => {
+    jobs.readJob.mockResolvedValue(job({ createdByOid: "mo-oid", recipientCount: 30, status: "sending" }));
+    jobs.cancelWaitingRecipients.mockResolvedValue(22);
+    jest.mocked(queries.refreshCounts).mockResolvedValue({ blocked: 0, failed: 1, pending: 1, recipients: 30, sent: 6 });
+    const response = await cancelCorrespondence(post({ correspondenceId: 41 }), context);
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ correspondenceId: 41, sent: 6, status: "cancelled", unsent: 22 });
+    expect(jobs.moveJob).toHaveBeenCalledWith(expect.anything(), 41, expect.arrayContaining(["sending"]), "cancelled", { cancelledBy: "Mo Manager" });
+    expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ detail: "22 recipients not sent; 6 had already gone", fromStatus: "sending", toStatus: "cancelled" }));
+    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.cancel", after: { sent: 6, status: "cancelled", unsent: 22 }, before: { status: "sending" } }));
   });
 
   it("lets a manager cancel someone else's, and refuses a colleague who is not the creator or a manager", async () => {
@@ -136,8 +151,8 @@ describe("cancelCorrespondence", () => {
     expect((await cancelCorrespondence(post({ correspondenceId: 41 }), context)).status).toBe(200);
   });
 
-  it("answers 409 once the send has started or finished, writing nothing", async () => {
-    for (const status of ["sending", "sent", "failed", "cancelled"] as const) {
+  it("answers 409 once the send has finished, writing nothing", async () => {
+    for (const status of ["sent", "failed", "cancelled"] as const) {
       jobs.readJob.mockResolvedValue(job({ createdByOid: "mo-oid", status }));
       jobs.moveJob.mockResolvedValue(false);
       expect((await cancelCorrespondence(post({ correspondenceId: 41 }), context)).status).toBe(409);

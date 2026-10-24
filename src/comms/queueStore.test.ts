@@ -60,6 +60,16 @@ describe("settleJob", () => {
     expect(s.completeJob).not.toHaveBeenCalled();
   });
 
+  it("cancels a recipient a retry put back in a cancelled job, so it never goes", async () => {
+    s.refreshCounts.mockResolvedValueOnce(tally({ pending: 1, sent: 4 })).mockResolvedValueOnce(tally({ pending: 0, sent: 4 }));
+    s.readJob.mockResolvedValueOnce(job("cancelled"));
+    s.cancelWaitingRecipients.mockResolvedValue(1);
+    await settleJob(conn, 41);
+    expect(s.cancelWaitingRecipients).toHaveBeenCalledWith(conn, 41);
+    expect(s.refreshCounts).toHaveBeenCalledTimes(2);
+    expect(s.completeJob).not.toHaveBeenCalled();
+  });
+
   it("writes no event or ledger row when someone else completed it first", async () => {
     s.refreshCounts.mockResolvedValue(tally());
     s.completeJob.mockResolvedValue(false);

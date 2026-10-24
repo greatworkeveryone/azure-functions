@@ -74,8 +74,13 @@ export function parseRecipient(value: unknown): Parsed<NewRecipient> {
   const refRaw = value.recipientRefId;
   const ref = refRaw === undefined || refRaw === null ? null : String(refRaw);
   if (ref !== null && !REF_ID.test(ref)) return fail("recipientRefId must be letters, digits, - or _");
-  // A tenancy's address always names the tenancy, so the test-record check can never be skipped by leaving it out.
-  if (recipientType === "tenancy" && (ref === null || !/^[1-9]\d{0,9}$/.test(ref))) return fail("A tenancy recipient needs its tenancy id (recipientRefId)");
+  // A recipient that is a record names it, so the server can check the address is that record's own contact and
+  // that it is not a test record; a typed address names none (and is checked against every test contact).
+  if (recipientType === "manual") {
+    if (ref !== null) return fail("A typed address has no record id");
+  } else if (ref === null || !/^[1-9]\d{0,9}$/.test(ref)) {
+    return fail(`A ${recipientType} recipient needs its record id (recipientRefId)`);
+  }
   const mergeValues = parseMergeValues(value.mergeValues);
   if (!mergeValues.ok) return mergeValues;
   return { ok: true, value: { address: address.value, mergeValues: mergeValues.value, name: name.value, recipientRefId: ref, recipientType } };
