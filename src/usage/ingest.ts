@@ -1,11 +1,15 @@
 import { TYPES, type Connection } from "tedious";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "../db";
-import type { UsageBatch } from "./validate";
+import { allowanceSince, limitPerDay, scaleToAllowance, sessionAllowance } from "./clamp";
+import { darwinDay, dayEndUtc, dayStartUtc } from "./days";
+import type { UsageBatch, UsageViewInput } from "./validate";
 
 // Writing one batch (PLAN §14). The person is the caller's own AppUsers row, found from the verified
 // token's oid. A session belongs to the person who started it: a batch that names someone else's
 // session is dropped, so nobody can add time to another person's day. Heartbeats add to a running
-// total (one row per page segment, not one per beat), capped so a bad client cannot inflate it.
+// total (one row per page segment, not one per beat). What may be added is held to the server's clock: no more
+// than the time since the session's last heartbeat plus a minute, and no more than 24 hours a day for the person
+// across every session (clamp.ts), so a client cannot inflate a figure by sending big numbers or new session ids.
 
 const SEGMENT_SECONDS_CAP = 3600;
 const SESSION_SECONDS_CAP = 86400;
@@ -19,7 +23,29 @@ export async function userIdForOid(connection: Connection, oid: string): Promise
 
 export type StoreOutcome = "foreign_session" | "stored";
 
-export async function storeUsageBatch(connection: Connection, userId: number, batch: UsageBatch, startedAt: Date): Promise<StoreOutcome> {
+/** What this person already has on each Darwin day the views fall on, from all their sessions. */
+async function usedPerDay(connection: Connection, userId: number, views: readonly UsageViewInput[]): Promise<Map<string, number>> {
+  const used = new Map<string, number>();
+  for (const day of new Set(views.map((item) => darwinDay(item.enteredAt)))) {
+    const from = dayStartUtc(day);
+    const to = dayEndUtc(day);
+    if (!from || !to) continue;
+    const rows = await executeQuery(
+      connection,
+      `SELECT COALESCE(SUM(v.ActiveSeconds), 0) AS Used FROM dbo.UsageViews v JOIN dbo.UsageSessions s ON s.SessionId = v.SessionId
+        WHERE s.UserId = @UserId AND v.EnteredAt >= @FromUtc AND v.EnteredAt < @ToUtc`,
+      [
+        { name: "UserId", type: TYPES.Int, value: userId },
+        { name: "FromUtc", type: TYPES.DateTime2, value: from },
+        { name: "ToUtc", type: TYPES.DateTime2, value: to },
+      ],
+    );
+    used.set(day, Number(rows[0]?.Used ?? 0));
+  }
+  return used;
+}
+
+export async function storeUsageBatch(connection: Connection, userId: number, batch: UsageBatch, startedAt: Date, now: Date = new Date()): Promise<StoreOutcome> {
   await beginTransaction(connection);
   try {
     await executeQuery(
@@ -37,14 +63,20 @@ export async function storeUsageBatch(connection: Connection, userId: number, ba
       ],
     );
 
-    const delta = batch.views.reduce((sum, view) => sum + view.activeSeconds, 0);
-    const existing = await executeQuery(connection, `SELECT UserId FROM dbo.UsageSessions WITH (UPDLOCK, HOLDLOCK) WHERE SessionId = @SessionId`, [
+    const existing = await executeQuery(connection, `SELECT UserId, StartedAt, LastHeartbeatAt, ActiveSeconds FROM dbo.UsageSessions WITH (UPDLOCK, HOLDLOCK) WHERE SessionId = @SessionId`, [
       { name: "SessionId", type: TYPES.NVarChar, value: batch.sessionId },
     ]);
     if (existing.length > 0 && Number(existing[0].UserId) !== userId) {
       await rollbackTransaction(connection);
       return "foreign_session";
     }
+    const [known] = existing;
+    const allowance = known
+      ? sessionAllowance({ activeSeconds: Number(known.ActiveSeconds), lastHeartbeatAt: known.LastHeartbeatAt as Date, startedAt: known.StartedAt as Date }, now)
+      : allowanceSince(startedAt, now);
+    const allowed = limitPerDay(scaleToAllowance(batch.views, allowance), await usedPerDay(connection, userId, batch.views));
+    const delta = allowed.reduce((sum, item) => sum + item.activeSeconds, 0);
+
     if (existing.length === 0) {
       await executeQuery(
         connection,
@@ -73,7 +105,7 @@ export async function storeUsageBatch(connection: Connection, userId: number, ba
       );
     }
 
-    for (const view of batch.views) {
+    for (const view of allowed) {
       await executeQuery(
         connection,
         `MERGE dbo.UsageViews WITH (HOLDLOCK) AS t

@@ -47,12 +47,14 @@ describe("storeUsageBatch: a new session", () => {
     expect(beginTransaction).toHaveBeenCalledTimes(1);
     expect(commitTransaction).toHaveBeenCalledTimes(1);
     expect(sqls()[0]).toMatch(/MERGE dbo\.UsageDevices/);
-    expect(sqls()[2]).toMatch(/INSERT INTO dbo\.UsageSessions/);
-    expect(param(2, "UserId")).toBe(7);
-    expect(param(2, "Delta")).toBe(60);
+    const insert = sqls().findIndex((sql) => /INSERT INTO dbo\.UsageSessions/.test(sql));
+    expect(insert).toBeGreaterThan(0);
+    expect(param(insert, "UserId")).toBe(7);
+    expect(param(insert, "Delta")).toBe(60);
     expect(sqls().filter((sql) => /MERGE dbo\.UsageViews/.test(sql))).toHaveLength(2);
-    expect(param(3, "Module")).toBe("inspections");
-    expect(param(4, "Continued")).toBe(true);
+    const merges = query.mock.calls.map((_c, index) => index).filter((index) => /MERGE dbo\.UsageViews/.test(sqls()[index]));
+    expect(param(merges[0], "Module")).toBe("inspections");
+    expect(param(merges[1], "Continued")).toBe(true);
   });
 
   it("writes only through bound parameters: no value is joined into SQL text", async () => {
@@ -63,12 +65,12 @@ describe("storeUsageBatch: a new session", () => {
 
 describe("storeUsageBatch: an existing session", () => {
   it("adds to the running total, capped, for the same person", async () => {
-    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ UserId: 7 }]);
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ ActiveSeconds: 0, LastHeartbeatAt: new Date(), StartedAt: new Date(Date.now() - 3600_000), UserId: 7 }]);
     await storeUsageBatch(conn, 7, batch, new Date());
-    expect(sqls()[2]).toMatch(/UPDATE dbo\.UsageSessions/);
-    expect(sqls()[2]).toMatch(/CASE WHEN ActiveSeconds \+ @Delta > @Cap/);
-    expect(sqls()[2]).toMatch(/AND UserId = @UserId/);
-    expect(param(2, "Cap")).toBe(86400);
+    const update = sqls().findIndex((sql) => /UPDATE dbo\.UsageSessions/.test(sql));
+    expect(sqls()[update]).toMatch(/CASE WHEN ActiveSeconds \+ @Delta > @Cap/);
+    expect(sqls()[update]).toMatch(/AND UserId = @UserId/);
+    expect(param(update, "Cap")).toBe(86400);
     expect(commitTransaction).toHaveBeenCalled();
   });
 
@@ -78,6 +80,43 @@ describe("storeUsageBatch: an existing session", () => {
     expect(sqls().some((sql) => /UsageViews|UPDATE dbo\.UsageSessions|INSERT INTO dbo\.UsageSessions/.test(sql))).toBe(false);
     expect(rollbackTransaction).toHaveBeenCalledTimes(1);
     expect(commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("storeUsageBatch: active time cannot be forged", () => {
+  const NOW = new Date("2026-10-24T01:10:00Z");
+  const heavy: UsageBatch = { ...batch, views: [{ ...batch.views[0], activeSeconds: 900, enteredAt: new Date("2026-10-24T01:09:00Z") }, { ...batch.views[1], activeSeconds: 900, enteredAt: new Date("2026-10-24T01:09:30Z") }] };
+  const delta = (callIndex: number) => param(callIndex, "Delta");
+  const viewSeconds = () => query.mock.calls.filter((call) => /MERGE dbo\.UsageViews/.test(String(call[1]))).map((call) => (call[2] as { name: string; value: unknown }[]).find((p) => p.name === "Seconds")?.value);
+
+  it("adds no more to an existing session than the time since its last heartbeat plus a minute", async () => {
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ ActiveSeconds: 100, LastHeartbeatAt: new Date("2026-10-24T01:09:15Z"), StartedAt: new Date("2026-10-24T01:00:00Z"), UserId: 7 }]);
+    await storeUsageBatch(conn, 7, heavy, new Date("2026-10-24T01:09:00Z"), NOW);
+    const update = query.mock.calls.findIndex((call) => /UPDATE dbo\.UsageSessions/.test(String(call[1])));
+    expect(delta(update)).toBeLessThanOrEqual(45 + 60);
+    expect(viewSeconds().reduce((sum: number, value) => sum + Number(value), 0)).toBeLessThanOrEqual(105);
+  });
+
+  it("limits a new session by the time since it started, plus a minute", async () => {
+    await storeUsageBatch(conn, 7, heavy, new Date("2026-10-24T01:09:00Z"), NOW);
+    const insert = query.mock.calls.findIndex((call) => /INSERT INTO dbo\.UsageSessions/.test(String(call[1])));
+    expect(delta(insert)).toBeLessThanOrEqual(60 + 60);
+  });
+
+  it("lets a normal heartbeat through whole", async () => {
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ ActiveSeconds: 100, LastHeartbeatAt: new Date("2026-10-24T01:09:15Z"), StartedAt: new Date("2026-10-24T01:00:00Z"), UserId: 7 }]);
+    const normal: UsageBatch = { ...batch, views: [{ ...batch.views[0], activeSeconds: 45, enteredAt: new Date("2026-10-24T01:05:00Z") }] };
+    await storeUsageBatch(conn, 7, normal, new Date("2026-10-24T01:05:00Z"), NOW);
+    expect(viewSeconds()).toEqual([45]);
+  });
+
+  it("holds a person to 24 hours a day across all their sessions, not per session id", async () => {
+    query.mockImplementation(async (_c, sql) => (/SUM\(v\.ActiveSeconds\)/.test(String(sql)) ? [{ Used: 86_380 }] : []));
+    const fresh: UsageBatch = { ...batch, sessionId: "x_anotherbrandnewsession", views: [{ ...batch.views[0], activeSeconds: 100, enteredAt: new Date("2026-10-24T01:09:00Z") }] };
+    await storeUsageBatch(conn, 7, fresh, new Date("2026-10-23T23:00:00Z"), NOW);
+    expect(viewSeconds()).toEqual([20]);
+    const sum = query.mock.calls.find((call) => /SUM\(v\.ActiveSeconds\)/.test(String(call[1])));
+    expect(String(sum?.[1])).toMatch(/s\.UserId = @UserId/);
   });
 });
 
