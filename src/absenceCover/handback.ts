@@ -11,7 +11,7 @@ import type { CoverCaller } from "./access";
 import { getCoverAction, insertCoverAction, listRecentActions, type CoverActionRow } from "./coverActionStore";
 import { coverError } from "./errors";
 import { probeEmailColumns } from "./inventory/emails";
-import { canTakeBack, MOVE_KIND_OF, MOVERS } from "./moves/domain";
+import { canTakeBackMove, MOVE_KIND_OF, MOVERS } from "./moves/domain";
 import { MoveRefused } from "./moves/types";
 import { loadAbsences } from "./view";
 import type { AbsenceKind, ItemType } from "./types";
@@ -103,7 +103,7 @@ export async function buildHandback(connection: Connection, caller: CoverCaller)
         absenceKind: row.absenceKind,
         action: row.action as "escalated" | "reassigned",
         at: row.createdAt.toISOString(),
-        canTakeBack: withCover && row.action === "reassigned" && canTakeBack(MOVE_KIND_OF[row.itemType]),
+        canTakeBack: withCover && canTakeBackMove(row.action, row.itemType),
         coverActionId: row.coverActionId,
         coverName: row.toUserId === null ? "the next person up" : (names.get(row.toUserId) ?? "a colleague"),
         itemId: row.itemId,
@@ -120,7 +120,7 @@ export async function buildHandback(connection: Connection, caller: CoverCaller)
 export async function takeBackItem(connection: Connection, caller: CoverCaller, coverActionId: number): Promise<{ coverActionId: number }> {
   const row = await getCoverAction(connection, coverActionId);
   if (!row || row.fromUserId !== caller.userId || row.dryRun) throw coverError.notFound("That move is not one of yours.");
-  if (row.action !== "reassigned") throw coverError.refused("cannot_take_back", "This was pushed up to the next person rather than handed to a cover, so it cannot be taken back here.");
+  if (row.action !== "reassigned" && !canTakeBackMove(row.action, row.itemType)) throw coverError.refused("cannot_take_back", "This was pushed up to the next person rather than handed to a cover, so it cannot be taken back here.");
   const mover = MOVERS[MOVE_KIND_OF[row.itemType]];
   if (!mover || row.toUserId === null) throw coverError.refused("cannot_take_back", "This only told someone, so there is nothing to take back.");
   const already = await executeQuery(connection, `SELECT 1 AS Found FROM dbo.CoverActions WHERE RelatedActionId = @Id AND Action = N'taken_back'`, [

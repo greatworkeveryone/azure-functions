@@ -5,7 +5,7 @@
 // director or the CFO sees more).
 
 import { holidayCalendarConfigured, inactivityDays, type CoverMode } from "./config";
-import { canTakeBack, isMovable, MOVE_KIND_OF } from "./moves/domain";
+import { canTakeBackMove, isMovable } from "./moves/domain";
 import { inTeamOf, type CoverCaller } from "./access";
 import { listRecentActions, type CoverActionRow } from "./coverActionStore";
 import type { PlanEntry } from "./plan";
@@ -113,7 +113,7 @@ function movedOf(row: CoverActionRow, names: ReadonlyMap<number, string>, takenB
     absenceKind: row.absenceKind,
     action: row.action as "escalated" | "reassigned",
     at: row.createdAt.toISOString(),
-    canTakeBack: row.action === "reassigned" && canTakeBack(MOVE_KIND_OF[row.itemType]),
+    canTakeBack: canTakeBackMove(row.action, row.itemType),
     coverActionId: row.coverActionId,
     from: { name: names.get(row.fromUserId) ?? "Former staff member", userId: row.fromUserId },
     itemId: row.itemId,

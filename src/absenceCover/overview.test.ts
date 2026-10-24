@@ -120,6 +120,7 @@ describe("buildOverview: what moved", () => {
       row({ action: "taken_back", coverActionId: 4, fromUserId: 7, relatedActionId: 2, toUserId: 1 }),
       row({ coverActionId: 2 }),
       row({ action: "escalated", coverActionId: 5, itemId: "40", itemType: "escalation", toUserId: null }),
+      row({ action: "escalated", coverActionId: 6, itemId: "15" }),
     ]);
     const result = await buildOverview(conn, manager, view([]), "live");
     expect(store.listRecentActions).toHaveBeenCalledWith(conn, 14);
@@ -127,6 +128,7 @@ describe("buildOverview: what moved", () => {
       [3, false, true, "Sam Facilities"],
       [2, true, true, "Sam Facilities"],
       [5, false, false, null],
+      [6, false, true, "Sam Facilities"],
     ]);
     expect(result.moved[0]).toMatchObject({ absenceKind: "planned", at: "2026-10-26T03:00:00.000Z", from: { name: "Fay Facilities", userId: 1 }, label: "Job #13", returnDate: "2026-11-02" });
   });

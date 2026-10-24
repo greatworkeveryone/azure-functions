@@ -127,11 +127,24 @@ describe("takeBackItem", () => {
   });
 
   it("explains that something pushed up its ladder, or only told, cannot be taken back", async () => {
-    store.getCoverAction.mockResolvedValue(row({ action: "escalated" }));
+    store.getCoverAction.mockResolvedValue(row({ action: "escalated", itemId: "40", itemType: "escalation" }));
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
     store.getCoverAction.mockResolvedValue(row({ itemType: "approval" }));
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ code: "cannot_take_back", status: 422 });
     expect(store.insertCoverAction).not.toHaveBeenCalled();
+  });
+
+  it("lets a job the ladder gave to someone higher up be taken back: it changed hands, it was not pushed up in place", async () => {
+    store.getCoverAction.mockResolvedValue(row({ action: "escalated" }));
+    expect(await takeBackItem(conn, fay, 100)).toEqual({ coverActionId: 555 });
+    expect(domain.MOVERS.job_assignee).toHaveBeenCalled();
+  });
+
+  it("offers the take-back button for it in the handback, and not for an escalation pushed up its own ladder", async () => {
+    store.listRecentActions.mockResolvedValue([row({ action: "escalated", coverActionId: 1 }), row({ action: "escalated", coverActionId: 2, itemId: "40", itemType: "escalation", toUserId: null })]);
+    db.executeQuery.mockReset().mockResolvedValueOnce([{ Holder: 2, Id: 12 }]).mockResolvedValueOnce([{ Holder: null, Id: 40 }]);
+    const items = (await buildHandback(conn, fay)).items;
+    expect(items.map((item) => [item.itemType, item.canTakeBack])).toEqual([["job", true], ["escalation", false]]);
   });
 
   it("is a conflict when it was already taken back", async () => {
