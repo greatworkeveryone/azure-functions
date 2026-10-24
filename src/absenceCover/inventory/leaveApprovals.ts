@@ -10,7 +10,7 @@ import { executeQuery } from "../../db";
 import { businessDayStart } from "../../escalation/businessTime";
 import { eligibleManager, leaveApprovers, type StaffMember } from "../../leavePolicy";
 import type { ReportingLink } from "../../leavePolicy";
-import { displayDate, leaveLabel } from "../absence";
+import { displayDate } from "../absence";
 import type { CoverItem } from "../types";
 
 export async function loadLeaveApprovalItems(
@@ -40,7 +40,7 @@ export async function loadLeaveApprovalItems(
       importance: "medium",
       importanceCode: "default",
       isTest: false,
-      label: `${subject.name}'s ${leaveLabel(String(row.Kind))} from ${displayDate(String(row.StartDate))} to ${displayDate(String(row.EndDate))} is waiting to be approved`,
+      label: `${subject.name}'s leave from ${displayDate(String(row.StartDate))} to ${displayDate(String(row.EndDate))} is waiting to be approved`,
       minRole: null,
       money: null,
       move: "none",

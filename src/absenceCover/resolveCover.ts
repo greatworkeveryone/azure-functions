@@ -80,7 +80,7 @@ export function resolveCover(item: CoverItem, absent: AbsentPerson, context: Cov
     for (const userId of ids) {
       const person = activeUser(context, userId);
       if (!person) {
-        if (!tried.has(userId)) skipped.push({ reason: "is no longer an active user", source, userId });
+        if (!tried.has(userId)) skipped.push({ name: `Someone no longer here (#${userId})`, reason: "is no longer an active user", source, userId });
         tried.add(userId);
         continue;
       }
@@ -88,7 +88,7 @@ export function resolveCover(item: CoverItem, absent: AbsentPerson, context: Cov
       if (why === null) {
         return { action: source === "ladder" ? "escalated" : "reassigned", found: true, name: person.name, role: person.role, skipped, source, userId };
       }
-      if (!tried.has(userId)) skipped.push({ reason: INELIGIBLE_TEXT[why], source, userId });
+      if (!tried.has(userId)) skipped.push({ name: person.name, reason: INELIGIBLE_TEXT[why], source, userId });
       tried.add(userId);
     }
   }

@@ -28,7 +28,7 @@ describe("resolveCover: the order", () => {
   it("falls to the reporting-line manager when the delegate is away too, and says why", () => {
     const resolution = found(resolveCover(item(), absent(), context({ absentIds: new Set([1, 7]), delegates: [delegate()], links: [{ managerId: 2, userId: 1 }] })));
     expect(resolution).toMatchObject({ action: "reassigned", source: "reporting_manager", userId: 2 });
-    expect(resolution.skipped).toEqual([{ reason: "is away too", source: "delegate", userId: 7 }]);
+    expect(resolution.skipped).toEqual([{ name: "Sam Facilities", reason: "is away too", source: "delegate", userId: 7 }]);
   });
 
   it("falls to the team manager when there is no delegate and no reporting line", () => {
@@ -65,7 +65,7 @@ describe("resolveCover: who is passed over", () => {
 
   it("passes over a cover who cannot do this kind of work", () => {
     const resolution = found(resolveCover(item(), absent(), context({ delegates: [delegate({ delegateUserId: 10 })], directory: withUser })));
-    expect(resolution.skipped).toEqual([{ reason: "cannot do this kind of work", source: "delegate", userId: 10 }]);
+    expect(resolution.skipped).toEqual([{ name: "Una User", reason: "cannot do this kind of work", source: "delegate", userId: 10 }]);
     expect(resolution.source).toBe("team_manager");
   });
 
@@ -77,7 +77,7 @@ describe("resolveCover: who is passed over", () => {
 
   it("never picks the person who raised or asked for it", () => {
     const resolution = found(resolveCover(item({ raisedByUserId: 7 }), absent(), context({ delegates: [delegate()] })));
-    expect(resolution.skipped).toEqual([{ reason: "raised or asked for it", source: "delegate", userId: 7 }]);
+    expect(resolution.skipped).toEqual([{ name: "Sam Facilities", reason: "raised or asked for it", source: "delegate", userId: 7 }]);
     expect(resolution.source).toBe("team_manager");
   });
 
@@ -88,7 +88,7 @@ describe("resolveCover: who is passed over", () => {
 
   it("passes over a nominated cover who is no longer an active user", () => {
     const resolution = found(resolveCover(item(), absent(), context({ delegates: [delegate({ delegateUserId: 99 })] })));
-    expect(resolution.skipped).toEqual([{ reason: "is no longer an active user", source: "delegate", userId: 99 }]);
+    expect(resolution.skipped).toEqual([{ name: "Someone no longer here (#99)", reason: "is no longer an active user", source: "delegate", userId: 99 }]);
   });
 
   it("reports nobody when no one may take it, with every reason", () => {
@@ -105,7 +105,7 @@ describe("resolveCover: a decision, an escalation and a leave approval", () => {
 
   it("gives an authority escalation only to its target role or above", () => {
     const resolution = found(resolveCover(item({ capability: null, minRole: "accounts_manager", type: "escalation" }), absent(), context({ delegates: [delegate()] })));
-    expect(resolution.skipped).toEqual(expect.arrayContaining([{ reason: "cannot do this kind of work", source: "delegate", userId: 7 }]));
+    expect(resolution.skipped).toEqual(expect.arrayContaining([{ name: "Sam Facilities", reason: "cannot do this kind of work", source: "delegate", userId: 7 }]));
     expect(resolution.userId).toBe(5);
     expect(resolution.action).toBe("escalated");
   });
@@ -131,7 +131,7 @@ describe("resolveCover: money", () => {
   it("goes up the ladder when the cover's limit is too low", () => {
     const resolution = found(resolveCover(quote(15_000), absent(), context({ links: [{ managerId: 2, userId: 1 }] })));
     expect(resolution).toMatchObject({ action: "escalated", role: "accounts_manager", source: "ladder", userId: 6 });
-    expect(resolution.skipped).toEqual(expect.arrayContaining([{ reason: "has no authority for that amount", source: "reporting_manager", userId: 2 }]));
+    expect(resolution.skipped).toEqual(expect.arrayContaining([{ name: "Max Manager", reason: "has no authority for that amount", source: "reporting_manager", userId: 2 }]));
   });
 
   it("goes to a director above the director threshold, and for an unknown amount", () => {
@@ -147,7 +147,7 @@ describe("resolveCover: money", () => {
 
   it("never gives a quote to the person who added it, unless a director", () => {
     const resolution = found(resolveCover(quote(8_000, { createdByName: "Max Manager" }), absent(), context({ links: [{ managerId: 2, userId: 1 }] })));
-    expect(resolution.skipped).toEqual([{ reason: "added it", source: "reporting_manager", userId: 2 }]);
+    expect(resolution.skipped).toEqual([{ name: "Max Manager", reason: "added it", source: "reporting_manager", userId: 2 }]);
     expect(resolution.userId).toBe(8);
     expect(found(resolveCover(quote(60_000, { createdByName: "Dee Director" }), absent(), context())).userId).toBe(4);
   });

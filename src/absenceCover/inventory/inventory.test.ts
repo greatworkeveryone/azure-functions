@@ -229,7 +229,7 @@ describe("leave approvals", () => {
     answer([/dbo\.LeaveRequests/, pending]);
     const [row] = await loadLeaveApprovalItems(conn, new Set([2, 4, 5]), staff, []);
     expect(row).toMatchObject({ id: "3", move: "none", raisedByUserId: 1, type: "leave_approval" });
-    expect(row.label).toBe("Fay Facilities's annual leave from 09/11/2026 to 13/11/2026 is waiting to be approved");
+    expect(row.label).toBe("Fay Facilities's leave from 09/11/2026 to 13/11/2026 is waiting to be approved");
     expect(row.dueAt?.toISOString()).toBe("2026-11-08T23:00:00.000Z"); // 08:30 in Darwin on 9 Nov
   });
 

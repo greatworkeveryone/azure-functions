@@ -47,7 +47,7 @@ export function reasonTextFor(entry: Pick<PlanEntry, "absent" | "decision" | "re
   const { absent, decision, resolution } = entry;
   const why = DECISION_TEXT[decision.reasonCode] ?? "";
   const parts = [sentence(why), sentence(absent.reason)];
-  for (const skipped of resolution.skipped) parts.push(sentence(`${SOURCE_TEXT[skipped.source]} was passed over: they ${skipped.reason}`));
+  for (const skipped of resolution.skipped) parts.push(sentence(`${skipped.name}, ${SOURCE_TEXT[skipped.source]}, ${skipped.reason}`));
   if (resolution.found) {
     parts.push(sentence(`${wrote === "suggested" ? "Suggested cover" : wrote === "escalated" ? "Escalated to" : "Moved to"} ${resolution.name}, ${SOURCE_TEXT[resolution.source]}`));
   } else {

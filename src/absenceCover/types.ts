@@ -34,7 +34,7 @@ export interface AbsentPerson {
   name: string;
   /** Completed business days with no sign-in; only for `inactive`. */
   quietBusinessDays: number | null;
-  /** One plain sentence for the screen, e.g. "On annual leave until 30/10/2026". */
+  /** One plain sentence for the screen, e.g. "On leave until 30/10/2026". It never says what kind of leave: it is also written to the permanent ledger. */
   reason: string;
   reasonCode: "no_sign_in" | "planned_leave" | "unplanned_leave";
   /** Names the absence so a manager's "keep" holds for it and no other. */
@@ -117,6 +117,8 @@ export interface CoverContext {
 }
 
 export interface SkippedCover {
+  /** Who was passed over: their name, or a placeholder for someone no longer in the directory. */
+  name: string;
   reason: string;
   source: CoverSource;
   userId: number | null;

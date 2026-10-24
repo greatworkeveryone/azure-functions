@@ -49,7 +49,7 @@ describe("detectAbsences: leave", () => {
     const { absent } = detect({ leaves: [leave()] });
     expect(absent).toHaveLength(1);
     expect(absent[0]).toMatchObject({ kind: "planned", reasonCode: "planned_leave", ref: "leave:11", returnDate: "2026-11-02", userId: 1 });
-    expect(absent[0].reason).toBe("On annual leave until 30/10/2026");
+    expect(absent[0].reason).toBe("On leave until 30/10/2026");
   });
 
   it("is unplanned when sick or personal leave was booked on the day it starts", () => {
@@ -86,9 +86,10 @@ describe("detectAbsences: leave", () => {
     expect(absent[0].returnDate).toBe("2026-11-02");
   });
 
-  it("describes sick and other leave in plain words", () => {
-    expect(detect({ leaves: [leave({ kind: "unpaid_leave" })] }).absent[0].reason).toContain("unpaid leave");
-    expect(detect({ leaves: [leave({ kind: "something_else" })] }).absent[0].reason).toContain("On leave until");
+  it.each(["annual_leave", "personal_leave", "unpaid_leave", "other_leave", "something_else"])("never says what kind of leave %s is: the words go in the permanent ledger", (kind) => {
+    const { absent } = detect({ leaves: [leave({ approvedOn: kind === "personal_leave" ? "2026-10-26" : "2026-10-01", kind })] });
+    expect(absent[0].reason).toMatch(/^(On leave until|Away on leave that was not planned, until) 30\/10\/2026$/);
+    expect(absent[0].leaveKind).toBe(kind);
   });
 });
 

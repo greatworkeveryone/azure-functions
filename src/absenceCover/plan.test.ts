@@ -123,7 +123,7 @@ describe("reasonTextFor", () => {
   it("says why, who is away, who was passed over and who has it", () => {
     const entry = plan([item({ dueAt: due("2026-10-28") })], [], { delegates: [{ coverDelegateId: 1, delegateUserId: 7, fromDate: "2026-10-26", leaveRequestId: 11, toDate: "2026-10-30", userId: 1 }], absentIds: new Set([1, 7]) }).entries[0];
     expect(entry.reasonText).toBe(
-      "It falls due before they are back. On annual leave until 30/10/2026. the cover they nominated was passed over: they is away too. Moved to Max Manager, their team manager.",
+      "It falls due before they are back. On leave until 30/10/2026. Sam Facilities, the cover they nominated, is away too. Moved to Max Manager, their team manager.",
     );
     expect(reasonTextFor(entry, "suggested")).toContain("Suggested cover Max Manager");
   });

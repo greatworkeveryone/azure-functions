@@ -16,6 +16,9 @@
 // are the holidays in ESCALATION_HOLIDAYS when that is set (Floorplan has no
 // public-holiday calendar of its own yet).
 //
+// What kind of leave it is never reaches the words: they are written to the permanent
+// ledger, and a person's kind of leave (a sick day) is theirs.
+//
 // "Approved before the start" uses the leave request's last change time as the
 // approval time: an approved request is only ever changed to withdraw it.
 
@@ -38,15 +41,6 @@ export interface StaffFact {
   role: string;
   userId: number;
 }
-
-const LEAVE_LABELS: Record<string, string> = {
-  annual_leave: "annual leave",
-  other_leave: "leave",
-  personal_leave: "personal leave",
-  unpaid_leave: "unpaid leave",
-};
-
-export const leaveLabel = (kind: string): string => LEAVE_LABELS[kind] ?? "leave";
 
 /** DD/MM/YYYY, as the screens write dates. */
 export function displayDate(iso: string): string {
@@ -88,7 +82,6 @@ function leaveRun(person: LeaveFact[], today: string, holidays: Holidays): { cov
 function onLeave(staff: StaffFact, run: { covering: LeaveFact; end: string }, holidays: Holidays): AbsentPerson {
   const { covering } = run;
   const planned = covering.approvedOn < covering.startDate;
-  const label = leaveLabel(covering.kind);
   return {
     endDate: run.end,
     kind: planned ? "planned" : "unplanned",
@@ -97,7 +90,7 @@ function onLeave(staff: StaffFact, run: { covering: LeaveFact; end: string }, ho
     leaveRequestId: covering.requestId,
     name: staff.name,
     quietBusinessDays: null,
-    reason: planned ? `On ${label} until ${displayDate(run.end)}` : `Away on ${label} that was not planned, until ${displayDate(run.end)}`,
+    reason: planned ? `On leave until ${displayDate(run.end)}` : `Away on leave that was not planned, until ${displayDate(run.end)}`,
     reasonCode: planned ? "planned_leave" : "unplanned_leave",
     ref: `leave:${covering.requestId}`,
     returnDate: returnDateAfter(run.end, holidays),

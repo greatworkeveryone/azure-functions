@@ -50,7 +50,7 @@ describe("buildOverview: who is away", () => {
     expect(result.away).toEqual([
       {
         cover: { name: "Sam Facilities", source: "delegate", userId: 7 }, endDate: "2026-10-30", itemCount: 2, kind: "planned", lastSeenOn: null, movedCount: 1, name: "Fay Facilities",
-        reason: "On annual leave until 30/10/2026", returnDate: "2026-11-02", role: "facilities", startDate: "2026-10-26", suggestedCount: 2, userId: 1,
+        reason: "On leave until 30/10/2026", returnDate: "2026-11-02", role: "facilities", startDate: "2026-10-26", suggestedCount: 2, userId: 1,
       },
     ]);
     expect(result.today).toBe(TODAY);

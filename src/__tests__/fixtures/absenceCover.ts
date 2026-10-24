@@ -44,7 +44,7 @@ export const absent = (over: Partial<AbsentPerson> = {}): AbsentPerson => ({
   leaveRequestId: 11,
   name: "Fay Facilities",
   quietBusinessDays: null,
-  reason: "On annual leave until 30/10/2026",
+  reason: "On leave until 30/10/2026",
   reasonCode: "planned_leave",
   ref: "leave:11",
   returnDate: "2026-11-02",
