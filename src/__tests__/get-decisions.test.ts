@@ -8,6 +8,7 @@ import { clearRoleCache } from "../auth";
 import { getDecisions } from "../functions/getDecisions";
 import { DECISIONS_CSV_HEADERS } from "../ledger/csv";
 import { MAX_LIST_ROWS } from "../pagination";
+import { _resetRateLimitForTests } from "../rateLimit";
 
 jest.mock("../db", () => ({
   closeConnection:         jest.fn(),
@@ -79,6 +80,7 @@ const get = (query: Record<string, string> = {}, roles = "director") => getDecis
 beforeEach(() => {
   jest.clearAllMocks();
   clearRoleCache();
+  _resetRateLimitForTests();
   db.createRequestConnection.mockResolvedValue({});
   db.executeQuery.mockResolvedValue([]);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";

@@ -15,6 +15,8 @@ jest.mock("../auth", () => {
       name: "Test User",
       email: "test@co.com",
     }),
+    // Member-account claims: a pre-invite may only be claimed by a member (acct 0, idtyp user).
+    verifiedRequestClaims: jest.fn().mockResolvedValue({ acct: "0", idtyp: "user" }),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     errorResponse:     jest.fn().mockReturnValue({ status: 500, jsonBody: { error: "Error" } }),
   };
@@ -80,6 +82,9 @@ const { upsertAppUser, registerSelf } = require("./users") as {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks keeps queued mockResolvedValueOnce values; a test that queues
+  // more results than the handler consumes would otherwise shift the next test's queue.
+  db.executeQuery.mockReset();
   rateLimit._resetRateLimitForTests();
   db.createServiceRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
