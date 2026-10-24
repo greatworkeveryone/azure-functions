@@ -19,7 +19,7 @@ import { insertCoverAction } from "../coverActionStore";
 import { COVER_ACTOR_NAME, type AbsentPerson, type CoverActionKind, type CoverItem } from "../types";
 import { MOVERS } from "./domain";
 import { raiseCoverNotice } from "./notice";
-import type { MoveActor } from "./types";
+import { MoveRefused, type MoveActor } from "./types";
 
 export interface ApplyInput {
   absent: Pick<AbsentPerson, "kind" | "name" | "ref" | "returnDate" | "userId">;
@@ -109,11 +109,14 @@ export async function applyCoverAction(connection: Connection, input: ApplyInput
         reason: input.reasonText,
         to: cover,
       });
-      if (!ok) return null;
+      if (!ok) throw new MoveRefused();
     }
     const coverActionId = await insertCoverAction(connection, ledgerRowFor(input, cover.userId));
     announce = await raiseCoverNotice(connection, { coverActionId, deepLink: item.deepLink, toUserId: cover.userId });
     return coverActionId;
+  }).catch((error: unknown) => {
+    if (error instanceof MoveRefused) return null;
+    throw error;
   });
   if (moved === null) return { reason: "changed", status: "skipped" };
   return { announce, coverActionId: moved, status: "applied", toUserId: cover.userId };

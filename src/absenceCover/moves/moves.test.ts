@@ -87,6 +87,15 @@ describe("moveDecision", () => {
     expect(sqls()[1]).toContain("N'comment'");
   });
 
+  it("reports false, having already written the makers, when the escalation turns out stale: the caller must roll back", async () => {
+    decisions.getRequestRow.mockResolvedValue(request());
+    db.executeQuery.mockResolvedValueOnce([{ RequestId: 5 }]);
+    store.findLiveEscalation.mockResolvedValue({ escalationId: 40, level: 1, rowVersion: "ev" });
+    store.updateEscalation.mockResolvedValue(false);
+    expect(await moveDecision(conn, args({ itemId: "5" }))).toBe(false);
+    expect(sqls()[0]).toContain("UPDATE dbo.JobDecisionRequests");
+  });
+
   it("leaves an escalation that has moved up to the manager alone", async () => {
     decisions.getRequestRow.mockResolvedValue(request());
     db.executeQuery.mockResolvedValueOnce([{ RequestId: 5 }]).mockResolvedValueOnce([]);

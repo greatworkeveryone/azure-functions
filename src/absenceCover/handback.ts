@@ -12,6 +12,7 @@ import { getCoverAction, insertCoverAction, listRecentActions, type CoverActionR
 import { coverError } from "./errors";
 import { probeEmailColumns } from "./inventory/emails";
 import { canTakeBack, MOVE_KIND_OF, MOVERS } from "./moves/domain";
+import { MoveRefused } from "./moves/types";
 import { loadAbsences } from "./view";
 import type { AbsenceKind, ItemType } from "./types";
 
@@ -138,7 +139,7 @@ export async function takeBackItem(connection: Connection, caller: CoverCaller, 
       takeBack: true,
       to: { name: caller.name, userId: caller.userId },
     });
-    if (!moved) return null;
+    if (!moved) throw new MoveRefused();
     return insertCoverAction(connection, {
       absenceKind: row.absenceKind,
       absenceRef: row.absenceRef,
@@ -158,6 +159,9 @@ export async function takeBackItem(connection: Connection, caller: CoverCaller, 
       runId: null,
       toUserId: caller.userId,
     });
+  }).catch((error: unknown) => {
+    if (error instanceof MoveRefused) return null;
+    throw error;
   });
   if (id === null) throw coverError.changed(`This is no longer with ${coverName ?? "the cover"} (it may be finished), so there is nothing to take back.`);
   return { coverActionId: id };

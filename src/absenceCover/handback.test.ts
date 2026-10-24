@@ -8,7 +8,20 @@ jest.mock("../db", () => ({ executeQuery: jest.fn() }));
 jest.mock("./coverActionStore", () => ({ getCoverAction: jest.fn(), insertCoverAction: jest.fn(), listRecentActions: jest.fn() }));
 jest.mock("./view", () => ({ loadAbsences: jest.fn() }));
 jest.mock("./inventory/emails", () => ({ probeEmailColumns: jest.fn() }));
-jest.mock("../rentReview/store", () => ({ inTransaction: async (_c: unknown, work: () => Promise<unknown>) => work() }));
+const txLog: string[] = [];
+jest.mock("../rentReview/store", () => ({
+  inTransaction: async (_c: unknown, work: () => Promise<unknown>) => {
+    txLog.push("begin");
+    try {
+      const out = await work();
+      txLog.push("commit");
+      return out;
+    } catch (error) {
+      txLog.push("rollback");
+      throw error;
+    }
+  },
+}));
 jest.mock("./moves/domain", () => {
   const actual = jest.requireActual("./moves/domain");
   return { ...actual, MOVERS: { ...actual.MOVERS, job_assignee: jest.fn(), decision_makers: jest.fn() } };
@@ -127,8 +140,10 @@ describe("takeBackItem", () => {
   });
 
   it("is a conflict, writing no row, when it is no longer with the cover", async () => {
+    txLog.length = 0;
     domain.MOVERS.job_assignee.mockResolvedValue(false);
     await expect(takeBackItem(conn, fay, 100)).rejects.toMatchObject({ status: 409 });
     expect(store.insertCoverAction).not.toHaveBeenCalled();
+    expect(txLog).toEqual(["begin", "rollback"]);
   });
 });

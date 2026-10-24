@@ -77,6 +77,15 @@ describe("applyCoverAction: a move", () => {
     expect(notice.raiseCoverNotice).not.toHaveBeenCalled();
   });
 
+  it("rolls back, never commits, when a mover has already written part of a move and then finds the row stale (a decision's makers changed, its escalation did not)", async () => {
+    domain.MOVERS.job_assignee.mockImplementation(async () => {
+      log.push("partial write");
+      return false;
+    });
+    expect(await applyCoverAction(conn, input())).toEqual({ reason: "changed", status: "skipped" });
+    expect(log).toEqual(["begin", "partial write", "rollback"]);
+  });
+
   it("rolls the whole move back when the ledger row cannot be written", async () => {
     store.insertCoverAction.mockRejectedValueOnce(new Error("ledger down"));
     await expect(applyCoverAction(conn, input())).rejects.toThrow("ledger down");
