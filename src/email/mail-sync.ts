@@ -14,6 +14,17 @@ import type { Connection } from "tedious";
 import { executeQuery } from "../db";
 import { graphFetchEmailPages } from "../graph";
 import { upsertGraphEmails } from "../functions/emails";
+import { inboundColumnsOn } from "../inboundTriage/config";
+import { linkReplies } from "../inboundTriage/replyLink";
+
+export interface SyncOptions {
+  /**
+   * A mailbox read for the first time starts from now, not from the newest email stored: it is an
+   * extra mailbox (INBOUND_EXTRA_MAILBOXES) whose old mail is not wanted in Incoming. Its watermark row
+   * is written at once, so the next sync carries on from there instead of from "now" again.
+   */
+  startFromNow?: boolean;
+}
 
 export interface MailboxSyncResult {
   fetched: number;
@@ -34,7 +45,11 @@ async function knownMessageIdsSince(connection: Connection, since: Date): Promis
 // newest stored email (the handover row in production), as the global
 // MAX(ReceivedAt) watermark did — but once it has a row, an ingestEmail with a
 // future date or another mailbox's mail can no longer move it.
-async function readWatermark(connection: Connection, mailbox: string): Promise<{ since: Date | null; tracked: boolean }> {
+async function readWatermark(
+  connection: Connection,
+  mailbox: string,
+  startFromNow: boolean,
+): Promise<{ since: Date | null; tracked: boolean }> {
   const [shape] = await executeQuery(
     connection,
     "SELECT CASE WHEN OBJECT_ID(N'dbo.EmailSyncState', N'U') IS NULL THEN 0 ELSE 1 END AS HasState",
@@ -48,6 +63,11 @@ async function readWatermark(connection: Connection, mailbox: string): Promise<{
     );
     const last = rows[0]?.LastReceivedAt as Date | string | null | undefined;
     if (last) return { since: new Date(last), tracked };
+    if (startFromNow) {
+      const now = new Date();
+      await advanceWatermark(connection, mailbox, now, null);
+      return { since: now, tracked };
+    }
   }
   const latestRows = await executeQuery(connection, "SELECT MAX(ReceivedAt) AS LatestReceivedAt FROM Emails");
   const rawDate = latestRows[0]?.LatestReceivedAt as Date | string | null | undefined;
@@ -80,14 +100,19 @@ async function advanceWatermark(
 // `receivedDateTime ge watermark` — `ge`, not `gt`, so two mails that share the
 // newest timestamp are both seen. The rows already stored in that window go to
 // Graph as a skip-set, so their attachments are not refetched.
-export async function syncMailbox(connection: Connection, mailbox: string): Promise<MailboxSyncResult> {
-  const { since, tracked } = await readWatermark(connection, mailbox);
+export async function syncMailbox(connection: Connection, mailbox: string, options: SyncOptions = {}): Promise<MailboxSyncResult> {
+  const { since, tracked } = await readWatermark(connection, mailbox, options.startFromNow === true);
+  // A mailbox with no watermark table cannot be read from "now": there is nowhere to remember it.
+  if (options.startFromNow && !tracked) return { fetched: 0, pages: 0, since: null };
+  const inbound = inboundColumnsOn() ? { mailbox: mailbox.toLowerCase() } : undefined;
   const known = since ? await knownMessageIdsSince(connection, since) : new Set<string>();
 
   let fetched = 0;
   let pages = 0;
   for await (const page of graphFetchEmailPages(mailbox, since?.toISOString(), known)) {
-    await upsertGraphEmails(connection, page.emails);
+    await upsertGraphEmails(connection, page.emails, inbound ? { inbound } : {});
+    // A reply is linked to the send it answers once it is stored. Linking is never allowed to fail the sync.
+    if (inbound) await linkReplies(connection, page.emails.map((email) => email.internetMessageId)).catch((err: unknown) => console.error("[inbound] reply linking failed:", err instanceof Error ? err.message : String(err)));
     fetched += page.emails.length;
     pages += 1;
     if (tracked && page.newestReceivedAt) {

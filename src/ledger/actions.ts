@@ -314,6 +314,12 @@ export const LEDGER_ACTIONS = {
   "myob.control_change": { exception: true, reasonRequired: true, subjects: ["myob_control"] },
   // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
   "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
+  // Who owns an Incoming email (EB3). The inbound triage worker assigns a strong match itself
+  // (system actor; RuleApplied says which rule), a manager assigns one from the Needs triage queue,
+  // and a manager moving an assigned email to someone else is a reassignment, with an optional note.
+  "email.assign": { exception: false, reasonRequired: false, subjects: ["email"] },
+  "email.auto_assign": { exception: false, reasonRequired: false, subjects: ["email"] },
+  "email.reassign": { exception: false, reasonRequired: false, subjects: ["email"] },
   // The proposal pipeline (sprint M3, decision 12): one row per step. An
   // exception (MYOB said no, the outcome is unknown, or the read-back differs)
   // and a withdrawal are exceptions; a withdrawal needs its reason.

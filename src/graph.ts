@@ -11,6 +11,7 @@
 // and record the error rather than blocking the DB write.
 
 import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
+import { replyHeaders } from "./inboundTriage/messageIds";
 import { assertMayLeave, type EgressSubject } from "./test-data";
 
 interface TokenResponse {
@@ -241,7 +242,11 @@ export interface GraphEmail {
   // Trimmed auth headers for audit / the approval UI (≤ 2000 chars).
   authenticationResults: string | null;
   graphMessageId: string;
+  /** The Message-ID this email answers (In-Reply-To), normalised: no angle brackets, lower case. */
+  inReplyTo?: string | null;
   internetMessageId: string;
+  /** The ids in its References header, normalised and space separated, newest last. */
+  referenceIds?: string | null;
   subject: string | null;
   fromAddress: string | null;
   fromName: string | null;
@@ -356,10 +361,14 @@ async function toGraphEmail(m: any, mailbox: string, token: string): Promise<Gra
   const rawName: string | null = m.from?.emailAddress?.name ?? null;
   const rawAddress: string | null = m.from?.emailAddress?.address ?? null;
   const fromName = rawName && rawName !== rawAddress ? rawName : null;
-  const auth = assessSenderAuth(toMessageHeaders(m.internetMessageHeaders), rawAddress ?? "");
+  const headers = toMessageHeaders(m.internetMessageHeaders);
+  const auth = assessSenderAuth(headers, rawAddress ?? "");
+  const { inReplyTo, referenceIds } = replyHeaders(headers);
   return {
     graphMessageId: m.id,
+    inReplyTo,
     internetMessageId: m.internetMessageId ?? m.id,
+    referenceIds,
     subject: m.subject ?? null,
     fromAddress: rawAddress,
     fromName,
