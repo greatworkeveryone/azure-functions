@@ -5,6 +5,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../db";
+import { stripKeyMarker } from "./idempotency";
 
 export type EventActor = { kind: "system"; name: string } | { kind: "user"; name: string; oid: string };
 
@@ -61,7 +62,7 @@ export async function readEvents(connection: Connection, correspondenceId: numbe
   return rows.map((row) => ({
     actorName: String(row.ActorName),
     createdAt: new Date(row.CreatedAt as Date).toISOString(),
-    detail: (row.Detail as string | null) ?? null,
+    detail: stripKeyMarker((row.Detail as string | null) ?? null),
     errorCode: (row.ErrorCode as string | null) ?? null,
     fromStatus: (row.FromStatus as string | null) ?? null,
     recipientId: row.RecipientId === null || row.RecipientId === undefined ? null : Number(row.RecipientId),

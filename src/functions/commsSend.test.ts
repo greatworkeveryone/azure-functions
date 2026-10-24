@@ -319,3 +319,54 @@ describe("previewCorrespondence", () => {
     });
   });
 });
+
+describe("queueCorrespondence: the double-click guard", () => {
+  const KEY = "0b9a7c5e-3f2d-4a61-9d1e-5c7b8a2f4e10";
+  const db = jest.requireMock("../db") as { commitTransaction: jest.Mock; executeQuery: jest.Mock };
+
+  it("queues once and notes the key when the key is new", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    expect(response.status).toBe(201);
+    expect(response.jsonBody).toMatchObject({ correspondenceId: 41, repeated: false });
+    expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ detail: `2 recipients key=${KEY}` }));
+  });
+
+  it("returns the job already made, queuing nothing, when the same person submits the same key again", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([{ CorrespondenceId: 41 }]);
+    jobs.readJob.mockResolvedValue({ blockedCount: 0, correspondenceId: 41, recipientCount: 2, status: "queued" } as never);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({ correspondenceId: 41, queued: 2, repeated: true, requiresApproval: false, status: "queued" });
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+    expect(jobs.insertRecipient).not.toHaveBeenCalled();
+    expect(jest.mocked(events.appendEvent)).not.toHaveBeenCalled();
+    expect(jest.mocked(record)).not.toHaveBeenCalled();
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("looks for the key among the caller's own jobs only", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    const lookup = db.executeQuery.mock.calls[1][2];
+    expect(lookup).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Oid", value: "fay-oid" })]));
+  });
+
+  it("does not look when there is no key, so existing callers behave as before", async () => {
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.status).toBe(201);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it.each(["short", "has spaces in it, which no key does", "x".repeat(65), 12345678901234567, ""])("refuses the malformed key %j", async (bad) => {
+    const response = await queueCorrespondence(post(request({ idempotencyKey: bad })), context);
+    expect(response.status).toBe(400);
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+  });
+
+  it("fails the queue, queuing nothing, when the lock can't be taken", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: -1 }]);
+    expect((await queueCorrespondence(post(request({ idempotencyKey: KEY })), context)).status).toBe(500);
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+  });
+});

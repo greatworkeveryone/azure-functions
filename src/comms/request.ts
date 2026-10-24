@@ -6,6 +6,7 @@
 // another person's details is refused with the reason. Per-recipient merge values may carry
 // only the fields in the catalogue that the server doesn't fill itself.
 
+import { IDEMPOTENCY_KEY } from "./idempotency";
 import { mailbox, optionalLine, plainLine, type Checked } from "./fields";
 import { MAX_RECIPIENTS_PER_JOB } from "./config";
 import type { RecipientType } from "./compose";
@@ -126,14 +127,18 @@ export function parseContent(body: Record<string, unknown>): Parsed<EmailContent
 
 export interface QueueInput extends EmailContent {
   duplicatesDropped: number;
+  /** One per compose session: a repeated submit with the same key returns the job already made. */
+  idempotencyKey: string | null;
   recipients: NewRecipient[];
 }
 
 export function parseQueueInput(body: Record<string, unknown>): Parsed<QueueInput> {
-  const extra = unexpectedKey(body, [...CONTENT_KEYS, "recipients"]);
+  const extra = unexpectedKey(body, [...CONTENT_KEYS, "recipients", "idempotencyKey"]);
   if (extra) return fail(extra);
   const content = parseContent(body);
   if (!content.ok) return content;
+  const key = body.idempotencyKey;
+  if (key !== undefined && key !== null && !(typeof key === "string" && IDEMPOTENCY_KEY.test(key))) return fail("idempotencyKey must be 16 to 64 letters, digits, - or _");
   if (!Array.isArray(body.recipients) || body.recipients.length === 0) return fail("Choose at least one recipient");
   if (body.recipients.length > MAX_RECIPIENTS_PER_JOB) return fail(`A send can have at most ${MAX_RECIPIENTS_PER_JOB} recipients`);
   const seen = new Set<string>();
@@ -145,7 +150,7 @@ export function parseQueueInput(body: Record<string, unknown>): Parsed<QueueInpu
     seen.add(recipient.value.address);
     recipients.push(recipient.value);
   }
-  return { ok: true, value: { ...content.value, duplicatesDropped: body.recipients.length - recipients.length, recipients } };
+  return { ok: true, value: { ...content.value, duplicatesDropped: body.recipients.length - recipients.length, idempotencyKey: typeof key === "string" ? key : null, recipients } };
 }
 
 export type PreviewInput = { content: EmailContent; kind: "draft"; recipient: NewRecipient } | { correspondenceId: number; kind: "saved"; recipientId: number };

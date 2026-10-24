@@ -1,4 +1,4 @@
-// POST /api/queueCorrespondence  { kind, subject, bodyMarkdown, templateId?, templateVersion?, replyTo, signatureMode, recipients }
+// POST /api/queueCorrespondence  { kind, subject, bodyMarkdown, templateId?, templateVersion?, replyTo, signatureMode, recipients, idempotencyKey? }
 //
 // Creates a send job: one message per recipient, from the one Randazzo Properties sender, with the
 // reply-to the caller chose (an identity their role may use, or their own company address) and a
@@ -7,7 +7,8 @@
 // COMMS_APPROVAL_THRESHOLD (default 20) waits for a manager (approveCorrespondence); a smaller one is
 // queued. Recipients with a missing merge field are stored blocked and named; if none can be sent
 // nothing is created. Nothing goes out here: the queue timer sends, and only when COMMS_SEND_ENABLED
-// is "true". Same roles as sending (ACTION_ROLES.sendEmail).
+// is "true". Same roles as sending (ACTION_ROLES.sendEmail). An idempotencyKey (one per compose session)
+// makes a repeated submit return the job already made (200, repeated: true) instead of queuing a second.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
@@ -60,8 +61,8 @@ export async function queueCorrespondence(request: HttpRequest, context: Invocat
       return badRequest(`No recipient can be sent this email. ${first.ok ? "" : first.detail}`.trim());
     }
     const user = await findUserByOid(connection, actor.oid);
-    const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold());
-    return { headers: noStore, jsonBody: { ...queued, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.status === "awaiting_approval" }, status: 201 };
+    const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold(), input.value.idempotencyKey);
+    return { headers: noStore, jsonBody: { ...queued, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.status === "awaiting_approval" }, status: queued.repeated ? 200 : 201 };
   } catch (error) {
     context.error("queueCorrespondence failed:", error instanceof Error ? error.message : error);
     return errorResponse("Could not queue the email", error);
