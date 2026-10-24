@@ -33,6 +33,14 @@ describe("switches.md rows for cover while away", () => {
     expect(row).toMatch(/migration 177/);
   });
 
+  it("says inactivity only suggests, is skipped on a stale log, aborts on unexpected volume, and keeps dormant people from being covers", () => {
+    const row = rows.get("ABSENCE_INACTIVITY_DAYS") ?? "";
+    expect(row).toMatch(/only ever produces suggestions/);
+    expect(row).toMatch(/stale/);
+    expect(row).toMatch(/more than 20% of active staff/);
+    expect(row).toMatch(/never chosen as a cover/);
+  });
+
   it("says the dry run wins and moves nothing", () => {
     const row = rows.get("ABSENCE_COVER_DRY_RUN") ?? "";
     expect(row).toMatch(/Wins over `ABSENCE_COVER_ENABLED`/);
