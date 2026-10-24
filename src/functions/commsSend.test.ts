@@ -12,7 +12,7 @@ import { previewCorrespondence } from "./previewCorrespondence";
 import { queueCorrespondence } from "./queueCorrespondence";
 
 jest.mock("@azure/functions", () => ({ ...jest.requireActual("@azure/functions"), app: { http: jest.fn() } }));
-let roles: string[] = [AppRole.ACCOUNTS];
+let roles: string[] = [AppRole.ACCOUNTS_APPROVAL];
 let token: string | null = "token";
 let email = "fay@randazzo.properties";
 jest.mock("../auth", () => ({
@@ -62,7 +62,7 @@ const request = (over: Record<string, unknown> = {}, count = 2) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   _resetRateLimitForTests();
-  roles = [AppRole.ACCOUNTS];
+  roles = [AppRole.ACCOUNTS_APPROVAL];
   token = "token";
   email = "fay@randazzo.properties";
   delete process.env.COMMS_APPROVAL_THRESHOLD;
@@ -76,11 +76,22 @@ beforeEach(() => {
 });
 
 describe("queueCorrespondence: who may", () => {
-  it.each([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR])("lets %s queue", async (role) => {
+  it.each([AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR])("lets %s queue a broadcast", async (role) => {
     roles = [role];
     // the identity is for accounts roles; use the sender's own address so every role has a valid reply-to
     const response = await queueCorrespondence(post(request({ replyTo: { type: "own" }, signatureMode: "personal" })), context);
     expect(response.status).toBe(201);
+  });
+
+  it.each([AppRole.ACCOUNTS, AppRole.FACILITIES])("lets %s queue a letter but not a broadcast, which is for managers and directors", async (role) => {
+    roles = [role];
+    const own = { replyTo: { type: "own" }, signatureMode: "personal" };
+    expect((await queueCorrespondence(post(request({ ...own, kind: "letter" })), context)).status).toBe(201);
+    jobs.insertJob.mockClear();
+    const refused = await queueCorrespondence(post(request(own)), context);
+    expect(refused.status).toBe(403);
+    expect(JSON.stringify(refused.jsonBody)).toContain("managers and directors");
+    expect(jobs.insertJob).not.toHaveBeenCalled();
   });
 
   it("refuses admin, which sends nothing real, and a baseline user, before reading anything", async () => {
@@ -105,7 +116,7 @@ describe("queueCorrespondence: the job", () => {
     expect(response.jsonBody).toMatchObject({ blocked: 0, correspondenceId: 41, queued: 2, requiresApproval: false, status: "queued" });
     const job = jobs.insertJob.mock.calls[0][1];
     expect(job).toMatchObject({
-      createdBy: { email: "fay@randazzo.properties", name: "Fay Facilities", oid: "fay-oid", role: "accounts" },
+      createdBy: { email: "fay@randazzo.properties", name: "Fay Facilities", oid: "fay-oid", role: "accounts_manager" },
       fromAddress: "notices@randazzo.properties",
       fromName: "Randazzo Properties",
       replyTo: { address: "accounts@randazzo.properties", identityId: 3, name: "Randazzo Accounts" },
@@ -130,7 +141,7 @@ describe("queueCorrespondence: the job", () => {
     expect(db.beginTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
     expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actor: { kind: "user", name: "Fay Facilities", oid: "fay-oid" }, correspondenceId: 41, fromStatus: null, toStatus: "queued", type: "job" }));
-    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.queue", actor: expect.objectContaining({ kind: "user", name: "Fay Facilities", role: "accounts", userId: 7 }), subject: { id: 41, type: "correspondence" } }));
+    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.queue", actor: expect.objectContaining({ kind: "user", name: "Fay Facilities", role: "accounts_manager", userId: 7 }), subject: { id: 41, type: "correspondence" } }));
   });
 
   it("rolls everything back when the ledger row can't be written", async () => {
@@ -250,7 +261,7 @@ describe("queueCorrespondence: recipients are resolved from the server's records
 
 describe("queueCorrespondence: reply-to and signature are checked on the server", () => {
   it("refuses an identity the role may not use", async () => {
-    roles = [AppRole.FACILITIES];
+    roles = [AppRole.FACILITIES_APPROVAL];
     const response = await queueCorrespondence(post(request()), context);
     expect(response.status).toBe(403);
     expect(jobs.insertJob).not.toHaveBeenCalled();
@@ -395,6 +406,7 @@ describe("previewCorrespondence", () => {
     });
 
     it("refuses someone else's send unless the caller is a manager, and 404s a missing one", async () => {
+      roles = [AppRole.ACCOUNTS];
       jobs.readJob.mockResolvedValue({ ...saved, createdByOid: "someone-else" });
       expect((await previewCorrespondence(post({ correspondenceId: 41, recipientId: 9 }), context)).status).toBe(403);
       roles = [AppRole.ACCOUNTS_APPROVAL];
@@ -405,3 +417,100 @@ describe("previewCorrespondence", () => {
     });
   });
 });
+
+describe("queueCorrespondence: the double-click guard", () => {
+  const KEY = "0b9a7c5e-3f2d-4a61-9d1e-5c7b8a2f4e10";
+  const db = jest.requireMock("../db") as { commitTransaction: jest.Mock; executeQuery: jest.Mock };
+
+  it("queues once and notes the key when the key is new", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    expect(response.status).toBe(201);
+    expect(response.jsonBody).toMatchObject({ correspondenceId: 41, repeated: false });
+    expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ detail: `2 recipients key=${KEY}` }));
+  });
+
+  it("returns the job already made, queuing nothing, when the same person submits the same key again", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([{ CorrespondenceId: 41 }]);
+    jobs.readJob.mockResolvedValue({ blockedCount: 0, correspondenceId: 41, recipientCount: 2, status: "queued" } as never);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({ correspondenceId: 41, queued: 2, repeated: true, requiresApproval: false, status: "queued" });
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+    expect(jobs.insertRecipient).not.toHaveBeenCalled();
+    expect(jest.mocked(events.appendEvent)).not.toHaveBeenCalled();
+    expect(jest.mocked(record)).not.toHaveBeenCalled();
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("looks for the key among the caller's own jobs only", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    const lookup = db.executeQuery.mock.calls[1][2];
+    expect(lookup).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Oid", value: "fay-oid" })]));
+  });
+
+  it("does not look when there is no key, so existing callers behave as before", async () => {
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.status).toBe(201);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it.each(["short", "has spaces in it, which no key does", "x".repeat(65), 12345678901234567, ""])("refuses the malformed key %j", async (bad) => {
+    const response = await queueCorrespondence(post(request({ idempotencyKey: bad })), context);
+    expect(response.status).toBe(400);
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+  });
+
+  it("fails the queue, queuing nothing, when the lock can't be taken", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: -1 }]);
+    expect((await queueCorrespondence(post(request({ idempotencyKey: KEY })), context)).status).toBe(500);
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("queueCorrespondence: a repeated submit and the 24 hour count", () => {
+  const KEY = "0b9a7c5e-3f2d-4a61-9d1e-5c7b8a2f4e10";
+  const db = jest.requireMock("../db") as { executeQuery: jest.Mock };
+
+  it("returns the same job with the same reason on a repeat, and does not add its recipients to the total again", async () => {
+    // First submit: 21 recipients, 4 already sent today, over the threshold of 20 by size.
+    jobs.recentRecipientCount.mockResolvedValue(4);
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    const first = await queueCorrespondence(post(request({ idempotencyKey: KEY }, 21)), context);
+    expect(first.status).toBe(201);
+    expect(first.jsonBody).toMatchObject({ approvalReason: "size", correspondenceId: 41, recentRecipients: 4, repeated: false });
+    expect(jobs.insertJob).toHaveBeenCalledTimes(1);
+
+    // Repeat: the job exists now, so the stored total is 4 + 21. Nothing new is written.
+    jobs.insertJob.mockClear();
+    jobs.insertRecipient.mockClear();
+    jobs.recentRecipientCount.mockClear();
+    jobs.recentRecipientCount.mockResolvedValue(25);
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([{ CorrespondenceId: 41 }]);
+    jobs.readJob.mockResolvedValue({ blockedCount: 0, correspondenceId: 41, createdByOid: "fay-oid", kind: "broadcast", recipientCount: 21, requiresApproval: true, status: "awaiting_approval" } as never);
+    const again = await queueCorrespondence(post(request({ idempotencyKey: KEY }, 21)), context);
+    expect(again.status).toBe(200);
+    expect(again.jsonBody).toMatchObject({ approvalNote: (first.jsonBody as { approvalNote: string }).approvalNote, approvalReason: "size", correspondenceId: 41, recentRecipients: 4, repeated: true, requiresApproval: true, status: "awaiting_approval" });
+    expect(jobs.insertJob).not.toHaveBeenCalled();
+    expect(jobs.insertRecipient).not.toHaveBeenCalled();
+    // The only count read is to say what the first answer said (25 stored less the job's own 21); it adds nothing.
+    expect(jobs.recentRecipientCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a repeat dodge the count: a different key from the same person is counted in full", async () => {
+    jobs.recentRecipientCount.mockResolvedValue(18);
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([]);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: "1b9a7c5e-3f2d-4a61-9d1e-5c7b8a2f4e11" }, 5)), context);
+    expect(response.jsonBody).toMatchObject({ approvalReason: "recent", recentRecipients: 18, repeated: false });
+  });
+
+  it("answers a repeat of a send that went straight to the queue with no approval note", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ Result: 0 }]).mockResolvedValueOnce([{ CorrespondenceId: 41 }]);
+    jobs.recentRecipientCount.mockResolvedValue(2);
+    jobs.readJob.mockResolvedValue({ blockedCount: 1, correspondenceId: 41, createdByOid: "fay-oid", kind: "broadcast", recipientCount: 2, requiresApproval: false, status: "queued" } as never);
+    const response = await queueCorrespondence(post(request({ idempotencyKey: KEY })), context);
+    expect(response.jsonBody).toMatchObject({ approvalNote: null, approvalReason: null, blocked: 1, queued: 1, repeated: true, requiresApproval: false });
+  });
+});
+

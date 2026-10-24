@@ -11,6 +11,7 @@ import * as ts from "typescript";
 const ROOT = join(__dirname, "..", "..");
 const ALLOWED_FILES: Record<string, string> = {
   "src/comms/events.ts": "inserts an event and reads a job's events",
+  "src/comms/idempotency.ts": "reads a job's first event to find the job a repeated submit already made (EB2)",
 };
 const CHANGES_THE_TABLE = /\b(UPDATE|DELETE|TRUNCATE|DROP|ALTER|MERGE|EXEC|EXECUTE|sp_\w+|IDENTITY_INSERT|DISABLE)\b/i;
 const READS_OR_APPENDS = /^\s*(SELECT|INSERT\s+INTO)\b/i;

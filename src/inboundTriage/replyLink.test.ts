@@ -26,7 +26,7 @@ describe("linking a reply to the send it answers", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it("with the send core's stub answering nothing, a reply is simply unlinked", async () => {
+  it("when the send core recognises nothing, a reply is simply unlinked", async () => {
     db.executeQuery.mockResolvedValue([{ EmailID: 1, InReplyTo: "p@x", ReferenceIds: null }]);
     expect(await linkReplies(connection, ["<m1@x>"])).toBe(0);
     expect(db.executeQuery).toHaveBeenCalledTimes(1);
@@ -56,12 +56,5 @@ describe("linking a reply to the send it answers", () => {
     await storeLink(connection, 1, { ...SEND, kind: "k".repeat(80), sendId: "s".repeat(100), subject: "x".repeat(500) });
     const params = Object.fromEntries(db.executeQuery.mock.calls[0][2].map((p: { name: string; value: unknown }) => [p.name, p.value]));
     expect([String(params.Kind).length, String(params.SendId).length, String(params.Subject).length]).toEqual([30, 64, 300]);
-  });
-});
-
-describe("the send lookup EB1 will replace", () => {
-  it("answers nothing today", async () => {
-    const real = jest.requireActual("./sendLookup") as { findSendByInternetMessageId: typeof findSendByInternetMessageId };
-    expect(await real.findSendByInternetMessageId(connection, ["a@x"])).toBeNull();
   });
 });

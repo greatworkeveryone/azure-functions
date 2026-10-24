@@ -8,8 +8,9 @@ import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
 import { composeForRecipient, type ComposeJob } from "./compose";
 import { appendEvent } from "./events";
+import { findJobByKey, takeKeyLock, withKeyMarker } from "./idempotency";
 import { resolveRecipientRecord, type Resolution } from "./recipientRecords";
-import { insertJob, insertRecipient, recentRecipientCount } from "./store";
+import { insertJob, insertRecipient, readJob, recentRecipientCount } from "./store";
 import type { CommsActor } from "./actor";
 import type { JobStatus, NewJob, NewRecipient } from "./types";
 
@@ -24,6 +25,8 @@ export interface QueuedJob {
   queued: number;
   /** This sender's recipients over the last 24 hours, before this send. */
   recentRecipients: number;
+  /** True when this is the job a repeated submit (the same idempotency key) had already made. */
+  repeated: boolean;
   status: JobStatus;
 }
 
@@ -74,6 +77,15 @@ export async function applyResolutions(connection: Connection, checked: readonly
 /** True for a recipient nothing will be sent to: a missing field, or refused by the server's records. */
 export const isBlocked = (entry: Checked): boolean => !entry.composed.ok || entry.refusal !== undefined;
 
+interface Made {
+  approval: { note: string | null; reason: ApprovalReason | null };
+  correspondenceId: number;
+  recent: number;
+  status: JobStatus;
+}
+
+type Outcome = { earlier: QueuedJob; made?: undefined } | { earlier?: undefined; made: Made };
+
 export async function writeJob(
   connection: Connection,
   job: NewJob,
@@ -81,12 +93,21 @@ export async function writeJob(
   actor: CommsActor,
   userId: number | null,
   threshold: number,
+  idempotencyKey: string | null = null,
 ): Promise<QueuedJob> {
   const blocked = checked.filter(isBlocked).length;
-  const result = await inTransaction(connection, async () => {
+  const result = await inTransaction<Outcome>(connection, async () => {
+    // A repeated submit (the same key from the same person) finds the job already made and writes nothing, so it
+    // adds nothing to the 24 hour count either. The lock makes two racing submits take turns.
+    if (idempotencyKey !== null) {
+      if (!(await takeKeyLock(connection, actor.oid, idempotencyKey))) throw new Error("Could not take the send's lock");
+      const earlier = await findJobByKey(connection, actor.oid, idempotencyKey);
+      if (earlier !== null) return txOk<Outcome>({ earlier: await describeEarlier(connection, earlier, threshold) });
+    }
     // Counted before this job exists and under a lock, so splitting a send into many jobs only moves the same people past the line.
-    const recent = await recentRecipientCount(connection, actor.oid);
-    const approval = approvalDecision(job.recipients.length, recent, threshold);
+    // A test to oneself (kind system) is outside the count and never waits for a manager.
+    const recent = job.kind === "system" ? 0 : await recentRecipientCount(connection, actor.oid);
+    const approval = job.kind === "system" ? { note: null, reason: null } : approvalDecision(job.recipients.length, recent, threshold);
     const requiresApproval = approval.reason !== null;
     const status: JobStatus = requiresApproval ? "awaiting_approval" : "queued";
     const correspondenceId = await insertJob(connection, job, status, requiresApproval);
@@ -99,11 +120,14 @@ export async function writeJob(
     await appendEvent(connection, {
       actor: { kind: "user", name: actor.name, oid: actor.oid },
       correspondenceId,
-      detail: !requiresApproval
-        ? `${job.recipients.length} recipients`
-        : approval.reason === "size"
-          ? `${job.recipients.length} recipients, over ${threshold}: waits for a manager`
-          : `${job.recipients.length} recipients, ${recent} in the last 24 hours, over ${threshold}: waits for a manager`,
+      detail: withKeyMarker(
+        !requiresApproval
+          ? `${job.recipients.length} recipients`
+          : approval.reason === "size"
+            ? `${job.recipients.length} recipients, over ${threshold}: waits for a manager`
+            : `${job.recipients.length} recipients, ${recent} in the last 24 hours, over ${threshold}: waits for a manager`,
+        idempotencyKey,
+      ),
       fromStatus: null,
       toStatus: status,
       type: "job",
@@ -114,10 +138,11 @@ export async function writeJob(
       after: { approvalReason: approval.reason, blocked, kind: job.kind, recentRecipients: recent, recipients: job.recipients.length, replyTo: job.replyTo.address, signatureMode: job.signatureMode, status },
       subject: { id: correspondenceId, type: "correspondence" },
     });
-    return txOk({ approval, correspondenceId, recent, status });
+    return txOk<Outcome>({ made: { approval, correspondenceId, recent, status } });
   });
   if (!result.ok) throw new Error("Could not queue the send");
-  const { approval, correspondenceId, recent, status } = result.value;
+  if (result.value.earlier) return result.value.earlier;
+  const { approval, correspondenceId, recent, status } = result.value.made as Made;
   return {
     approvalNote: approval.note,
     approvalReason: approval.reason,
@@ -125,6 +150,31 @@ export async function writeJob(
     correspondenceId,
     queued: job.recipients.length - blocked,
     recentRecipients: recent,
+    repeated: false,
     status,
+  };
+}
+
+/**
+ * What an earlier submit with the same key made, read back as it stands now (it may since have been approved or
+ * sent). Read inside the transaction. Its own recipients are taken off the 24 hour total so the answer says what
+ * it said the first time, and nothing is added to the total.
+ */
+async function describeEarlier(connection: Connection, correspondenceId: number, threshold: number): Promise<QueuedJob> {
+  const job = await readJob(connection, correspondenceId);
+  if (!job) throw new Error("The earlier send could not be read");
+  const total = job.kind === "system" || job.status === "cancelled" ? job.recipientCount : await recentRecipientCount(connection, job.createdByOid);
+  const recent = Math.max(0, total - job.recipientCount);
+  const decision = job.kind === "system" ? { note: null, reason: null } : approvalDecision(job.recipientCount, recent, threshold);
+  const waits = job.requiresApproval;
+  return {
+    approvalNote: waits ? decision.note ?? "This send needs a manager's approval." : null,
+    approvalReason: waits ? decision.reason ?? (job.recipientCount > threshold ? "size" : "recent") : null,
+    blocked: job.blockedCount,
+    correspondenceId,
+    queued: job.recipientCount - job.blockedCount,
+    recentRecipients: recent,
+    repeated: true,
+    status: job.status,
   };
 }

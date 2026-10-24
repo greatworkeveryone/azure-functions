@@ -27,6 +27,13 @@ const COMPANY_REPORTING_REASONS: Record<string, string> = {
   "tenancySchedule/load.ts": "the Tenancy Schedule report's reads",
 };
 const COMPANY_REPORTING = new Set(Object.keys(COMPANY_REPORTING_REASONS));
+// A second decided exception: the person writing an email broadcast chooses whether it reaches residences
+// (PLAN §13, EB2: "commercial and residential as chosen"). The category is read and returned, never put in a
+// WHERE clause: the choice is applied in code, and only when the person has made it. Nothing operational joins it.
+const AUDIENCE_CHOICE_REASONS: Record<string, string> = {
+  "comms/broadcast/audienceLoad.ts": "reads each building's category so a broadcast reaches residences only when the sender ticks Include residences",
+};
+const AUDIENCE_CHOICE = new Set(Object.keys(AUDIENCE_CHOICE_REASONS));
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -43,13 +50,13 @@ describe("a residence is never restricted by its category", () => {
     const readers = files
       .filter(({ text }) => /\b(?:b|bld|building|Buildings)\.Category\b/.test(text))
       .map(({ path }) => path)
-      .filter((path) => !ALLOWED.has(path) && !COMPANY_REPORTING.has(path));
+      .filter((path) => !ALLOWED.has(path) && !COMPANY_REPORTING.has(path) && !AUDIENCE_CHOICE.has(path));
     expect(readers).toEqual([]);
   });
 
   it("no query filters Buildings on a category value", () => {
     const filters = files
-      .filter(({ path }) => !ALLOWED.has(path) && !COMPANY_REPORTING.has(path))
+      .filter(({ path }) => !ALLOWED.has(path) && !COMPANY_REPORTING.has(path) && !AUDIENCE_CHOICE.has(path))
       .filter(({ text }) => /Buildings[^`"]{0,400}Category\s*(?:=|<>|!=|\bIN\b)\s*\(?\s*N?'(?:commercial|residence)'/i.test(text))
       .map(({ path }) => path);
     expect(filters).toEqual([]);
@@ -60,6 +67,14 @@ describe("a residence is never restricted by its category", () => {
       const text = files.find((file) => file.path === path)?.text ?? "";
       expect(text).toMatch(/Category = N'commercial'/);
       expect(text).not.toMatch(/Category\s*(?:=|<>|!=)\s*N?'residence'/i);
+    }
+  });
+
+  it("the broadcast audience reads the category but never filters a query on it", () => {
+    for (const path of AUDIENCE_CHOICE) {
+      const text = files.find((file) => file.path === path)?.text ?? "";
+      expect(text).not.toMatch(/WHERE[^`"]{0,400}Category/i);
+      expect(text).not.toMatch(/Category\s*(?:=|<>|!=|\bIN\b)\s*\(?\s*N?'(?:commercial|residence)'/i);
     }
   });
 

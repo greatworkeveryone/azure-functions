@@ -99,14 +99,16 @@ export const APPROVAL_WINDOW_HOURS = 24;
 
 /**
  * How many recipients this person has queued, over every job of theirs, in the last 24 hours (a cancelled
- * job doesn't count). Read inside the queueing transaction with a range lock on the creator's rows, so two
- * sends queued at once by one person can't both see room that only one of them has.
+ * job doesn't count, and neither does a test to oneself, which is kind system). Read inside the queueing
+ * transaction with a range lock on the creator's rows, so two sends queued at once by one person can't both
+ * see room that only one of them has. `lock` false is for showing the figure beforehand (no decision rests on it).
  */
-export async function recentRecipientCount(connection: Connection, createdByOid: string): Promise<number> {
+export async function recentRecipientCount(connection: Connection, createdByOid: string, lock = true): Promise<number> {
+  const LOCK_HINT = lock ? "WITH (UPDLOCK, HOLDLOCK)" : "";
   const [row] = await executeQuery(
     connection,
-    `SELECT COALESCE(SUM(RecipientCount), 0) AS N FROM dbo.Correspondence WITH (UPDLOCK, HOLDLOCK)
-      WHERE CreatedByOid = @Oid AND CreatedAt >= DATEADD(hour, -@Hours, SYSUTCDATETIME()) AND Status <> 'cancelled'`,
+    `SELECT COALESCE(SUM(RecipientCount), 0) AS N FROM dbo.Correspondence ${LOCK_HINT}
+      WHERE CreatedByOid = @Oid AND CreatedAt >= DATEADD(hour, -@Hours, SYSUTCDATETIME()) AND Status <> 'cancelled' AND Kind <> 'system'`,
     [{ name: "Oid", type: TYPES.NVarChar, value: createdByOid }, { name: "Hours", type: TYPES.Int, value: APPROVAL_WINDOW_HOURS }],
   );
   return Number(row?.N ?? 0);
