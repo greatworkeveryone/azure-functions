@@ -1,8 +1,9 @@
 // Registers the adapters this package ships. Importing this module is what makes
 // jobs, tenancies, rent reviews (WP26), lease events (WP32, WP33), pending schedule changes (WP26c),
-// attributed approvals and variances (WP43a-2) and system health escalatable; other packages register their own from their own
+// attributed approvals and variances (WP43a-2), cover while away (AW1) and system health escalatable; other packages register their own from their own
 // modules with registerAdapter.
 
+import { absenceCoverAdapter } from "./absenceCover";
 import { approvalAttributionAdapter } from "./approvalAttribution";
 import { defectsPeriodAdapter } from "./defectsPeriod";
 import { reviewNoticeAdapter } from "./reviewNotice";
@@ -15,6 +16,7 @@ import { serviceScheduleAdapter } from "./serviceSchedule";
 import { systemAdapter } from "./system";
 import { tenancyAdapter } from "./tenancy";
 
+registerAdapter(absenceCoverAdapter);
 registerAdapter(approvalAttributionAdapter);
 registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);

@@ -36,6 +36,7 @@ function matchesPerFile(pattern: RegExp): Map<string, string[]> {
 // it the ONLY writer of the rows it acts on? If another feature writes to the
 // same table, the timer must filter on something that feature can't produce.
 const REVIEWED_TIMERS: Record<string, string> = {
+  absenceCoverTimer: "absenceCoverTimer.ts — selects positively (people away today and exactly their open jobs, pending decision requests, live escalations aimed at them, quotes awaiting approval, assigned emails); changes who has an item only through the item's own columns and history (Jobs.AssignedTo and its assignment_change event, JobDecisionRequests.DecisionMakers, Escalations.TargetUserId, Emails.AssignedToUserId), each in one transaction with its append-only dbo.CoverActions row; approves, answers and deletes nothing; off unless ABSENCE_COVER_ENABLED is \"true\", ABSENCE_COVER_DRY_RUN writes suggested rows only (AW1)",
   parseEmailsTimer: "parseEmails.ts — writes Emails.AI* columns only",
   parseEmailsDailyRetry: "parseEmails.ts — Graph mail sync + AI parse retry",
   tenancyCpiSyncTimer: "tenancyCpiSyncTimer.ts — CPI rows it owns",

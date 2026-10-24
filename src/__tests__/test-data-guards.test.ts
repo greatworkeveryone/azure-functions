@@ -51,6 +51,11 @@ const READS: Read[] = [
   { anchor: "export async function listDueJobs(", file: "digest/store.ts", mode: "hard" },
   { anchor: "export async function listOverdueKeys(", file: "digest/store.ts", mode: "hard" },
   { anchor: "export async function loadDailyFacts(", file: "myob/daily/store.ts", mode: "hard" },
+  // Cover while away (AW1): the engine moves real work only, so each read of someone's items says so.
+  { anchor: "export async function loadJobItems(", file: "absenceCover/inventory/jobs.ts", mode: "hard" },
+  { anchor: "export async function loadDecisionItems(", file: "absenceCover/inventory/decisions.ts", mode: "hard" },
+  { anchor: "export async function loadApprovalItems(", file: "absenceCover/inventory/approvals.ts", mode: "hard" },
+  { anchor: "export async function loadEmailItems(", file: "absenceCover/inventory/emails.ts", mode: "hard" },
 ];
 
 function regionOf(source: string, anchor: string): string {
