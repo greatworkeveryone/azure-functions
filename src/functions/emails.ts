@@ -43,6 +43,8 @@ import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { requireMoneyContext } from "../moneyGate";
 import { linkDirectorReply } from "../email/director-reply-link";
 import { showTestParam } from "../test-data";
+import { escapeLikePattern } from "../searchUtils";
+import { replyDecisionMessage, replyStatesDecision } from "../email/reply-decision";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -101,6 +103,9 @@ const EMAIL_COLUMNS = `
 //               never hidden from staff altogether (DL-34): Incoming shows them
 //               under "AI couldn't read", and unflagEmail puts one back.
 
+// Each status becomes a parameter; a long list is a mistake, not a filter.
+const MAX_STATUS_FILTERS = 20;
+
 export async function getEmails(
   request: HttpRequest,
   context: InvocationContext,
@@ -116,6 +121,9 @@ export async function getEmails(
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  if (statusList.length > MAX_STATUS_FILTERS) {
+    return { status: 400, jsonBody: { error: `statuses accepts at most ${MAX_STATUS_FILTERS} values` } };
+  }
 
   const page = Math.max(1, Number(request.query.get("page") ?? "1"));
   const pageSize = Math.min(100, Math.max(1, Number(request.query.get("pageSize") ?? "50")));
@@ -127,8 +135,9 @@ export async function getEmails(
   const params: { name: string; type: any; value: any }[] = [];
 
   if (search) {
-    whereParts.push("(FromAddress LIKE @Search OR Subject LIKE @Search)");
-    params.push({ name: "Search", type: TYPES.NVarChar, value: `%${search}%` });
+    // User text is a literal, not a pattern: % _ [ are escaped (one scan per wildcard otherwise).
+    whereParts.push("(FromAddress LIKE @Search ESCAPE '\\' OR Subject LIKE @Search ESCAPE '\\')");
+    params.push({ name: "Search", type: TYPES.NVarChar, value: `%${escapeLikePattern(search)}%` });
   }
 
   if (statusList.length === 1) {
@@ -237,6 +246,8 @@ async function getEmail(
 // body) — FromAddress is caller-supplied, so these rows can't record a
 // director decision.
 
+const MAX_INGEST_ATTACHMENTS = 50;
+
 export async function ingestEmail(
   request: HttpRequest,
   context: InvocationContext,
@@ -267,6 +278,7 @@ export async function ingestEmail(
     if (!MessageID || typeof MessageID !== "string") {
       return { status: 400, jsonBody: { error: "MessageID (string) required" } };
     }
+    const ingestBlobNames: string[] = [];
 
     // AttachmentBlobs is either a JSON array of blob-name strings or a JSON
     // array of { blobName, fileName } objects. Reject anything outside the
@@ -282,6 +294,9 @@ export async function ingestEmail(
       if (!Array.isArray(parsed)) {
         return { status: 400, jsonBody: { error: "AttachmentBlobs must be a JSON array" } };
       }
+      if (parsed.length > MAX_INGEST_ATTACHMENTS) {
+        return { status: 400, jsonBody: { error: `AttachmentBlobs accepts at most ${MAX_INGEST_ATTACHMENTS} entries` } };
+      }
       for (const entry of parsed) {
         const blobName = typeof entry === "string"
           ? entry
@@ -291,10 +306,29 @@ export async function ingestEmail(
         if (!isBlobName(blobName, EMAIL_ATTACHMENT_SHAPE)) {
           return { status: 400, jsonBody: { error: "AttachmentBlobs entries must be email-attachments/{messageId}/{uuid} names" } };
         }
+        ingestBlobNames.push(blobName);
       }
     }
 
     connection = await createRequestConnection(token);
+
+    // A blob belongs to the email it arrived on. Pointing a new row at another
+    // email's attachment would let an invoice be re-homed under a made-up sender.
+    if (ingestBlobNames.length > 0) {
+      const owned = await executeQuery(
+        connection,
+        `SELECT TOP 1 MessageID FROM Emails
+          WHERE MessageID <> @MessageID
+            AND (${ingestBlobNames.map((_, i) => `AttachmentBlobs LIKE @B${i} ESCAPE '\\'`).join(" OR ")})`,
+        [
+          { name: "MessageID", type: TYPES.NVarChar, value: MessageID },
+          ...ingestBlobNames.map((b, i) => ({ name: `B${i}`, type: TYPES.NVarChar, value: `%${escapeLikePattern(b)}%` })),
+        ],
+      );
+      if (owned.length > 0) {
+        return { status: 409, jsonBody: { error: "AttachmentBlobs entries already belong to another email" } };
+      }
+    }
 
     // Deterministic job match — shared with the Graph sync and the parse
     // worker (src/email/job-ref.ts) so MatchedJobID means the same everywhere.
@@ -1221,6 +1255,13 @@ export async function recordEmailQuoteDecision(
     const directorName = ((directorRows[0].DisplayName as string | null) ?? "").trim() || sender;
     const directorUserId = (directorRows[0].UserID as number | null | undefined) ?? null;
 
+    // Check 3: the director's own words say this decision. The operator picks
+    // Decision; the reply has to back it, or any later "call me" could be filed as approval.
+    const stated = replyStatesDecision(emailRows[0].Body as string | null, Decision);
+    if (!stated.ok) {
+      return refuse(422, `reply_${stated.reason}`, replyDecisionMessage(Decision, stated.reason), quoteJobId);
+    }
+
     await beginTransaction(conn);
     inTransaction = true;
 
@@ -1402,6 +1443,9 @@ export async function upsertGraphEmails(
     // UPDLOCK + HOLDLOCK: the range lock spans check and insert, so two
     // concurrent syncs can't both pass the check. A unique violation (091)
     // means another sync won the race — the row is stored, so skip it.
+    // Message-ID is sender-written, so the attachment backfill (a re-sync that
+    // first saw the message before its attachments landed) only fills a row from
+    // the same sender, and never an authenticated row from an unauthenticated message.
     try {
       await executeQuery(
         connection,
@@ -1412,7 +1456,9 @@ export async function upsertGraphEmails(
                  'graph', @SenderAuthenticated, @AuthenticationResults)
        ELSE IF @AttachmentBlobs IS NOT NULL
          UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
-         WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL`,
+         WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL
+           AND FromAddress = @FromAddress
+           AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1)`,
         [
           { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
           { name: "FromAddress", type: TYPES.NVarChar, value: fit(email.fromAddress, ADDRESS_MAX) },

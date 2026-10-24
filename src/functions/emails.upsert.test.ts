@@ -82,4 +82,14 @@ describe("upsertGraphEmails", () => {
       SenderAuthenticated: true,
     });
   });
+
+  it("only backfills attachments onto a row from the same sender, never an authenticated row from an unauthenticated message", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1>", { attachmentBlobNames: [{ blobName: "email-attachments/m1/x", fileName: "x.pdf" }] })]);
+
+    const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+    const backfill = sql.slice(sql.indexOf("ELSE IF"));
+    expect(backfill).toMatch(/AttachmentBlobs IS NULL/);
+    expect(backfill).toMatch(/FromAddress = @FromAddress/);
+    expect(backfill).toMatch(/ISNULL\(SenderAuthenticated, 0\) = 0 OR @SenderAuthenticated = 1/);
+  });
 });

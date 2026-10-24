@@ -32,6 +32,11 @@ jest.mock("../blob-storage", () => ({
   uploadBlob: jest.fn(),
 }));
 jest.mock("../mybuildings-client", () => ({ uploadAttachment: jest.fn() }));
+jest.mock("../ledger", () => ({ record: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Ada Admin", role: "admin", userId: 1 }),
+}));
+jest.mock("../ledger/moneyDecisions", () => ({ jobScope: jest.fn().mockResolvedValue({ buildingId: 7, jobId: 12 }) }));
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ status?: number; jsonBody?: any }>;
 
@@ -153,6 +158,26 @@ describe("deleteAttachment ordering and asset links", () => {
     const res = await deleteAttachment(post({ AttachmentID: 5 }), ctx);
     expect(res.status).toBe(200);
     expect(order).toEqual(["row", "commit", "blob"]);
+  });
+
+  it("ledgers the delete against the job before the commit", async () => {
+    const ledger = require("../ledger") as { record: jest.Mock };
+    ledger.record.mockClear();
+    const order: string[] = [];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("FROM Attachments a")) return [{ ...rowFor[0], OriginalName: "quote.pdf" }];
+      return [];
+    });
+    ledger.record.mockImplementationOnce(async () => { order.push("ledger"); });
+    db.commitTransaction.mockImplementationOnce(async () => { order.push("commit"); });
+    const res = await deleteAttachment(post({ AttachmentID: 5 }), ctx);
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["ledger", "commit"]);
+    expect(ledger.record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "attachment.delete",
+      before: expect.objectContaining({ attachmentId: 5, fileName: "quote.pdf" }),
+      subject: { id: 12, type: "job" },
+    }));
   });
 
   it("rolls back and keeps the blob when the row delete fails", async () => {

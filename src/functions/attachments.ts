@@ -572,7 +572,7 @@ async function handleDeleteAttachment(
     // strings dominate), so we don't gate on it.
     const rows = await executeQuery(
       connection,
-      `SELECT a.BlobName, a.MyBuildingsConfirmedAt, a.UploadedBy,
+      `SELECT a.BlobName, a.MyBuildingsConfirmedAt, a.UploadedBy, a.OriginalName,
               a.JobID, a.WorkRequestID,
               j.CreatedBy AS JobCreatedBy
          FROM Attachments a
@@ -586,6 +586,8 @@ async function handleDeleteAttachment(
     const blobName = rows[0].BlobName as string;
     const archived = rows[0].MyBuildingsConfirmedAt != null;
     const uploadedBy = rows[0].UploadedBy as string | null;
+    const jobId = typeof rows[0].JobID === "number" ? (rows[0].JobID as number) : null;
+    const fileName = typeof rows[0].OriginalName === "string" ? (rows[0].OriginalName as string) : null;
 
     const callerRoles = await rolesForRequest(request);
     const isAdmin = callerRoles.includes(AppRole.ADMIN);
@@ -620,6 +622,9 @@ async function handleDeleteAttachment(
       context.log(`deleteAttachment: row ${attachmentId} removed; its blob is not this row's to delete`);
     }
 
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
     // Row first, in one transaction: a file linked to an asset is refused (the FK cascade
     // would silently drop the link), and the range lock stops a link landing mid-delete.
     await beginTransaction(connection);
@@ -638,6 +643,17 @@ async function handleDeleteAttachment(
         "DELETE FROM Attachments WHERE Id = @Id",
         [{ name: "Id", type: TYPES.Int, value: attachmentId }],
       );
+      if (jobId !== null) {
+        const scope = await jobScope(connection, jobId);
+        await record(connection, {
+          action: "attachment.delete",
+          actor,
+          before: { attachmentId, blobName, fileName: fileName ?? null },
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: jobId, type: "job" },
+        });
+      }
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});

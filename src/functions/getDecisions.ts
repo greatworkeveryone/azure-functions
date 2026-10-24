@@ -19,7 +19,8 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
-import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
+import { checkRateLimit } from "../rateLimit";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decisionsCsvFileName, decisionsToCsv } from "../ledger/csv";
 import { buildDecisionWhere, parseDecisionFilters } from "../ledger/filters";
@@ -32,6 +33,8 @@ const ORDER_BY_IMPACT = "ORDER BY FinancialImpact DESC, OccurredAt DESC, LedgerI
 
 const NOT_TEST_SCOPE = `((JobId IS NULL OR JobId IN (SELECT tj.JobID FROM dbo.Jobs tj WHERE tj.IsTest = 0))
   AND (TenantId IS NULL OR TenantId IN (SELECT tt.TenantId FROM dbo.Tenants tt WHERE tt.IsTest = 0)) OR @ShowTest = 1)`;
+
+const EXPORT_LIMIT = { limit: 5, windowMs: 60_000 };
 
 export async function getDecisions(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -46,6 +49,19 @@ export async function getDecisions(request: HttpRequest, context: InvocationCont
   if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
   const { filters } = parsed;
   const asCsv = filters.format === "csv";
+  // A CSV export reads the whole filtered ledger; five a minute per person.
+  if (asCsv) {
+    const identity = await verifiedIdentityFromRequest(request);
+    if (!identity) return unauthorizedResponse();
+    const rl = checkRateLimit(`decisionsCsv:${identity.oid}`, EXPORT_LIMIT);
+    if (!rl.allowed) {
+      return {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+        jsonBody: { error: "Rate limit exceeded" },
+      };
+    }
+  }
   const built = buildDecisionWhere(filters);
   // D9: decisions about a test job or tenancy only with the admin's Show test data on.
   const params = [...built.params, await showTestParam(request)];

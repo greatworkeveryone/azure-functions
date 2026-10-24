@@ -2,17 +2,9 @@ import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES } from "tedious";
 import { noteAccess } from "./access/accessEvents";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
+import { acceptedAudiences } from "./apiAudience";
 import { isDevOverrideEnabled, verifyEntraToken } from "./jwt";
 import { Sentry } from "./sentry";
-
-// Audience claim Entra puts on tokens issued for Azure SQL. Used by
-// rolesForRequest to verify the SQL bearer token before trusting its `oid`.
-// Entra emits this with and without a trailing slash depending on token
-// version / scope variant, so we accept both.
-const SQL_AUDIENCE = [
-  "https://database.windows.net/",
-  "https://database.windows.net",
-];
 
 export enum AppRole {
   ACCOUNTS            = "accounts",
@@ -253,7 +245,7 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   // before trusting the `oid` claim. SQL would reject a forged token at the
   // DB layer, but here we look the user up via a service connection — SQL
   // never sees this token, so we must verify it ourselves.
-  const payload = await verifyEntraToken(sqlToken, SQL_AUDIENCE);
+  const payload = await verifyEntraToken(sqlToken, acceptedAudiences());
   if (!payload) return [];
   const oid = typeof payload.oid === "string" ? payload.oid : null;
   if (!oid) return [];
@@ -283,7 +275,7 @@ export async function verifiedIdentityFromRequest(
   const token = extractToken(request);
   if (!token) return null;
 
-  const payload = await verifyEntraToken(token, SQL_AUDIENCE);
+  const payload = await verifyEntraToken(token, acceptedAudiences());
   if (!payload || typeof payload.oid !== "string") return null;
 
   const name = typeof payload.name === "string" ? payload.name : null;
@@ -302,12 +294,13 @@ export async function verifiedIdentityFromRequest(
  * The caller's bearer token claims after full verification (signature, expiry,
  * issuer, audience), or null. The money gate (src/moneyGate.ts) reads
  * `auth_time`/`iat` and `amr` from here; keep it on the same audience as
- * rolesForRequest when the token audience changes.
+ * rolesForRequest. Both token kinds carry them: an app-scoped v2 token has
+ * `amr`/`auth_time` when the SPA requests the scope for the same account.
  */
 export async function verifiedRequestClaims(request: HttpRequest): Promise<Record<string, unknown> | null> {
   const token = extractToken(request);
   if (!token) return null;
-  return verifyEntraToken(token, SQL_AUDIENCE);
+  return verifyEntraToken(token, acceptedAudiences());
 }
 
 /**

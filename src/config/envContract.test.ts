@@ -41,3 +41,10 @@ describe("forbiddenSettingsSet", () => {
     expect(severity("SQL_USER_CONNECTION")).toBe("error");
   });
 });
+
+describe("API_TOKEN_AUDIENCE", () => {
+  it("is an optional setting, not required in production", () => {
+    const entry = ENV_CONTRACT.find((s) => s.name === "API_TOKEN_AUDIENCE");
+    expect(entry?.requiredInProd).toBe(false);
+  });
+});

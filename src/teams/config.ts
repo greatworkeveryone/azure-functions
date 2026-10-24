@@ -32,6 +32,25 @@ export function teamsAlertsRoute(env: NodeJS.ProcessEnv = process.env): TeamsAle
   return (env.TEAMS_ALERTS_ROUTE ?? "").trim().toLowerCase() === "app" ? "app" : "workflows";
 }
 
+export interface TeamsAlertsReadiness {
+  mode: TeamsMode;
+  /** Why alerts that are switched on can't go out (so they fall back to email); null when fine or off. */
+  problem: string | null;
+  route: TeamsAlertsRoute;
+}
+
+/** For /api/health: alerts switched on but missing what their route needs quietly become email only. */
+export function teamsAlertsReadiness(env: NodeJS.ProcessEnv = process.env): TeamsAlertsReadiness {
+  const mode = teamsMode(env);
+  const route = teamsAlertsRoute(env);
+  let problem: string | null = null;
+  if (mode !== "off" && route === "app" && teamsAppId(env) === null) problem = "TEAMS_APP_ID is unset";
+  if (mode === "live" && route === "workflows" && workflowConfig(env) === null) {
+    problem = "TEAMS_WORKFLOW_WEBHOOK_URL or TEAMS_WORKFLOW_KEY is unset";
+  }
+  return { mode, problem, route };
+}
+
 /** The Workflows flow's URL and key, trimmed, or null when either is unset. */
 export function workflowConfig(env: NodeJS.ProcessEnv = process.env): { key: string; url: string } | null {
   const url = (env.TEAMS_WORKFLOW_WEBHOOK_URL ?? "").trim();

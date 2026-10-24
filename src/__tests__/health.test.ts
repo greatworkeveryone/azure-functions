@@ -32,12 +32,15 @@ const SAVED = { ...process.env };
 
 function setAllSettings() {
   for (const entry of ENV_CONTRACT) process.env[entry.name] = "x";
+  process.env.API_TOKEN_AUDIENCE = "sql";
+  process.env.APP_CLIENT_ID = "client";
+  delete process.env.SQL_USER_CONNECTION;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
   setAllSettings();
-  for (const name of ["DEV_EMAIL_OVERRIDE", "EMAIL_REPLY_DECISIONS_ENABLED"]) delete process.env[name];
+  for (const name of ["DEV_EMAIL_OVERRIDE", "EMAIL_REPLY_DECISIONS_ENABLED", "TEAMS_ALERTS_ENABLED", "TEAMS_ALERTS_DRY_RUN"]) delete process.env[name];
   checkMigrations.mockResolvedValue({ changed: [], invalid: [], missing: [], outOfOrder: [], pending: [], unverified: [] });
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM STRING_SPLIT/.test(sql)) {
@@ -55,6 +58,20 @@ afterAll(() => {
 });
 
 describe("health?deep=true", () => {
+  it("reports the active API token audience mode", async () => {
+    process.env.API_TOKEN_AUDIENCE = "both";
+    const body = (await health(deep, ctx)).jsonBody as { apiTokenAudience: string; ok: boolean };
+    expect(body.apiTokenAudience).toBe("both");
+    expect(body.ok).toBe(true);
+  });
+
+  it("is not ok when the audience mode is invalid", async () => {
+    process.env.API_TOKEN_AUDIENCE = "bogus";
+    const body = (await health(deep, ctx)).jsonBody as { apiTokenAudience: string; ok: boolean };
+    expect(body.apiTokenAudience).toBe("sql");
+    expect(body.ok).toBe(false);
+  });
+
   it("reports a missing required setting by name, with what it breaks, and is not ok", async () => {
     delete process.env.SENTRY_DSN;
     const res = await health(deep, ctx);
@@ -93,6 +110,14 @@ describe("health?deep=true", () => {
     const body = (await health(deep, ctx)).jsonBody as { ok: boolean; settings: { forbidden: { name: string }[] } };
     expect(body.settings.forbidden.map((f) => f.name)).toEqual(["EMAIL_REPLY_DECISIONS_ENABLED"]);
     expect(body.ok).toBe(true);
+  });
+
+  it("is not ok when Teams alerts are on but the flow isn't configured", async () => {
+    process.env.TEAMS_ALERTS_ENABLED = "true";
+    delete process.env.TEAMS_WORKFLOW_WEBHOOK_URL;
+    const body = (await health(deep, ctx)).jsonBody as { alerts: { problem: string | null }; ok: boolean };
+    expect(body.alerts.problem).toBe("TEAMS_WORKFLOW_WEBHOOK_URL or TEAMS_WORKFLOW_KEY is unset");
+    expect(body.ok).toBe(false);
   });
 
   it("lists pending and changed migrations", async () => {

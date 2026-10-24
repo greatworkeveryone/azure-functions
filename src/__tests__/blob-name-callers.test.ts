@@ -83,6 +83,8 @@ beforeEach(() => {
     if (/FROM Attachments\s+WHERE JobID = @JobID AND BlobName = @BlobName/.test(sql)) {
       return p.JobID === 12 && p.BlobName === ON_JOB ? [{ Found: 1 }] : [];
     }
+    // ingestEmail's "does another email already own this blob" check: nobody does.
+    if (/MessageID <> @MessageID/.test(sql)) return [];
     if (/MAX\(Seq\)/.test(sql)) return [{ NextSeq: 1 }];
     if (/INSERT INTO Quotes/.test(sql)) return [{ QuoteID: 7 }];
     if (/INSERT INTO JobInvoices/.test(sql)) return [{ JobInvoiceID: 5 }];

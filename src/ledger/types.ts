@@ -19,6 +19,7 @@ export type LedgerSubjectType =
   | "carpark_group"
   | "comm_sequence"
   | "comm_template"
+  | "contractor"
   | "correspondence"
   | "email"
   | "defects_period"

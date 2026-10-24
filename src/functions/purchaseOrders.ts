@@ -16,6 +16,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
@@ -51,6 +52,16 @@ import {
   purchaseOrderSnapshot,
 } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+
+// PDF rendering is CPU-bound; one caller gets ten a minute.
+const PO_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
+function tooManyRequests(retryAfterMs: number): HttpResponseInit {
+  return {
+    status: 429,
+    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+    jsonBody: { error: "Rate limit exceeded" },
+  };
+}
 import {
   adminRefusal,
   holdsAdmin,
@@ -656,6 +667,11 @@ async function previewPurchaseOrder(
   const denied = await requireRole(request, ACTION_ROLES.sendPurchaseOrder.gate);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`previewPurchaseOrder:${identity.oid}`, PO_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -847,6 +863,8 @@ async function sendPurchaseOrder(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`sendPurchaseOrder:${identity.oid}`, PO_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {

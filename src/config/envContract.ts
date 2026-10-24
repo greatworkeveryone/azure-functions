@@ -60,6 +60,7 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   optional("TEAMS_WORKFLOW_WEBHOOK_URL", "The Workflows route has nowhere to post, so urgent alerts go by email only."),
   optional("TEAMS_WORKFLOW_KEY", "The Workflows flow would refuse our posts, so urgent alerts go by email only."),
   optional("TEAMS_ALERTS_ROUTE", "Defaults to \"workflows\"; set \"app\" once the Floorplan Teams app is installed."),
+  optional("API_TOKEN_AUDIENCE", "Bearer audience mode: sql (default), both or api. Unset keeps the legacy SQL-scoped token."),
   optional("BUILD_SHA", "Health cannot say which commit is deployed."),
 ];
 

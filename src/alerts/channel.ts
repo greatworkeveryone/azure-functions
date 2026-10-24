@@ -102,7 +102,7 @@ export function workflowsChannel(deps: WorkflowsDeps): AlertChannel {
       if (!isSafeAppRoute(alert.route)) return { detail: "unsafe route", status: "failed" };
 
       if (mode === "dry-run") {
-        (deps.log ?? ((message: string) => console.warn(message)))(`workflows dry-run: would alert ${address} (${alert.kind}) -> ${alert.route}`);
+        (deps.log ?? ((message: string) => console.warn(message)))(`workflows dry-run: would alert one recipient (${alert.kind}) -> ${alert.route}`);
         return { detail: null, status: "dry_run" };
       }
       const config = workflowConfig(env);

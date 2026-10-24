@@ -5,11 +5,23 @@ import {
   errorResponse,
   extractToken,
   requireRole,
+  rolesForRequest,
+  rolesPassGate,
   unauthorizedResponse,
+  verifiedIdentityFromRequest,
 } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
+import { checkRateLimit } from "../rateLimit";
 import { escapeLikePattern, validateSearchQuery } from "../searchUtils";
 import { showTestParam } from "../test-data";
+
+// Any role may search, but each group is shown only to the roles its list
+// endpoint allows, so search never reveals what the page would refuse.
+// Mirrors getTenants (functions/tenants.ts) and getKeys (functions/keys.ts).
+export const TENANT_SEARCH_ROLES = [AppRole.ACCOUNTS, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES] as const;
+export const KEY_SEARCH_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
+
+const SEARCH_LIMIT = { limit: 60, windowMs: 60_000 };
 
 export type SearchResultItem = {
   id: number;
@@ -163,6 +175,20 @@ export async function search(
   const denied = await requireRole(request, [AppRole.USER]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`search:${identity.oid}`, SEARCH_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+  const roles = await rolesForRequest(request);
+  const canSeeTenants = rolesPassGate(roles, TENANT_SEARCH_ROLES);
+  const canSeeKeys = rolesPassGate(roles, KEY_SEARCH_ROLES);
+
   const validated = validateSearchQuery(request.query.get("q") ?? undefined);
   if (!validated.ok) {
     return {
@@ -187,9 +213,9 @@ export async function search(
   try {
     conn = await createRequestConnection(token);
     // tedious connections handle one request at a time; run sequentially.
-    const tenants = await queryTenants(conn, params);
+    const tenants = canSeeTenants ? await queryTenants(conn, params) : [];
     const jobs = await queryJobs(conn, params);
-    const keys = await queryKeys(conn, params);
+    const keys = canSeeKeys ? await queryKeys(conn, params) : [];
     const buildings = await queryBuildings(conn, params);
     return {
       status: 200,

@@ -88,6 +88,7 @@ const EMAIL: Route = {
   match: /SELECT EmailID, FromAddress, Status/,
   rows: [
     {
+      Body: "Approved, go ahead.",
       EmailID: 42,
       FromAddress: " Dana@Example.com ",
       MatchedJobID: 9,
@@ -316,6 +317,7 @@ describe("a director's emailed rejection", () => {
   const rejectRoutes: Route[] = [
     { match: /UPDATE Quotes SET Status = 'rejected'/, rows: [{ QuoteID: 7 }] },
     withRow(HELPER_WRITES[1], { Status: "rejected" }),
+    withRow(EMAIL, { Body: "Rejected, too expensive." }),
     ...HAPPY,
   ];
 

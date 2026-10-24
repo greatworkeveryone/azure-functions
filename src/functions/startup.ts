@@ -5,6 +5,7 @@ import { createServiceRequestConnection } from "../db";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
 import { extractToken, oidFromToken } from "../auth";
+import { audienceConfigProblem } from "../apiAudience";
 import { devOverrideMisconfigured } from "../jwt";
 import { forbiddenSettingsSet } from "../config/envContract";
 import { sentryRequestContext } from "./sentryRequestContext";
@@ -19,6 +20,11 @@ if (devOverrideMisconfigured()) {
     "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true outside local Development. Unset it in the Function App configuration.",
   );
 }
+
+// api-only bearers cannot be used to open a per-caller SQL connection, so the
+// SQL_USER_CONNECTION rollback lever would silently break.
+const audienceProblem = audienceConfigProblem();
+if (audienceProblem) throw new Error(`Refusing to start: ${audienceProblem}`);
 
 // Capture any error thrown from a handler. Azure Functions are short-lived,
 // so we must await Sentry.flush() — without it the worker can be torn down

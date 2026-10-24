@@ -14,6 +14,9 @@ then the real switch.
 | --- | --- | --- | --- |
 | `MYOB_WRITES_ENABLED` | off | Master switch for MYOB writes. Johanne's `MyobControls` row must also allow the operation, and the record must not be test data | Johanne signs off |
 | `ATTRIBUTED_APPROVAL_ENABLED` | off | When `"true"`, a plain facilities officer may approve a quote within their own approval limit by declaring they discussed it with a manager and naming one (facilities manager, accounts manager, CFO or director; never admin or whoever added the quote). The manager is told and can say "I didn't agree to this". Off: facilities can't approve quotes at all, and an attribution sent is ignored | Only after Connor lifts beta-sprint decisions 1 and 9, and after review 117's R3/D1 fixes ship |
+| `TEAMS_ALERTS_ENABLED` · `_DRY_RUN` | off | Urgent escalations (level 2+, director authority, or flagged urgent) also go to Teams for people whose role has the `teamsAlerts` flag on. Everyone else, and every failure, still gets the email. Dry run logs "would alert one recipient" and posts nothing. Needs migrations 156 and 159. Without 159 every alert falls back to email. Spec: command-centre `.harness/TEAMS-ALERTS-STAGES-2026-10-23.md` | After a day of dry run, once the production flow passes its smoke test (Will's tasks §8c) |
+| `TEAMS_ALERTS_ROUTE` | `workflows` | `workflows`: a 1:1 chat from the Workflows (Power Automate) bot with an "Open in Floorplan" button, capped at 20 posts per 5 minutes (over the cap goes by email). `app`: Floorplan's own Teams app activity feed (needs `TEAMS_APP_ID` and the Teams Administrator setup; stage 2) | Leave `workflows` until the Floorplan Teams app is approved |
+| `TEAMS_WORKFLOW_WEBHOOK_URL` · `TEAMS_WORKFLOW_KEY` | unset: no Teams alerts | The production flow's trigger URL and the shared key it checks (`x-floorplan-key`). Key Vault references only. Never logged. If either leaks, rotate both: regenerate the trigger URL and key, update Key Vault, restart | With `TEAMS_ALERTS_ENABLED` |
 | `EMAIL_REPLY_DECISIONS_ENABLED` | off | Lets a director approve or decline by replying to an email | Leave off: decisions happen in the app |
 | `ESCALATION_SWEEP_ENABLED` · `_DRY_RUN` | off | The 30-minute sweep raises, moves up and ends escalations, and emails them. It also sends a decision request's scheduled reminders and moves an unanswered one up to the raiser's manager at its deadline (an Urgent one only if the raiser ticked "move up if no answer"; it is reminded at 24 hours either way, and an Emergency is never chased). Nothing is reminded or escalated while it is off (the first email, at ask time, does not need it) It also asks a deferred decision again on its day (once); in dry run it logs 'would ask job #N again' | After a dry run |
 | `ESCALATION_HOLIDAYS` | unset: no holidays | Darwin public holidays, `YYYY-MM-DD`, comma-separated. The SLA clocks and the decision-request tiers skip them (weekends are always skipped). A bad entry is ignored and logged | Keep the list current for the year |
@@ -83,6 +86,11 @@ stored on it (`JobDecisionRequests.AutoEscalate`): always for Soon, Routine and
 Fixed; the raiser's tick for Urgent, off unless ticked; never for an Emergency.
 An Urgent request that was not ticked has no due moment, so the sweep reminds it
 and then leaves it where it is until someone answers or withdraws it.
+
+Teams alerts (`teamsAlerts`) is not a screen: the backend reads it per role to decide
+who also gets urgent escalations on Teams, and treats a missing row or a read error
+as off. Turn it on for Connor's role first, then for the roles that receive urgent
+escalations. It does nothing until `TEAMS_ALERTS_ENABLED` is on.
 
 ## Migrations
 

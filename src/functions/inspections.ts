@@ -34,6 +34,8 @@ import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 import { showTestParam, testFlagForCreate } from "../test-data";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+// Packet PDFs download every photo; keep one caller from saturating the worker.
+const PACKET_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
 
 // Hard ceiling on ops per /applyInspectionOps batch — bounds per-request work
 // (each op is several queries inside one transaction on a Basic-tier DB).
@@ -1970,6 +1972,11 @@ async function getInspectionPacketPdf(
 
   const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`inspectionPacketPdf:${identity.oid}`, PACKET_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   const inspectionId = Number(request.params.inspectionId);
   if (!Number.isFinite(inspectionId) || inspectionId <= 0) {
