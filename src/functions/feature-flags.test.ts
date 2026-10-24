@@ -46,6 +46,7 @@ const FRONTEND_FEATURE_KEYS = [
   "escalations",
   "finance",
   "guidedHelp",
+  "inboundTriage",
   "incoming",
   "inspectionJobSuggestions",
   "inspections",

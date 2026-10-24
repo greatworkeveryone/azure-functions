@@ -484,6 +484,13 @@
   "syncWorkRequests": [
     "admin"
   ],
+  "triageIncomingEmail": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "unapproveQuote": [
     "accounts_manager",
     "admin",
@@ -556,6 +563,15 @@
     "facilities",
     "facilities_manager",
     "user"
+  ],
+  "viewEmailRouting": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
   ],
   "viewEscalations": [
     "accounts",

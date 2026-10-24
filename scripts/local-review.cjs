@@ -45,7 +45,7 @@ function prepareRuntime() {
     GRAPH_MAILBOX_ACTIVE: "dev", ACCESS_LOG_ENABLED: "false", MYOB_WRITES_ENABLED: "false",
     ATTRIBUTED_APPROVAL_ENABLED: "false", SCHEDULER_ENABLED: "false",
     // AI gateway: off, and on the built-in mock if it is switched on (set AI_ENABLED to "true" here to try Admin -> AI activity; nothing leaves the machine; each purpose is switched on in AI_PURPOSES_ENABLED).
-    AI_ENABLED: "false", AI_PROVIDER: "mock", AI_PURPOSES_ENABLED: "echo_test,quote_extraction,invoice_extraction,library_answer,inspection_job_titles",
+    AI_ENABLED: "false", AI_PROVIDER: "mock", AI_PURPOSES_ENABLED: "echo_test,quote_extraction,invoice_extraction,library_answer,inspection_job_titles,inbound_email_triage",
     APPLICATIONINSIGHTS_CONNECTION_STRING: "", APPINSIGHTS_INSTRUMENTATIONKEY: "",
   };
   for (const name of fs.readdirSync(path.join(root, "src/functions"))) {
@@ -97,7 +97,7 @@ async function prepare() {
     const report = await runSeed(connection, entries, { apply: true, log: console.log });
     if (report.failed) throw new Error("Procedure seed failed.");
     const { TYPES } = require("tedious");
-    const features = ["activity", "aiAssist", "aiDocumentExtraction", "assets", "comms", "complianceReport", "contractorSuggestions", "decisionJobs", "documentation", "escalations", "finance", "guidedHelp", "incoming", "inspections", "jobs", "keys", "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures", "quotes", "recurringFaults", "rentReviews", "tenancySchedule", "tenancyScheduleReport", "tenancyVacancies", "timesheets"];
+    const features = ["activity", "aiAssist", "aiDocumentExtraction", "assets", "comms", "complianceReport", "contractorSuggestions", "decisionJobs", "documentation", "escalations", "finance", "guidedHelp", "inboundTriage", "incoming", "inspections", "jobs", "keys", "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures", "quotes", "recurringFaults", "rentReviews", "tenancySchedule", "tenancyScheduleReport", "tenancyVacancies", "timesheets"];
     const roles = Object.values(require("../dist/auth").AppRole);
     await db.executeQuery(connection, `MERGE dbo.FeatureFlags AS t
       USING (SELECT f.[value] AS FeatureKey, r.[value] AS RoleName FROM OPENJSON(@Features) f CROSS JOIN OPENJSON(@Roles) r) s

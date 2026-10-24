@@ -373,6 +373,16 @@ export const ACTION_ROLES = {
     routes: ["promoteEmailToJob", "promoteEmailToQuote", "promoteEmailToInvoice"],
     why: "Turn an email into a job, a quote or an invoice. Field officers do this (decision 1).",
   },
+  viewEmailRouting: {
+    gate: [A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL],
+    routes: ["getEmailRouting"],
+    why: "See, on each Incoming email, which mailbox it came from, who has it and why, and the send it replies to. Same people as read Incoming itself (getEmails).",
+  },
+  triageIncomingEmail: {
+    gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    routes: ["getTriageQueue", "assignEmail"],
+    why: "Work the Needs triage queue and give an Incoming email to someone, or move it to someone else (EB3). The team managers' job; directors, the CFO and admin through the hierarchy. Field officers see who has an email, they do not hand it out.",
+  },
   raiseEscalation: {
     gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.ACCOUNTS_APPROVAL, A.ACCOUNTS, A.FACILITIES_APPROVAL, A.FACILITIES],
     routes: ["raiseEscalation", "previewEscalationTarget"],
