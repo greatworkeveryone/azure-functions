@@ -88,6 +88,9 @@ describe("invalid input", () => {
     ["a bad recipient type", { recipients: [{ ...recipient, recipientType: "alien" }] }],
     ["a tenancy with no id", { recipients: [{ ...recipient, recipientRefId: undefined }] }],
     ["a tenancy with a non-numeric id", { recipients: [{ ...recipient, recipientRefId: "abc" }] }],
+    ["a contractor with no id", { recipients: [{ ...recipient, recipientRefId: undefined, recipientType: "contractor" }] }],
+    ["a staff member with a non-numeric id", { recipients: [{ ...recipient, recipientRefId: "abc", recipientType: "staff" }] }],
+    ["a typed address that names a record", { recipients: [{ ...recipient, recipientType: "manual" }] }],
     ["an unknown merge field", { recipients: [{ ...recipient, mergeValues: { "tenant.shoeSize": "9" } }] }],
     ["a non-text merge value", { recipients: [{ ...recipient, mergeValues: { "tenant.name": 5 } }] }],
     ["a merge value that is too long", { recipients: [{ ...recipient, mergeValues: { "tenant.name": "x".repeat(501) } }] }],
@@ -100,8 +103,8 @@ describe("invalid input", () => {
     expect(parseQueueInput(queue({ recipients: many }))).toMatchObject({ error: expect.stringContaining("at most 2000"), ok: false });
   });
 
-  it("allows a contractor with no reference id, and a template with a version", () => {
-    expect(parseQueueInput(queue({ recipients: [{ address: "c@example.com", recipientType: "contractor" }], templateId: "rent-notice", templateVersion: 2 }))).toMatchObject({
+  it("allows a contractor with its id, a typed address with none, and a template with a version", () => {
+    expect(parseQueueInput(queue({ recipients: [{ address: "m@example.com", recipientType: "manual" }, { address: "c@example.com", recipientRefId: 4, recipientType: "contractor" }], templateId: "rent-notice", templateVersion: 2 }))).toMatchObject({
       ok: true,
       value: { templateId: "rent-notice", templateVersion: 2 },
     });

@@ -8,9 +8,10 @@ import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
 import { composeForRecipient, type ComposeJob } from "./compose";
 import { appendEvent } from "./events";
+import { resolveRecipientRecord, type Resolution } from "./recipientRecords";
 import { insertJob, insertRecipient, recentRecipientCount } from "./store";
 import type { CommsActor } from "./actor";
-import type { JobStatus, NewJob } from "./types";
+import type { JobStatus, NewJob, NewRecipient } from "./types";
 
 export type ApprovalReason = "recent" | "size";
 
@@ -50,18 +51,38 @@ export function checkRecipients(job: NewJob, now: Date = new Date()) {
     signatureMode: job.signatureMode,
     subject: job.subject,
   };
-  return job.recipients.map((recipient) => ({ composed: composeForRecipient(compose, recipient, now), recipient }));
+  return job.recipients.map((recipient): Checked => ({ composed: composeForRecipient(compose, recipient, now), recipient }));
 }
+
+export interface Checked {
+  composed: ReturnType<typeof composeForRecipient>;
+  recipient: NewRecipient;
+  /** Set when the server's own records refuse this recipient (not the record's contact, or a test record). */
+  refusal?: Exclude<Resolution, { ok: true }>;
+}
+
+/** Asks the server's records about each recipient, as the send will, so a refused one is stored blocked and named. */
+export async function applyResolutions(connection: Connection, checked: readonly Checked[]): Promise<Checked[]> {
+  const out: Checked[] = [];
+  for (const entry of checked) {
+    const resolution = await resolveRecipientRecord(connection, entry.recipient);
+    out.push(resolution.ok ? entry : { ...entry, refusal: resolution });
+  }
+  return out;
+}
+
+/** True for a recipient nothing will be sent to: a missing field, or refused by the server's records. */
+export const isBlocked = (entry: Checked): boolean => !entry.composed.ok || entry.refusal !== undefined;
 
 export async function writeJob(
   connection: Connection,
   job: NewJob,
-  checked: ReturnType<typeof checkRecipients>,
+  checked: readonly Checked[],
   actor: CommsActor,
   userId: number | null,
   threshold: number,
 ): Promise<QueuedJob> {
-  const blocked = checked.filter((entry) => !entry.composed.ok).length;
+  const blocked = checked.filter(isBlocked).length;
   const result = await inTransaction(connection, async () => {
     // Counted before this job exists and under a lock, so splitting a send into many jobs only moves the same people past the line.
     const recent = await recentRecipientCount(connection, actor.oid);
@@ -69,13 +90,11 @@ export async function writeJob(
     const requiresApproval = approval.reason !== null;
     const status: JobStatus = requiresApproval ? "awaiting_approval" : "queued";
     const correspondenceId = await insertJob(connection, job, status, requiresApproval);
-    for (const { composed, recipient } of checked) {
-      await insertRecipient(
-        connection,
-        correspondenceId,
-        recipient,
-        composed.ok ? { detail: null, errorCode: null, status: "queued" } : { detail: composed.detail, errorCode: "missing_field", status: "blocked" },
-      );
+    for (const { composed, recipient, refusal } of checked) {
+      let outcome: Parameters<typeof insertRecipient>[3] = { detail: null, errorCode: null, status: "queued" };
+      if (refusal) outcome = { detail: refusal.detail, errorCode: refusal.code, status: "blocked" };
+      else if (!composed.ok) outcome = { detail: composed.detail, errorCode: "missing_field", status: "blocked" };
+      await insertRecipient(connection, correspondenceId, recipient, outcome);
     }
     await appendEvent(connection, {
       actor: { kind: "user", name: actor.name, oid: actor.oid },

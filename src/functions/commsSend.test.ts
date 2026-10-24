@@ -3,6 +3,7 @@ import { AppRole } from "../auth";
 import * as events from "../comms/events";
 import type { AdminIdentity } from "../comms/identityStore";
 import * as identityStore from "../comms/identityStore";
+import * as records from "../comms/recipientRecords";
 import * as jobStore from "../comms/store";
 import * as userStore from "../comms/userSignatureStore";
 import { record } from "../ledger";
@@ -31,6 +32,7 @@ jest.mock("../db", () => ({
 }));
 jest.mock("../ledger", () => ({ record: jest.fn() }));
 jest.mock("../comms/events", () => ({ appendEvent: jest.fn() }));
+jest.mock("../comms/recipientRecords", () => ({ resolveRecipientRecord: jest.fn() }));
 jest.mock("../comms/store", () => ({ insertJob: jest.fn(), insertRecipient: jest.fn(), readJob: jest.fn(), readRecipient: jest.fn(), recentRecipientCount: jest.fn() }));
 jest.mock("../comms/identityStore", () => ({ ...jest.requireActual("../comms/identityStore"), readIdentity: jest.fn() }));
 jest.mock("../comms/userSignatureStore", () => ({ findUserByOid: jest.fn(), readUserSignature: jest.fn() }));
@@ -69,6 +71,7 @@ beforeEach(() => {
   idStore.readUserSignature.mockResolvedValue({ jobTitle: "Accounts officer", phone: "08 8900 0000", updatedAt: null });
   jobs.insertJob.mockResolvedValue(41);
   jobs.recentRecipientCount.mockResolvedValue(0);
+  jest.mocked(records.resolveRecipientRecord).mockResolvedValue({ ok: true });
   jobs.insertRecipient.mockResolvedValue(1);
 });
 
@@ -207,6 +210,41 @@ describe("queueCorrespondence: the threshold counts a sender's last 24 hours, so
     jobs.recentRecipientCount.mockResolvedValue(18);
     await queueCorrespondence(post(request({}, 5)), context);
     expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ after: expect.objectContaining({ approvalReason: "recent", recentRecipients: 18, status: "awaiting_approval" }) }));
+  });
+});
+
+describe("queueCorrespondence: recipients are resolved from the server's records (review M3)", () => {
+  const resolve = () => jest.mocked(records.resolveRecipientRecord);
+
+  it("asks about each recipient by the type, id and address in the request, before storing anything", async () => {
+    await queueCorrespondence(post(request({ recipients: [recipient(1), recipient(2, { recipientRefId: 9, recipientType: "contractor" }), recipient(3, { recipientRefId: undefined, recipientType: "manual" })] })), context);
+    expect(resolve().mock.calls.map(([, claim]) => ({ address: claim.address, recipientRefId: claim.recipientRefId, recipientType: claim.recipientType }))).toEqual([
+      { address: "pat1@example.com", recipientRefId: "1", recipientType: "tenancy" },
+      { address: "pat2@example.com", recipientRefId: "9", recipientType: "contractor" },
+      { address: "pat3@example.com", recipientRefId: null, recipientType: "manual" },
+    ]);
+    expect(resolve().mock.invocationCallOrder[0]).toBeLessThan(jobs.insertRecipient.mock.invocationCallOrder[0]);
+  });
+
+  it("stores a recipient whose address isn't the record's contact blocked, with the reason, and queues the rest", async () => {
+    resolve().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ code: "address_mismatch", detail: "That address isn't the recorded contact for that record", ok: false });
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.jsonBody).toMatchObject({ blocked: 1, queued: 1, status: "queued" });
+    expect(jobs.insertRecipient.mock.calls[1][3]).toEqual({ detail: "That address isn't the recorded contact for that record", errorCode: "address_mismatch", status: "blocked" });
+  });
+
+  it("refuses a typed address that is a test record's contact, and a test tenancy, the same way", async () => {
+    resolve().mockResolvedValueOnce({ code: "test_record", detail: "That address belongs to a test record", ok: false }).mockResolvedValueOnce({ code: "test_record", detail: "That tenancy is a test record", ok: false });
+    expect((await queueCorrespondence(post(request({}, 3)), context)).jsonBody).toMatchObject({ blocked: 2, queued: 1 });
+    expect(jobs.insertRecipient.mock.calls.map((call) => call[3].errorCode)).toEqual(["test_record", "test_record", null]);
+  });
+
+  it("creates nothing when no recipient resolves, and says why", async () => {
+    resolve().mockResolvedValue({ code: "address_mismatch", detail: "That address isn't the recorded contact for that record", ok: false });
+    const response = await queueCorrespondence(post(request()), context);
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.jsonBody)).toContain("recorded contact");
+    expect(jobs.insertJob).not.toHaveBeenCalled();
   });
 });
 

@@ -18,7 +18,7 @@ import { errorResponse } from "../auth";
 import { authorizeActor, badRequest, noStore } from "../comms/actor";
 import { approvalThreshold, fromAddress, fromName } from "../comms/config";
 import { findUserByOid } from "../comms/userSignatureStore";
-import { checkRecipients, writeJob } from "../comms/queueJob";
+import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms/queueJob";
 import { parseQueueInput } from "../comms/request";
 import { prepareSender } from "../comms/senderSetup";
 import type { NewJob } from "../comms/types";
@@ -55,10 +55,10 @@ export async function queueCorrespondence(request: HttpRequest, context: Invocat
       templateId: input.value.templateId,
       templateVersion: input.value.templateVersion,
     };
-    const checked = checkRecipients(job);
-    if (checked.every((entry) => !entry.composed.ok)) {
-      const first = checked[0].composed;
-      return badRequest(`No recipient can be sent this email. ${first.ok ? "" : first.detail}`.trim());
+    const checked = await applyResolutions(connection, checkRecipients(job));
+    if (checked.every(isBlocked)) {
+      const first = checked[0];
+      return badRequest(`No recipient can be sent this email. ${first.refusal?.detail ?? (first.composed.ok ? "" : first.composed.detail)}`.trim());
     }
     const user = await findUserByOid(connection, actor.oid);
     const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold());

@@ -4,8 +4,8 @@
 import type { Connection } from "tedious";
 import { inTransaction, txOk } from "../assetRegisterSupport";
 import { record } from "../ledger";
-import { readIsTest } from "../test-data";
 import { appendEvent } from "./events";
+import { resolveRecipientRecord } from "./recipientRecords";
 import {
   claimRecipient,
   completeJob,
@@ -59,7 +59,7 @@ export function sqlQueueStore(connection: Connection): QueueStore {
   const actor = { kind: "system", name: TIMER_ACTOR } as const;
   return {
     claim: (recipientId) => claimRecipient(connection, recipientId),
-    isTestTenancy: (tenancyId) => readIsTest(connection, "tenancy", tenancyId),
+    resolve: (recipient) => resolveRecipientRecord(connection, recipient),
     async markJobSending(correspondenceId) {
       if (await moveJob(connection, correspondenceId, ["queued"], "sending")) {
         await appendEvent(connection, { actor, correspondenceId, fromStatus: "queued", toStatus: "sending", type: "job" });
