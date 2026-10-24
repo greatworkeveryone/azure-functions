@@ -14,7 +14,7 @@ const NOW = new Date("2026-10-24T02:00:00Z");
 
 const row = (id: number, over: Record<string, unknown> = {}) => ({
   AIClassification: null, AIFlaggedForReview: false, AIParsedData: null, Body: "b", EmailID: id, FromAddress: "a@b.co", InReplyTo: null,
-  IsTest: false, Mailbox: "notices@randazzo.properties", MatchedJobID: null, ReceivedAt: NOW, ReferenceIds: null, Subject: "s", ...over,
+  IsTest: false, Mailbox: "notices@randazzo.properties", MatchedJobID: null, ReceivedAt: NOW, ReferenceIds: null, SenderAuthenticated: true, Subject: "s", ...over,
 });
 const on = readInboundConfig({ INBOUND_TRIAGE_ENABLED: "true", INBOUND_TRIAGE_MAILBOXES: "accounts@randazzo.properties" });
 
@@ -93,6 +93,13 @@ describe("runInboundTriage", () => {
 });
 
 describe("loadPending", () => {
+  it("reads whether the sender was verified, and only an explicit yes counts", async () => {
+    db.executeQuery.mockResolvedValue([row(1), row(2, { SenderAuthenticated: false }), row(3, { SenderAuthenticated: null }), row(4, { SenderAuthenticated: 1 })]);
+    const emails = await loadPending(connection, readInboundConfig({}), NOW);
+    expect(emails.map((email) => email.senderAuthenticated)).toEqual([true, false, null, true]);
+    expect(String(db.executeQuery.mock.calls[0][1])).toContain("e.SenderAuthenticated");
+  });
+
   it("maps rows to emails and takes the config's limits", async () => {
     db.executeQuery.mockResolvedValue([row(7, { AIFlaggedForReview: 1, MatchedJobID: 42, InReplyTo: "p@x" })]);
     const [email] = await loadPending(connection, readInboundConfig({ INBOUND_TRIAGE_MAX_PER_RUN: "5", INBOUND_TRIAGE_MAX_AGE_DAYS: "9" }), NOW);

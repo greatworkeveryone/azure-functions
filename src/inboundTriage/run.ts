@@ -23,7 +23,7 @@ export interface TriageRunSummary {
 }
 
 const PENDING_SQL = `SELECT TOP (@Max) e.EmailID, e.Mailbox, e.FromAddress, e.Subject, e.Body, e.ReceivedAt, e.MatchedJobID,
-    e.AIClassification, e.AIParsedData, e.AIFlaggedForReview, e.InReplyTo, e.ReferenceIds, e.IsTest
+    e.AIClassification, e.AIParsedData, e.AIFlaggedForReview, e.InReplyTo, e.ReferenceIds, e.IsTest, e.SenderAuthenticated
   FROM dbo.Emails e
   WHERE e.Mailbox IN (SELECT [value] FROM OPENJSON(@Mailboxes))
     AND e.AssignedToUserId IS NULL AND e.Status IN ('unread', 'matched') AND e.ArchivedAt IS NULL
@@ -51,6 +51,7 @@ export async function loadPending(connection: Connection, config: InboundConfig,
     matchedJobId: row.MatchedJobID === null || row.MatchedJobID === undefined ? null : Number(row.MatchedJobID),
     receivedAt: row.ReceivedAt ? new Date(row.ReceivedAt as Date | string) : null,
     referenceIds: (row.ReferenceIds as string | null) ?? null,
+    senderAuthenticated: row.SenderAuthenticated === null || row.SenderAuthenticated === undefined ? null : row.SenderAuthenticated === true || row.SenderAuthenticated === 1,
     subject: (row.Subject as string | null) ?? null,
   }));
 }

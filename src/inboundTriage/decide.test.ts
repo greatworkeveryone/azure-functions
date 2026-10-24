@@ -4,7 +4,7 @@ import { candidate, context } from "../__tests__/fixtures/inboundTriageBuilders"
 import type { LinkedSend, ScoredCandidate } from "./types";
 
 const scored = (userId: number, score: number): ScoredCandidate => ({ ...candidate(userId, `User ${userId}`), reasons: [], score });
-const send = (sentByUserId: number | null): LinkedSend => ({ buildingId: null, jobId: null, kind: "broadcast", recipientEmail: null, sendId: "s1", sentByUserId, subject: "Water shut-off", tenancyId: null });
+const send = (sentByUserId: number | null, recipientEmail: string | null = "tenant@acme.example"): LinkedSend => ({ buildingId: null, jobId: null, kind: "broadcast", recipientEmail, sendId: "s1", sentByUserId, subject: "Water shut-off", tenancyId: null });
 
 describe("decide", () => {
   it("queues an email nobody can be given", () => {
@@ -12,7 +12,7 @@ describe("decide", () => {
   });
 
   it("assigns a reply to the person who sent the send, when they are among the candidates, whatever the scores", () => {
-    const verdict = decide([scored(1, 90), scored(2, 5)], context({ linkedSend: send(2) }));
+    const verdict = decide([scored(1, 90), scored(2, 5)], context({ linkedSend: send(2), replyVerified: true }));
     expect(verdict).toMatchObject({ decision: "auto", rule: "reply_to_known_send", chosen: { userId: 2 } });
   });
 
@@ -40,9 +40,35 @@ describe("decide", () => {
   });
 
   it("with the rules ranker, a reply's sender wins and a role alone never assigns", () => {
-    const ctx = context({ linkedSend: send(2) });
+    const ctx = context({ linkedSend: send(2), replyVerified: true });
     const ranked = rulesRanker.rank([candidate(1, "Fay"), candidate(2, "Gus", { sentLinkedSend: true })], ctx);
     expect(decide(ranked, ctx)).toMatchObject({ decision: "auto", chosen: { userId: 2 } });
     expect(decide(rulesRanker.rank([candidate(1, "Fay"), candidate(2, "Gus")], context()), context()).decision).toBe("queued");
+  });
+
+  describe("a sender who could not be verified", () => {
+    it("is always queued, whatever the scores and the reply link say", () => {
+      const ctx = context({ linkedSend: send(2), replyVerified: false, senderVerified: false });
+      expect(decide([scored(2, 90), scored(1, 5)], ctx)).toEqual({ decision: "queued", rule: "sender_unverified" });
+      expect(decide([scored(1, 90)], context({ senderVerified: false }))).toEqual({ decision: "queued", rule: "sender_unverified" });
+      expect(decide([], context({ senderVerified: false }))).toEqual({ decision: "queued", rule: "sender_unverified" });
+    });
+  });
+
+  describe("an assignment that rests on a reply link", () => {
+    it("needs the email to come from the address the send went to, as well as a verified sender", () => {
+      const ctx = context({ linkedSend: send(2), replyVerified: false });
+      expect(decide([scored(2, 90), scored(1, 5)], ctx)).toEqual({ decision: "queued", rule: "reply_unverified" });
+    });
+
+    it("also holds back a leader whose lead is the reply link, when the reply is not verified", () => {
+      const lead = { ...scored(2, 75), features: { ...candidate(2, "x").features, sentLinkedSend: true } };
+      expect(decide([lead, scored(1, 15)], context({ linkedSend: send(2), replyVerified: false }))).toEqual({ decision: "queued", rule: "reply_unverified" });
+      expect(decide([lead, scored(1, 15)], context({ linkedSend: send(2), replyVerified: true }))).toMatchObject({ decision: "auto" });
+    });
+
+    it("leaves a leader whose lead has nothing to do with a reply alone", () => {
+      expect(decide([scored(1, 80), scored(2, 5)], context({ linkedSend: send(9), replyVerified: false }))).toMatchObject({ decision: "auto", rule: "clear_leader" });
+    });
   });
 });

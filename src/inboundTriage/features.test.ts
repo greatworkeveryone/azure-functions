@@ -81,7 +81,7 @@ describe("chooseEligible", () => {
 
 const CONTEXT: TriageContext = {
   buildingId: 10, buildingName: "Frogmore House", category: "Electrical", contractorId: null, emailId: 5, intent: "maintenance_request", lane: "facilities",
-  linkedSend: null, mailbox: "notices@randazzo.properties", matchedJobId: 77, senderKind: "tenancy", tenancyId: 9, tenancyName: "Acme Pty Ltd", today: "2026-10-24", urgency: null,
+  linkedSend: null, mailbox: "notices@randazzo.properties", matchedJobId: 77, replyVerified: false, senderKind: "tenancy", senderVerified: true, tenancyId: 9, tenancyName: "Acme Pty Ltd", today: "2026-10-24", urgency: null,
 };
 
 const job = (over: Partial<AssignedJob>): AssignedJob => ({ assignedToUserId: 1, buildingId: 10, category: "Electrical", createdAt: ago(10), open: false, tenancyId: null, ...over });

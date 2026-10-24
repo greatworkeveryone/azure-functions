@@ -24,6 +24,10 @@ import type { Candidate, Ranker, ScoredCandidate, TriageContext } from "./types"
 export const MAX_LOGGED = 5;
 export const AUTOMATIC = "Floorplan (automatic)";
 
+/** Said first beside every suggestion for an email whose sender could not be verified, so the manager reads it before choosing. */
+export const SENDER_UNVERIFIED_REASON = "The sender could not be verified, so this email may not be from who it says.";
+export const REPLY_UNVERIFIED_REASON = "Replies to a message Floorplan sent, but not from the address it was sent to.";
+
 export interface TriageOptions {
   dryRun: boolean;
   inactivityDays: number;
@@ -103,6 +107,8 @@ export async function triageEmail(connection: Connection, email: TriageEmail, op
     ranker: options.ranker,
   });
   const verdict = decide(ranked, context);
+  const warning = verdict.rule === "sender_unverified" ? SENDER_UNVERIFIED_REASON : verdict.rule === "reply_unverified" ? REPLY_UNVERIFIED_REASON : null;
+  const shown = warning ? ranked.map((item) => ({ ...item, reasons: [{ caution: true, text: warning }, ...item.reasons] })) : ranked;
   const chosen = verdict.decision === "auto" ? verdict.chosen : null;
   const result: TriageResult = {
     chosen: chosen ? { name: chosen.name, userId: chosen.userId } : null,
@@ -116,7 +122,7 @@ export async function triageEmail(connection: Connection, email: TriageEmail, op
   // Link the reply (once) now that the lookup has been asked: a send core that landed after the sync still catches up.
   if (context.linkedSend) await storeLink(connection, email.emailId, context.linkedSend);
 
-  const top: LoggedItem[] = ranked.slice(0, MAX_LOGGED).map((item, index) => ({ features: item.features, rank: index + 1, reasons: item.reasons, score: item.score, userId: item.userId }));
+  const top: LoggedItem[] = shown.slice(0, MAX_LOGGED).map((item, index) => ({ features: item.features, rank: index + 1, reasons: item.reasons, score: item.score, userId: item.userId }));
   const logged = await withTransaction(connection, async () => {
     const setId = await insertSet(
       connection,

@@ -26,7 +26,7 @@ const NOW = new Date("2026-10-24T02:00:00Z");
 const EMAIL: TriageEmail = {
   aiClassification: null, aiFlagged: false, aiParsedData: null, body: "The air con is broken and it is too hot.", emailId: 5,
   fromAddress: "tenant@acme.example", inReplyTo: null, isTest: false, mailbox: "notices@randazzo.properties", matchedJobId: null,
-  receivedAt: NOW, referenceIds: null, subject: "Air con",
+  receivedAt: NOW, referenceIds: null, senderAuthenticated: true, subject: "Air con",
 };
 
 let state: FakeState;
@@ -217,7 +217,7 @@ describe("triageEmail: what the email names", () => {
 describe("triageEmail: dry run", () => {
   it("works out the decision and writes nothing at all", async () => {
     state.jobs = [...Array.from({ length: 5 }, () => job(1)), job(1, { IsOpen: 1, TenantID: 9 })];
-    lookup.findSendByInternetMessageId.mockResolvedValue({ buildingId: 10, jobId: null, kind: "broadcast", recipientEmail: null, sendId: "s", sentByUserId: 1, subject: "x", tenancyId: 9 });
+    lookup.findSendByInternetMessageId.mockResolvedValue({ buildingId: 10, jobId: null, kind: "broadcast", recipientEmail: "tenant@acme.example", sendId: "s", sentByUserId: 1, subject: "x", tenancyId: 9 });
     const result = await run({ ...EMAIL, inReplyTo: "p@x" }, { dryRun: true });
     expect(result).toMatchObject({ chosen: { userId: 1 }, decision: "auto", setId: null });
     expect(state.writes).toHaveLength(0);
@@ -246,5 +246,78 @@ describe("a replaceable ranker", () => {
     const [item] = acceptRanked(people, [{ ...scored(1, 5), reasons: Array.from({ length: 20 }, (_, i) => ({ caution: false, text: `${i} ${"x".repeat(500)}` })) }]);
     expect(item.reasons).toHaveLength(8);
     expect(item.reasons[0].text.length).toBe(200);
+  });
+});
+
+describe("triageEmail: a sender that could not be verified (forged From)", () => {
+  const FORGED: TriageEmail = { ...EMAIL, senderAuthenticated: false, subject: "New bank details for rent", body: "Please update the bank details for our rent payments." };
+
+  beforeEach(() => {
+    // Everything a forger could imitate: a tenancy contact with an open job and history, and a reply to a send.
+    state.jobs = [...Array.from({ length: 5 }, () => job(1)), job(1, { IsOpen: 1, TenantID: 9 })];
+    lookup.findSendByInternetMessageId.mockResolvedValue({ buildingId: 10, jobId: null, kind: "broadcast", recipientEmail: "tenant@acme.example", sendId: "s", sentByUserId: 1, subject: "Notice", tenancyId: 9 });
+  });
+
+  it("is never assigned automatically and goes to the queue, however well it imitates a tenant", async () => {
+    const result = await run({ ...FORGED, inReplyTo: "p@x" });
+    expect(result).toMatchObject({ chosen: null, decision: "queued", rule: "sender_unverified" });
+    expect(writesTo(/UPDATE dbo\.Emails\s+SET AssignedToUserId/)).toHaveLength(0);
+    expect(writesTo(/INSERT INTO dbo\.EmailRoutingSets/)[0].params.Decision).toBe("queued");
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it("does not look the sender up as a tenancy contact, a contractor or staff, nor look up the send it claims to answer", async () => {
+    await run({ ...FORGED, inReplyTo: "p@x" });
+    const sql = db.executeQuery.mock.calls.map((call) => String(call[1]));
+    expect(sql.some((text) => /PrimaryContactEmail|FROM dbo\.Contractors WHERE EmailAddress|AppUsers WHERE Email/.test(text))).toBe(false);
+    expect(lookup.findSendByInternetMessageId).not.toHaveBeenCalled();
+    expect(writesTo(/SET LinkedSendKind/)).toHaveLength(0);
+  });
+
+  it("logs a context that says the sender was not verified, with no sender-based evidence in it", async () => {
+    await run({ ...FORGED, inReplyTo: "p@x" });
+    const context = JSON.parse(String(writesTo(/INSERT INTO dbo\.EmailRoutingSets/)[0].params.ContextJson));
+    expect(context).toMatchObject({ linkedSend: null, replyVerified: false, senderKind: "unknown", senderVerified: false, tenancyId: null });
+    const features = writesTo(/INSERT INTO dbo\.EmailRoutingItems/).map((write) => JSON.parse(String(write.params.FeaturesJson)));
+    expect(features.every((vector) => vector.sentLinkedSend === false && vector.ownsOpenJobForTenancy === false)).toBe(true);
+  });
+
+  it("puts a plain warning on every suggestion, first", async () => {
+    await run(FORGED);
+    const reasons = writesTo(/INSERT INTO dbo\.EmailRoutingItems/).map((write) => JSON.parse(String(write.params.ReasonsJson)));
+    expect(reasons.length).toBeGreaterThan(0);
+    for (const list of reasons) expect(list[0]).toEqual({ caution: true, text: "The sender could not be verified, so this email may not be from who it says." });
+  });
+
+  it("treats an email whose sender was never checked (null) the same way", async () => {
+    expect((await run({ ...FORGED, senderAuthenticated: null })).rule).toBe("sender_unverified");
+  });
+
+  it("still assigns a verified email as before", async () => {
+    expect((await run({ ...EMAIL, subject: "Air con" })).decision).toBe("auto");
+  });
+});
+
+describe("triageEmail: a verified reply from someone other than the recipient", () => {
+  const SEND = { buildingId: 10, jobId: null, kind: "broadcast", recipientEmail: "tenant@acme.example", sendId: "s", sentByUserId: 3, subject: "Notice", tenancyId: 9 };
+  const REPLY = { ...EMAIL, body: "Thanks, noted.", inReplyTo: "parent@x", subject: "Re: Notice" };
+
+  it("is queued with a warning, not assigned to whoever sent the send", async () => {
+    lookup.findSendByInternetMessageId.mockResolvedValue(SEND);
+    const result = await run({ ...REPLY, fromAddress: "someone.else@elsewhere.example" });
+    expect(result).toMatchObject({ chosen: null, decision: "queued", rule: "reply_unverified" });
+    const reasons = JSON.parse(String(writesTo(/INSERT INTO dbo\.EmailRoutingItems/)[0].params.ReasonsJson));
+    expect(reasons[0]).toEqual({ caution: true, text: "Replies to a message Floorplan sent, but not from the address it was sent to." });
+  });
+
+  it("is assigned when it comes from the recipient's address, whatever its case", async () => {
+    lookup.findSendByInternetMessageId.mockResolvedValue(SEND);
+    const result = await run({ ...REPLY, fromAddress: "Tenant@Acme.Example" });
+    expect(result).toMatchObject({ chosen: { userId: 3 }, decision: "auto", rule: "reply_to_known_send" });
+  });
+
+  it("is queued when the send has no recorded recipient address to compare", async () => {
+    lookup.findSendByInternetMessageId.mockResolvedValue({ ...SEND, recipientEmail: null });
+    expect((await run(REPLY)).rule).toBe("reply_unverified");
   });
 });
