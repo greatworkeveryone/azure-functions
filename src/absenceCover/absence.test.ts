@@ -1,7 +1,7 @@
 /// <reference types="jest" />
 import { NO_HOLIDAYS } from "../escalation/businessTime";
 import { DIRECTORY, TODAY } from "../__tests__/fixtures/absenceCover";
-import { detectAbsences, displayDate, quietBusinessDays, returnDateAfter, type DetectInput, type LeaveFact } from "./absence";
+import { detectAbsences, displayDate, neutralReason, quietBusinessDays, returnDateAfter, type DetectInput, type LeaveFact } from "./absence";
 
 const leave = (over: Partial<LeaveFact> = {}): LeaveFact => ({
   approvedOn: "2026-10-01",
@@ -184,6 +184,20 @@ describe("detectAbsences: no sign-in", () => {
 it("lists people by name", () => {
   const { absent } = detect({ lastSeenOn: new Map([[7, "2026-10-01"], [3, "2026-10-01"]]), leaves: [leave()] });
   expect(absent.map((person) => person.name)).toEqual(["Ann Accounts", "Fay Facilities", "Sam Facilities"]);
+});
+
+describe("neutralReason: the only words other people read", () => {
+  it("is the first name and the date they are back, for leave", () => {
+    expect(neutralReason({ name: "Fay Facilities", returnDate: "2026-11-02" })).toBe("Covering while Fay is away until 02/11");
+  });
+
+  it("is unavailable, with no date, when nobody knows when they are back", () => {
+    expect(neutralReason({ name: "Fay Facilities", returnDate: null })).toBe("Covering while Fay is unavailable");
+  });
+
+  it("copes with a single name", () => {
+    expect(neutralReason({ name: "Cher", returnDate: null })).toBe("Covering while Cher is unavailable");
+  });
 });
 
 it("writes dates as DD/MM/YYYY", () => {

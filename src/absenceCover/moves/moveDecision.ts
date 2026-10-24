@@ -40,7 +40,7 @@ export const moveDecision: Mover = async (connection, { actorName, detail, from,
     [
       { name: "JobID", type: TYPES.Int, value: Number(detail.jobId ?? request.jobId) },
       { name: "CreatedBy", type: TYPES.NVarChar, value: actorName },
-      { name: "Text", type: TYPES.NVarChar, value: `The decision request now goes to ${to.name} (${from.name} is away): ${reason}`.slice(0, 2000) },
+      { name: "Text", type: TYPES.NVarChar, value: `The decision request now goes to ${to.name}: ${reason}`.slice(0, 2000) },
     ],
   );
   return true;

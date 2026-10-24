@@ -128,7 +128,7 @@ export async function takeBackItem(connection: Connection, caller: CoverCaller, 
   ]);
   if (already.length > 0) throw coverError.changed("You have already taken this back.");
   const coverName = (await executeQuery(connection, `SELECT DisplayName FROM dbo.AppUsers WHERE UserID = @Id`, [{ name: "Id", type: TYPES.Int, value: row.toUserId }]))[0]?.DisplayName;
-  const reason = `${caller.name} is back and took this back`;
+  const reason = `${caller.name} took this back`;
   const id = await inTransaction(connection, async () => {
     const moved = await mover(connection, {
       actorName: caller.name,

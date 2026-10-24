@@ -26,6 +26,18 @@ import { addBusinessDays, isBusinessDay, previousBusinessDay, type Holidays } fr
 import { addDaysIso } from "../darwinDate";
 import type { AbsentPerson } from "./types";
 
+/**
+ * The only words about an absence that other people read: a job's history, a decision's comment,
+ * an escalation's note, an email's assignment reason. First name, and the day they are back when
+ * known; never the kind of absence (planned or not, which implies sick leave) and never a sign-in
+ * date. The detail stays in the ledger and on the manager's Covering screen.
+ */
+export function neutralReason(person: { name: string; returnDate: string | null }): string {
+  const first = person.name.trim().split(/\s+/)[0] || "them";
+  if (person.returnDate === null) return `Covering while ${first} is unavailable`;
+  return `Covering while ${first} is away until ${displayDate(person.returnDate).slice(0, 5)}`;
+}
+
 export interface LeaveFact {
   /** Darwin date the request was approved (its last change). */
   approvedOn: string;

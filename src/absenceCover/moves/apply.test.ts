@@ -105,6 +105,33 @@ describe("applyCoverAction: a move", () => {
   });
 });
 
+describe("applyCoverAction: what other people can read", () => {
+  const SENSITIVE = /planned|unplanned|sick|personal|signed in|sign-in|business days|not signed|leave kind/i;
+
+  it("gives the item's own history a neutral reason: first name and the date back, never the kind of absence, and keeps the detail for the ledger", async () => {
+    await applyCoverAction(conn, input({ reasonText: "It falls due before they are back. Away on leave that was not planned, until 30/10/2026." }));
+    const args = domain.MOVERS.job_assignee.mock.calls[0][1];
+    expect(args.reason).toBe("Covering while Fay is away until 02/11");
+    expect(args.reason).not.toMatch(SENSITIVE);
+    expect(store.insertCoverAction.mock.calls[0][1].reasonText).toContain("not planned");
+  });
+
+  it("says unavailable, with no date and no sign-in detail, for someone who only stopped signing in", async () => {
+    await applyCoverAction(conn, input({ absent: absent({ endDate: null, kind: "inactive", reason: "Has not signed in since 20/10/2026 (3 business days)", returnDate: null }), reasonText: "Has not signed in since 20/10/2026." }));
+    const args = domain.MOVERS.job_assignee.mock.calls[0][1];
+    expect(args.reason).toBe("Covering while Fay is unavailable");
+    expect(args.reason).not.toMatch(SENSITIVE);
+  });
+
+  it("gives the escalation's note the same neutral reason, not the absence's", async () => {
+    engine.escalateFurther.mockResolvedValue({ next: { targetRole: "director", targetUserId: null }, previous: {} });
+    await applyCoverAction(conn, input({ action: "escalated", item: item({ id: "40", move: "escalation_retarget", type: "escalation" }), reasonText: "Away on leave that was not planned, until 30/10/2026." }));
+    const note = engine.escalateFurther.mock.calls[0][1].note;
+    expect(note).toBe("Covering while Fay is away until 02/11");
+    expect(note).not.toMatch(SENSITIVE);
+  });
+});
+
 describe("applyCoverAction: a notice only (a quote awaiting approval)", () => {
   it("tells the cover and writes the ledger row, without changing anything", async () => {
     const result = await applyCoverAction(conn, input({ item: item({ move: "notice", type: "approval" }) }));
