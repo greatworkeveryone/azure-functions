@@ -525,6 +525,36 @@ export const ACTION_ROLES = {
     routes: ["setApprovalFact"],
     why: "The CFO sets variance margin and cap; every change is money-gated and ledgered (decision 17).",
   },
+  // Native email (EB1, PLAN §13). The server composes every signature and checks every reply-to; these gates
+  // only say who may use the comms routes. Admin passes the gates but is turned away by the handlers of the
+  // two that send or approve real mail (the same rule as the approvals above: admin acts on test records only).
+  sendEmail: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    refused: [A.ADMIN],
+    routes: ["listCommsIdentities", "previewCorrespondence", "queueCorrespondence", "cancelCorrespondence"],
+    why: "Send email from Floorplan: choose a reply-to identity and a signature, preview, queue and cancel a send. Property and facilities staff and above. Admin is refused: it sends nothing real.",
+  },
+  approveEmail: {
+    gate: [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR, A.FACILITIES_APPROVAL],
+    refused: [A.ADMIN],
+    routes: ["approveCorrespondence"],
+    why: "Approve a large send (over COMMS_APPROVAL_THRESHOLD recipients): a manager, the CFO or a director, never the person who queued it. The handler checks that; admin approves nothing real and is refused.",
+  },
+  viewCorrespondence: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    routes: ["getCorrespondence"],
+    why: "Read a send job and its recipients. The handler further limits it to whoever queued the job and the managers who approve sends.",
+  },
+  manageEmailIdentities: {
+    gate: [A.ADMIN],
+    routes: ["manageCommsIdentities"],
+    why: "Admin → Email identities: the reply-to addresses, the roles allowed to send on their behalf and their team signatures. Admin only.",
+  },
+  editMySignature: {
+    gate: [A.USER],
+    routes: ["getMySignature", "updateMySignature"],
+    why: "Your own standard signature: your job title and phone. Any assigned role edits their own; an admin may edit another person's (the handler checks).",
+  },
   viewTechnicalSettings: { gate: [A.ADMIN], match: "exact", routes: [], why: "Technical administration pages remain admin-only; directors have business Settings." },
   viewAdmin: {
     gate: [A.ADMIN, A.DIRECTOR],

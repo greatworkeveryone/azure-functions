@@ -22,7 +22,7 @@ const sourceFiles = (dir: string): string[] =>
 // requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
 // alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
 // requireProcedureApprover (src/procedureAccess.ts) is the same for publishProcedure.
-const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|rolesForRequest|runControllerAction|withCaller|withMajorEvent|withDocumentRegister)\s*(?:<[^>]*>)?\s*\(/;
+const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|authorizeActor|rolesForRequest|runControllerAction|withCaller|withMajorEvent|withDocumentRegister)\s*(?:<[^>]*>)?\s*\(/;
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {

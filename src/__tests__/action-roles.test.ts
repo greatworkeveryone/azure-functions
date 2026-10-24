@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "7619a47ac12a646661300f106c16a792d3b15c6fa21f5322111c2814e1c1b3b9";
+const PINNED_SHA256 = "0fa04eb16b9aa818ab4e33f20cf066caf514fa61b3220919410e92197747166a";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {

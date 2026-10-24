@@ -1,0 +1,407 @@
+{
+  "documents": [
+    {
+      "name": "headings and paragraphs",
+      "source": "## Rent review\n\nDear {{tenant.addressee}},\n\nWe write about\n**{{building.name}}**\nand the lease.\n\n### Next steps\nPlease call us.",
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 2,
+          "text": "Rent review"
+        },
+        {
+          "kind": "paragraph",
+          "text": "Dear {{tenant.addressee}},"
+        },
+        {
+          "kind": "paragraph",
+          "text": "We write about **{{building.name}}** and the lease."
+        },
+        {
+          "kind": "heading",
+          "level": 3,
+          "text": "Next steps"
+        },
+        {
+          "kind": "paragraph",
+          "text": "Please call us."
+        }
+      ]
+    },
+    {
+      "name": "lists",
+      "source": "- one\n- **two** and *three*\n  continued here\n\n1. first\n2. second with `code`\n3. third [link](https://example.com/a?b=1)",
+      "blocks": [
+        {
+          "items": [
+            "one",
+            "**two** and *three* continued here"
+          ],
+          "kind": "list",
+          "ordered": false
+        },
+        {
+          "items": [
+            "first",
+            "second with `code`",
+            "third [link](https://example.com/a?b=1)"
+          ],
+          "kind": "list",
+          "ordered": true
+        }
+      ]
+    },
+    {
+      "name": "quote and rule",
+      "source": "> Quoted {{today}}\n\n---\n\n***\n\nAfter.",
+      "blocks": [
+        {
+          "kind": "quote",
+          "text": "Quoted {{today}}"
+        },
+        {
+          "kind": "rule"
+        },
+        {
+          "kind": "rule"
+        },
+        {
+          "kind": "paragraph",
+          "text": "After."
+        }
+      ]
+    },
+    {
+      "name": "table",
+      "source": "| Item | Value |\n|---|---|\n| Suite | {{tenant.suite}} |\n| Expiry | {{tenant.leaseExpiry}} |\n\nAfter the table.",
+      "blocks": [
+        {
+          "header": [
+            "Item",
+            "Value"
+          ],
+          "kind": "table",
+          "rows": [
+            [
+              "Suite",
+              "{{tenant.suite}}"
+            ],
+            [
+              "Expiry",
+              "{{tenant.leaseExpiry}}"
+            ]
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "text": "After the table."
+        }
+      ]
+    },
+    {
+      "name": "fields in odd places",
+      "source": "## About {{building.name}}\n\n*Emphasis {{sender.name}}* and **bold {{sender.title}}** and {{ spaced.path }} and {{broken\n\n- list {{tenant.name}}\n\n[{{tenant.name}}](mailto:a@b.co)",
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 2,
+          "text": "About {{building.name}}"
+        },
+        {
+          "kind": "paragraph",
+          "text": "*Emphasis {{sender.name}}* and **bold {{sender.title}}** and {{ spaced.path }} and {{broken"
+        },
+        {
+          "items": [
+            "list {{tenant.name}}"
+          ],
+          "kind": "list",
+          "ordered": false
+        },
+        {
+          "kind": "paragraph",
+          "text": "[{{tenant.name}}](mailto:a@b.co)"
+        }
+      ]
+    },
+    {
+      "name": "plain and empty",
+      "source": "\n\n   \n\nJust text with * a star and ** two stars and `unclosed\n",
+      "blocks": [
+        {
+          "kind": "paragraph",
+          "text": "Just text with * a star and ** two stars and `unclosed"
+        }
+      ]
+    },
+    {
+      "name": "windows line endings",
+      "source": "Line one\r\nLine two\r\n\r\n- a\r\n- b\r\n",
+      "blocks": [
+        {
+          "kind": "paragraph",
+          "text": "Line one Line two"
+        },
+        {
+          "items": [
+            "a",
+            "b"
+          ],
+          "kind": "list",
+          "ordered": false
+        }
+      ]
+    }
+  ],
+  "fields": [
+    {
+      "text": "Plain text",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Plain text"
+        }
+      ]
+    },
+    {
+      "text": "**bold** *italic* `code` [text](https://example.com)",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "**bold** *italic* `code` [text](https://example.com)"
+        }
+      ]
+    },
+    {
+      "text": "mixed **bold {{tenant.name}}** *it {{building.name}}* {{today.long}}",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "mixed **bold "
+        },
+        {
+          "kind": "field",
+          "path": "tenant.name"
+        },
+        {
+          "kind": "text",
+          "text": "** *it "
+        },
+        {
+          "kind": "field",
+          "path": "building.name"
+        },
+        {
+          "kind": "text",
+          "text": "* "
+        },
+        {
+          "kind": "field",
+          "path": "today.long"
+        }
+      ]
+    },
+    {
+      "text": "[a](b) [c](d) trailing",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "[a](b) [c](d) trailing"
+        }
+      ]
+    },
+    {
+      "text": "nested **bold *not italic* end**",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "nested **bold *not italic* end**"
+        }
+      ]
+    },
+    {
+      "text": "{{one}}{{two}}",
+      "parts": [
+        {
+          "kind": "field",
+          "path": "one"
+        },
+        {
+          "kind": "field",
+          "path": "two"
+        }
+      ]
+    },
+    {
+      "text": "stray ** and * and ` marks",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "stray ** and * and ` marks"
+        }
+      ]
+    },
+    {
+      "text": " restored markers",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "*` restored markers"
+        }
+      ]
+    }
+  ],
+  "inline": [
+    {
+      "text": "Plain text",
+      "tokens": [
+        {
+          "kind": "text",
+          "text": "Plain text"
+        }
+      ]
+    },
+    {
+      "text": "**bold** *italic* `code` [text](https://example.com)",
+      "tokens": [
+        {
+          "kind": "strong",
+          "text": "bold"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "kind": "em",
+          "text": "italic"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "kind": "code",
+          "text": "code"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "href": "https://example.com",
+          "kind": "link",
+          "text": "text"
+        }
+      ]
+    },
+    {
+      "text": "mixed **bold {{tenant.name}}** *it {{building.name}}* {{today.long}}",
+      "tokens": [
+        {
+          "kind": "text",
+          "text": "mixed "
+        },
+        {
+          "kind": "strong",
+          "text": "bold "
+        },
+        {
+          "kind": "field",
+          "path": "tenant.name"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "kind": "em",
+          "text": "it "
+        },
+        {
+          "kind": "field",
+          "path": "building.name"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "kind": "field",
+          "path": "today.long"
+        }
+      ]
+    },
+    {
+      "text": "[a](b) [c](d) trailing",
+      "tokens": [
+        {
+          "href": "b",
+          "kind": "link",
+          "text": "a"
+        },
+        {
+          "kind": "text",
+          "text": " "
+        },
+        {
+          "href": "d",
+          "kind": "link",
+          "text": "c"
+        },
+        {
+          "kind": "text",
+          "text": " trailing"
+        }
+      ]
+    },
+    {
+      "text": "nested **bold *not italic* end**",
+      "tokens": [
+        {
+          "kind": "text",
+          "text": "nested **bold "
+        },
+        {
+          "kind": "em",
+          "text": "not italic"
+        },
+        {
+          "kind": "text",
+          "text": " end**"
+        }
+      ]
+    },
+    {
+      "text": "{{one}}{{two}}",
+      "tokens": [
+        {
+          "kind": "field",
+          "path": "one"
+        },
+        {
+          "kind": "field",
+          "path": "two"
+        }
+      ]
+    },
+    {
+      "text": "stray ** and * and ` marks",
+      "tokens": [
+        {
+          "kind": "text",
+          "text": "stray ** and * and ` marks"
+        }
+      ]
+    },
+    {
+      "text": " restored markers",
+      "tokens": [
+        {
+          "kind": "text",
+          "text": "*` restored markers"
+        }
+      ]
+    }
+  ]
+}

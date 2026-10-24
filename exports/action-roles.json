@@ -8,6 +8,12 @@
     "facilities",
     "facilities_manager"
   ],
+  "approveEmail": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "approveInvoice": [
     "accounts",
     "accounts_manager",
@@ -230,6 +236,16 @@
     "facilities",
     "facilities_manager"
   ],
+  "editMySignature": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
+  ],
   "editProcedures": [
     "accounts_manager",
     "admin",
@@ -269,6 +285,9 @@
     "admin",
     "director",
     "facilities_manager"
+  ],
+  "manageEmailIdentities": [
+    "admin"
   ],
   "manageFinancialEvents": [
     "admin",
@@ -449,6 +468,14 @@
   "runAiHealthCheck": [
     "admin"
   ],
+  "sendEmail": [
+    "accounts",
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "sendPurchaseOrder": [
     "accounts_manager",
     "admin",
@@ -534,6 +561,15 @@
     "facilities_manager"
   ],
   "viewBuildingRegister": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewCorrespondence": [
     "accounts",
     "accounts_manager",
     "admin",

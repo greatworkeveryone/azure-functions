@@ -328,6 +328,12 @@ export const LEDGER_ACTIONS = {
   // Johanne's lab (plan M5): her result for one scripted case on the
   // demonstration file, with her note. RuleApplied is the case id.
   "myob.lab_result": { exception: false, reasonRequired: true, subjects: ["myob_control"] },
+  // Native email (EB1, PLAN §13): a send job queued (or put to a manager when it is large),
+  // approved, cancelled, and its completion by the queue timer. The subject is the job.
+  "correspondence.approve": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.cancel": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.queue": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.sent": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;
