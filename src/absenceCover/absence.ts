@@ -42,6 +42,8 @@ export interface LeaveFact {
   /** Darwin date the request was approved (its last change). */
   approvedOn: string;
   endDate: string;
+  /** Total hours requested, as booked. */
+  hours: number;
   kind: string;
   requestId: number;
   startDate: string;
@@ -75,6 +77,10 @@ export function quietBusinessDays(lastSeenOn: string, today: string, holidays: H
 }
 
 /** The leave covering today, run on through leave that follows it straight away. */
+/** Single-day leave under this many hours (a dentist's hour) leaves the person in: not an absence. */
+const PART_DAY_HOURS = 4;
+const isPartDay = (leave: LeaveFact): boolean => leave.startDate === leave.endDate && leave.hours < PART_DAY_HOURS;
+
 function leaveRun(person: LeaveFact[], today: string, holidays: Holidays): { covering: LeaveFact; end: string } | null {
   const covering = person
     .filter((leave) => leave.startDate <= today && today <= leave.endDate)
@@ -151,7 +157,7 @@ export function detectAbsences(input: DetectInput): Detection {
   const reason = inactivityReason(input);
   const dormantIds: number[] = [];
   for (const staff of input.staff) {
-    const mine = input.leaves.filter((leave) => leave.userId === staff.userId);
+    const mine = input.leaves.filter((leave) => leave.userId === staff.userId && !isPartDay(leave));
     const run = leaveRun(mine, input.today, input.holidays);
     if (run) {
       absent.push(onLeave(staff, run, input.holidays));

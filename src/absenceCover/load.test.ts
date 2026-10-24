@@ -39,12 +39,12 @@ describe("loadCoverState", () => {
   });
 
   it("reads approved leave still running or starting within 90 days, with the Darwin day it was approved", async () => {
-    answer([{ EndDate: "2026-10-30", Kind: "annual_leave", RequestId: 11, StartDate: "2026-10-26", UpdatedAt: new Date("2026-10-25T20:00:00Z"), UserId: 1 }], []);
+    answer([{ EndDate: "2026-10-30", Hours: 38, Kind: "annual_leave", RequestId: 11, StartDate: "2026-10-26", UpdatedAt: new Date("2026-10-25T20:00:00Z"), UserId: 1 }], []);
     const state = await loadCoverState(conn, "2026-10-26", true);
     const sql = sqlOf(/LeaveRequests/);
     expect(sql).toContain("Status = N'approved' AND EndDate >= @Today AND StartDate <= DATEADD(day, 90, @Today)");
     // 20:00 UTC on the 25th is 05:30 on the 26th in Darwin.
-    expect(state.leaves).toEqual([{ approvedOn: "2026-10-26", endDate: "2026-10-30", kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }]);
+    expect(state.leaves).toEqual([{ approvedOn: "2026-10-26", endDate: "2026-10-30", hours: 38, kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }]);
   });
 
   it("reads when each person was last seen, as a Darwin day, over the last 45 days", async () => {

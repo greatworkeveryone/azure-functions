@@ -14,7 +14,7 @@ const conn = {} as never;
 const NOW = new Date("2026-10-26T03:00:00Z"); // Monday 12:30 in Darwin
 const state = (over: Record<string, unknown> = {}) => ({
   accessLogNewestOn: "2026-10-26", delegates: [], directory: DIRECTORY, emailColumns: { assignedToUserId: false }, facts: FACTS, lastSeenOn: new Map(DIRECTORY.map((person) => [person.userId, "2026-10-26"])),
-  leaves: [{ approvedOn: "2026-10-01", endDate: "2026-10-30", kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }],
+  leaves: [{ approvedOn: "2026-10-01", endDate: "2026-10-30", hours: 38, kind: "annual_leave", requestId: 11, startDate: "2026-10-26", userId: 1 }],
   links: [], staff: [], ...over,
 });
 

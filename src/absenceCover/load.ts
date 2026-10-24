@@ -33,7 +33,7 @@ export interface CoverState {
 async function loadLeaves(connection: Connection, today: string): Promise<LeaveFact[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT RequestId, UserId, Kind, CONVERT(VARCHAR(10), StartDate, 23) AS StartDate, CONVERT(VARCHAR(10), EndDate, 23) AS EndDate, UpdatedAt
+    `SELECT RequestId, UserId, Kind, Hours, CONVERT(VARCHAR(10), StartDate, 23) AS StartDate, CONVERT(VARCHAR(10), EndDate, 23) AS EndDate, UpdatedAt
        FROM dbo.LeaveRequests
       WHERE Status = N'approved' AND EndDate >= @Today AND StartDate <= DATEADD(day, 90, @Today)`,
     [{ name: "Today", type: TYPES.Date, value: new Date(`${today}T00:00:00Z`) }],
@@ -41,6 +41,7 @@ async function loadLeaves(connection: Connection, today: string): Promise<LeaveF
   return rows.map((row) => ({
     approvedOn: todayInDarwin(row.UpdatedAt as Date),
     endDate: String(row.EndDate),
+    hours: Number(row.Hours ?? 0),
     kind: String(row.Kind),
     requestId: Number(row.RequestId),
     startDate: String(row.StartDate),

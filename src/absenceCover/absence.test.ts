@@ -6,6 +6,7 @@ import { detectAbsences, displayDate, neutralReason, quietBusinessDays, returnDa
 const leave = (over: Partial<LeaveFact> = {}): LeaveFact => ({
   approvedOn: "2026-10-01",
   endDate: "2026-10-30",
+  hours: 38,
   kind: "annual_leave",
   requestId: 11,
   startDate: "2026-10-26",
@@ -69,6 +70,16 @@ describe("detectAbsences: leave", () => {
 
   it("ignores leave that has not started and leave that has ended", () => {
     expect(detect({ leaves: [leave({ startDate: "2026-10-27" }), leave({ endDate: "2026-10-23", requestId: 12, startDate: "2026-10-19" })] }).absent).toEqual([]);
+  });
+
+  it("does not call someone away for an hour or two off: single-day leave under four hours is not an absence", () => {
+    expect(detect({ leaves: [leave({ approvedOn: "2026-10-26", endDate: "2026-10-26", hours: 2, kind: "personal_leave" })] }).absent).toEqual([]);
+    expect(detect({ leaves: [leave({ endDate: "2026-10-26", hours: 3.99 })] }).absent).toEqual([]);
+  });
+
+  it("does call them away for a half day or more, and for any run of days", () => {
+    expect(detect({ leaves: [leave({ endDate: "2026-10-26", hours: 4 })] }).absent).toHaveLength(1);
+    expect(detect({ leaves: [leave({ endDate: "2026-10-27", hours: 3 })] }).absent).toHaveLength(1);
   });
 
   it("treats the first and the last day of the leave as away", () => {
