@@ -7,15 +7,15 @@
 // COMMS_APPROVAL_THRESHOLD (default 20) waits for a manager (approveCorrespondence); a smaller one is
 // queued. Recipients with a missing merge field are stored blocked and named; if none can be sent
 // nothing is created. Nothing goes out here: the queue timer sends, and only when COMMS_SEND_ENABLED
-// is "true". Same roles as sending (ACTION_ROLES.sendEmail). An idempotencyKey (one per compose session)
-// makes a repeated submit return the job already made (200, repeated: true) instead of queuing a second.
+// is "true". Same roles as sending (ACTION_ROLES.sendEmail); a broadcast needs ACTION_ROLES.sendBroadcast too.
+// An idempotencyKey (one per compose session) makes a repeated submit return the job already made (200, repeated: true) instead of queuing a second.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
 import { readJsonBody } from "../assetRegisterSupport";
-import { errorResponse } from "../auth";
-import { authorizeActor, badRequest, noStore } from "../comms/actor";
+import { errorResponse, rolesPassGate } from "../auth";
+import { authorizeActor, badRequest, forbidden, noStore } from "../comms/actor";
 import { approvalThreshold, fromAddress, fromName } from "../comms/config";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { checkRecipients, writeJob } from "../comms/queueJob";
@@ -35,6 +35,8 @@ export async function queueCorrespondence(request: HttpRequest, context: Invocat
   if (!body) return badRequest("JSON object required");
   const input = parseQueueInput(body);
   if (!input.ok) return badRequest(input.error);
+  // A broadcast is for managers and directors; a letter to one tenancy stays with everyone who may send.
+  if (input.value.kind === "broadcast" && !rolesPassGate(actor.roles, ACTION_ROLES.sendBroadcast.gate)) return forbidden("Only managers and directors can send a broadcast");
 
   let connection: Connection | undefined;
   try {

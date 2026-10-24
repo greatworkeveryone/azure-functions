@@ -11,7 +11,7 @@ import { previewCorrespondence } from "./previewCorrespondence";
 import { queueCorrespondence } from "./queueCorrespondence";
 
 jest.mock("@azure/functions", () => ({ ...jest.requireActual("@azure/functions"), app: { http: jest.fn() } }));
-let roles: string[] = [AppRole.ACCOUNTS];
+let roles: string[] = [AppRole.ACCOUNTS_APPROVAL];
 let token: string | null = "token";
 let email = "fay@randazzo.properties";
 jest.mock("../auth", () => ({
@@ -60,7 +60,7 @@ const request = (over: Record<string, unknown> = {}, count = 2) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   _resetRateLimitForTests();
-  roles = [AppRole.ACCOUNTS];
+  roles = [AppRole.ACCOUNTS_APPROVAL];
   token = "token";
   email = "fay@randazzo.properties";
   delete process.env.COMMS_APPROVAL_THRESHOLD;
@@ -72,11 +72,22 @@ beforeEach(() => {
 });
 
 describe("queueCorrespondence: who may", () => {
-  it.each([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR])("lets %s queue", async (role) => {
+  it.each([AppRole.ACCOUNTS_APPROVAL, AppRole.FACILITIES_APPROVAL, AppRole.CFO, AppRole.DIRECTOR])("lets %s queue a broadcast", async (role) => {
     roles = [role];
     // the identity is for accounts roles; use the sender's own address so every role has a valid reply-to
     const response = await queueCorrespondence(post(request({ replyTo: { type: "own" }, signatureMode: "personal" })), context);
     expect(response.status).toBe(201);
+  });
+
+  it.each([AppRole.ACCOUNTS, AppRole.FACILITIES])("lets %s queue a letter but not a broadcast, which is for managers and directors", async (role) => {
+    roles = [role];
+    const own = { replyTo: { type: "own" }, signatureMode: "personal" };
+    expect((await queueCorrespondence(post(request({ ...own, kind: "letter" })), context)).status).toBe(201);
+    jobs.insertJob.mockClear();
+    const refused = await queueCorrespondence(post(request(own)), context);
+    expect(refused.status).toBe(403);
+    expect(JSON.stringify(refused.jsonBody)).toContain("managers and directors");
+    expect(jobs.insertJob).not.toHaveBeenCalled();
   });
 
   it("refuses admin, which sends nothing real, and a baseline user, before reading anything", async () => {
@@ -101,7 +112,7 @@ describe("queueCorrespondence: the job", () => {
     expect(response.jsonBody).toMatchObject({ blocked: 0, correspondenceId: 41, queued: 2, requiresApproval: false, status: "queued" });
     const job = jobs.insertJob.mock.calls[0][1];
     expect(job).toMatchObject({
-      createdBy: { email: "fay@randazzo.properties", name: "Fay Facilities", oid: "fay-oid", role: "accounts" },
+      createdBy: { email: "fay@randazzo.properties", name: "Fay Facilities", oid: "fay-oid", role: "accounts_manager" },
       fromAddress: "notices@randazzo.properties",
       fromName: "Randazzo Properties",
       replyTo: { address: "accounts@randazzo.properties", identityId: 3, name: "Randazzo Accounts" },
@@ -126,7 +137,7 @@ describe("queueCorrespondence: the job", () => {
     expect(db.beginTransaction).toHaveBeenCalledTimes(1);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
     expect(jest.mocked(events.appendEvent)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actor: { kind: "user", name: "Fay Facilities", oid: "fay-oid" }, correspondenceId: 41, fromStatus: null, toStatus: "queued", type: "job" }));
-    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.queue", actor: expect.objectContaining({ kind: "user", name: "Fay Facilities", role: "accounts", userId: 7 }), subject: { id: 41, type: "correspondence" } }));
+    expect(jest.mocked(record)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "correspondence.queue", actor: expect.objectContaining({ kind: "user", name: "Fay Facilities", role: "accounts_manager", userId: 7 }), subject: { id: 41, type: "correspondence" } }));
   });
 
   it("rolls everything back when the ledger row can't be written", async () => {
@@ -164,7 +175,7 @@ describe("queueCorrespondence: the approval threshold", () => {
 
 describe("queueCorrespondence: reply-to and signature are checked on the server", () => {
   it("refuses an identity the role may not use", async () => {
-    roles = [AppRole.FACILITIES];
+    roles = [AppRole.FACILITIES_APPROVAL];
     const response = await queueCorrespondence(post(request()), context);
     expect(response.status).toBe(403);
     expect(jobs.insertJob).not.toHaveBeenCalled();
@@ -309,6 +320,7 @@ describe("previewCorrespondence", () => {
     });
 
     it("refuses someone else's send unless the caller is a manager, and 404s a missing one", async () => {
+      roles = [AppRole.ACCOUNTS];
       jobs.readJob.mockResolvedValue({ ...saved, createdByOid: "someone-else" });
       expect((await previewCorrespondence(post({ correspondenceId: 41, recipientId: 9 }), context)).status).toBe(403);
       roles = [AppRole.ACCOUNTS_APPROVAL];

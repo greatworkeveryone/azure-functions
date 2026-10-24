@@ -541,7 +541,7 @@ export const ACTION_ROLES = {
   sendEmail: {
     gate: [A.FACILITIES, A.ACCOUNTS],
     refused: [A.ADMIN],
-    routes: ["listCommsIdentities", "previewCorrespondence", "queueCorrespondence", "cancelCorrespondence"],
+    routes: ["listCommsIdentities", "previewCorrespondence", "queueCorrespondence", "cancelCorrespondence", "sendTestCorrespondence"],
     why: "Send email from Floorplan: choose a reply-to identity and a signature, preview, queue and cancel a send. Property and facilities staff and above. Admin is refused: it sends nothing real.",
   },
   approveEmail: {
@@ -552,8 +552,13 @@ export const ACTION_ROLES = {
   },
   viewCorrespondence: {
     gate: [A.FACILITIES, A.ACCOUNTS],
-    routes: ["getCorrespondence"],
-    why: "Read a send job and its recipients. The handler further limits it to whoever queued the job and the managers who approve sends.",
+    routes: ["getCorrespondence", "listCorrespondence"],
+    why: "Read a send job and its recipients, and list sends. The handlers further limit it to whoever queued the job and the managers who approve sends.",
+  },
+  sendBroadcast: {
+    gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL, A.DIRECTOR],
+    routes: ["resolveBroadcastAudience", "getBroadcastOptions"],
+    why: "Build and send an email broadcast (Tools, Email broadcast): choose an audience, see who would get it, write it, preview it. Managers and directors (the CFO through the accounts manager rule). Admin passes the gate so the screens can be tried, but queueing and the test send refuse admin (sendEmail), so nothing real goes from an admin account.",
   },
   manageEmailIdentities: {
     gate: [A.ADMIN],
