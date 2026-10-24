@@ -7,6 +7,7 @@ import {
   DEFAULT_LEASE_EVENT_DAYS,
   MAX_LEASE_EVENT_DAYS,
   type LeaseEventReview,
+  type LeaseEventScheduledReview,
   type LeaseEventTenancy,
 } from "../rentReview/leaseEvents";
 
@@ -226,5 +227,66 @@ describe("whether the schedule behind a row is signed off (PLAN D7)", () => {
   it("is on the option deadline row too, when the option text can be read", () => {
     const [option] = build([tenancy(1, { expiry: addMonthsClamped(TODAY, 8), optionNoticeMonths: 6, optionPeriods: "2 x 5 years", scheduleSignedOff: false })], []);
     expect(option).toMatchObject({ kind: "option_deadline", scheduleSignedOff: false });
+  });
+});
+
+describe("a review date with no review row yet (UX review TN5)", () => {
+  const scheduled = (id: number, nextReviewDate: string, over: Partial<LeaseEventScheduledReview> = {}): LeaseEventScheduledReview => ({
+    buildingId: 5,
+    method: "cpi",
+    nextReviewDate,
+    scheduleSignedOff: true,
+    tenantId: id,
+    tenantName: `Tenant ${id}`,
+    ...over,
+  });
+  const buildWith = (scheduledReviews: LeaseEventScheduledReview[], reviews: LeaseEventReview[] = [], days = 90) =>
+    buildLeaseEvents({ days, reviews, scheduledReviews, tenancies: [], today: TODAY });
+
+  it("lists an overdue next review date as a review that has not started, with no review id or state", () => {
+    const [event] = buildWith([scheduled(1, DAY(-5))]);
+    expect(event).toEqual({
+      buildingId: 5,
+      date: DAY(-5),
+      kind: "review",
+      method: "cpi",
+      notStarted: true,
+      overdue: true,
+      ownerName: null,
+      ownerUserId: null,
+      scheduleSignedOff: true,
+      tenantId: 1,
+      tenantName: "Tenant 1",
+    });
+    expect(event).not.toHaveProperty("reviewId");
+    expect(event).not.toHaveProperty("state");
+  });
+
+  it("lists one due inside the window, not overdue on its own day, and leaves out the day after the window", () => {
+    expect(buildWith([scheduled(1, TODAY), scheduled(2, DAY(90)), scheduled(3, DAY(91))]).map((e) => [e.tenantId, e.overdue])).toEqual([
+      [1, false],
+      [2, false],
+    ]);
+  });
+
+  it("adds nothing for a tenancy whose open review row already covers it", () => {
+    const events = buildWith([scheduled(1, DAY(-5))], [review(1, DAY(-5))]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ reviewId: "rev-1", state: "due" });
+    expect(events[0]).not.toHaveProperty("notStarted");
+  });
+
+  it("still lists a tenancy whose only open review belongs to someone else's row", () => {
+    const events = buildWith([scheduled(2, DAY(-1))], [review(1, DAY(-5))]);
+    expect(events.map((e) => [e.tenantId, e.notStarted ?? false])).toEqual([[1, false], [2, true]]);
+  });
+
+  it("puts overdue first, oldest first, among the reviews and the not-started rows together", () => {
+    const events = buildWith([scheduled(1, DAY(20)), scheduled(2, DAY(-30))], [review(3, DAY(-10)), review(4, DAY(5))]);
+    expect(events.map((e) => e.tenantId)).toEqual([2, 3, 4, 1]);
+  });
+
+  it("is unchanged when the caller passes no scheduled reviews", () => {
+    expect(build([], [review(1, DAY(5))])).toHaveLength(1);
   });
 });

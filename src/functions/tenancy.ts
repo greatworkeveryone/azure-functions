@@ -80,10 +80,12 @@ import {
   validateDeleteStepEnvelope,
   validateUpsertFeeEnvelope,
   validateUpsertGroupEnvelope,
-  validateUpsertStepEnvelope,
+  validateUpsertStepEnvelope, onlyCategoryChanged
 } from "../scheduledRateStepLogic";
 import { daysBetweenIso, todayInDarwin } from "../darwinDate";
 import { parseMoney, parseMoneyField } from "../money";
+import { isLeaseType, LEASE_TYPE_ERROR, type LeaseType } from "../chargeCategories";
+import { GST_BASIS_ERROR, type GstBasis, isGstBasis } from "../gstBasis";
 import { hasLeaseEventWithin } from "../tenancyLeaseEvents";
 import * as ledger from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
@@ -107,9 +109,14 @@ import {
   withNextReviewDate,
 } from "../tenancyScheduleWrite";
 import { exemptionDelete, exemptionEdit, readExemptionRemovalReason } from "../ratchetExemptionEdit";
+import { selectWithLeaseOptions } from "../leaseOptionColumns";
+import { concludeLeaseEscalations } from "../leaseEvents/escalations";
+import { closeEventsForEditedExpiry } from "../leaseEvents/expiryEdit";
+import { optionCountsForTextEdit } from "../leaseEvents/optionText";
 import { resolveActivePlannerTasks } from "../planner";
 import { CPI_REFERENCE_RULES } from "../rentReview/basis";
 import { chargedOn, computeCharges, parseReliefs, type RentRelief } from "../scheduleCharges";
+import { loadPortfolioOccupancy } from "../portfolioOccupancy";
 import { loadPendingChanges, pendingChangesOf, pendingFor, type PendingChanges } from "../scheduleChange/pending";
 import { scheduleTermsOf } from "../scheduleTerms";
 import { insertRentScheduleChangeLog } from "../rentScheduleChangeLog";
@@ -136,7 +143,7 @@ import {
   parseLeaseAdministration,
 } from "../leaseAdministrationLogic";
 import { showTestParam, testFlagForCreate } from "../test-data";
-import { infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
+import { INFO_SHEET_RATE_LIMIT, infoSheetPositionOf, infoSheetRestoreOf, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
@@ -293,6 +300,10 @@ interface RegisterTenantApi {
   infoSheetVersion: number;
   /** m078 — lease document administration (execution dates, licences, etc.). */
   leaseAdministration: LeaseAdministration;
+  /** m159 (TS3): what kind of lease this is, for the Tenancy Schedule's rent label; null = not set. A label, not a figure. */
+  leaseType: LeaseType | null;
+  /** m160 (T14): whether this tenancy's rents and fees are entered ex or inc GST; null = not recorded. A label, never converted. */
+  gstBasis: GstBasis | null;
   /** WP26c: changes awaiting a director (relief requests, reviews awaiting approval),
    *  on every read; absent from a write's response, which reads the row alone. */
   pendingChanges?: PendingChanges;
@@ -314,6 +325,10 @@ interface RegisterTenantApi {
   occupancies: TenantOccupancyApi[];
   optionNoticeMonths?: number;
   optionPeriods?: string;
+  /** Options left to exercise (Tenants.OptionsRemaining, WP32); absent until recorded. */
+  optionsRemaining?: number;
+  optionsTotal?: number;
+  optionTermMonths?: number;
   postalAddress?: string;
   primaryContactEmail?: string;
   primaryContactName?: string;
@@ -581,6 +596,8 @@ function tenantRowToApi(
     infoSheetSections: parseInfoSheetSections(row.InfoSheetSections as string | null | undefined),
     infoSheetVersion: Number(row.InfoSheetVersion ?? 0),
     leaseAdministration: parseLeaseAdministration(row.LeaseAdministration as string | null | undefined),
+    leaseType: isLeaseType(row.LeaseType) ? row.LeaseType : null,
+    gstBasis: isGstBasis(row.GstBasis) ? row.GstBasis : null,
     informationSheetAsAt: asStr(row.InformationSheetAsAt),
     informationSheetReference: asStr(row.InformationSheetReference),
     lastReviewDate: toIsoDate(row.LastReviewDate),
@@ -594,6 +611,11 @@ function tenantRowToApi(
     occupancies,
     optionNoticeMonths: asNum(row.OptionNoticeMonths),
     optionPeriods: asStr(row.OptionPeriods),
+    // WP32 (migration 106): the structured options, when recorded; the option
+    // window counts these before the free text.
+    optionsRemaining: asNum(row.OptionsRemaining),
+    optionsTotal: asNum(row.OptionsTotal),
+    optionTermMonths: asNum(row.OptionTermMonths),
     ...(pending ? { pendingChanges: pending } : {}),
     postalAddress: asStr(row.PostalAddress),
     primaryContactEmail: asStr(row.PrimaryContactEmail),
@@ -709,6 +731,8 @@ const TENANT_COLUMNS = `
   InfoSheetSections,
   InfoSheetVersion,
   LeaseAdministration,
+  LeaseType,
+  GstBasis,
   CreatedAt, UpdatedAt, CreatedById, CreatedByName, UpdatedById, UpdatedByName,
   RowVersion, ScheduleVersion,
   ${SIGN_OFF_COLUMNS},
@@ -717,10 +741,13 @@ const TENANT_COLUMNS = `
 `;
 
 // The building register: archived tenancies (D4) only when asked for.
-const REGISTER_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
+// The 106 option columns join each select below through selectWithLeaseOptions (data review S2-1).
+// Builders, still named and written as the SQL text, so the D9 guard (test-data-guards) reads each
+// variant's IsTest filter where it always has.
+const REGISTER_SQL = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId AND t.ArchivedAt IS NULL
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
-const REGISTER_WITH_ARCHIVED_SQL = `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
+const REGISTER_WITH_ARCHIVED_SQL = (OPTION_COLUMNS: string) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE BuildingId = @BuildingId
    AND (t.IsTest = 0 OR @ShowTest = 1)
  ORDER BY LegalName`;
 
@@ -788,7 +815,7 @@ async function getRegisterTenants(
   try {
     connection = await createRequestConnection(token);
 
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
       includeArchived ? REGISTER_WITH_ARCHIVED_SQL : REGISTER_SQL,
       [{ name: "BuildingId", type: TYPES.Int, value: buildingId }, showTest],
@@ -897,9 +924,9 @@ async function getRegisterTenant(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const tenantRows = await executeQuery(
+    const tenantRows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     if (tenantRows.length === 0) {
@@ -1056,7 +1083,7 @@ async function upsertRegisterTenant(
       return { status: 400, jsonBody: { error: "LegalName cannot be empty" } };
     }
 
-    const invalidTerm = invalidTermValue(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
+    const invalidTerm = invalidTermValue(body) ?? invalidLeaseType(body) ?? invalidGstBasis(body) ?? (tenantId === undefined ? floorAboveCap(body, {}) : null);
     if (invalidTerm) return invalidTerm;
 
     connection = await createRequestConnection(token);
@@ -1084,7 +1111,7 @@ async function upsertRegisterTenant(
             SecurityDepositRequired, SecurityDepositMethod, SecurityDepositHeld,
             Status, Comments, EscalationPercent, EscalationSchedule,
             BusinessTenanciesAct,
-            LeaseAdministration,
+            LeaseAdministration, LeaseType, GstBasis,
             CreatedById, CreatedByName, UpdatedById, UpdatedByName, IsTest
          )
          OUTPUT INSERTED.TenantId
@@ -1102,7 +1129,7 @@ async function upsertRegisterTenant(
             @SecurityDepositRequired, @SecurityDepositMethod, @SecurityDepositHeld,
             @Status, @Comments, @EscalationPercent, @EscalationSchedule,
             @BusinessTenanciesAct,
-            @LeaseAdministration,
+            @LeaseAdministration, @LeaseType, @GstBasis,
             @CreatedById, @CreatedByName, @UpdatedById, @UpdatedByName, @IsTest
          )`,
         [
@@ -1125,14 +1152,24 @@ async function upsertRegisterTenant(
       }
       const actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
-      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId);
+      const closedLeaseEvents: string[] = [];
+      const refused = await updateRegisterTenantRow(connection, body, caller, actor, tenantId, closedLeaseEvents);
       if (refused) return refused;
       resultId = tenantId;
+      for (const leaseEventId of closedLeaseEvents) {
+        await concludeLeaseEscalations(connection, {
+          actor,
+          code: "expiry_changed",
+          leaseEventId,
+          log: (message) => context.warn(message),
+          note: "The lease's expiry was changed, so this no longer applies",
+        });
+      }
     }
 
-    const stored = await executeQuery(
+    const stored = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @Id`,
       [{ name: "Id", type: TYPES.Int, value: resultId }],
     );
     if (stored.length === 0) {
@@ -1201,6 +1238,11 @@ const TENANT_UPDATE_COLUMNS: Record<string, unknown> = {
   InformationSheetReference: TYPES.NVarChar,
   LastReviewDate: TYPES.Date,
   LastReviewIncreasePercent: TYPES.Decimal,
+  // m159 (TS3): null clears it; invalidLeaseType has already refused a value off the list.
+  // Not a schedule term: it changes no figure, so no ledger entry or ScheduleVersion bump.
+  LeaseType: TYPES.NVarChar,
+  // m160 (T14): null clears it; invalidGstBasis has already refused a value off the list. A label, not a schedule term.
+  GstBasis: TYPES.NVarChar,
   LegalName: TYPES.NVarChar,
   Lot: TYPES.NVarChar,
   MyobId: TYPES.NVarChar,
@@ -1251,7 +1293,7 @@ const SCHEDULE_TERM_FIELDS: Record<string, string> = {
 const REVIEW_DATE_FIELDS = ["Commencement", "LastReviewDate", "NextReviewDate", "ReviewIntervalMonths"] as const;
 
 const LOCKED_TENANT_COLUMNS = `
-  TenantId, BuildingId, Status, Expiry, RowVersion, UpdatedByName, UpdatedAt,
+  TenantId, BuildingId, Status, Expiry, OptionPeriods, RowVersion, UpdatedByName, UpdatedAt,
   CpiCapPercent, CpiFloorPercent, CpiReferenceQuarterRule, FixedReviewPercent, RentPerAnnum,
   ReviewIntervalMonths, ReviewType, ReviewRatchet,
   Commencement, LastReviewDate, NextReviewDate, ScheduledRateSteps,
@@ -1329,6 +1371,20 @@ function invalidTermValue(body: Record<string, any>): HttpResponseInit | null {
   return null;
 }
 
+/** 400 for a LeaseType off the list (TS3). Absent leaves it unchanged, null clears it. */
+function invalidLeaseType(body: Record<string, any>): HttpResponseInit | null {
+  const value = body.LeaseType;
+  if (value === undefined || value === null || isLeaseType(value)) return null;
+  return { status: 400, jsonBody: { error: LEASE_TYPE_ERROR } };
+}
+
+/** 400 for a GstBasis other than ex or inc (T14). Absent leaves it unchanged, null clears it. */
+function invalidGstBasis(body: Record<string, any>): HttpResponseInit | null {
+  const value = body.GstBasis;
+  if (value === undefined || value === null || isGstBasis(value)) return null;
+  return { status: 400, jsonBody: { error: GST_BASIS_ERROR } };
+}
+
 /** 400 when the CPI floor would sit above the cap once this write applies. */
 function floorAboveCap(fields: Record<string, unknown>, current: SqlRow): HttpResponseInit | null {
   if (fields.CpiCapPercent === undefined && fields.CpiFloorPercent === undefined) return null;
@@ -1391,6 +1447,8 @@ async function updateRegisterTenantRow(
   caller: UserRef,
   actor: ledger.LedgerActor,
   tenantId: number,
+  /** Filled with the lease events an expiry edit closed, for their escalations after the commit. */
+  closedLeaseEvents: string[] = [],
 ): Promise<HttpResponseInit | null> {
   await beginTransaction(connection);
   try {
@@ -1458,6 +1516,18 @@ async function updateRegisterTenantRow(
       await commitTransaction(connection);
       return null;
     }
+    // Data review S2-4: the option text and the structured counts move together.
+    const optionCounts = fields.OptionPeriods !== undefined
+      ? await optionCountsForTextEdit(connection, tenantId, fields.OptionPeriods as string | null)
+      : null;
+    if (optionCounts) {
+      setParts.push("OptionsTotal = @OptionsTotal", "OptionsRemaining = @OptionsRemaining", "OptionTermMonths = @OptionTermMonths");
+      updateParams.push(
+        { name: "OptionsTotal", type: TYPES.Int, value: optionCounts.after.total },
+        { name: "OptionsRemaining", type: TYPES.Int, value: optionCounts.after.remaining },
+        { name: "OptionTermMonths", type: TYPES.Int, value: optionCounts.after.termMonths },
+      );
+    }
     const termsChanged = Object.keys(termsAfter).length > 0;
     // A change to what the schedule is computed from clears a sign-off, and the
     // person says why (PLAN WP24). Asked before anything is written.
@@ -1495,6 +1565,35 @@ async function updateRegisterTenantRow(
     }
     if (priorSignOff && clearReason) {
       await recordSignOffCleared(connection, scope, priorSignOff, clearReason, "tenant");
+    }
+    if (optionCounts) {
+      const counts = (c: { remaining: number | null; termMonths: number | null; total: number | null }) => ({
+        optionsRemaining: c.remaining,
+        optionsTotal: c.total,
+        optionTermMonths: c.termMonths,
+      });
+      await ledger.record(connection, {
+        ...scope,
+        action: "schedule.terms_edit",
+        after: { ...counts(optionCounts.after), optionPeriods: fields.OptionPeriods ?? null },
+        before: { ...counts(optionCounts.before), optionPeriods: (current.OptionPeriods as string | null | undefined) ?? null },
+        ruleApplied: "options_from_text",
+      });
+    }
+    // Data review S2-3: open lease events of the old expiry close with the edit.
+    const oldExpiry = toIsoDate(current.Expiry) ?? null;
+    if (oldExpiry !== null && fields.Expiry !== undefined && (toIsoDate(fields.Expiry as string | null) ?? null) !== oldExpiry) {
+      closedLeaseEvents.push(
+        ...(await closeEventsForEditedExpiry(connection, {
+          actor,
+          buildingId: (current.BuildingId as number | null) ?? null,
+          correlationId: scope.correlationId,
+          editorName: caller.name,
+          newExpiry: toIsoDate(fields.Expiry as string | null) ?? null,
+          oldExpiry,
+          tenantId,
+        })),
+      );
     }
     await commitTransaction(connection);
     return null;
@@ -1679,6 +1778,8 @@ function buildTenantParams(
       type: TYPES.NVarChar,
       value: v("BusinessTenanciesAct"),
     },
+    { name: "LeaseType", type: TYPES.NVarChar, value: v("LeaseType") },
+    { name: "GstBasis", type: TYPES.NVarChar, value: v("GstBasis") },
     { name: "CreatedById", type: TYPES.NVarChar, value: caller.id },
     { name: "CreatedByName", type: TYPES.NVarChar, value: caller.name },
     { name: "UpdatedById", type: TYPES.NVarChar, value: caller.id },
@@ -2148,12 +2249,12 @@ async function getReviewsDue(
       ...(buildingIdParam ? [{ name: "BuildingId", type: TYPES.Int, value: Number(buildingIdParam) }] : []),
       await showTestParam(request),
     ];
-    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
+    /* eslint-disable local/no-sql-interpolation -- interpolations are TENANT_COLUMNS (const), OPTION_COLUMNS (one of two constants, leaseOptionColumns.ts), `where` (allowlisted parameterized fragment) and a literal AND/WHERE keyword; no user value reaches the SQL text */
     // Also expiries and option deadlines from yesterday to 91 days ahead: a
     // wider net than the Darwin-day filter below, which is exact.
-    const rows = await executeQuery(
+    const rows = await selectWithLeaseOptions(
       connection,
-      `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t
+      (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t
        ${where} ${where ? "AND" : "WHERE"} t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1) AND (
          (NextReviewDate IS NOT NULL
            AND NextReviewDate <= DATEADD(day, 90, CAST(SYSUTCDATETIME() AS DATE)))
@@ -2193,10 +2294,11 @@ async function getReviewsDue(
 }
 
 // ── GET /api/getPortfolioOccupancy ───────────────────────────────────────────
-// One row per building with total SQM, active SQM and occupancy %. Active =
-// tenants in status 'current' or 'holdover' (mirrors TenancySummary on the
-// register page). Buildings with no tenant rows are omitted; the client falls
-// back to 0 / no value for those.
+// One row per commercial building with total SQM, active SQM and occupancy %.
+// Active = tenants in status 'current' or 'holdover' (mirrors TenancySummary on
+// the register page). Buildings with no tenant rows are omitted; the client falls
+// back to 0 / no value for those. Residences are the family's own houses and stay
+// out of these company figures (T10); see portfolioOccupancy.ts.
 
 const TENANCY_DESK_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
 
@@ -2215,68 +2317,9 @@ async function getPortfolioOccupancy(
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const rows = await executeQuery(
-      connection,
-      `SELECT t.BuildingId,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN occ.TenantSqm ELSE 0 END) AS ActiveSqm,
-              SUM(occ.TenantSqm) AS TotalSqm,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN t.RentPerAnnum ELSE 0 END) AS AnnualRent,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                       THEN 1 ELSE 0 END) AS ActiveTenantCount,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.ScheduleSignedOffAt IS NULL
-                       THEN 1 ELSE 0 END) AS UnsignedTenantCount,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.Expiry IS NOT NULL
-                       THEN occ.TenantSqm
-                            * DATEDIFF(day, CAST(GETDATE() AS DATE), t.Expiry)
-                       ELSE 0 END) AS WaleNumeratorSqmDays,
-              SUM(CASE WHEN t.Status IN ('current','holdover')
-                            AND t.Expiry IS NOT NULL
-                       THEN occ.TenantSqm ELSE 0 END) AS WaleDenominatorSqm
-       FROM dbo.Tenants t
-       INNER JOIN (
-         SELECT TenantId, SUM(SizeSqm) AS TenantSqm
-         FROM dbo.TenantOccupancies
-         WHERE ArchivedAt IS NULL
-         GROUP BY TenantId
-       ) occ ON occ.TenantId = t.TenantId
-       WHERE t.ArchivedAt IS NULL
-         AND (t.IsTest = 0 OR @ShowTest = 1)
-       GROUP BY t.BuildingId`,
-      [showTest],
-    );
-
-    // WP26c: changes awaiting a director across the portfolio, dates and names
-    // only: facilities read these figures too.
-    const pending = await loadPendingChanges(connection, { all: true }, "dates_only", showTest.value);
-    const buildings = rows.map((r) => {
-      const totalSqm = Number(r.TotalSqm) || 0;
-      const activeSqm = Number(r.ActiveSqm) || 0;
-      const annualRent = Number(r.AnnualRent) || 0;
-      const activeTenantCount = Number(r.ActiveTenantCount) || 0;
-      const waleNumerator = Number(r.WaleNumeratorSqmDays) || 0;
-      const waleDenominator = Number(r.WaleDenominatorSqm) || 0;
-      const waleYears =
-        waleDenominator > 0 ? waleNumerator / waleDenominator / 365.25 : 0;
-      return {
-        activeSqm,
-        activeTenantCount,
-        annualRent: seesRent ? annualRent : null,
-        buildingId: r.BuildingId as number,
-        occupancyPercent: totalSqm > 0 ? (activeSqm / totalSqm) * 100 : 0,
-        // The building's changes awaiting a director (WP26c): "Includes {n} changes awaiting a director".
-        pendingChangeCount: pending.filter((item) => item.buildingId === Number(r.BuildingId)).length,
-        totalSqm,
-        // Active tenancies whose schedule nobody has signed off yet (PLAN D7).
-        unsignedTenantCount: Number(r.UnsignedTenantCount) || 0,
-        waleExpirySqm: waleDenominator,
-        waleYears,
-      };
-    });
-
+    const loaded = await loadPortfolioOccupancy(connection, showTest);
+    const pending = loaded.pending;
+    const buildings = loaded.buildings.map((building) => ({ ...building, annualRent: seesRent ? building.annualRent : null }));
     return { status: 200, jsonBody: { buildings, pendingChanges: pendingChangesOf(pending) } };
   } catch (error: any) {
     context.error("getPortfolioOccupancy failed:", error.message);
@@ -2301,9 +2344,9 @@ async function reloadFullTenant(
   // tenant payload back from a mutation. We do the cheaper subset (skip
   // notes/reviews/history) because the frontend re-uses the cached
   // detail-query response for those and only patches the tenant row.
-  const tenantRows = await executeQuery(
+  const tenantRows = await selectWithLeaseOptions(
     connection,
-    `SELECT ${TENANT_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
+    (OPTION_COLUMNS) => `SELECT ${TENANT_COLUMNS}, ${OPTION_COLUMNS} FROM dbo.Tenants t WHERE TenantId = @TenantId`,
     [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
   );
   if (tenantRows.length === 0) return null;
@@ -3275,8 +3318,6 @@ async function deleteCarparkScheduleGroup(
 
 // ── POST /api/upsertInfoSheetSection ─────────────────────────────────────────
 
-const INFO_SHEET_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
-
 async function upsertInfoSheetSectionHandler(
   request: HttpRequest,
   context: InvocationContext,
@@ -3307,17 +3348,25 @@ async function upsertInfoSheetSectionHandler(
     }
     const infoSheetVersion = infoSheetVersionOf(body);
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
+    const position = infoSheetPositionOf(body);
+    if (typeof position === "object") return position;
+    const restore = infoSheetRestoreOf(body);
+    if (typeof restore === "object") return restore;
 
     connection = await createRequestConnection(token);
+    // An Undo (Restore) is ledgered, in the same transaction, with what it put back and where.
+    const actor = restore ? await resolveLedgerActor(request, connection) : null;
+    if (restore && !actor) return unauthorizedResponse();
     // D11: under the row lock and at the version shown (409 when stale). Only the
     // section's own fields change; its rows stay as stored. A section that isn't
-    // there is a 404 unless IsNew; a column that isn't a JSON array a 422.
+    // there is a 404 unless IsNew (then it goes at Position, as Undo puts one back);
+    // a column that isn't a JSON array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
-      ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertSection", section },
+      ledger: actor ? { action: "tenancy.info_sheet_section_restore", actor } : null,
+      op: { isNew: body.IsNew === true, kind: "upsertSection", position, restore, section },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3421,17 +3470,25 @@ async function upsertInfoSheetRowHandler(
     }
     const infoSheetVersion = infoSheetVersionOf(body);
     if (typeof infoSheetVersion !== "number") return infoSheetVersion;
+    const position = infoSheetPositionOf(body);
+    if (typeof position === "object") return position;
+    const restore = infoSheetRestoreOf(body);
+    if (typeof restore === "object") return restore;
 
     connection = await createRequestConnection(token);
+    // An Undo (Restore) is ledgered, in the same transaction, with what it put back and where.
+    const actor = restore ? await resolveLedgerActor(request, connection) : null;
+    if (restore && !actor) return unauthorizedResponse();
     // D11: under the row lock and at the version shown (409 when stale). A row
-    // that isn't there is a 404 unless IsNew, a missing section a 404, and a
-    // column that isn't a JSON array a 422.
+    // that isn't there is a 404 unless IsNew (then it goes at Position, as Undo
+    // puts one back), a missing section a 404, and a column that isn't a JSON
+    // array a 422.
     const outcome = await writeInfoSheet(connection, {
       buildingId: BuildingId,
       caller,
       expectedVersion: infoSheetVersion,
-      ledger: null,
-      op: { isNew: body.IsNew === true, kind: "upsertRow", row, sectionId },
+      ledger: actor ? { action: "tenancy.info_sheet_row_restore", actor } : null,
+      op: { isNew: body.IsNew === true, kind: "upsertRow", position, restore, row, sectionId },
       tenantId: TenantId,
     });
     if (!outcome.ok) return outcome.response;
@@ -3646,6 +3703,7 @@ async function upsertMiscFeeHandler(
         const next = upsertMiscFee(existing, fee);
         return {
           column: "MiscFees",
+          keepsSignOff: onlyCategoryChanged(before, fee),
           kind: "write",
           ledgerEntries: [
             { action: "schedule.manual_edit", after: next.find((f) => f.id === fee.id) ?? fee, before, subject: { id: fee.id, type: "misc_fee" } },

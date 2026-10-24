@@ -1429,27 +1429,20 @@ function isUniqueViolation(err: unknown): boolean {
   return typeof number === "number" && SQL_UNIQUE_VIOLATIONS.includes(number);
 }
 
-export async function upsertGraphEmails(
-  connection: import("tedious").Connection,
-  emails: GraphEmail[],
-): Promise<void> {
-  for (const email of emails) {
-    const matchedJobId = await matchJobId(connection, email.subject, email.bodyContent);
-    const attachmentBlobsJson =
-      email.attachmentBlobNames.length > 0
-        ? JSON.stringify(email.attachmentBlobNames)
-        : null;
+// `inbound` is set only when migration 176's columns are in use (INBOUND_TRIAGE_*, INBOUND_EXTRA_MAILBOXES):
+// the row then records which mailbox it came from and the reply headers. Without it the statement is
+// exactly what it was before 176, so a database that has not had 176 applied is never asked for them.
+export interface UpsertOptions {
+  inbound?: { mailbox: string };
+}
 
-    // UPDLOCK + HOLDLOCK: the range lock spans check and insert, so two
-    // concurrent syncs can't both pass the check. A unique violation (091)
-    // means another sync won the race — the row is stored, so skip it.
-    // Message-ID is sender-written, so the attachment backfill (a re-sync that
-    // first saw the message before its attachments landed) only fills a row from
-    // the same sender, and never an authenticated row from an unauthenticated message.
-    try {
-      await executeQuery(
-        connection,
-      `IF NOT EXISTS (SELECT 1 FROM Emails WITH (UPDLOCK, HOLDLOCK) WHERE MessageID = @MessageID)
+// UPDLOCK + HOLDLOCK: the range lock spans check and insert, so two
+// concurrent syncs can't both pass the check. A unique violation (091)
+// means another sync won the race — the row is stored, so skip it.
+// Message-ID is sender-written, so the attachment backfill (a re-sync that
+// first saw the message before its attachments landed) only fills a row from
+// the same sender, and never an authenticated row from an unauthenticated message.
+const INSERT_EMAIL = `IF NOT EXISTS (SELECT 1 FROM Emails WITH (UPDLOCK, HOLDLOCK) WHERE MessageID = @MessageID)
          INSERT INTO Emails (MessageID, FromAddress, FromName, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs,
                              Source, SenderAuthenticated, AuthenticationResults)
          VALUES (@MessageID, @FromAddress, @FromName, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs,
@@ -1458,7 +1451,36 @@ export async function upsertGraphEmails(
          UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
          WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL
            AND FromAddress = @FromAddress
-           AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1)`,
+           AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1)`;
+
+const INSERT_EMAIL_INBOUND = `IF NOT EXISTS (SELECT 1 FROM Emails WITH (UPDLOCK, HOLDLOCK) WHERE MessageID = @MessageID)
+         INSERT INTO Emails (MessageID, FromAddress, FromName, Subject, Body, ReceivedAt, MatchedJobID, Status, AttachmentBlobs,
+                             Source, SenderAuthenticated, AuthenticationResults, Mailbox, InReplyTo, ReferenceIds)
+         VALUES (@MessageID, @FromAddress, @FromName, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs,
+                 'graph', @SenderAuthenticated, @AuthenticationResults, @Mailbox, @InReplyTo, @ReferenceIds)
+       ELSE IF @AttachmentBlobs IS NOT NULL
+         UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
+         WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL
+           AND FromAddress = @FromAddress
+           AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1)`;
+
+export async function upsertGraphEmails(
+  connection: import("tedious").Connection,
+  emails: GraphEmail[],
+  options: UpsertOptions = {},
+): Promise<void> {
+  const statement = options.inbound ? INSERT_EMAIL_INBOUND : INSERT_EMAIL;
+  for (const email of emails) {
+    const matchedJobId = await matchJobId(connection, email.subject, email.bodyContent);
+    const attachmentBlobsJson =
+      email.attachmentBlobNames.length > 0
+        ? JSON.stringify(email.attachmentBlobNames)
+        : null;
+
+    try {
+      await executeQuery(
+        connection,
+        statement,
         [
           { name: "MessageID", type: TYPES.NVarChar, value: email.internetMessageId },
           { name: "FromAddress", type: TYPES.NVarChar, value: fit(email.fromAddress, ADDRESS_MAX) },
@@ -1470,6 +1492,13 @@ export async function upsertGraphEmails(
           { name: "AttachmentBlobs", type: TYPES.NVarChar, value: attachmentBlobsJson },
           { name: "SenderAuthenticated", type: TYPES.Bit, value: email.senderAuthenticated },
           { name: "AuthenticationResults", type: TYPES.NVarChar, value: email.authenticationResults },
+          ...(options.inbound
+            ? [
+                { name: "Mailbox", type: TYPES.NVarChar, value: options.inbound.mailbox },
+                { name: "InReplyTo", type: TYPES.NVarChar, value: email.inReplyTo ?? null },
+                { name: "ReferenceIds", type: TYPES.NVarChar, value: email.referenceIds ?? null },
+              ]
+            : []),
         ],
       );
     } catch (err: unknown) {

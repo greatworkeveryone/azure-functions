@@ -54,6 +54,29 @@ describe("upsertGraphEmails", () => {
     expect(sql).toMatch(/IF NOT EXISTS\s*\(SELECT 1 FROM Emails WITH \(UPDLOCK, HOLDLOCK\) WHERE MessageID = @MessageID\)\s*INSERT/);
   });
 
+  it("writes exactly the columns it always did when no inbound option is given", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1>")]);
+
+    const sql = String(db.executeQuery.mock.calls[0][1]);
+    expect(sql).not.toMatch(/Mailbox|InReplyTo|ReferenceIds/);
+    expect((db.executeQuery.mock.calls[0][2] as { name: string }[]).map((p) => p.name)).not.toContain("Mailbox");
+  });
+
+  it("with the inbound option, stores the mailbox and the reply headers too (migration 176)", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1>", { inReplyTo: "parent@x", referenceIds: "root@x parent@x" })], { inbound: { mailbox: "accounts@example.test" } });
+
+    const [, sql, params] = db.executeQuery.mock.calls[0];
+    expect(String(sql)).toMatch(/Mailbox, InReplyTo, ReferenceIds\)\s+VALUES \(.*@Mailbox, @InReplyTo, @ReferenceIds\)/s);
+    expect(Object.fromEntries((params as { name: string; value: unknown }[]).map((p) => [p.name, p.value]))).toMatchObject({ InReplyTo: "parent@x", Mailbox: "accounts@example.test", ReferenceIds: "root@x parent@x" });
+  });
+
+  it("stores no reply headers for an email that has none", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1>")], { inbound: { mailbox: "accounts@example.test" } });
+
+    const params = Object.fromEntries((db.executeQuery.mock.calls[0][2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]));
+    expect(params).toMatchObject({ InReplyTo: null, ReferenceIds: null });
+  });
+
   it.each([2601, 2627])("treats unique violation %p as already stored and keeps going", async (code) => {
     db.executeQuery.mockRejectedValueOnce(sqlError(code)).mockResolvedValue([]);
 

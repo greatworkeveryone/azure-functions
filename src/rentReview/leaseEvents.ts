@@ -3,7 +3,11 @@
 // of row:
 //
 //   review           every open review whose date falls inside the window or has
-//                    already passed (overdue)
+//                    already passed (overdue); and every tenancy whose schedule's
+//                    next review date is inside the window or past with no open
+//                    review row yet, as a row marked `notStarted` (UX review TN5:
+//                    the register says "Review overdue", so the list must too,
+//                    whether or not the generator has made the row)
 //   expiry           the expiry of every active tenancy (not vacated, not archived),
 //                    whether or not a review
 //                    is due (F18c: expiries used to surface only with a review);
@@ -29,6 +33,8 @@ export interface LeaseEvent {
   kind: LeaseEventKind;
   /** Review rows only. */
   method?: RentReviewMethod | null;
+  /** Review rows only: true when the tenancy's next review date is due but no review row exists yet (no reviewId, no state). */
+  notStarted?: boolean;
   overdue: boolean;
   ownerName?: string | null;
   ownerUserId?: number | null;
@@ -45,6 +51,16 @@ export interface LeaseEventTenancy {
   expiry: string | null;
   optionNoticeMonths: number | null;
   optionPeriods: string | null;
+  scheduleSignedOff: boolean;
+  tenantId: number;
+  tenantName: string;
+}
+
+/** A tenancy's schedule-derived next review date (Tenants.NextReviewDate), for the "not started" rows. */
+export interface LeaseEventScheduledReview {
+  buildingId: number;
+  method: RentReviewMethod | null;
+  nextReviewDate: string;
   scheduleSignedOff: boolean;
   tenantId: number;
   tenantName: string;
@@ -73,6 +89,8 @@ export function buildLeaseEvents(input: {
   days: number;
   /** Open reviews only. */
   reviews: readonly LeaseEventReview[];
+  /** Active tenancies with a next review date; one with an open review above is covered by that row and adds nothing. */
+  scheduledReviews?: readonly LeaseEventScheduledReview[];
   /** Active (not vacated) tenancies. */
   tenancies: readonly LeaseEventTenancy[];
   /** The Darwin date. */
@@ -97,6 +115,24 @@ export function buildLeaseEvents(input: {
       state: review.state,
       tenantId: review.tenantId,
       tenantName: review.tenantName,
+    });
+  }
+
+  const withOpenReview = new Set(input.reviews.map((review) => review.tenantId));
+  for (const scheduled of input.scheduledReviews ?? []) {
+    if (scheduled.nextReviewDate > until || withOpenReview.has(scheduled.tenantId)) continue;
+    events.push({
+      buildingId: scheduled.buildingId,
+      date: scheduled.nextReviewDate,
+      kind: "review",
+      method: scheduled.method,
+      notStarted: true,
+      overdue: scheduled.nextReviewDate < today,
+      ownerName: null,
+      ownerUserId: null,
+      scheduleSignedOff: scheduled.scheduleSignedOff,
+      tenantId: scheduled.tenantId,
+      tenantName: scheduled.tenantName,
     });
   }
 

@@ -78,7 +78,7 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe("money-gated routes", () => {
-  it("lists the sixteen money endpoints that existed before MYOB was gated, WP26's four rent review decisions, WP26c's two schedule change decisions, R13's variance margin and J6b's director quote approval included", () => {
+  it("lists the twenty-eight money endpoints that exist today: the sixteen that existed before MYOB was gated, WP26's four rent review decisions, WP26c's two schedule change decisions, R13's variance margin, J6b's director quote approval, the emailed quote decision, the seven MYOB routes, WP32's option exercise and WP33's renewal decision", () => {
     expect(MONEY_GATED_ROUTES.map((r) => r.route)).toEqual([
       "setApprovalLimit",
       "setApprovalFact",
@@ -106,6 +106,8 @@ describe("money-gated routes", () => {
       "registerMyobCompanyFile",
       "importMyobMappings",
       "acceptMyobBaseline",
+      "approveOptionExercise",
+      "recordRenewalOutcome",
     ]);
   });
 

@@ -49,7 +49,7 @@ function answer(locked: Record<string, unknown>) {
 }
 const sqlRun = (pattern: RegExp) => db.executeQuery.mock.calls.filter((call) => pattern.test(call[1] as string));
 
-const write = (over: { expectedVersion?: number; reason?: string | null; reject?: boolean } = {}) =>
+const write = (over: { expectedVersion?: number; keepsSignOff?: boolean; reason?: string | null; reject?: boolean } = {}) =>
   runScheduleWrite(
     {} as never,
     {
@@ -65,6 +65,7 @@ const write = (over: { expectedVersion?: number; reason?: string | null; reject?
         ? { error: "No such step", kind: "reject", status: 404 }
         : {
             column: "ScheduledRateSteps",
+            keepsSignOff: over.keepsSignOff,
             kind: "write",
             ledgerEntries: [{ action: "schedule.manual_edit", after: { id: "s1" }, before: null, subject: { id: "s1", type: "rate_step" } }],
             result: null,
@@ -125,6 +126,14 @@ describe("a schedule write to a signed-off tenancy", () => {
     expect(cleared.before.signOff).toMatchObject({ by: "Mia Manager", note: "Checked against the lease" });
     expect(cleared.after.signOff).toBeNull();
     expect(cleared.correlationId).toBe(entries[0].correlationId);
+  });
+
+  it("keeps the sign-off, asking nothing, for a write that changes no figure (a fee's category)", async () => {
+    answer(lockedRow(SIGNED));
+    const outcome = await write({ keepsSignOff: true });
+    expect(outcome.kind).toBe("ok");
+    expect(sqlRun(/ScheduleSignedOffAt = NULL/)).toHaveLength(0);
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual(["schedule.manual_edit"]);
   });
 
   it("still refuses a stale write or a bad request before it asks why", async () => {

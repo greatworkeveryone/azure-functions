@@ -4,6 +4,8 @@ import { AppRole, errorResponse, unauthorizedResponse } from "./auth";
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "./db";
 import { record } from "./ledger";
 import { resolveLedgerActor } from "./ledger/actor";
+import { LEDGER_MAX_SNAPSHOT_BYTES, snapshotBytes } from "./ledger/validate";
+import { draftContents, tenancyRowForLedger } from "./tenancyDraftContent";
 import { invalidateTenant } from "./tenant-register-cache";
 
 // Tenancies and their lease documents are archived, never hard-deleted (D4:
@@ -40,28 +42,41 @@ async function readTenancyState(connection: Connection, tenantId: number): Promi
 // Removing a Tenants row cascades into its occupancies, notes, rent reviews,
 // rent schedule change log (which revert restores from) and document links, and
 // strands its decision-ledger rows. So it is allowed only for a tenancy that
-// nothing refers to and nothing has been recorded against. Every table that
-// refers to a tenancy is read here, each under a range lock (HOLDLOCK) inside the
-// delete's transaction so no row can be added between this check and the delete.
+// nothing refers to and nothing has been recorded against, and whose own row has
+// nothing a person entered in it (src/tenancyDraftContent.ts names every column
+// and child table; D11 re-check S1-2: the info sheet, lease administration,
+// miscellaneous fees and incentives used to be missed). The row and every table
+// that refers to a tenancy are read here, each under a lock (UPDLOCK, HOLDLOCK)
+// inside the delete's transaction so nothing can be added between this check and
+// the delete.
 
 export interface DraftFacts extends TenancyState {
   carparks: number;
+  changeRequests: number;
+  /** What the tenancy row itself holds (tenancyDraftContent.ts), as phrases. */
+  contents: string[];
   decisions: number;
   defectsPeriods: number;
   documents: number;
   jobs: number;
   keys: number;
+  leaseEvents: number;
   notes: number;
   occupancies: number;
   occupancyHistory: number;
+  registerDocuments: number;
   rentReviews: number;
+  /** The whole row as stored, JSON-safe: what the ledger keeps when a draft is deleted. */
+  row: Record<string, unknown>;
   scheduleChanges: number;
-  scheduleRows: number;
   signedOff: boolean;
   vacancies: number;
 }
 
-const DRAFT_FACTS_SQL = `SELECT t.LegalName, t.BuildingId, t.ArchivedAt, t.ScheduledRateSteps,
+// Every column, so a column added later is in the ledger copy and is looked at by the rule.
+const DRAFT_ROW_SQL = `SELECT * FROM dbo.Tenants WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @Id`;
+
+const DRAFT_FACTS_SQL = `SELECT t.LegalName, t.BuildingId, t.ArchivedAt,
        (SELECT COUNT(*) FROM dbo.Jobs j WITH (HOLDLOCK) WHERE j.TenantID = t.TenantId) AS Jobs,
        (SELECT COUNT(*) FROM dbo.Keys k WITH (HOLDLOCK) WHERE k.TenancyId = t.TenantId) AS Keys,
        (SELECT COUNT(*) FROM dbo.Vacancies v WITH (HOLDLOCK) WHERE v.TenancyId = t.TenantId) AS Vacancies,
@@ -77,33 +92,29 @@ const DRAFT_FACTS_SQL = `SELECT t.LegalName, t.BuildingId, t.ArchivedAt, t.Sched
   FROM dbo.Tenants t WITH (UPDLOCK, HOLDLOCK)
  WHERE t.TenantId = @Id`;
 
-// Sign-off (migration 097) and defects periods (119) may not exist yet where
-// this runs; each is read only when its column or table does.
-const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0;
+// Sign-off (migration 097), defects periods (119), schedule change requests (099)
+// the documentation register (154) and lease events (106) may not exist yet where this runs; each is
+// read only when its column or table does.
+const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0, @Requests INT = 0, @RegisterDocs INT = 0, @LeaseEvents INT = 0;
 IF COL_LENGTH(N'dbo.Tenants', N'ScheduleSignedOffAt') IS NOT NULL
   EXEC sp_executesql
     N'SELECT @n = COUNT(*) FROM dbo.Tenants WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @Id AND ScheduleSignedOffAt IS NOT NULL',
     N'@Id INT, @n INT OUTPUT', @Id = @Id, @n = @SignedOff OUTPUT;
 IF OBJECT_ID(N'dbo.DefectsPeriods', N'U') IS NOT NULL
   SELECT @Defects = COUNT(*) FROM dbo.DefectsPeriods WITH (HOLDLOCK) WHERE TenantId = @Id;
-SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods;`;
+IF OBJECT_ID(N'dbo.ScheduleChangeRequests', N'U') IS NOT NULL
+  SELECT @Requests = COUNT(*) FROM dbo.ScheduleChangeRequests WITH (HOLDLOCK) WHERE TenantId = @Id;
+IF OBJECT_ID(N'dbo.RegisterDocuments', N'U') IS NOT NULL
+  SELECT @RegisterDocs = COUNT(*) FROM dbo.RegisterDocuments WITH (HOLDLOCK) WHERE TenantId = @Id;
+IF OBJECT_ID(N'dbo.LeaseEvents', N'U') IS NOT NULL
+  SELECT @LeaseEvents = COUNT(*) FROM dbo.LeaseEvents WITH (HOLDLOCK) WHERE TenantId = @Id;
+SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods, @Requests AS ChangeRequests, @RegisterDocs AS RegisterDocuments, @LeaseEvents AS LeaseEvents;`;
 
 const DELETE_DRAFT_SQL = `DELETE FROM dbo.Tenants WHERE TenantId = @Id`;
 
-// Schedule text that is not an empty list (or null) counts as a schedule, even
-// when it can't be read: unreadable is never taken to mean empty.
-function countSteps(raw: unknown): number {
-  if (typeof raw !== "string" || raw.trim() === "") return 0;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed.length;
-    return parsed === null ? 0 : 1;
-  } catch {
-    return 1;
-  }
-}
-
 export async function readDraftFacts(connection: Connection, tenantId: number): Promise<DraftFacts | null> {
+  const [stored] = await executeQuery(connection, DRAFT_ROW_SQL, [{ name: "Id", type: TYPES.Int, value: tenantId }]);
+  if (!stored) return null;
   const [row] = await executeQuery(connection, DRAFT_FACTS_SQL, [
     { name: "Id", type: TYPES.Int, value: tenantId },
     { name: "IdText", type: TYPES.NVarChar, value: String(tenantId) },
@@ -115,18 +126,22 @@ export async function readDraftFacts(connection: Connection, tenantId: number): 
     archivedAt: (row.ArchivedAt as Date | null) ?? null,
     buildingId: (row.BuildingId as number | null) ?? null,
     carparks: num(row.Carparks),
+    changeRequests: num(optional?.ChangeRequests),
+    contents: draftContents(stored),
     decisions: num(row.Decisions),
     defectsPeriods: num(optional?.DefectsPeriods),
     documents: num(row.Documents),
     jobs: num(row.Jobs),
     keys: num(row.Keys),
+    leaseEvents: num(optional?.LeaseEvents),
     legalName: String(row.LegalName ?? `Tenancy #${tenantId}`),
     notes: num(row.Notes),
     occupancies: num(row.Occupancies),
     occupancyHistory: num(row.OccupancyHistory),
+    registerDocuments: num(optional?.RegisterDocuments),
     rentReviews: num(row.RentReviews),
+    row: tenancyRowForLedger(stored),
     scheduleChanges: num(row.ScheduleChanges),
-    scheduleRows: countSteps(row.ScheduledRateSteps),
     signedOff: num(optional?.SignedOff) > 0,
     vacancies: num(row.Vacancies),
   };
@@ -138,11 +153,21 @@ const listOf = (items: string[]) =>
 
 export const JOBS_REFUSAL = "Cannot delete — tenant is assigned to at least one job. Reassign first.";
 
-/** Why this tenancy can't be hard-deleted (it isn't an empty draft), or null when it can. */
-export function draftDeletionRefusal(facts: DraftFacts): { error: string; status: number } | null {
+/** What the ledger keeps of a deleted draft: the name, the building and the whole row. */
+export function draftLedgerBefore(facts: DraftFacts) {
+  return { buildingId: facts.buildingId, legalName: facts.legalName, row: facts.row };
+}
+
+/**
+ * Why this tenancy can't be hard-deleted (it isn't an empty draft, or what it
+ * holds is too big for the ledger to keep a copy of), or null when it can. A
+ * refusal for what it holds is a 409 naming each thing in `contains`, so the
+ * screen can list them and offer Archive instead.
+ */
+export function draftDeletionRefusal(facts: DraftFacts): { contains?: string[]; error: string; status: number } | null {
   if (facts.jobs > 0) return { error: JOBS_REFUSAL, status: 400 };
   const has = [
-    ...(facts.scheduleRows > 0 ? ["a rent schedule"] : []),
+    ...facts.contents,
     ...(facts.occupancies > 0 ? [counted(facts.occupancies, "area", "areas")] : []),
     ...(facts.occupancyHistory > 0 ? ["area history"] : []),
     ...(facts.notes > 0 ? [counted(facts.notes, "note", "notes")] : []),
@@ -150,14 +175,23 @@ export function draftDeletionRefusal(facts: DraftFacts): { error: string; status
     ...(facts.scheduleChanges > 0 ? ["rent schedule history"] : []),
     ...(facts.documents > 0 ? [counted(facts.documents, "document", "documents")] : []),
     ...(facts.keys > 0 ? [counted(facts.keys, "key", "keys")] : []),
+    ...(facts.leaseEvents > 0 ? [counted(facts.leaseEvents, "option or renewal record", "option or renewal records")] : []),
     ...(facts.vacancies > 0 ? [counted(facts.vacancies, "vacancy", "vacancies")] : []),
     ...(facts.carparks > 0 ? [counted(facts.carparks, "car park", "car parks")] : []),
     ...(facts.defectsPeriods > 0 ? [counted(facts.defectsPeriods, "defects period", "defects periods")] : []),
+    ...(facts.changeRequests > 0 ? [counted(facts.changeRequests, "schedule change request", "schedule change requests")] : []),
+    ...(facts.registerDocuments > 0 ? [counted(facts.registerDocuments, "documentation register entry", "documentation register entries")] : []),
     ...(facts.signedOff ? ["a schedule sign-off"] : []),
     ...(facts.decisions > 0 ? ["decision history"] : []),
   ];
-  if (has.length === 0) return null;
-  return { error: `${facts.legalName} has ${listOf(has)}, so it can't be deleted. Archive it instead.`, status: 422 };
+  if (has.length > 0) {
+    return { contains: has, error: `${facts.legalName} has ${listOf(has)}, so it can't be deleted. Archive it instead.`, status: 409 };
+  }
+  // The copy kept in the ledger is what makes a delete recoverable, so a row too big to keep is not deleted.
+  if (snapshotBytes(draftLedgerBefore(facts)) > LEDGER_MAX_SNAPSHOT_BYTES) {
+    return { error: `${facts.legalName} is too large to keep a copy of in the history, so it can't be deleted. Archive it instead.`, status: 409 };
+  }
+  return null;
 }
 
 /**
@@ -189,13 +223,13 @@ export async function deleteTenancyDraft(
       const refusal = draftDeletionRefusal(facts);
       if (refusal) {
         await rollbackTransaction(connection).catch(() => {});
-        return { status: refusal.status, jsonBody: { error: refusal.error } };
+        return { status: refusal.status, jsonBody: { contains: refusal.contains, error: refusal.error } };
       }
       await executeQuery(connection, DELETE_DRAFT_SQL, [{ name: "Id", type: TYPES.Int, value: tenantId }]);
       await record(connection, {
         action: "tenancy.delete_draft",
         actor,
-        before: { buildingId: facts.buildingId, legalName: facts.legalName },
+        before: draftLedgerBefore(facts),
         buildingId: facts.buildingId,
         subject: { id: tenantId, type: "tenancy" },
       });

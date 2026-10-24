@@ -41,7 +41,7 @@ const PERIOD_JOINS = `
   LEFT JOIN dbo.Tenants t ON t.TenantID = d.TenantId
   LEFT JOIN dbo.Contractors c ON c.ContractorID = d.ContractorId`;
 // TradingName is nullable and can be blank; the legal name is NOT NULL (migration 037).
-const TENANT_NAME = "COALESCE(NULLIF(LTRIM(RTRIM(t.TradingName)), ''), t.LegalName) AS TenantName";
+export const TENANT_NAME = "COALESCE(NULLIF(LTRIM(RTRIM(t.TradingName)), ''), t.LegalName) AS TenantName";
 const SELECT_PERIOD = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, ${TENANT_NAME}, c.ContractorName
   FROM dbo.DefectsPeriods d ${PERIOD_JOINS}`;
 const SELECT_PERIOD_FOR_UPDATE = `SELECT ${DEFECTS_PERIOD_COLUMNS}, b.BuildingName, ${TENANT_NAME}, c.ContractorName

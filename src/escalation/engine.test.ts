@@ -13,6 +13,7 @@ import {
   concludeForSubject,
   escalateFurther,
   hasNextLevel,
+  previewNextLevel,
   previewTarget,
   raise,
   raiseWithin,
@@ -1039,6 +1040,47 @@ describe("hasNextLevel", () => {
     const esc = await openEscalation();
     getPolicyMock.mockResolvedValueOnce(null);
     expect(await hasNextLevel(conn, esc, NOW)).toBe(false);
+  });
+});
+
+describe("previewNextLevel", () => {
+  it("names the level and the people Escalate further would send it to", async () => {
+    const esc = await openEscalation();
+    expect(await previewNextLevel(conn, esc, NOW)).toEqual({ names: ["Dee"], roleLabel: "Director" });
+  });
+
+  it("lists every eligible person at that level, by name", async () => {
+    mockWorld.users = [ADAM, DEE, user(6, "Eli", "director"), FAY];
+    const esc = await openEscalation();
+    expect(await previewNextLevel(conn, esc, NOW)).toEqual({ names: ["Dee", "Eli"], roleLabel: "Director" });
+  });
+
+  it("is null at the top of the ladder, like hasNextLevel", async () => {
+    const esc = await openEscalation();
+    const { next } = await escalateFurther(conn, { actor: actorOf(ADAM), escalationId: esc.escalationId, mode: "next_level", now: NOW });
+    expect(await previewNextLevel(conn, next, NOW)).toBeNull();
+    expect(await hasNextLevel(conn, next, NOW)).toBe(false);
+  });
+
+  it("is null for an unknown policy", async () => {
+    const esc = await openEscalation();
+    getPolicyMock.mockResolvedValueOnce(null);
+    expect(await previewNextLevel(conn, esc, NOW)).toBeNull();
+  });
+
+  it("agrees with hasNextLevel and writes nothing", async () => {
+    const esc = await openEscalation();
+    const next = await previewNextLevel(conn, esc, NOW);
+    expect(next !== null).toBe(await hasNextLevel(conn, esc, NOW));
+    expect(ledger).not.toHaveBeenCalled();
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(jest.mocked(notifyTargets)).not.toHaveBeenCalled();
+  });
+
+  it("uses the directory it is given instead of loading one", async () => {
+    const esc = await openEscalation();
+    mockWorld.users = [];
+    expect(await previewNextLevel(conn, esc, NOW, [ADAM, DEE, FAY])).toEqual({ names: ["Dee"], roleLabel: "Director" });
   });
 });
 

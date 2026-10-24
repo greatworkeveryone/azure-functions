@@ -511,6 +511,8 @@ describe("upsertRegisterTenant — write integrity", () => {
     db.executeQuery
       .mockResolvedValueOnce([lockedRow({ Expiry: new Date("2020-06-30T00:00:00Z") })])
       .mockResolvedValueOnce([])
+      // An expiry edit looks for lease events of the old expiry (data review S2-3): none here (no table).
+      .mockResolvedValueOnce([{ Id: null }])
       .mockResolvedValueOnce(storedRow({ Expiry: new Date("2031-06-30T00:00:00Z") }));
     const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Expiry: "2031-06-30" }), ctx);
     expect((res.jsonBody as { tenant: { status: string } }).tenant.status).toBe("current");
@@ -712,6 +714,238 @@ describe("upsertRegisterTenant — numeric validation", () => {
     await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, ReviewType: "" }), ctx);
     const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
     expect(update?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "ReviewType", value: "none" })]));
+  });
+});
+
+// ── upsertRegisterTenant: lease type (Tenancy Schedule TS3, m159) ───────────
+
+describe("upsertRegisterTenant — lease type", () => {
+  const storedRow = (over: Record<string, unknown> = {}) => [
+    { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
+  ];
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+  const tenantOf = (res: { jsonBody?: unknown }) => (res.jsonBody as { tenant: { leaseType: unknown } }).tenant;
+
+  it("stores a lease type on the list, shows it on the tenant, and ledgers nothing (a label is not a schedule term)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ LeaseType: "casualMallLicence" }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, LeaseType: "casualMallLicence", RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/LeaseType = @LeaseType/);
+    expect(updateCall()?.[1]).not.toMatch(/ScheduleVersion/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "LeaseType", value: "casualMallLicence" })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).toHaveBeenCalled();
+    expect(tenantOf(res).leaseType).toBe("casualMallLicence");
+  });
+
+  it("clears the lease type with null", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ LeaseType: "retail" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ LeaseType: null }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, LeaseType: null }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/LeaseType = @LeaseType/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "LeaseType", value: null })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(tenantOf(res).leaseType).toBeNull();
+  });
+
+  it("leaves the lease type alone when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ LeaseType: "retail" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ LeaseType: "retail" }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Comments: "edited" }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/Comments = @Comments/);
+    expect(updateCall()?.[1]).not.toMatch(/LeaseType/);
+    expect(updateCall()?.[2].map((p) => p.name)).not.toContain("LeaseType");
+    expect(tenantOf(res).leaseType).toBe("retail");
+  });
+
+  it.each([["freehold"], [""], ["Retail"], [3], [true], [{}]])("refuses %p as a lease type with a 400 and writes nothing", async (leaseType) => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, LeaseType: leaseType }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe("LeaseType must be one of retail, office, licence, casualMallLicence, carParkOnly, other, or null");
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("refuses an invalid lease type on create too", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, LeaseType: "freehold", LegalName: "Acme" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("takes a lease type on create, and none when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 42 }])
+      .mockResolvedValueOnce([{ TenantId: 42, BuildingId: 5, LegalName: "Acme", LeaseType: "licence", Status: "current" }]);
+    const created = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, LeaseType: "licence", LegalName: "Acme" }), ctx);
+    expect(created.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants"));
+    expect(insert?.[1]).toMatch(/@LeaseType/);
+    expect(insert?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "LeaseType", value: "licence" })]));
+    expect(tenantOf(created).leaseType).toBe("licence");
+
+    db.executeQuery.mockClear();
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 43 }])
+      .mockResolvedValueOnce([{ TenantId: 43, BuildingId: 5, LegalName: "Beta", Status: "current" }]);
+    const bare = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, LegalName: "Beta" }), ctx);
+    expect(db.executeQuery.mock.calls[0][2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "LeaseType", value: null })]));
+    expect(tenantOf(bare).leaseType).toBeNull();
+  });
+
+  it("keeps the RowVersion check: a stale write of a lease type is a 409 and changes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([
+      lockedRow({ RowVersion: Buffer.from("00000000000007d2", "hex"), UpdatedByName: "Priya Accounts" }),
+    ]);
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, LeaseType: "office", RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toMatch(/Priya Accounts/);
+    expect(updateCall()).toBeUndefined();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("reads LeaseType on the register list, and shows a stored value off the list as not set", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        { TenantId: 1, BuildingId: 5, LegalName: "A", LeaseType: "office", Status: "current" },
+        { TenantId: 2, BuildingId: 5, LegalName: "B", LeaseType: null, Status: "current" },
+        { TenantId: 3, BuildingId: 5, LegalName: "C", LeaseType: "freehold", Status: "current" },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
+    const tenantRows = (res.jsonBody as { tenants: Array<{ leaseType: unknown }> }).tenants;
+    expect(db.executeQuery.mock.calls[0][1]).toMatch(/\bLeaseType\b/);
+    expect(tenantRows.map((t) => t.leaseType)).toEqual(["office", null, null]);
+  });
+});
+
+// ── upsertRegisterTenant: GST basis (T14, m160) ─────────────────────────────
+
+describe("upsertRegisterTenant — GST basis", () => {
+  const storedRow = (over: Record<string, unknown> = {}) => [
+    { TenantId: 7, BuildingId: 3, LegalName: "Acme", Status: "current", ...over },
+  ];
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+  const tenantOf = (res: { jsonBody?: unknown }) => (res.jsonBody as { tenant: { gstBasis: unknown } }).tenant;
+
+  it.each(["ex", "inc"])("stores %p, shows it on the tenant, and ledgers nothing (a label is not a schedule term)", async (basis) => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: basis }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: basis, RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/GstBasis = @GstBasis/);
+    expect(updateCall()?.[1]).not.toMatch(/ScheduleVersion/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: basis })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).toHaveBeenCalled();
+    expect(tenantOf(res).gstBasis).toBe(basis);
+  });
+
+  it("clears the basis with null", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ GstBasis: "ex" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: null }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: null }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/GstBasis = @GstBasis/);
+    expect(updateCall()?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: null })]));
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(tenantOf(res).gstBasis).toBeNull();
+  });
+
+  it("leaves the basis alone when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([lockedRow({ GstBasis: "inc" })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(storedRow({ GstBasis: "inc" }));
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, Comments: "edited" }), ctx);
+    expect(res.status).toBe(200);
+    expect(updateCall()?.[1]).toMatch(/Comments = @Comments/);
+    expect(updateCall()?.[1]).not.toMatch(/GstBasis/);
+    expect(updateCall()?.[2].map((p) => p.name)).not.toContain("GstBasis");
+    expect(tenantOf(res).gstBasis).toBe("inc");
+  });
+
+  it.each([["gross"], [""], ["EX"], ["Inc"], [1], [true], [{}]])("refuses %p as a GST basis with a 400 and writes nothing", async (basis) => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: basis }), ctx);
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe("GstBasis must be one of ex, inc, or null");
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("refuses an invalid basis on create too", async () => {
+    const res = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, GstBasis: "gross", LegalName: "Acme" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("takes a basis on create, and none when it isn't sent", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 42 }])
+      .mockResolvedValueOnce([{ TenantId: 42, BuildingId: 5, LegalName: "Acme", GstBasis: "inc", Status: "current" }]);
+    const created = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, GstBasis: "inc", LegalName: "Acme" }), ctx);
+    expect(created.status).toBe(200);
+    const insert = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants"));
+    expect(insert?.[1]).toMatch(/@GstBasis/);
+    expect(insert?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: "inc" })]));
+    expect(tenantOf(created).gstBasis).toBe("inc");
+
+    db.executeQuery.mockClear();
+    db.executeQuery
+      .mockResolvedValueOnce([{ TenantId: 43 }])
+      .mockResolvedValueOnce([{ TenantId: 43, BuildingId: 5, LegalName: "Beta", Status: "current" }]);
+    const bare = await handlers.upsertRegisterTenant(makeRequest({ BuildingId: 5, LegalName: "Beta" }), ctx);
+    expect(db.executeQuery.mock.calls[0][2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "GstBasis", value: null })]));
+    expect(tenantOf(bare).gstBasis).toBeNull();
+  });
+
+  it("keeps the RowVersion check: a stale write of a basis is a 409 and changes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([
+      lockedRow({ RowVersion: Buffer.from("00000000000007d2", "hex"), UpdatedByName: "Priya Accounts" }),
+    ]);
+    const res = await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, GstBasis: "ex", RowVersion: ROW_VERSION }), ctx);
+    expect(res.status).toBe(409);
+    expect(updateCall()).toBeUndefined();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
+  it("reads GstBasis on the register list, and shows a stored value off the list as not recorded", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([
+        { TenantId: 1, BuildingId: 5, LegalName: "A", GstBasis: "ex", Status: "current" },
+        { TenantId: 2, BuildingId: 5, LegalName: "B", GstBasis: "inc", Status: "current" },
+        { TenantId: 3, BuildingId: 5, LegalName: "C", GstBasis: null, Status: "current" },
+        { TenantId: 4, BuildingId: 5, LegalName: "D", GstBasis: "gross", Status: "current" },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.getRegisterTenants(makeRequest(null, { buildingId: "5" }), ctx);
+    const tenantRows = (res.jsonBody as { tenants: Array<{ gstBasis: unknown }> }).tenants;
+    expect(db.executeQuery.mock.calls[0][1]).toMatch(/\bGstBasis\b/);
+    expect(tenantRows.map((t) => t.gstBasis)).toEqual(["ex", "inc", null, null]);
   });
 });
 
@@ -946,10 +1180,12 @@ describe("deleteRegisterTenant", () => {
   });
 
   it("returns 400 when the tenant is referenced by a job", async () => {
-    // The draft facts (D4: every table that refers to the tenancy, under lock),
-    // then the optional sign-off / defects-period read.
+    // The tenancy row (S1-2: every column, under lock), the draft facts (D4: every
+    // table that refers to the tenancy, under lock), then the optional sign-off /
+    // defects-period read.
     db.executeQuery
-      .mockResolvedValueOnce([{ Jobs: 2, LegalName: "Acme", ScheduledRateSteps: "[]" }])
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
+      .mockResolvedValueOnce([{ Jobs: 2, LegalName: "Acme" }])
       .mockResolvedValueOnce([{ DefectsPeriods: 0, SignedOff: 0 }]);
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);
     expect(res.status).toBe(400);
@@ -958,6 +1194,7 @@ describe("deleteRegisterTenant", () => {
 
   it("deletes the tenant when no jobs reference it", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
       .mockResolvedValueOnce([{ N: 0 }])
       .mockResolvedValueOnce([]);
 
@@ -972,8 +1209,9 @@ describe("deleteRegisterTenant", () => {
     expect(deleteCall).toBeDefined();
   });
 
-  it("returns 500 when DELETE throws", async () => {
+  it("returns 500 when the read under lock throws", async () => {
     db.executeQuery
+      .mockResolvedValueOnce([{ LegalName: "Acme", TenantId: 1 }])
       .mockResolvedValueOnce([{ N: 0 }])
       .mockRejectedValueOnce(new Error("locked"));
     const res = await handlers.deleteRegisterTenant(makeRequest({ TenantId: 1 }), ctx);

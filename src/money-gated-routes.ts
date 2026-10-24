@@ -46,7 +46,7 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   // Gated only while EMAIL_REPLY_DECISIONS_ENABLED is on; off, it files the reply and decides nothing.
   { file: "src/functions/emails.ts", label: "Record a director's emailed quote decision", route: "recordEmailQuoteDecision" },
   // MYOB: every route that writes to or reconfigures the MYOB link. pauseMyob is
-// deliberately absent: the emergency stop must never wait on a step-up.
+  // deliberately absent: the emergency stop must never wait on a step-up.
   { file: "src/functions/approveAndSendToMyob.ts", label: "Approve and send a record to MYOB", route: "approveAndSendToMyob", via: "src/myob/proposalHttp.ts" },
   { file: "src/functions/proposeToMyob.ts", label: "Propose a record to MYOB", route: "proposeToMyob", via: "src/myob/proposalHttp.ts" },
   { file: "src/functions/setMyobControl.ts", label: "Change a MYOB control", route: "setMyobControl" },
@@ -54,6 +54,10 @@ export const MONEY_GATED_ROUTES: readonly MoneyGatedRoute[] = [
   { file: "src/functions/registerMyobCompanyFile.ts", label: "Register a MYOB company file", route: "registerMyobCompanyFile", via: "src/myob-controller-handler.ts" },
   { file: "src/functions/importMyobMappings.ts", label: "Import MYOB mappings", route: "importMyobMappings", via: "src/myob-controller-handler.ts" },
   { file: "src/functions/acceptMyobBaseline.ts", label: "Accept MYOB's record as the baseline", route: "acceptMyobBaseline", via: "src/myob-controller-handler.ts" },
+  // WP32, WP33: an option exercise extends the lease and adds its schedule rows; a
+  // renewal sets a new starting rent. Both change what a tenant is billed.
+  { file: "src/functions/approveOptionExercise.ts", label: "Approve an option exercise", route: "approveOptionExercise" },
+  { file: "src/functions/recordRenewalOutcome.ts", label: "Decide a lease renewal", route: "recordRenewalOutcome" },
 ];
 
 export function isMoneyGatedRoute(route: string): boolean {

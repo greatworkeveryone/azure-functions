@@ -8,6 +8,12 @@
     "facilities",
     "facilities_manager"
   ],
+  "approveEmail": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "approveInvoice": [
     "accounts",
     "accounts_manager",
@@ -16,6 +22,11 @@
     "facilities_manager"
   ],
   "approveInvoiceAsDirector": [
+    "director"
+  ],
+  "approveOptionExercise": [
+    "accounts_manager",
+    "cfo",
     "director"
   ],
   "approveOwnRentReview": [
@@ -164,6 +175,11 @@
     "admin",
     "director"
   ],
+  "createWorkRequest": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "deleteAnyInspection": [
     "admin",
     "director",
@@ -194,6 +210,11 @@
     "facilities",
     "facilities_manager"
   ],
+  "editBuildingRegister": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "editInspections": [
     "admin",
     "director",
@@ -214,6 +235,16 @@
     "director",
     "facilities",
     "facilities_manager"
+  ],
+  "editMySignature": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
   ],
   "editProcedures": [
     "accounts_manager",
@@ -238,6 +269,12 @@
     "cfo",
     "director"
   ],
+  "manageAbsenceCover": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "manageAccessProfiles": [
     "admin"
   ],
@@ -255,16 +292,25 @@
     "director",
     "facilities_manager"
   ],
+  "manageEmailIdentities": [
+    "admin"
+  ],
   "manageFinancialEvents": [
+    "admin",
     "cfo",
     "director"
   ],
   "manageMajorEvents": [
+    "admin",
     "cfo",
     "director",
     "facilities_manager"
   ],
+  "manageManualBuildings": [
+    "admin"
+  ],
   "manageOperationalEvents": [
+    "admin",
     "director",
     "facilities_manager"
   ],
@@ -292,7 +338,15 @@
     "director",
     "facilities_manager"
   ],
+  "manageStaffReporting": [
+    "admin",
+    "cfo",
+    "director"
+  ],
   "manageTestData": [
+    "admin"
+  ],
+  "manageUsageAnalytics": [
     "admin"
   ],
   "manageVarianceMargin": [
@@ -317,6 +371,9 @@
   ],
   "myobController": [
     "cfo"
+  ],
+  "overrideLeaseEventChecks": [
+    "director"
   ],
   "overrideRentReviewChecks": [
     "director"
@@ -349,15 +406,28 @@
     "director",
     "facilities_manager"
   ],
+  "recordOptionNotice": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
   "recordPayment": [
     "accounts_manager",
     "cfo",
+    "director"
+  ],
+  "recordRenewalOutcome": [
     "director"
   ],
   "rejectInvoice": [
     "accounts_manager",
     "admin",
     "cfo",
+    "director"
+  ],
+  "rejectOptionNotice": [
     "director"
   ],
   "rejectScheduleChange": [
@@ -404,6 +474,24 @@
     "cfo",
     "director"
   ],
+  "runAiHealthCheck": [
+    "admin"
+  ],
+  "sendBroadcast": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "sendEmail": [
+    "accounts",
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "sendPurchaseOrder": [
     "accounts_manager",
     "admin",
@@ -439,6 +527,13 @@
   "syncWorkRequests": [
     "admin"
   ],
+  "triageIncomingEmail": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "unapproveQuote": [
     "accounts_manager",
     "admin",
@@ -456,6 +551,13 @@
     "facilities",
     "facilities_manager"
   ],
+  "viewAbsenceCover": [
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "viewAccessLog": [
     "admin",
     "cfo",
@@ -465,11 +567,39 @@
     "admin",
     "director"
   ],
+  "viewAiActivity": [
+    "admin",
+    "director"
+  ],
   "viewAllEscalations": [
     "admin",
     "director"
   ],
   "viewAssets": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewAuditLog": [
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "viewBuildingRegister": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "viewCorrespondence": [
     "accounts",
     "accounts_manager",
     "admin",
@@ -493,6 +623,15 @@
     "facilities_manager",
     "user"
   ],
+  "viewEmailRouting": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "viewEscalations": [
     "accounts",
     "accounts_manager",
@@ -503,6 +642,11 @@
     "facilities_manager"
   ],
   "viewFinanceControlsPack": [
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewFinanceUsageAnalytics": [
     "admin",
     "cfo",
     "director"
@@ -546,6 +690,23 @@
     "facilities",
     "facilities_manager"
   ],
+  "viewLeaseEvents": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
+  "viewLeave": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
+  ],
   "viewMaintenanceOverview": [
     "accounts",
     "accounts_manager",
@@ -568,6 +729,12 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "viewOperationsReports": [
+    "admin",
+    "cfo",
+    "director",
+    "facilities_manager"
   ],
   "viewPayments": [
     "accounts",
@@ -641,6 +808,11 @@
     "cfo",
     "director"
   ],
+  "viewTenancySchedule": [
+    "admin",
+    "cfo",
+    "director"
+  ],
   "viewTimesheets": [
     "accounts",
     "accounts_manager",
@@ -650,6 +822,10 @@
     "facilities",
     "facilities_manager",
     "user"
+  ],
+  "viewUsageAnalytics": [
+    "admin",
+    "director"
   ],
   "viewUserManagement": [
     "admin",

@@ -13,8 +13,7 @@ export interface ActionDefinition {
 
 // Every decision code, `domain.verb`. Each package adds its codes in its own
 // block so parallel branches don't collide. Packages still to add theirs:
-// WP26b (billing holds), WP29b (billing runs), WP32 (lease events), WP60–WP62
-// (comms).
+// WP26b (billing holds), WP29b (billing runs), WP60–WP62 (comms).
 export const LEDGER_ACTIONS = {
   // Refusals, any subject (WP19b)
   denied: { exception: true, reasonRequired: false, subjects: "any" },
@@ -130,14 +129,37 @@ export const LEDGER_ACTIONS = {
   "schedule.recompute_next_review": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "schedule.terms_edit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // A point taken off a draft inspection (UX review N3). The subject is the
+  // inspection; `before` holds the point's text and its photo records so it can be
+  // put back by hand. Routine mid-inspection work, so not an exception.
+  "inspection.point_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
+  // A single photo taken off a point (UX fix round 2, B2). `before` holds the point, the attachment id,
+  // blobName, fileName and who uploaded it and when. The file itself stays in storage.
+  "inspection.photo_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
+  // A room or a whole level taken off a draft inspection (UX review N3 follow-up).
+  // Same subject and shape rule as a point: `before` holds the room's name and
+  // level (or the level's name) and every point's text with its photo records
+  // (id, blobName, fileName), because the delete cascades to all of them.
+  "inspection.room_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+  "inspection.level_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
+
   // Tenancy archive (D4): a tenancy or a lease document leaves the register
   // without being destroyed; only an empty draft is ever hard-deleted.
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
   "tenancy.delete_draft": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.document_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
-  // An info sheet section or row taken off (D11), with the whole sheet as it was in Before.
+  // An info sheet section or row taken off (D11). Before holds only the entry removed and its position;
+  // one too big for a ledger row is split across several rows of the same correlation id (S3-6, infoSheetLedger.ts).
   "tenancy.info_sheet_row_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // Undo putting back what was just taken off (D11 re-check S3-2). After holds the entry and where it went. An
+  // exception like the removal it answers, so the removal and its Undo show together in Decisions & exceptions.
+  "tenancy.info_sheet_row_restore": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  // Rows added to an info sheet in one bulk add (D11 re-check S2-3). After holds only the rows added.
+  "tenancy.info_sheet_rows_added": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.info_sheet_section_delete": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.info_sheet_section_restore": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   // Test data (D9): an admin marks a record as test data, or back. An
   // exception: it decides whether the record may leave Floorplan.
   "test_data.flag": { exception: true, reasonRequired: true, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },
@@ -227,6 +249,31 @@ export const LEDGER_ACTIONS = {
   "rent_review.submit": { exception: false, reasonRequired: false, subjects: ["rent_review"] },
   "rent_review.waive": { exception: true, reasonRequired: true, subjects: ["rent_review"] },
 
+  // Lease events (WP32 option exercise, WP33 expiry and renewal). The subject is
+  // the lease event; the scope columns carry the tenancy and building. The
+  // generator records open, window_open, lapsed and renewal_referred as the
+  // system actor (leaseEventsGeneratorTimer). A notice dated outside its window
+  // is recorded as late_notice, an exception with the recorder's reason (PLAN
+  // §3.12: late option notices need one); a director accepting it, or approving
+  // with the schedule not signed off, writes director_override naming the check
+  // (C10, C3; D23). option_exercised is the APPLY: expiry, options remaining,
+  // the option-term rows and any market review, before and after. A rejection
+  // and a cancellation are exceptions with their reason; each renewal outcome
+  // carries what the directors decided.
+  "lease_event.cancel": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.director_override": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.holdover": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.lapsed": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.late_notice": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.notice_recorded": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.open": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.option_exercised": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.option_rejected": { exception: true, reasonRequired: true, subjects: ["lease_event"] },
+  "lease_event.renewal_referred": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.renewed": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.vacating": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+  "lease_event.window_open": { exception: false, reasonRequired: false, subjects: ["lease_event"] },
+
   // Escalations (WP20). The subject is the escalation itself; the row carries
   // the job or tenant it is about in its scope columns. A withdrawal is the one
   // exception: a person decided the escalation was not needed.
@@ -274,6 +321,12 @@ export const LEDGER_ACTIONS = {
   "myob.control_change": { exception: true, reasonRequired: true, subjects: ["myob_control"] },
   // Incoming triage (S3, SEC-05): hiding an email from Incoming names who did it.
   "email.archive": { exception: false, reasonRequired: false, subjects: ["email"] },
+  // Who owns an Incoming email (EB3). The inbound triage worker assigns a strong match itself
+  // (system actor; RuleApplied says which rule), a manager assigns one from the Needs triage queue,
+  // and a manager moving an assigned email to someone else is a reassignment, with an optional note.
+  "email.assign": { exception: false, reasonRequired: false, subjects: ["email"] },
+  "email.auto_assign": { exception: false, reasonRequired: false, subjects: ["email"] },
+  "email.reassign": { exception: false, reasonRequired: false, subjects: ["email"] },
   // The proposal pipeline (sprint M3, decision 12): one row per step. An
   // exception (MYOB said no, the outcome is unknown, or the read-back differs)
   // and a withdrawal are exceptions; a withdrawal needs its reason.
@@ -288,6 +341,12 @@ export const LEDGER_ACTIONS = {
   // Johanne's lab (plan M5): her result for one scripted case on the
   // demonstration file, with her note. RuleApplied is the case id.
   "myob.lab_result": { exception: false, reasonRequired: true, subjects: ["myob_control"] },
+  // Native email (EB1, PLAN §13): a send job queued (or put to a manager when it is large),
+  // approved, cancelled, and its completion by the queue timer. The subject is the job.
+  "correspondence.approve": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.cancel": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.queue": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
+  "correspondence.sent": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
 } as const satisfies Record<string, ActionDefinition>;
 
 export type LedgerAction = keyof typeof LEDGER_ACTIONS;

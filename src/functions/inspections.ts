@@ -25,17 +25,41 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { isDevOverrideEnabled } from "../jwt";
 import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 import { showTestParam, testFlagForCreate } from "../test-data";
+import { resolveLedgerActor } from "../ledger/actor";
+import type { LedgerActor } from "../ledger";
+import {
+  levelRemoval,
+  pointRemoval,
+  photoRemoval,
+  recordInspectionRemoval,
+  roomRemoval,
+  type RemovedContributor,
+  type RemovedPoint,
+  type RemovedRoom,
+} from "../inspectionRemovalLedger";
+import { assertPointTextLength, OpRefusal } from "../inspectionLimits";
+import {
+  composeGroupTitle,
+  joinDistinct,
+  parseRaiseGroups,
+  type RaiseGroup,
+} from "../inspectionRaiseGroups";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 // Packet PDFs download every photo; keep one caller from saturating the worker.
 const PACKET_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
+
+// What a job's LevelName and ExactLocation hold when it is edited (jobs.ts MAX_LEN): a job
+// raised from findings in several rooms lists them all, cut to the same width.
+const JOB_LEVEL_NAME_MAX = 100;
+const JOB_EXACT_LOCATION_MAX = 200;
 
 // Hard ceiling on ops per /applyInspectionOps batch — bounds per-request work
 // (each op is several queries inside one transaction on a Basic-tier DB).
@@ -56,7 +80,10 @@ export function isValidInspectionBlobName(blobName: unknown): boolean {
 // Raw failure text can leak schema/constraint detail to clients, so the per-op
 // rejection reason is generic in production; dev builds keep the real message.
 // The full error is always logged server-side by the caller.
+// An OpRefusal is the exception: its text is written for the person (a length
+// limit, say) and carries no internal detail, so it always goes through.
 export function opRejectionReason(err: unknown): string {
+  if (err instanceof OpRefusal) return err.message;
   if (isDevOverrideEnabled() && err instanceof Error && err.message) return err.message;
   return "Operation could not be applied";
 }
@@ -343,6 +370,14 @@ function toIso(value: unknown): string {
   if (typeof value === "string") return value;
   return new Date().toISOString();
 }
+
+// A timestamp column for the removal ledger: ISO text, or null when the row has none.
+function isoOrNull(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === "string" ? value : null;
+}
+
+const textOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
 async function bumpRevision(connection: any, inspectionId: number): Promise<number> {
   const rows = await executeQuery(
@@ -638,8 +673,13 @@ export async function applyInspectionOps(
     await beginTransaction(connection);
     const applied: string[] = [];
     const rejected: { id: string; reason: string }[] = [];
-    // Blobs of removed attachments: deleted only once the batch has committed.
-    const blobsAfterCommit: string[] = [];
+    // Resolved on first use (a point removal), once per batch: most batches never need it.
+    let ledgerActor: LedgerActor | null = null;
+    const loadLedgerActor = async (conn: any): Promise<LedgerActor> => {
+      if (!ledgerActor) ledgerActor = await resolveLedgerActor(request, conn);
+      if (!ledgerActor) throw new Error("Could not resolve the signed-in user for the decision ledger");
+      return ledgerActor;
+    };
 
     try {
       // Concurrency + status guard INSIDE the transaction: UPDLOCK/HOLDLOCK
@@ -695,9 +735,8 @@ export async function applyInspectionOps(
         // linkRooms) rolls back to here — leaving earlier successful ops intact —
         // instead of committing torn state with the rest of the batch.
         await executeQuery(connection, "SAVE TRANSACTION op_sp", []);
-        const opBlobs: string[] = [];
         try {
-          await applyOne(connection, inspectionId, queued.op, identity, opBlobs);
+          await applyOne(connection, inspectionId, queued.op, identity, loadLedgerActor);
           await executeQuery(
             connection,
             `INSERT INTO dbo.InspectionOperationLog (OpId, InspectionId, OpType)
@@ -709,7 +748,6 @@ export async function applyInspectionOps(
             ],
           );
           applied.push(queued.id);
-          blobsAfterCommit.push(...opBlobs);
         } catch (err: any) {
           await executeQuery(connection, "ROLLBACK TRANSACTION op_sp", []).catch(() => {});
           context.error(`op ${queued.id} (${queued.op?.type}) failed:`, err);
@@ -719,9 +757,6 @@ export async function applyInspectionOps(
 
       const revision = await bumpRevision(connection, inspectionId);
       await commitTransaction(connection);
-      for (const blobName of blobsAfterCommit) {
-        try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
-      }
       return { status: 200, jsonBody: { applied, rejected: rejected.length > 0 ? rejected : undefined, revision } };
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
@@ -735,12 +770,81 @@ export async function applyInspectionOps(
   }
 }
 
+// What deleting a room, or every room of a level, takes with it through the
+// ON DELETE CASCADE foreign keys: the rooms' text, their points' text and the
+// photo records. Read before the DELETE so the ledger row can hold it. The
+// caller has already tied the room or level to this inspection.
+async function loadRemovedRooms(
+  connection: any,
+  scope: { roomId: string } | { levelId: string },
+): Promise<RemovedRoom[]> {
+  const byRoom = "roomId" in scope;
+  const SCOPE_SQL = byRoom ? "r.Id = @ScopeId" : "r.LevelId = @ScopeId";
+  const rows = await executeQuery(
+    connection,
+    `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+            r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
+            p.Id AS PointId, p.Description AS PointDescription,
+            p.AddedAt AS PointAddedAt, p.AddedById AS PointAddedById, p.AddedByName AS PointAddedByName,
+            a.Id AS AttachmentId, a.BlobName, a.FileName,
+            a.UploadedAt, a.UploadedById, a.UploadedByName
+     FROM dbo.InspectionRooms r
+     LEFT JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
+     LEFT JOIN dbo.InspectionAttachments a ON a.PointId = p.Id
+     WHERE ${SCOPE_SQL}
+     ORDER BY r.SortOrder, r.AddedAt, r.Id, p.SortOrder, p.AddedAt, p.Id, a.UploadedAt, a.Id`,
+    [{ name: "ScopeId", type: TYPES.NVarChar, value: byRoom ? scope.roomId : scope.levelId }],
+  );
+  const rooms = new Map<string, RemovedRoom>();
+  const points = new Map<string, RemovedPoint>();
+  for (const row of rows) {
+    let room = rooms.get(row.RoomId);
+    if (!room) {
+      room = {
+        addedAt: isoOrNull(row.RoomAddedAt),
+        addedById: textOrNull(row.RoomAddedById),
+        addedByName: textOrNull(row.RoomAddedByName),
+        description: row.RoomDescription ?? "",
+        id: row.RoomId,
+        name: row.RoomName,
+        points: [],
+      };
+      rooms.set(row.RoomId, room);
+    }
+    if (row.PointId == null) continue;
+    let point = points.get(row.PointId);
+    if (!point) {
+      point = {
+        addedAt: isoOrNull(row.PointAddedAt),
+        addedById: textOrNull(row.PointAddedById),
+        addedByName: textOrNull(row.PointAddedByName),
+        attachments: [],
+        description: row.PointDescription ?? "",
+        id: row.PointId,
+      };
+      points.set(row.PointId, point);
+      room.points.push(point);
+    }
+    if (row.AttachmentId != null) {
+      point.attachments.push({
+        blobName: row.BlobName,
+        fileName: row.FileName,
+        id: row.AttachmentId,
+        uploadedAt: isoOrNull(row.UploadedAt),
+        uploadedById: textOrNull(row.UploadedById),
+        uploadedByName: textOrNull(row.UploadedByName),
+      });
+    }
+  }
+  return [...rooms.values()];
+}
+
 async function applyOne(
   connection: any,
   inspectionId: number,
   op: any,
   identity: { oid: string; name: string },
-  blobsAfterCommit: string[],
+  loadLedgerActor: (conn: any) => Promise<LedgerActor>,
 ): Promise<void> {
   switch (op?.type) {
     case "updateInspection": {
@@ -805,6 +909,42 @@ async function applyOne(
     }
     case "removeLevel": {
       // ON DELETE CASCADE handles rooms → points → attachments + contributors.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first, with every room, point and photo record in Before (as
+      // several rows when it is too big for one); a failed ledger write rejects
+      // the op and nothing is deleted. The photo blobs stay in storage (never
+      // removed here).
+      const foundLevel = await executeQuery(
+        connection,
+        `SELECT l.Id AS LevelId, l.Name AS LevelName, l.AddedAt AS LevelAddedAt, i.BuildingId
+         FROM dbo.InspectionLevels l
+         JOIN dbo.Inspections i ON i.Id = l.InspectionId
+         WHERE l.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.levelId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundLevel.length > 0) {
+        const rooms = await loadRemovedRooms(connection, { levelId: op.levelId });
+        // The people who contributed to the level go too (the cascade drops them).
+        const contributorRows = await executeQuery(
+          connection,
+          `SELECT UserId, UserName FROM dbo.InspectionLevelContributors WHERE LevelId = @LevelId ORDER BY UserName, UserId`,
+          [{ name: "LevelId", type: TYPES.NVarChar, value: op.levelId }],
+        );
+        const contributors: RemovedContributor[] = contributorRows.map((c) => ({ id: c.UserId, name: c.UserName }));
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (foundLevel[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: levelRemoval(
+            { addedAt: isoOrNull(foundLevel[0].LevelAddedAt), id: foundLevel[0].LevelId, name: foundLevel[0].LevelName },
+            rooms,
+            contributors,
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE FROM dbo.InspectionLevels WHERE Id = @Id AND InspectionId = @InspectionId`,
@@ -869,6 +1009,43 @@ async function applyOne(
       return;
     }
     case "removeRoom": {
+      // Same ledger-first rule as removeLevel and removePoint: the room's text,
+      // its level, and each point's text and photo records go in Before.
+      const foundRoom = await executeQuery(
+        connection,
+        `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+                r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
+                l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE r.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.roomId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundRoom.length > 0) {
+        const [room] = await loadRemovedRooms(connection, { roomId: op.roomId });
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (foundRoom[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: roomRemoval(
+            {
+              addedAt: isoOrNull(foundRoom[0].RoomAddedAt),
+              addedById: textOrNull(foundRoom[0].RoomAddedById),
+              addedByName: textOrNull(foundRoom[0].RoomAddedByName),
+              description: foundRoom[0].RoomDescription ?? "",
+              id: foundRoom[0].RoomId,
+              levelId: foundRoom[0].LevelId,
+              levelName: foundRoom[0].LevelName,
+              name: foundRoom[0].RoomName,
+            },
+            room?.points ?? [],
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE r
@@ -883,6 +1060,7 @@ async function applyOne(
       return;
     }
     case "addPoint": {
+      assertPointTextLength(op.description, "addPoint");
       await executeQuery(
         connection,
         // INSERT…SELECT scopes the point to a room in THIS inspection: a forged
@@ -909,6 +1087,7 @@ async function applyOne(
       if (op.patch?.description === undefined) {
         throw new Error("updatePoint requires patch.description");
       }
+      assertPointTextLength(op.patch.description, "updatePoint");
       // JOIN Point → Room → Level → Inspection so the WHERE asserts the
       // point actually lives under the inspection this op claims to mutate.
       await executeQuery(
@@ -928,6 +1107,58 @@ async function applyOne(
       return;
     }
     case "removePoint": {
+      // Every removal is written to the decision ledger in this same transaction,
+      // with the point's text and its photo records in Before (as several rows when
+      // it is too big for one): if the ledger cannot be written the op is rolled
+      // back to its savepoint and rejected, so nothing goes unlogged. The photo
+      // blobs stay in storage (never removed here).
+      const found = await executeQuery(
+        connection,
+        `SELECT p.Id AS PointId, p.RoomId, p.Description, p.AddedAt, p.AddedById, p.AddedByName,
+                r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE p.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (found.length > 0) {
+        const photos = await executeQuery(
+          connection,
+          `SELECT a.Id, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName
+           FROM dbo.InspectionAttachments a WHERE a.PointId = @Id ORDER BY a.UploadedAt, a.Id`,
+          [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
+        );
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (found[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: pointRemoval(
+            {
+              addedAt: isoOrNull(found[0].AddedAt),
+              addedById: textOrNull(found[0].AddedById),
+              addedByName: textOrNull(found[0].AddedByName),
+              description: found[0].Description ?? "",
+              id: found[0].PointId,
+              levelName: found[0].LevelName,
+              roomId: found[0].RoomId,
+              roomName: found[0].RoomName,
+            },
+            photos.map((photo) => ({
+              blobName: photo.BlobName,
+              fileName: photo.FileName,
+              id: photo.Id,
+              uploadedAt: isoOrNull(photo.UploadedAt),
+              uploadedById: textOrNull(photo.UploadedById),
+              uploadedByName: textOrNull(photo.UploadedByName),
+            })),
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE p
@@ -976,23 +1207,48 @@ async function applyOne(
       return;
     }
     case "removeAttachment": {
-      // Scope both the BlobName lookup and the DELETE to this inspection via
-      // the Point → Room → Level chain. Without it any attachment Id from
-      // another inspection could be deleted.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first (the photo record, with who uploaded it and when); a
+      // failed ledger write rejects the op and nothing is removed. The file stays
+      // in storage: a photo can be copied onto a job, and only the record goes.
+      // Both the lookup and the DELETE are scoped to this inspection via the
+      // Point → Room → Level chain, so an attachment Id from another inspection
+      // matches nothing.
       const rows = await executeQuery(
         connection,
-        `SELECT a.BlobName
+        `SELECT a.Id, a.PointId, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName,
+                p.RoomId, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
          FROM dbo.InspectionAttachments a
          JOIN dbo.InspectionPoints p ON p.Id = a.PointId
          JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
          JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
          WHERE a.Id = @Id AND l.InspectionId = @InspectionId`,
         [
           { name: "Id",           type: TYPES.NVarChar, value: op.attachmentId },
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      const blobName = rows[0]?.BlobName as string | undefined;
+      if (rows.length > 0) {
+        const photo = rows[0];
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (photo.BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: photoRemoval({
+            blobName: photo.BlobName,
+            fileName: photo.FileName,
+            id: photo.Id,
+            levelName: photo.LevelName,
+            pointId: photo.PointId,
+            roomId: photo.RoomId,
+            roomName: photo.RoomName,
+            uploadedAt: isoOrNull(photo.UploadedAt),
+            uploadedById: textOrNull(photo.UploadedById),
+            uploadedByName: textOrNull(photo.UploadedByName),
+          }),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE a
@@ -1006,11 +1262,6 @@ async function applyOne(
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      // Defence in depth: never destroy a blob outside this feature's prefix,
-      // even if a legacy row catalogued one.
-      if (blobName && blobName.startsWith("inspections/")) {
-        blobsAfterCommit.push(blobName);
-      }
       return;
     }
     case "linkRooms": {
@@ -1607,6 +1858,15 @@ export async function mergeInspections(
 //            Jobs row is created per room, with a combined description and
 //            every contributing point linked to it via InspectionRaisedJobs.
 //
+// Or, in place of PointIds and Mode (SC-AI6, suggested jobs a person reviewed):
+//   Groups: [{ PointIds[], Priority?, Title? }]
+// Each group is exactly one Jobs row from its not-yet-raised points, whatever rooms
+// or levels they sit in. Title (after DescriptionPrefix) and Priority are the
+// person's; without them the job is titled and prioritised as the modes above.
+// Sending Groups together with PointIds or Mode is a 400, so a backend from before
+// this field (which ignores it) refuses the request instead of raising a job per
+// finding. Everything below is shared by both forms: the one route, one transaction.
+//
 // For each Job the endpoint also:
 //   1. Inserts a `creation` JobEvents row (CreationSource = "inspection") so
 //      the activity feed mirrors a manually-created job.
@@ -1634,6 +1894,8 @@ interface RaiseJobsBody {
     Priority?: string;
     SubType?: string;
   };
+  /** Validated by parseRaiseGroups before it is used. */
+  Groups?: unknown;
   InspectionId?: number;
   Mode?: "per-point" | "per-room";
   PointIds?: string[];
@@ -1652,6 +1914,13 @@ interface PointContext {
 interface RaisedJobOutput {
   jobId: number;
   pointIds: string[];
+}
+
+/** The findings that become one job, and what a person chose for it (only Groups carry a choice). */
+interface JobBatch {
+  points: PointContext[];
+  priority?: string;
+  title?: string;
 }
 
 export async function raiseJobsFromInspection(
@@ -1677,14 +1946,29 @@ export async function raiseJobsFromInspection(
     const mode = body?.Mode ?? "per-point";
     const defaults = body?.Defaults ?? {};
 
-    if (!inspectionId || pointIds.length === 0) {
+    // Groups, when sent, are the whole request: PointIds and Mode must not be there beside them.
+    const sentGroups = body?.Groups !== undefined && body?.Groups !== null;
+    let requestedGroups: RaiseGroup[] | null = null;
+    if (sentGroups) {
+      if (!inspectionId) {
+        return { status: 400, jsonBody: { error: "InspectionId and Groups[] required" } };
+      }
+      if (pointIds.length > 0 || (body.Mode !== undefined && body.Mode !== null)) {
+        return { status: 400, jsonBody: { error: "Send Groups, or PointIds with a Mode, not both." } };
+      }
+    } else if (!inspectionId || pointIds.length === 0) {
       return { status: 400, jsonBody: { error: "InspectionId and PointIds[] required" } };
     }
-    if (mode !== "per-point" && mode !== "per-room") {
+    if (!sentGroups && mode !== "per-point" && mode !== "per-room") {
       return { status: 400, jsonBody: { error: "Mode must be 'per-point' or 'per-room'" } };
     }
     if (!defaults.JobType || !defaults.Priority) {
       return { status: 400, jsonBody: { error: "Defaults.JobType and Defaults.Priority required" } };
+    }
+    if (sentGroups) {
+      const parsed = parseRaiseGroups(body.Groups);
+      if ("error" in parsed) return { status: 400, jsonBody: { error: parsed.error } };
+      requestedGroups = parsed.groups;
     }
 
     const caller: UserRef = { id: identity.oid, name: identity.name };
@@ -1707,7 +1991,9 @@ export async function raiseJobsFromInspection(
     }
 
     // A repeated id in one request must not raise two jobs for one finding.
-    const requestedPointIds = Array.from(new Set(pointIds));
+    const requestedPointIds = requestedGroups
+      ? requestedGroups.flatMap((group) => group.pointIds)
+      : Array.from(new Set(pointIds));
     const pointIndex = buildPointIndex(inspection);
     const missing = requestedPointIds.filter((id) => !pointIndex.has(id));
     if (missing.length > 0) {
@@ -1758,7 +2044,9 @@ export async function raiseJobsFromInspection(
       // `missing` check above already rejected any id not in pointIndex, so a
       // fresh lookup here can only miss if the inspection was mutated
       // concurrently — bail with a 409 rather than crash on a non-null assertion.
-      const grouped = groupPointsForJobs(raisedPointIds, mode, pointIndex);
+      const grouped = requestedGroups
+        ? groupPointsByRequest(requestedGroups, alreadyRaised, pointIndex)
+        : groupPointsForJobs(raisedPointIds, mode, pointIndex);
       if ("goneId" in grouped) {
         await rollbackTransaction(connection).catch(() => {});
         return {
@@ -1767,11 +2055,21 @@ export async function raiseJobsFromInspection(
         };
       }
 
-      for (const group of grouped.groups) {
+      for (const batch of grouped.groups) {
+        const group = batch.points;
         const first = group[0];
-        const title = buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
+        const title = batch.title
+          ? composeGroupTitle(descriptionPrefix, batch.title)
+          : buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
         const description = buildJobDescription(group);
         const isPerRoom = group.length > 1 || mode === "per-room";
+        // A group can span rooms and levels; the job's own fields hold them as text.
+        const levelName = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.levelName), JOB_LEVEL_NAME_MAX)
+          : first.levelName;
+        const exactLocation = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.roomName), JOB_EXACT_LOCATION_MAX)
+          : first.roomName;
 
         const inserted = await executeQuery(
           connection,
@@ -1799,11 +2097,11 @@ export async function raiseJobsFromInspection(
             { name: "SourceInspectionId",      type: TYPES.Int,      value: inspectionId },
             { name: "SourceInspectionRoomId",  type: TYPES.NVarChar, value: first.roomId },
             { name: "SourceInspectionPointId", type: TYPES.NVarChar, value: isPerRoom ? null : first.pointId },
-            { name: "LevelName",               type: TYPES.NVarChar, value: first.levelName },
-            { name: "ExactLocation",           type: TYPES.NVarChar, value: first.roomName },
+            { name: "LevelName",               type: TYPES.NVarChar, value: levelName },
+            { name: "ExactLocation",           type: TYPES.NVarChar, value: exactLocation },
             { name: "JobType",                 type: TYPES.NVarChar, value: defaults.JobType },
             { name: "SubType",                 type: TYPES.NVarChar, value: defaults.SubType ?? null },
-            { name: "Priority",                type: TYPES.NVarChar, value: defaults.Priority },
+            { name: "Priority",                type: TYPES.NVarChar, value: batch.priority ?? defaults.Priority },
           ],
         );
         const jobId = inserted[0].JobID as number;
@@ -1875,7 +2173,7 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
   return index;
 }
 
-type GroupedPoints = { groups: PointContext[][] } | { goneId: string };
+type GroupedPoints = { groups: JobBatch[] } | { goneId: string };
 
 // One batch of points per Job-to-create: a batch per point, or a batch per room.
 function groupPointsForJobs(
@@ -1884,21 +2182,42 @@ function groupPointsForJobs(
   pointIndex: Map<string, PointContext>,
 ): GroupedPoints {
   if (mode === "per-room") {
-    const byRoom = new Map<string, PointContext[]>();
+    const byRoom = new Map<string, JobBatch>();
     for (const id of pointIds) {
       const ctx = pointIndex.get(id);
       if (!ctx) return { goneId: id };
-      const list = byRoom.get(ctx.roomId);
-      if (list) list.push(ctx);
-      else byRoom.set(ctx.roomId, [ctx]);
+      const batch = byRoom.get(ctx.roomId);
+      if (batch) batch.points.push(ctx);
+      else byRoom.set(ctx.roomId, { points: [ctx] });
     }
     return { groups: Array.from(byRoom.values()) };
   }
-  const groups: PointContext[][] = [];
+  const groups: JobBatch[] = [];
   for (const id of pointIds) {
     const ctx = pointIndex.get(id);
     if (!ctx) return { goneId: id };
-    groups.push([ctx]);
+    groups.push({ points: [ctx] });
+  }
+  return { groups };
+}
+
+// One batch per requested group: the group's findings that have no job yet, as one
+// job. A group whose findings all have jobs already makes none.
+function groupPointsByRequest(
+  requested: RaiseGroup[],
+  alreadyRaised: ReadonlySet<string>,
+  pointIndex: Map<string, PointContext>,
+): GroupedPoints {
+  const groups: JobBatch[] = [];
+  for (const group of requested) {
+    const points: PointContext[] = [];
+    for (const id of group.pointIds) {
+      if (alreadyRaised.has(id)) continue;
+      const ctx = pointIndex.get(id);
+      if (!ctx) return { goneId: id };
+      points.push(ctx);
+    }
+    if (points.length > 0) groups.push({ points, priority: group.priority, title: group.title });
   }
   return { groups };
 }

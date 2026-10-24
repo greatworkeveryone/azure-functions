@@ -44,10 +44,17 @@ export interface PendingChanges {
   items: PendingChangeItem[];
 }
 
-export type PendingScope = { all: true } | { buildingId: number } | { tenantId: number };
+// `commercial` is every commercial building: the company figures' scope, which leaves out
+// the family's residences (T10). `all` is every building, for the operational lists.
+export type PendingScope = { all: true } | { buildingId: number } | { commercial: true } | { tenantId: number };
 export type PendingDetail = "dates_only" | "full";
 
 const money = (value: number): string => new Intl.NumberFormat("en-AU", { currency: "AUD", style: "currency" }).format(value);
+
+// Company reporting covers commercial buildings only: residences are the family's own
+// houses (Connor, 22 Oct 2026; TENANCY-SCHEDULE-REPORT T10). Selected positively, so a new
+// category stays out until someone decides it belongs.
+const COMMERCIAL_TENANT = "EXISTS (SELECT 1 FROM dbo.Buildings cb WHERE cb.BuildingID = t.BuildingId AND cb.Category = N'commercial')";
 
 // A list across tenancies leaves out test tenancies too (D9), unless the reader
 // is an admin with Show test data on.
@@ -60,7 +67,8 @@ function scopeSql(scope: PendingScope, alias: string, showTest: boolean): { para
       sql: " AND t.BuildingId = @BuildingId AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1)",
     };
   }
-  return { params: [showTestParam], sql: " AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1)" };
+  const everyone = " AND t.ArchivedAt IS NULL AND (t.IsTest = 0 OR @ShowTest = 1)";
+  return { params: [showTestParam], sql: "commercial" in scope ? `${everyone} AND ${COMMERCIAL_TENANT}` : everyone };
 }
 
 const RELIEF_SQL = `SELECT c.RequestId, c.TenantId, c.Kind, c.Payload, c.Reason, c.State, c.RequestedByName, c.RequestedAt,

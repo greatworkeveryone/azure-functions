@@ -36,11 +36,13 @@ function matchesPerFile(pattern: RegExp): Map<string, string[]> {
 // it the ONLY writer of the rows it acts on? If another feature writes to the
 // same table, the timer must filter on something that feature can't produce.
 const REVIEWED_TIMERS: Record<string, string> = {
+  absenceCoverTimer: "absenceCoverTimer.ts — selects positively (people away today and exactly their open jobs, pending decision requests, live escalations aimed at them, quotes awaiting approval, assigned emails); changes who has an item only through the item's own columns and history (Jobs.AssignedTo and its assignment_change event, JobDecisionRequests.DecisionMakers, Escalations.TargetUserId, Emails.AssignedToUserId), each in one transaction with its append-only dbo.CoverActions row; approves, answers and deletes nothing; off unless ABSENCE_COVER_ENABLED is \"true\", ABSENCE_COVER_DRY_RUN writes suggested rows only (AW1)",
   parseEmailsTimer: "parseEmails.ts — writes Emails.AI* columns only",
   parseEmailsDailyRetry: "parseEmails.ts — Graph mail sync + AI parse retry",
   tenancyCpiSyncTimer: "tenancyCpiSyncTimer.ts — CPI rows it owns",
   timesheetSyncTimer: "timesheetSyncTimer.ts — stamps Timesheets.SentToMyobDate",
   tenancyReviewScheduleTimer: "tenancyReviewScheduleTimer.ts — writes only its own RentReviews workflow rows, and only when RENT_REVIEW_GENERATOR_ENABLED is \"true\"",
+  leaseEventsGeneratorTimer: "leaseEventsGeneratorTimer.ts — writes only its own LeaseEvents rows (open, window open, lapse, renewal referral) and their ledger rows, selected positively (live, non-test tenancies with an expiry); deletes nothing; off unless LEASE_EVENTS_GENERATOR_ENABLED is \"true\", LEASE_EVENTS_GENERATOR_DRY_RUN writes nothing (WP32, WP33)",
   syncAllWorkRequestsTimer: "syncAllWorkRequests.ts — MERGE into WorkRequests (local edits live in WorkRequestOverrides)",
   plannerSyncTimer: "plannerSyncTimer.ts — PlannerTasks + Graph Planner; shared with jobPlannerSync",
   renewGraphSubscription: "graphWebhook.ts — Graph subscription only",
@@ -48,7 +50,10 @@ const REVIEWED_TIMERS: Record<string, string> = {
   ledgerVerifyTimer: "ledgerVerifyTimer.ts — read-only digest verification of the ledger tables",
   accessReportTimer: "accessReportTimer.ts — reads AccessEvents and AppUsers, sends mail, writes nothing; off unless ACCESS_REPORT_ENABLED is \"true\"",
   schedulerTimer: "schedulerTimer.ts — reads ServiceSchedules and DefectsPeriods; creates jobs, asset links and run rows selected positively by schedule id, idempotent on (ScheduleId, DueDate); off unless SCHEDULER_ENABLED is \"true\", SCHEDULER_DRY_RUN writes nothing (sprint F2)",
+  commsSendTimer: "commsSendTimer.ts — writes only its own CorrespondenceRecipients, Correspondence and CorrespondenceEvents rows (outcomes, counts, completion) and their ledger row, selected positively (queued or would-send recipients of queued or sending jobs, oldest first, at most COMMS_MAX_PER_MINUTE a minute); sends mail through Graph draft-then-send; deletes nothing; off unless COMMS_SEND_ENABLED is \"true\", COMMS_SEND_DRY_RUN sends nothing (EB1)",
   digestTimer: "digestTimer.ts — reads only, sends mail; off unless DIGEST_ENABLED or DIGEST_DRY_RUN is \"true\"",
+  usageRollupTimer: "usageRollupTimer.ts — writes only dbo.UsageDaily, recomputed from UsageViews, UsageSessions and UsageDevices for the last three Darwin days (a figure is only ever replaced by a larger one); deletes nothing; runs only while USAGE_TRACKING_ENABLED is \"true\" (UA1)",
+  usagePurgeTimer: "usagePurgeTimer.ts — deletes only raw UsageViews and UsageSessions rows older than USAGE_RETENTION_DAYS (default 180, at least 30), selected positively: a view only when its person's UsageDaily roll-up for its Darwin day was made after the day ended and after the session's last heartbeat; a session only when it has no views left and its day is rolled up; and UsageDaily rows only as whole days older than USAGE_DAILY_RETENTION_DAYS (default 730, never below the raw days), never UsageDevices; capped per run, logs counts, dry run counts only; off unless USAGE_PURGE_ENABLED or USAGE_PURGE_DRY_RUN is \"true\" (UA1)",
   myobDailyEmailTimer: "myobDailyEmailTimer.ts — reads only (DecisionLedger rows about MYOB proposals joined to registered MyobCompanyFiles, MyobApiLog outcome rows, cfo AppUsers) and sends mail; writes and deletes nothing; off unless MYOB_DAILY_EMAIL_ENABLED or MYOB_DAILY_EMAIL_DRY_RUN is \"true\" (plan M4)",
   myobReadbackTimer: "myobReadbackTimer.ts — selects positively by proposal id (the latest verified MyobProposals row per MYOB uid); GETs through a GET-only client; writes only that row's read-back columns (LastReadBackAt, MyobRowVersion, MyobStatus, MyobSnapshot, Discrepancy), checked against its RowVersion so a concurrent send makes the read-back fail rather than overwrite, plus a ledger row; deletes nothing; off unless MYOB_READBACK_ENABLED or MYOB_READBACK_DRY_RUN is \"true\" (plan M10)",
 };
@@ -63,7 +68,6 @@ const REVIEWED_BLOB_DELETES: Record<string, string[]> = {
   // Removes the blob it uploaded a moment earlier when the register insert did not commit;
   // the key is fresh (randomUUID), and the cleanup re-checks that no RegisterDocuments row references it.
   "functions/document-register.ts": ["deleteBlob"],
-  "functions/inspections.ts": ["deleteBlob"],
   // Same pattern: a fresh key (randomUUID) under major-events/<id>/, and the cleanup re-checks that no MajorEventDocuments row references it.
   "functions/major-events.ts": ["deleteBlob"],
   "functions/purchaseOrders.ts": ["deleteBlob"],

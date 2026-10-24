@@ -320,6 +320,52 @@ describe("upsertMiscFee", () => {
     const res = await handlers.upsertMiscFee(makeRequest(validBody), ctx);
     expect(res.status).toBe(500);
   });
+
+  // TS3 (T11): a category is a label inside the MiscFees JSON; it changes no figure.
+  describe("category", () => {
+    const storedFees = (): string | undefined => {
+      const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+        | [unknown, string, Array<{ name: string; value: unknown }>]
+        | undefined;
+      return update?.[2].find((p) => p.name === "Value")?.value as string | undefined;
+    };
+
+    it("stores the category with the fee and returns it", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ MiscFees: null }]).mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: "cleaning" } }), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { fees: Array<{ category?: string }> }).fees[0].category).toBe("cleaning");
+      expect(JSON.parse(storedFees() as string)[0]).toMatchObject({ category: "cleaning", id: FEE_ID });
+    });
+
+    it("keeps the other fees' categories when it changes one", async () => {
+      const other = { baseAmount: 50, category: "electricity", commencedAt: "2025-01-01", frequency: "monthly", id: "00000000-0000-4000-8000-0000000000aa", title: "Power" };
+      db.executeQuery
+        .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...validFee, category: "cleaning" }, other]) }])
+        .mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: "outgoings" } }), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { fees: Array<{ category?: string }> }).fees.map((f) => f.category)).toEqual(["outgoings", "electricity"]);
+      expect(JSON.parse(storedFees() as string).map((f: { category?: string }) => f.category)).toEqual(["outgoings", "electricity"]);
+    });
+
+    it("clears the category with null, and stores no key for it", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...validFee, category: "cleaning" }]) }])
+        .mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: null } }), ctx);
+      expect(res.status).toBe(200);
+      expect("category" in (res.jsonBody as { fees: object[] }).fees[0]).toBe(false);
+      expect("category" in JSON.parse(storedFees() as string)[0]).toBe(false);
+    });
+
+    it.each([["rent"], [""], [3], ["Cleaning"]])("returns 400 for the category %p, before any query", async (category) => {
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category } }), ctx);
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { error: string }).error).toMatch(/^fee\.category must be one of licenceFee, carBayRent, afterHoursAc/);
+      expect(db.executeQuery).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ── deleteMiscFee ────────────────────────────────────────────────────────────
@@ -437,6 +483,22 @@ describe("misc fee writes — versioned and ledgered", () => {
     });
     const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
     expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("ledgers a category change with the fee as it was and as it is (TS3), like any other field of the fee", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...fee, category: "cleaning" }]), ScheduleVersion: 2 }])
+      .mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000000bb", "hex"), ScheduleVersion: 3 }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee: { ...fee, category: "outgoings" }, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { category: "outgoings", id: FEE_ID },
+      before: { category: "cleaning", id: FEE_ID },
+    });
   });
 
   it("returns 409 when the fee is written against a stale ScheduleVersion", async () => {

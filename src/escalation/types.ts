@@ -100,6 +100,13 @@ export interface DirectoryUser {
   userId: number;
 }
 
+/** Who "Escalate further" would send an escalation to (getEscalation's `next`). */
+export interface NextLevelDto {
+  /** The eligible people's names; empty when the level is only an env-list mailbox. */
+  names: string[];
+  roleLabel: string;
+}
+
 /** The signed-in person asking, for visibility and permission checks. */
 export interface Viewer {
   name: string;

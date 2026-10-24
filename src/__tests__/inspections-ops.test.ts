@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { clearRoleCache } from "../auth";
 import { _resetRateLimitForTests } from "../rateLimit";
+import { OpRefusal } from "../inspectionLimits";
+import { REMOVAL_ROW_BUDGET_BYTES } from "../inspectionRemovalLedger";
+import { LEDGER_MAX_SNAPSHOT_BYTES } from "../ledger";
 import {
   applyInspectionOps,
   completeInspection,
@@ -226,42 +229,19 @@ describe("applyInspectionOps batching (F13)", () => {
   });
 });
 
-// ── Blob deletion waits for the commit ───────────────────────────────────────
+// ── removeAttachment keeps the file ──────────────────────────────────────────
 
-describe("applyInspectionOps removeAttachment blob delete", () => {
-  const BLOB = "inspections/7/abc.jpg";
+describe("applyInspectionOps removeAttachment", () => {
   const body = { inspectionId: 7, ops: [{ id: "op-1", inspectionId: 7, createdAt: "", op: { type: "removeAttachment", attachmentId: "att-1" } }] };
-  const routes = [
-    { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
-    { match: "SELECT a.BlobName", rows: [{ BlobName: BLOB }] },
-    { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
-  ];
 
-  it("deletes the blob only after the transaction commits", async () => {
-    mockDb(routes);
-    db.commitTransaction.mockImplementation(async () => { expect(blob.deleteBlob).not.toHaveBeenCalled(); });
+  it("removes the record and leaves the file in storage (a photo can be copied onto a job)", async () => {
+    mockDb([
+      { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
+      { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
+    ]);
     const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
     expect(res.status).toBe(200);
-    expect(blob.deleteBlob).toHaveBeenCalledWith(BLOB);
-  });
-
-  it("keeps the blob when the commit fails", async () => {
-    mockDb(routes);
-    db.commitTransaction.mockRejectedValue(new Error("commit failed"));
-    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
-    expect(res.status).toBe(500);
-    expect(db.rollbackTransaction).toHaveBeenCalled();
-    expect(blob.deleteBlob).not.toHaveBeenCalled();
-  });
-
-  it("keeps the blob when the op is rolled back to its savepoint", async () => {
-    mockDb(routes);
-    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-      if (sql.includes("INSERT INTO dbo.InspectionOperationLog")) throw new Error("log insert failed");
-      return routes.find((r) => sql.includes(r.match))?.rows ?? [];
-    });
-    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
-    expect(res.jsonBody).toMatchObject({ rejected: [{ id: "op-1" }] });
+    expect(db.executeQuery.mock.calls.some(([, sql]: [unknown, string]) => sql.includes("DELETE a") && sql.includes("dbo.InspectionAttachments"))).toBe(true);
     expect(blob.deleteBlob).not.toHaveBeenCalled();
   });
 });
@@ -960,3 +940,688 @@ describe("applyInspectionOps addLevel op with a free-text name (IN3)", () => {
   });
 });
 
+
+// ── Splitting a removal across ledger rows ───────────────────────────────────
+
+let photoSeq = 0;
+/** A photo record as the attachments query returns it, with a realistic blob name. */
+function photoRow(n: number = ++photoSeq): { Id: string; BlobName: string; FileName: string } {
+  return {
+    Id: `0f8b2c1e-4d3a-4b5c-9e7f-${String(n).padStart(12, "0")}`,
+    BlobName: `inspections/7/5d2e8a90-77c1-4f0b-a3d4-${String(n).padStart(12, "0")}-site-photo-${n}.jpg`,
+    FileName: `site-photo-${n}.jpg`,
+  };
+}
+
+/** Every row under the ledger's own cap (and inside the margin), all one operation. */
+function expectRowsWithinTheLimit(rows: Record<string, unknown>[]): void {
+  for (const row of rows) {
+    const bytes = Buffer.byteLength(row.Before as string, "utf8");
+    expect(bytes).toBeLessThanOrEqual(REMOVAL_ROW_BUDGET_BYTES);
+    expect(bytes).toBeLessThan(LEDGER_MAX_SNAPSHOT_BYTES);
+  }
+  expect(new Set(rows.map((row) => row.CorrelationId)).size).toBe(1);
+  expect(rows[0].CorrelationId).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(new Set(rows.map((row) => row.Action)).size).toBe(1);
+}
+
+// ── N3: every point removal is written to the decision ledger ────────────────
+
+describe("applyInspectionOps removePoint op (UX review N3)", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const REMOVE = { id: "op-rm", inspectionId: 7, createdAt: "", op: { type: "removePoint", pointId: "pt-1" } };
+  const POINT_ROW = {
+    PointId: "pt-1", RoomId: "rm-1", Description: "Cracked tile", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9,
+    AddedAt: new Date("2026-10-19T22:30:00.000Z"), AddedById: "oid-ada", AddedByName: "Ada Added",
+  };
+  const UPLOAD = { UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader" };
+  const PHOTOS = [
+    { Id: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg", ...UPLOAD },
+    { Id: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg", ...UPLOAD },
+  ];
+
+  function removeDb(point: Row[], photos: Row[], failLedger = false): void {
+    db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
+      if (sql.includes("SELECT p.Id AS PointId")) return point;
+      if (sql.includes("FROM dbo.InspectionAttachments a WHERE a.PointId")) return photos;
+      if (sql.includes("INSERT INTO dbo.DecisionLedger") && failLedger) throw new Error("ledger down");
+      if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
+      return [];
+    });
+  }
+
+  const apply = () =>
+    applyInspectionOps(
+      makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [REMOVE] } }),
+      makeContext(),
+    );
+
+  const paramsOf = (call: SqlCall): Record<string, unknown> => Object.fromEntries(call[2].map((p) => [p.name, p.value]));
+
+  it("logs who, which inspection, which point and how many photos, then removes it", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const row = paramsOf(ledger[0]);
+    expect(row).toMatchObject({
+      Action: "inspection.point_removed",
+      ActorKind: "user",
+      ActorName: "Test User",
+      ActorRole: "facilities",
+      BuildingId: 9,
+      SubjectId: "7",
+      SubjectType: "inspection",
+    });
+    const uploaded = { uploadedAt: "2026-10-20T01:02:03.000Z", uploadedById: "oid-una", uploadedByName: "Una Uploader" };
+    expect(JSON.parse(row.Before as string)).toEqual({
+      addedAt: "2026-10-19T22:30:00.000Z",
+      addedById: "oid-ada",
+      addedByName: "Ada Added",
+      attachmentCount: 2,
+      attachments: [
+        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1", ...uploaded },
+        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2", ...uploaded },
+      ],
+      description: "Cracked tile",
+      levelName: "Ground",
+      pointId: "pt-1",
+      roomId: "rm-1",
+      roomName: "Lobby",
+    });
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+    const removed = sqls.findIndex((sql) => sql.startsWith("DELETE p"));
+    expect(logged).toBeGreaterThan(-1);
+    expect(removed).toBeGreaterThan(logged);
+  });
+
+  it("keeps the photo files: nothing is removed from blob storage", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+    await apply();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("does not remove the point when the ledger row cannot be written; the op is rejected", async () => {
+    removeDb([POINT_ROW], PHOTOS, true);
+
+    const res = await apply();
+
+    const out = res.jsonBody as OpsOut;
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    expect(sqls.some((sql) => sql.startsWith("DELETE p"))).toBe(false);
+    expect(sqls).toContain("ROLLBACK TRANSACTION op_sp");
+  });
+
+  it("writes a small removal as one row with no part markers", async () => {
+    removeDb([POINT_ROW], PHOTOS);
+    await apply();
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const before = JSON.parse(paramsOf(ledger[0]).Before as string);
+    expect(before).not.toHaveProperty("parts");
+    expect(before).not.toHaveProperty("part");
+  });
+
+  it("splits a point with hundreds of photos over several rows instead of refusing it", async () => {
+    const many = Array.from({ length: 700 }, (_, i) => photoRow(i));
+    removeDb([POINT_ROW], many);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const rows = callsMatching("INSERT INTO dbo.DecisionLedger").map((call) => paramsOf(call));
+    expect(rows.length).toBeGreaterThan(2);
+    const befores = rows.map((row) => JSON.parse(row.Before as string));
+    expectRowsWithinTheLimit(rows);
+    expect(befores[0]).toMatchObject({ attachmentCount: 700, description: "Cracked tile", part: 1, parts: rows.length, pointId: "pt-1" });
+    const slices = befores.slice(1).flatMap((before) => before.points);
+    expect(slices.every((slice: { id: string }) => slice.id === "pt-1")).toBe(true);
+    expect(slices.map((slice: { attachments: unknown[] }) => slice.attachments.length).reduce((a: number, b: number) => a + b, 0)).toBe(700);
+    expect(slices.flatMap((slice: { attachments: { id: string }[] }) => slice.attachments.map((a) => a.id))).toEqual(many.map((p) => p.Id));
+    const sqls = (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+    expect(sqls.map((sql) => sql.includes("INSERT INTO dbo.DecisionLedger")).lastIndexOf(true)).toBeLessThan(sqls.findIndex((sql) => sql.startsWith("DELETE p")));
+  });
+
+  it("writes no ledger row for a point that is not in this inspection", async () => {
+    removeDb([], []);
+    const res = await apply();
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+  });
+
+  it("still refuses a completed inspection before anything is read or logged", async () => {
+    mockDb([{ match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 3, Status: "complete" }] }]);
+    const res = await apply();
+    expect(res.status).toBe(409);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    expect(callsMatching("SELECT p.Id AS PointId")).toHaveLength(0);
+  });
+});
+
+// ── N3 follow-up: room and level removals are written to the decision ledger ─
+
+describe("applyInspectionOps removeRoom and removeLevel ops (UX review N3)", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+
+  // One row per room x point x photo, as the LEFT JOINs return them.
+  const ROOM_STAMP = { RoomAddedAt: new Date("2026-10-19T21:00:00.000Z"), RoomAddedById: "oid-rita", RoomAddedByName: "Rita Room" };
+  const LOBBY = { RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", ...ROOM_STAMP };
+  const POINT_STAMP = { PointAddedAt: new Date("2026-10-19T22:30:00.000Z"), PointAddedById: "oid-ada", PointAddedByName: "Ada Added" };
+  const UPLOAD = { UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader" };
+  const NO_POINT = { PointId: null, PointDescription: null, PointAddedAt: null, PointAddedById: null, PointAddedByName: null };
+  const NO_PHOTO = { AttachmentId: null, BlobName: null, FileName: null, UploadedAt: null, UploadedById: null, UploadedByName: null };
+  const JOINED: Row[] = [
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-1", BlobName: "inspections/7/a.jpg", FileName: "a.jpg", ...UPLOAD },
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-1", PointDescription: "Cracked tile", AttachmentId: "att-2", BlobName: "inspections/7/b.jpg", FileName: "b.jpg", ...UPLOAD },
+    { ...LOBBY, ...POINT_STAMP, PointId: "pt-2", PointDescription: null, ...NO_PHOTO },
+    { RoomId: "rm-2", RoomName: "Plant room", RoomDescription: null, RoomAddedAt: null, RoomAddedById: "oid-rita", RoomAddedByName: "Rita Room", ...NO_POINT, ...NO_PHOTO },
+  ];
+  const POINT_OUT = { addedAt: "2026-10-19T22:30:00.000Z", addedById: "oid-ada", addedByName: "Ada Added" };
+  const UPLOAD_OUT = { uploadedAt: "2026-10-20T01:02:03.000Z", uploadedById: "oid-una", uploadedByName: "Una Uploader" };
+  const LOBBY_POINTS = [
+    {
+      ...POINT_OUT,
+      attachments: [
+        { blobName: "inspections/7/a.jpg", fileName: "a.jpg", id: "att-1", ...UPLOAD_OUT },
+        { blobName: "inspections/7/b.jpg", fileName: "b.jpg", id: "att-2", ...UPLOAD_OUT },
+      ],
+      description: "Cracked tile",
+      id: "pt-1",
+    },
+    { ...POINT_OUT, attachments: [], description: "", id: "pt-2" },
+  ];
+  const ROOM_ROW = {
+    RoomId: "rm-1", RoomName: "Lobby", RoomDescription: "Entrance", LevelId: "lv-1", LevelName: "Ground", BuildingId: 9, ...ROOM_STAMP,
+  };
+  const LEVEL_ROW = { LevelId: "lv-1", LevelName: "Ground", LevelAddedAt: new Date("2026-10-18T00:00:00.000Z"), BuildingId: 9 };
+  const CONTRIBUTORS = [{ UserId: "oid-ada", UserName: "Ada Added" }, { UserId: "oid-bo", UserName: "Bo Builder" }];
+
+  /** `failLedger`: true fails every ledger write, a number fails that write (1 = the first). */
+  function removeDb(found: { room?: Row[]; level?: Row[] }, joined: Row[], failLedger: boolean | number = false, contributors: Row[] = []): void {
+    let ledgerWrites = 0;
+    db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
+      if (sql.includes("LEFT JOIN dbo.InspectionPoints")) return joined;
+      if (sql.includes("FROM dbo.InspectionLevelContributors")) return contributors;
+      if (sql.startsWith("SELECT r.Id AS RoomId")) return found.room ?? [];
+      if (sql.startsWith("SELECT l.Id AS LevelId")) return found.level ?? [];
+      if (sql.includes("INSERT INTO dbo.DecisionLedger")) {
+        ledgerWrites += 1;
+        if (failLedger === true || failLedger === ledgerWrites) throw new Error("ledger down");
+      }
+      if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
+      return [];
+    });
+  }
+
+  const apply = (op: Row) =>
+    applyInspectionOps(
+      makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [{ id: "op-rm", inspectionId: 7, createdAt: "", op }] } }),
+      makeContext(),
+    );
+  const removeRoom = () => apply({ type: "removeRoom", roomId: "rm-1" });
+  const removeLevel = () => apply({ type: "removeLevel", levelId: "lv-1" });
+
+  const paramsOf = (call: SqlCall): Record<string, unknown> => Object.fromEntries(call[2].map((p) => [p.name, p.value]));
+  const sqlsRun = () => (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+  const DELETE_ROOM = (sql: string) => sql.startsWith("DELETE r");
+  const DELETE_LEVEL = (sql: string) => sql.startsWith("DELETE FROM dbo.InspectionLevels");
+
+  describe("removeRoom", () => {
+    it("logs who, which inspection, the room, its level and each point with its photos, then removes it", async () => {
+      removeDb({ room: [ROOM_ROW] }, JOINED.slice(0, 3));
+
+      const res = await removeRoom();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+      expect(ledger).toHaveLength(1);
+      const row = paramsOf(ledger[0]);
+      expect(row).toMatchObject({
+        Action: "inspection.room_removed",
+        ActorKind: "user",
+        ActorName: "Test User",
+        ActorRole: "facilities",
+        BuildingId: 9,
+        SubjectId: "7",
+        SubjectType: "inspection",
+      });
+      expect(JSON.parse(row.Before as string)).toEqual({
+        attachmentCount: 2,
+        levelId: "lv-1",
+        levelName: "Ground",
+        pointCount: 2,
+        points: LOBBY_POINTS,
+        roomAddedAt: "2026-10-19T21:00:00.000Z",
+        roomAddedById: "oid-rita",
+        roomAddedByName: "Rita Room",
+        roomDescription: "Entrance",
+        roomId: "rm-1",
+        roomName: "Lobby",
+      });
+      const sqls = sqlsRun();
+      const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+      const removed = sqls.findIndex(DELETE_ROOM);
+      expect(logged).toBeGreaterThan(-1);
+      expect(removed).toBeGreaterThan(logged);
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("logs an empty room too", async () => {
+      removeDb({ room: [ROOM_ROW] }, [JOINED[3]]);
+      await removeRoom();
+      const before = JSON.parse(paramsOf(callsMatching("INSERT INTO dbo.DecisionLedger")[0]).Before as string);
+      expect(before).toMatchObject({ attachmentCount: 0, pointCount: 0, points: [], roomId: "rm-1" });
+    });
+
+    it("does not remove the room when the ledger row cannot be written; the op is rejected", async () => {
+      removeDb({ room: [ROOM_ROW] }, JOINED.slice(0, 3), true);
+
+      const res = await removeRoom();
+
+      const out = res.jsonBody as OpsOut;
+      expect(out.applied).toEqual([]);
+      expect(out.rejected).toHaveLength(1);
+      expect(sqlsRun().some(DELETE_ROOM)).toBe(false);
+      expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+    });
+
+    it("writes no ledger row for a room that is not in this inspection", async () => {
+      removeDb({}, []);
+      const res = await removeRoom();
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+      expect(callsMatching("LEFT JOIN dbo.InspectionPoints")).toHaveLength(0);
+    });
+  });
+
+  describe("removeLevel", () => {
+    it("logs the level and every room with its points and photos, then removes it", async () => {
+      removeDb({ level: [LEVEL_ROW] }, JOINED, false, CONTRIBUTORS);
+
+      const res = await removeLevel();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+      expect(ledger).toHaveLength(1);
+      const row = paramsOf(ledger[0]);
+      expect(row).toMatchObject({
+        Action: "inspection.level_removed",
+        ActorKind: "user",
+        ActorName: "Test User",
+        ActorRole: "facilities",
+        BuildingId: 9,
+        SubjectId: "7",
+        SubjectType: "inspection",
+      });
+      expect(JSON.parse(row.Before as string)).toEqual({
+        attachmentCount: 2,
+        contributors: [{ id: "oid-ada", name: "Ada Added" }, { id: "oid-bo", name: "Bo Builder" }],
+        levelAddedAt: "2026-10-18T00:00:00.000Z",
+        levelId: "lv-1",
+        levelName: "Ground",
+        pointCount: 2,
+        roomCount: 2,
+        rooms: [
+          { addedAt: "2026-10-19T21:00:00.000Z", addedById: "oid-rita", addedByName: "Rita Room", description: "Entrance", id: "rm-1", name: "Lobby", points: LOBBY_POINTS },
+          { addedAt: null, addedById: "oid-rita", addedByName: "Rita Room", description: "", id: "rm-2", name: "Plant room", points: [] },
+        ],
+      });
+      const sqls = sqlsRun();
+      const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+      const removed = sqls.findIndex(DELETE_LEVEL);
+      expect(logged).toBeGreaterThan(-1);
+      expect(removed).toBeGreaterThan(logged);
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("reads the rooms of the level that was named, not of any other", async () => {
+      removeDb({ level: [LEVEL_ROW] }, JOINED);
+      await removeLevel();
+      const [read] = callsMatching("LEFT JOIN dbo.InspectionPoints");
+      expect(read[1]).toContain("WHERE r.LevelId = @ScopeId");
+      expect(paramsOf(read)).toEqual({ ScopeId: "lv-1" });
+    });
+
+    it("does not remove the level when the ledger row cannot be written; the op is rejected", async () => {
+      removeDb({ level: [LEVEL_ROW] }, JOINED, true);
+
+      const res = await removeLevel();
+
+      const out = res.jsonBody as OpsOut;
+      expect(out.applied).toEqual([]);
+      expect(out.rejected).toHaveLength(1);
+      expect(sqlsRun().some(DELETE_LEVEL)).toBe(false);
+      expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+    });
+
+    it("writes no ledger row for a level that is not in this inspection", async () => {
+      removeDb({}, []);
+      const res = await removeLevel();
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+      expect(callsMatching("LEFT JOIN dbo.InspectionPoints")).toHaveLength(0);
+    });
+  });
+
+  // ── Too big for one ledger row: written as several, never refused ──────────
+  describe("a removal larger than one ledger row", () => {
+    type Point = { id: string; description: string; photos: number };
+    type RoomSpec = { id: string; name: string; points: Point[] };
+
+    /** The LEFT JOIN result for these rooms: one row per room x point x photo. */
+    function joinedFor(rooms: RoomSpec[]): { rows: Row[]; photoIds: Map<string, string[]> } {
+      const rows: Row[] = [];
+      const photoIds = new Map<string, string[]>();
+      for (const room of rooms) {
+        const head = { RoomId: room.id, RoomName: room.name, RoomDescription: null };
+        if (room.points.length === 0) rows.push({ ...head, PointId: null, PointDescription: null, AttachmentId: null, BlobName: null, FileName: null });
+        for (const point of room.points) {
+          const ids: string[] = [];
+          photoIds.set(point.id, ids);
+          if (point.photos === 0) rows.push({ ...head, PointId: point.id, PointDescription: point.description, AttachmentId: null, BlobName: null, FileName: null });
+          for (let i = 0; i < point.photos; i += 1) {
+            const photo = photoRow();
+            ids.push(photo.Id);
+            rows.push({ ...head, PointId: point.id, PointDescription: point.description, AttachmentId: photo.Id, BlobName: photo.BlobName, FileName: photo.FileName });
+          }
+        }
+      }
+      return { rows, photoIds };
+    }
+
+    // The mock rows for these rooms carry no added-by columns, so the records hold null.
+    const NO_STAMP = { addedAt: null, addedById: null, addedByName: null };
+
+    type Before = {
+      part?: number; parts?: number; rooms?: { id: string }[]; points?: { id: string; description?: string; continued?: boolean; attachments: { id: string }[] }[];
+    };
+    const ledgerRows = () => callsMatching("INSERT INTO dbo.DecisionLedger").map((call) => paramsOf(call));
+    const beforesOf = (rows: Record<string, unknown>[]): Before[] => rows.map((row) => JSON.parse(row.Before as string));
+
+    /** Every point and photo record from the detail rows: how often each id turns up. */
+    function tally(befores: Before[]) {
+      const photoSeen = new Map<string, number>();
+      const pointText = new Map<string, number>();
+      const pointOrder: string[] = [];
+      for (const before of befores.slice(1)) {
+        for (const point of before.points ?? []) {
+          if (!pointOrder.includes(point.id)) pointOrder.push(point.id);
+          if (point.description !== undefined) pointText.set(point.id, (pointText.get(point.id) ?? 0) + 1);
+          for (const att of point.attachments) photoSeen.set(att.id, (photoSeen.get(att.id) ?? 0) + 1);
+        }
+      }
+      return { photoSeen, pointOrder, pointText };
+    }
+
+    it("splits a level of about 900 photos in 3 rooms into rows under the limit that hold every record once", async () => {
+      const rooms: RoomSpec[] = ["Lobby", "Plant room", "Stair"].map((name, r) => ({
+        id: `rm-${r + 1}`,
+        name,
+        points: [0, 1, 2].map((p) => ({ id: `pt-${r + 1}${p + 1}`, description: `Finding ${r + 1}.${p + 1}`, photos: 100 })),
+      }));
+      const { rows: joined, photoIds } = joinedFor(rooms);
+      removeDb({ level: [LEVEL_ROW] }, joined);
+
+      const res = await removeLevel();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const rows = ledgerRows();
+      expect(rows.length).toBeGreaterThanOrEqual(3);
+      expect(rows[0]).toMatchObject({ Action: "inspection.level_removed", BuildingId: 9, SubjectId: "7", SubjectType: "inspection" });
+      expectRowsWithinTheLimit(rows);
+      const befores = beforesOf(rows);
+      expect(befores.map((b) => b.part)).toEqual(rows.map((_, i) => i + 1));
+      expect(befores.every((b) => b.parts === rows.length)).toBe(true);
+      expect(befores[0]).toEqual({
+        attachmentCount: 900,
+        levelAddedAt: "2026-10-18T00:00:00.000Z",
+        levelId: "lv-1",
+        levelName: "Ground",
+        part: 1,
+        parts: rows.length,
+        pointCount: 9,
+        roomCount: 3,
+        rooms: [
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-1", name: "Lobby", pointCount: 3 },
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-2", name: "Plant room", pointCount: 3 },
+          { ...NO_STAMP, attachmentCount: 300, description: "", id: "rm-3", name: "Stair", pointCount: 3 },
+        ],
+      });
+      const { photoSeen, pointOrder, pointText } = tally(befores);
+      expect(pointOrder).toEqual([...photoIds.keys()]);
+      expect([...pointText.values()]).toEqual(Array(9).fill(1));
+      expect(photoSeen.size).toBe(900);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+      expect([...photoSeen.keys()].sort()).toEqual([...photoIds.values()].flat().sort());
+      for (const before of befores.slice(1)) {
+        expect(before).toMatchObject({ levelId: "lv-1", levelName: "Ground" });
+        expect(before.points?.every((point) => "roomId" in point)).toBe(true);
+      }
+      const sqls = sqlsRun();
+      expect(sqls.map((sql) => sql.includes("INSERT INTO dbo.DecisionLedger")).lastIndexOf(true)).toBeLessThan(sqls.findIndex(DELETE_LEVEL));
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
+    });
+
+    it("splits the photos of one point of about 600 across rows, each slice naming its point", async () => {
+      const { rows: joined, photoIds } = joinedFor([{ id: "rm-1", name: "Lobby", points: [{ id: "pt-9", description: "Water damage", photos: 600 }] }]);
+      removeDb({ room: [ROOM_ROW] }, joined);
+
+      const res = await removeRoom();
+
+      expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+      const rows = ledgerRows();
+      expect(rows.length).toBeGreaterThan(2);
+      expect(rows[0].Action).toBe("inspection.room_removed");
+      expectRowsWithinTheLimit(rows);
+      const befores = beforesOf(rows);
+      expect(befores[0]).toEqual({
+        attachmentCount: 600,
+        levelId: "lv-1",
+        levelName: "Ground",
+        part: 1,
+        parts: rows.length,
+        pointCount: 1,
+        roomAddedAt: "2026-10-19T21:00:00.000Z",
+        roomAddedById: "oid-rita",
+        roomAddedByName: "Rita Room",
+        roomDescription: "Entrance",
+        roomId: "rm-1",
+        roomName: "Lobby",
+      });
+      const slices = befores.slice(1).flatMap((before) => before.points ?? []);
+      expect(slices.length).toBe(rows.length - 1);
+      expect(slices.every((slice) => slice.id === "pt-9")).toBe(true);
+      expect(slices.map((slice) => slice.continued === true)).toEqual(slices.map((_, i) => i > 0));
+      expect(slices.map((slice) => slice.description)).toEqual(slices.map((_, i) => (i === 0 ? "Water damage" : undefined)));
+      const { photoSeen } = tally(befores);
+      expect(photoSeen.size).toBe(600);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+      expect(slices.flatMap((slice) => slice.attachments.map((a) => a.id))).toEqual(photoIds.get("pt-9"));
+    });
+
+    it("keeps small points whole beside a big one, in order", async () => {
+      const { rows: joined } = joinedFor([
+        { id: "rm-1", name: "Lobby", points: [
+          { id: "pt-a", description: "Small", photos: 2 },
+          { id: "pt-b", description: "Big", photos: 500 },
+          { id: "pt-c", description: "Also small", photos: 1 },
+        ] },
+      ]);
+      removeDb({ room: [ROOM_ROW] }, joined);
+
+      await removeRoom();
+
+      const befores = beforesOf(ledgerRows());
+      const { photoSeen, pointOrder, pointText } = tally(befores);
+      expect(pointOrder).toEqual(["pt-a", "pt-b", "pt-c"]);
+      expect([...pointText.entries()]).toEqual([["pt-a", 1], ["pt-b", 1], ["pt-c", 1]]);
+      expect(photoSeen.size).toBe(503);
+      expect([...photoSeen.values()].every((n) => n === 1)).toBe(true);
+    });
+
+    it("rejects the whole op and removes nothing when a later part fails to write", async () => {
+      const { rows: joined } = joinedFor([{ id: "rm-1", name: "Lobby", points: [{ id: "pt-9", description: "Water damage", photos: 900 }] }]);
+      removeDb({ room: [ROOM_ROW] }, joined, 3);
+
+      const res = await removeRoom();
+
+      const out = res.jsonBody as OpsOut;
+      expect(out.applied).toEqual([]);
+      expect(out.rejected).toHaveLength(1);
+      expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(3);
+      expect(sqlsRun().some(DELETE_ROOM)).toBe(false);
+      expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+      expect(blob.deleteBlob).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ── UX fix round 2, B2: a photo removal is logged first, and the file stays ──
+
+describe("applyInspectionOps removeAttachment op", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const REMOVE = { id: "op-rm", inspectionId: 7, createdAt: "", op: { type: "removeAttachment", attachmentId: "att-1" } };
+  const PHOTO_ROW = {
+    Id: "att-1", PointId: "pt-1", BlobName: "inspections/5d2e8a90-77c1-4f0b-a3d4-000000000001.jpg", FileName: "crack.jpg",
+    UploadedAt: new Date("2026-10-20T01:02:03.000Z"), UploadedById: "oid-una", UploadedByName: "Una Uploader",
+    RoomId: "rm-1", RoomName: "Lobby", LevelName: "Ground", BuildingId: 9,
+  };
+
+  function photoDb(photo: Row[], failLedger = false): void {
+    db.executeQuery.mockImplementation(async (_conn: unknown, sql: string) => {
+      if (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id")) return [{ Revision: 1, Status: "draft" }];
+      if (sql.startsWith("SELECT a.Id, a.PointId")) return photo;
+      if (sql.includes("INSERT INTO dbo.DecisionLedger") && failLedger) throw new Error("ledger down");
+      if (sql.includes("OUTPUT INSERTED.Revision")) return [{ Revision: 2 }];
+      return [];
+    });
+  }
+  const apply = () =>
+    applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [REMOVE] } }), makeContext());
+  const paramsOf = (call: SqlCall): Record<string, unknown> => Object.fromEntries(call[2].map((p) => [p.name, p.value]));
+  const sqlsRun = () => (db.executeQuery.mock.calls as SqlCall[]).map(([, sql]) => sql);
+
+  it("logs who removed which photo, from which point, and who uploaded it and when, then removes the record", async () => {
+    photoDb([PHOTO_ROW]);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    const ledger = callsMatching("INSERT INTO dbo.DecisionLedger");
+    expect(ledger).toHaveLength(1);
+    const row = paramsOf(ledger[0]);
+    expect(row).toMatchObject({
+      Action: "inspection.photo_removed",
+      ActorKind: "user",
+      ActorName: "Test User",
+      ActorRole: "facilities",
+      BuildingId: 9,
+      SubjectId: "7",
+      SubjectType: "inspection",
+    });
+    expect(JSON.parse(row.Before as string)).toEqual({
+      attachmentId: "att-1",
+      blobName: PHOTO_ROW.BlobName,
+      fileName: "crack.jpg",
+      levelName: "Ground",
+      pointId: "pt-1",
+      roomId: "rm-1",
+      roomName: "Lobby",
+      uploadedAt: "2026-10-20T01:02:03.000Z",
+      uploadedById: "oid-una",
+      uploadedByName: "Una Uploader",
+    });
+    const sqls = sqlsRun();
+    const logged = sqls.findIndex((sql) => sql.includes("INSERT INTO dbo.DecisionLedger"));
+    const removed = sqls.findIndex((sql) => sql.startsWith("DELETE a"));
+    expect(logged).toBeGreaterThan(-1);
+    expect(removed).toBeGreaterThan(logged);
+  });
+
+  it("keeps the photo file: nothing is removed from blob storage", async () => {
+    photoDb([PHOTO_ROW]);
+    await apply();
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("does not remove the photo when the ledger row cannot be written; the op is rejected", async () => {
+    photoDb([PHOTO_ROW], true);
+
+    const res = await apply();
+
+    const out = res.jsonBody as OpsOut;
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    expect(sqlsRun().some((sql) => sql.startsWith("DELETE a"))).toBe(false);
+    expect(sqlsRun()).toContain("ROLLBACK TRANSACTION op_sp");
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+
+  it("reads and deletes only within the inspection named, and logs nothing for a photo that is not in it", async () => {
+    photoDb([]);
+
+    const res = await apply();
+
+    expect((res.jsonBody as OpsOut).applied).toEqual(["op-rm"]);
+    expect(callsMatching("INSERT INTO dbo.DecisionLedger")).toHaveLength(0);
+    for (const call of [...callsMatching("FROM dbo.InspectionAttachments a"), ...callsMatching("DELETE a")]) {
+      expect(call[1]).toContain("l.InspectionId = @InspectionId");
+      expect(paramsOf(call)).toMatchObject({ InspectionId: 7 });
+    }
+  });
+});
+
+// ── UX fix round 2, B2 (bug 5): point text is capped at 5,000 characters ─────
+
+describe("applyInspectionOps point text length", () => {
+  type OpsOut = { applied: string[]; rejected?: { id: string; reason: string }[] };
+  const apply = (op: Row) =>
+    applyInspectionOps(
+      makeRequest({ headers: authHeaders("facilities"), body: { inspectionId: 7, ops: [{ id: "op-1", inspectionId: 7, createdAt: "", op }] } }),
+      makeContext(),
+    );
+  const draftDb = () =>
+    mockDb([
+      { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
+      { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
+    ]);
+  const add = (description: string) => ({ type: "addPoint", pointId: "pt-1", roomId: "rm-1", description, addedAt: "2026-10-23T00:00:00.000Z" });
+  const update = (description: string) => ({ type: "updatePoint", pointId: "pt-1", patch: { description } });
+
+  it("accepts exactly 5,000 characters on add and on update", async () => {
+    draftDb();
+    expect(((await apply(add("x".repeat(5000)))).jsonBody as OpsOut).applied).toEqual(["op-1"]);
+    draftDb();
+    expect(((await apply(update("x".repeat(5000)))).jsonBody as OpsOut).applied).toEqual(["op-1"]);
+    expect(callsMatching("INSERT INTO dbo.InspectionPoints")).toHaveLength(1);
+    expect(callsMatching("UPDATE p")).toHaveLength(1);
+  });
+
+  it.each([
+    ["addPoint", add, "INSERT INTO dbo.InspectionPoints"],
+    ["updatePoint", update, "UPDATE p"],
+  ])("refuses 5,001 characters on %s, writes nothing, and says why in the reason", async (_name, build, sqlStart) => {
+    draftDb();
+
+    const out = (await apply(build("x".repeat(5001)))).jsonBody as OpsOut;
+
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toHaveLength(1);
+    expect(out.rejected?.[0].reason).toMatch(/5001 characters.*limit is 5000/);
+    expect(callsMatching(sqlStart)).toHaveLength(0);
+  });
+
+  it("an over-long note's reason is shown in production, while other failures stay generic", () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Production";
+    expect(opRejectionReason(new OpRefusal("too long"))).toBe("too long");
+    expect(opRejectionReason(new Error("Violation of UNIQUE KEY constraint"))).toBe("Operation could not be applied");
+  });
+});

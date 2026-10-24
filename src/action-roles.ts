@@ -34,6 +34,7 @@ import { MANAGE_DEFECTS_PERIODS_ROLES, MANAGE_SERVICE_SCHEDULES_ROLES, VIEW_FACI
 import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
+import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
 export interface ActionRoles {
   /** The allowlist the handler's gate is given. */
@@ -61,16 +62,16 @@ const REVIEW_APPROVERS: readonly AppRole[] = [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRE
 const ADMIN_TEST_ONLY = "admin acts on test records only (beta sprint decision 4), and a screen doesn't know whether a record is one";
 
 export const ACTION_ROLES = {
-  viewDocumentation: { gate: [A.USER], routes: ["getDocumentRegister", "downloadRegisterDocument"], why: "Unified metadata discovery; each source retains its own role/audience and test-data filters. User-only readers see procedures only." },
+  viewDocumentation: { gate: [A.USER], routes: ["getDocumentRegister", "downloadRegisterDocument", "askLibrary"], why: "Unified metadata discovery; each source retains its own role/audience and test-data filters. User-only readers see procedures only. Ask the Library (askLibrary) answers from passages the browser chose out of the procedures this person can already read; the gateway adds its own switch and rate limit." },
   editRegisterDocuments: { gate: VIEW_ASSETS_ROLES, routes: ["uploadRegisterDocument", "updateRegisterDocument"], why: "Record original operational documents. Metadata updates require ownership or management; tenancy scope additionally requires tenancy access." },
   viewMajorEvents: { gate: EVENT_READ_ROLES, match: "exact", routes: ["getMajorEvents", "getMajorEvent", "addMajorEventEntry", "uploadMajorEventDocument", "getMajorEventDocument", "exportMajorEventPack"], why: "Operational event coordination for operational staff; each event further restricts reads and contributions to its selected audience, always including its management authority." },
-  manageOperationalEvents: { gate: OPERATIONAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only facilities managers and directors create, plan and close operational events; admin has no implicit override." },
-  manageFinancialEvents: { gate: FINANCIAL_EVENT_MANAGERS, match: "exact", routes: [], why: "Only CFO/directors create, plan and close financial events; an event grants no financial approval authority." },
-  manageMajorEvents: { gate: [A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer event management gate; the stored event domain further restricts facilities managers to operational and CFO to financial events." },
+  manageOperationalEvents: { gate: [A.ADMIN, ...OPERATIONAL_EVENT_MANAGERS], match: "exact", routes: [], why: "Admin, facilities managers and directors create/edit operational event plans; only facilities managers/directors close them." },
+  manageFinancialEvents: { gate: [A.ADMIN, ...FINANCIAL_EVENT_MANAGERS], match: "exact", routes: [], why: "Admin and CFO/directors create/edit financial event plans; only CFO/directors close them. No money approval authority is granted." },
+  manageMajorEvents: { gate: [A.ADMIN, A.FACILITIES_APPROVAL, A.CFO, A.DIRECTOR], match: "exact", routes: ["createMajorEvent", "updateMajorEvent", "closeMajorEvent"], why: "Outer gate for planning/closure. Admin may create/edit plans; closure retains domain-specific Facilities Manager or CFO/director authority." },
   addQuoteContractor: {
     gate: [A.ACCOUNTS, A.FACILITIES],
-    routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent"],
-    why: "Request quotes: keep a job's list of contractors asked to quote. Field officers do this (decision 1).",
+    routes: ["addJobRequestedContractor", "removeJobRequestedContractor", "toggleRequestedContractorSent", "suggestContractors", "recordContractorSuggestionOutcome"],
+    why: "Request quotes: keep a job's list of contractors asked to quote, and see who is suggested for it. Field officers do this (decision 1). Everyone who may raise a purchase order is in this list, so suggestions serve both choosing a contractor to ask and one to assign.",
   },
   approveInvoice: {
     gate: roles(SUBJECT_ELIGIBLE_ROLES.invoice),
@@ -124,6 +125,12 @@ export const ACTION_ROLES = {
     refused: [A.ADMIN],
     routes: ["directorApproveQuote"],
     why: "The director's approval of a quote. The handler re-checks the director role: admin is never a director approver.",
+  },
+  approveOptionExercise: {
+    gate: REVIEW_APPROVERS,
+    refused: [A.ADMIN],
+    routes: ["approveOptionExercise"],
+    why: `Approve a recorded option notice, which extends the lease and its schedule (OPTION_APPROVE_ROLES, leaseEvents/http.ts); not the notice's recorder; ${ADMIN_TEST_ONLY}.`,
   },
   approveRentReview: {
     gate: REVIEW_APPROVERS,
@@ -213,14 +220,19 @@ export const ACTION_ROLES = {
   },
   createQuote: {
     gate: [A.ACCOUNTS, A.FACILITIES],
-    routes: ["upsertQuote"],
-    why: "Add or edit a received quote. Field officers do this (decision 1); approving one is approveQuote.",
+    routes: ["upsertQuote", "extractDocumentFields"],
+    why: "Add or edit a received quote. Field officers do this (decision 1); approving one is approveQuote. extractDocumentFields (Read this document, SC-AI2) shares this gate for quotes and invoices alike, because createInvoice is the same list.",
   },
   createTestData: {
     gate: [A.ADMIN, A.DIRECTOR],
     match: "exact",
     routes: [],
     why: "Create a record marked as test data (D9). It gates the create forms' test checkbox; the rule itself lives inside the creates (test-data.ts testFlagForCreate, a literal admin-or-director check), so no route of its own.",
+  },
+  createWorkRequest: {
+    gate: [A.FACILITIES_APPROVAL],
+    routes: ["createWorkRequest"],
+    why: "File a new work request from Job Intake, which creates it in myBuildings first: facilities managers, with admin and directors through the hierarchy. Field officers and accounts are refused, so the New request button is not offered to them.",
   },
   deleteAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
@@ -250,7 +262,7 @@ export const ACTION_ROLES = {
   },
   editInspections: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
-    routes: ["createInspection", "applyInspectionOps", "completeInspection", "uploadInspectionAttachment", "raiseJobsFromInspection"],
+    routes: ["createInspection", "applyInspectionOps", "completeInspection", "uploadInspectionAttachment", "raiseJobsFromInspection", "tidyInspectionJobTitles"],
     why: "Create, edit and complete inspections (EDIT_INSPECTIONS_ROLES, inspections.ts).",
   },
   editJobs: {
@@ -297,6 +309,11 @@ export const ACTION_ROLES = {
     routes: ["upsertDefectsPeriod", "archiveDefectsPeriod"],
     why: "Add, edit and archive defects periods, and book inside one with a reason.",
   },
+  manageManualBuildings: {
+    gate: [A.ADMIN],
+    routes: ["upsertManualBuilding"],
+    why: "Add a building myBuildings doesn't manage, and edit it (upsertManualBuilding: authorizeWrite with ADMIN only).",
+  },
   managePurchaseOrders: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES_APPROVAL],
     routes: ["deletePurchaseOrder", "unmarkPurchaseOrderComplete"],
@@ -309,7 +326,7 @@ export const ACTION_ROLES = {
   },
   manageServiceSchedules: {
     gate: MANAGE_SERVICE_SCHEDULES_ROLES,
-    routes: ["upsertServiceSchedule", "archiveServiceSchedule", "importServiceSchedules"],
+    routes: ["saveMaintenanceCoverage", "saveContractorCoverage", "upsertServiceSchedule", "archiveServiceSchedule", "importServiceSchedules"],
     why: "Add, edit, archive and import service schedules.",
   },
   manageTestData: {
@@ -340,6 +357,12 @@ export const ACTION_ROLES = {
     routes: ["setMyobControl", "pauseMyob", "acceptMyobBaseline", "runMyobLabProbe", "recordMyobLabResult"],
     why: "The CFO's MYOB switches and the pause, accepting MYOB's record as the baseline (SPR-M4), and the MYOB lab's probes and results (plan M5) (isMyobController: the cfo role, literally).",
   },
+  overrideLeaseEventChecks: {
+    gate: [A.DIRECTOR],
+    match: "exact",
+    routes: [],
+    why: "Accept an option notice dated outside its window, approve an exercise with the schedule not signed off, or approve a notice you recorded, each with a reason: directors only (D23).",
+  },
   overrideRentReviewChecks: {
     gate: [A.DIRECTOR],
     match: "exact",
@@ -350,6 +373,16 @@ export const ACTION_ROLES = {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.FACILITIES],
     routes: ["promoteEmailToJob", "promoteEmailToQuote", "promoteEmailToInvoice"],
     why: "Turn an email into a job, a quote or an invoice. Field officers do this (decision 1).",
+  },
+  viewEmailRouting: {
+    gate: [A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL],
+    routes: ["getEmailRouting"],
+    why: "See, on each Incoming email, which mailbox it came from, who has it and why, and the send it replies to. Same people as read Incoming itself (getEmails).",
+  },
+  triageIncomingEmail: {
+    gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
+    routes: ["getTriageQueue", "assignEmail"],
+    why: "Work the Needs triage queue and give an Incoming email to someone, or move it to someone else (EB3). The team managers' job; directors, the CFO and admin through the hierarchy. Field officers see who has an email, they do not hand it out.",
   },
   raiseEscalation: {
     gate: [A.ADMIN, A.DIRECTOR, A.CFO, A.ACCOUNTS_APPROVAL, A.ACCOUNTS, A.FACILITIES_APPROVAL, A.FACILITIES],
@@ -405,6 +438,23 @@ export const ACTION_ROLES = {
     routes: ["respondToJobDecision"],
     why: "Answer a decision you were asked for (the request names who).",
   },
+  recordOptionNotice: {
+    gate: TENANCY_DESK,
+    routes: ["recordOptionNotice"],
+    why: "Record a tenant's notice exercising a lease option (OPTION_RECORD_ROLES, leaseEvents/http.ts: the editTenancy roles).",
+  },
+  recordRenewalOutcome: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["recordRenewalOutcome"],
+    why: `Decide a lease referred for renewal: renewed, vacating or holdover (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
+  },
+  rejectOptionNotice: {
+    gate: [A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["rejectOptionNotice", "correctOptionsRemaining"],
+    why: `Reject a recorded option notice, or correct a lease's options left, each with a reason (LEASE_DIRECTOR_ROLES); ${ADMIN_TEST_ONLY}.`,
+  },
   revertAnyInspection: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
     refused: [A.FACILITIES],
@@ -416,6 +466,11 @@ export const ACTION_ROLES = {
     refused: [A.ADMIN],
     routes: ["revertRentReview"],
     why: "Revert an applied rent review (REVIEW_APPROVE_ROLES). Admin is refused.",
+  },
+  runAiHealthCheck: {
+    gate: [A.ADMIN],
+    routes: ["runAiHealthCheck"],
+    why: "Send a test call through the AI gateway (echo_test) to check the switch, the provider and the log: admin only, as the other technical administration (viewTechnicalSettings). It reads no record and takes no input.",
   },
   sendPurchaseOrder: {
     gate: [A.ACCOUNTS_APPROVAL, A.FACILITIES_APPROVAL],
@@ -464,6 +519,26 @@ export const ACTION_ROLES = {
     routes: ["getAccessEvents"],
     why: "Recent sign-ins and anomalies (ACCESS_VIEW_ROLES).",
   },
+  viewAiActivity: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    routes: ["listAiCalls"],
+    why: "Admin → AI activity: the log of every AI call (who, which purpose, how big, how it ended): admin and directors, as Settings and rollout controls (viewAdmin). No route returns stored text.",
+  },
+  viewUsageAnalytics: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi"],
+    why: "Audit log → Usage: who uses Floorplan, for how long, on what kind of device, plus the email and AI breakdowns (PLAN §14): admin and directors. The CFO is refused these routes and has the Finance view instead (usage/scope.ts holds the scope).",
+  },
+  viewFinanceUsageAnalytics: {
+    gate: [A.CFO],
+    routes: ["getUsageFinance"],
+    why: "Audit log → Usage → Finance usage: accounts, accounts manager, CFO and admin people, MYOB calls and money decisions only (PLAN §14): the CFO, with admin and directors through the hierarchy. The server holds the CFO to that scope whatever filters are sent.",
+  },
+  manageUsageAnalytics: {
+    gate: [A.ADMIN],
+    routes: ["labelUsageDevice", "runUsageRollup"],
+    why: "Name a shared device (\"Facilities tablet\") and run the usage roll-up now (PLAN §14): admin only.",
+  },
   viewFinanceControlsPack: { gate: [A.CFO, A.DIRECTOR], routes: ["getFinanceControlsPack"], why: "Read the CFO controls matrix and sign-off history (WP55)." },
   signFinanceControlsPack: { gate: [A.CFO], match: "exact", routes: ["signFinanceControlsPack"], why: "The CFO records her review of the current controls pack; this enables no MYOB writes." },
   manageApprovalLimits: {
@@ -477,6 +552,41 @@ export const ACTION_ROLES = {
     routes: ["setApprovalFact"],
     why: "The CFO sets variance margin and cap; only a director or admin sets the director approval threshold; every change is money-gated and ledgered (decision 17).",
   },
+  // Native email (EB1, PLAN §13). The server composes every signature and checks every reply-to; these gates
+  // only say who may use the comms routes. Admin passes the gates but is turned away by the handlers of the
+  // two that send or approve real mail (the same rule as the approvals above: admin acts on test records only).
+  sendEmail: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    refused: [A.ADMIN],
+    routes: ["listCommsIdentities", "previewCorrespondence", "queueCorrespondence", "cancelCorrespondence", "sendTestCorrespondence"],
+    why: "Send email from Floorplan: choose a reply-to identity and a signature, preview, queue and cancel a send. Property and facilities staff and above. Admin is refused: it sends nothing real.",
+  },
+  approveEmail: {
+    gate: [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR, A.FACILITIES_APPROVAL],
+    refused: [A.ADMIN],
+    routes: ["approveCorrespondence"],
+    why: "Approve a large send (over COMMS_APPROVAL_THRESHOLD recipients): a manager, the CFO or a director, never the person who queued it. The handler checks that; admin approves nothing real and is refused.",
+  },
+  viewCorrespondence: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    routes: ["getCorrespondence", "listCorrespondence"],
+    why: "Read a send job and its recipients, and list sends. The handlers further limit it to whoever queued the job and the managers who approve sends.",
+  },
+  sendBroadcast: {
+    gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL, A.DIRECTOR],
+    routes: ["resolveBroadcastAudience", "getBroadcastOptions"],
+    why: "Build and send an email broadcast (Tools, Email broadcast): choose an audience, see who would get it, write it, preview it. Managers and directors (the CFO through the accounts manager rule). Admin passes the gate so the screens can be tried, but queueing and the test send refuse admin (sendEmail), so nothing real goes from an admin account.",
+  },
+  manageEmailIdentities: {
+    gate: [A.ADMIN],
+    routes: ["manageCommsIdentities"],
+    why: "Admin → Email identities: the reply-to addresses, the roles allowed to send on their behalf and their team signatures. Admin only.",
+  },
+  editMySignature: {
+    gate: [A.USER],
+    routes: ["getMySignature", "updateMySignature"],
+    why: "Your own standard signature: your job title and phone. Any assigned role edits their own; an admin may edit another person's (the handler checks).",
+  },
   viewTechnicalSettings: { gate: [A.ADMIN], match: "exact", routes: [], why: "Technical administration pages remain admin-only; directors have business Settings." },
   viewAdmin: {
     gate: [A.ADMIN, A.DIRECTOR],
@@ -488,11 +598,39 @@ export const ACTION_ROLES = {
     routes: [],
     why: "Every escalation in the business (ALL_ESCALATION_ROLES, getEscalations?view=all).",
   },
+  viewLeave: {
+    gate: [A.USER],
+    routes: ["getLeaveRequests", "createLeaveRequest", "decideLeaveRequest", "getCoverDelegates", "saveCoverDelegate", "archiveCoverDelegate", "getMyHandback", "takeBackCoverItem"],
+    why: "Own leave and server-filtered review queue; per-record authority is enforced. Also who covers for you while you are away (AW1): you, your manager or your team's manager nominate, and you take back what moved while you were away.",
+  },
+  viewAbsenceCover: {
+    gate: roles(VIEW_COVER_ROLES),
+    routes: ["getCoverOverview"],
+    why: "The Covering screen: who is away, what is waiting on them and what moved (AW1, VIEW_COVER_ROLES). A manager sees their own team; the CFO and directors see more.",
+  },
+  manageAbsenceCover: {
+    gate: roles(MANAGE_COVER_ROLES),
+    refused: [A.ADMIN],
+    routes: ["decideCoverItem"],
+    why: "Move an item to its cover, or keep it where it is (AW1). The gate admits admin through the hierarchy and the handler refuses it: admin arranges nobody's work (decision 4). Live only: nothing moves while ABSENCE_COVER_ENABLED is unset or in dry run.",
+  },
+  manageStaffReporting: { gate: [A.CFO,A.DIRECTOR], routes: ["getStaffReporting", "saveStaffReporting"], why: "CFO reporting controls for leave routing; no money or timesheet authority changes." },
+  viewBuildingRegister: {
+    gate: VIEW_ASSETS_ROLES,
+    routes: ["getBuildingRegister"],
+    why: "Read building, lot and contact details; existing operational-reader roles.",
+  },
+  editBuildingRegister: {
+    gate: MANAGE_ASSET_TYPES_ROLES,
+    routes: ["saveBuildingRegister"],
+    why: "Maintain building/lot facts and contacts; existing property-manager roles (admin, director and facilities manager).",
+  },
   viewAssets: {
     gate: VIEW_ASSETS_ROLES,
     routes: ["getAssets", "getAsset", "getLocations", "getAssetTypes"],
     why: "Read the asset register.",
   },
+  viewAuditLog: { gate: [A.FACILITIES_APPROVAL,A.CFO,A.DIRECTOR], routes: ["getAuditLog"], why: "Cross-application audit: Facilities managers receive operational metadata only; CFO/director/admin receive all recorded areas." },
   viewDecisions: {
     gate: [A.DIRECTOR, A.CFO],
     routes: ["getDecisions"],
@@ -520,8 +658,8 @@ export const ACTION_ROLES = {
   },
   viewJobs: {
     gate: JOB_READ,
-    routes: ["getJobs", "getJob"],
-    why: "Read jobs, their history and their packet.",
+    routes: ["getJobs", "getJob", "getCoverNotes"],
+    why: "Read jobs, their history and their packet, and who is covering a job while its owner is away.",
   },
   viewKeys: {
     gate: [A.FACILITIES, A.FACILITIES_APPROVAL],
@@ -530,13 +668,18 @@ export const ACTION_ROLES = {
   },
   viewMaintenanceOverview: {
     gate: VIEW_FACILITIES_ROLES,
-    routes: ["getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules"],
-    why: "Defects periods, service schedules and the maintenance overview.",
+    routes: ["getMaintenanceCoverage", "getMaintenanceOverview", "getDefectsPeriods", "getServiceSchedules", "getRecurringFaults"],
+    why: "Defects periods, service schedules, the maintenance overview and recurring-fault signals.",
   },
   viewMyobControls: {
     gate: [A.CFO],
     routes: ["getMyobControls", "getMyobActivity", "reconcileMyob", "getMyobLab"],
     why: "Read the MYOB controls, the Activity view and reconciliation (SPR-M4), and the MYOB lab (plan M5).",
+  },
+  viewOperationsReports: {
+    gate: [A.CFO, A.FACILITIES_APPROVAL],
+    routes: ["getMaintenanceSpendReport", "getComplianceReport"],
+    why: "The operations reports in Tools → Reports (maintenance spend, compliance): the CFO, directors and admin, and facilities managers. Reads only, commercial buildings only.",
   },
   viewPayments: {
     gate: [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.DIRECTOR],
@@ -564,6 +707,11 @@ export const ACTION_ROLES = {
     routes: ["getQuotes"],
     why: "Read a job's quotes.",
   },
+  viewLeaseEvents: {
+    gate: TENANCY_DESK,
+    routes: ["getTenancyLeaseEvents"],
+    why: "A tenancy's option exercises and renewals (LEASE_EVENT_VIEW_ROLES: the roles that may read a tenancy).",
+  },
   viewRentReviews: {
     gate: TENANCY_DESK,
     routes: ["getRentReviews", "getRentReview", "getUpcomingLeaseEvents"],
@@ -583,6 +731,11 @@ export const ACTION_ROLES = {
     gate: TENANCY_DESK,
     routes: [],
     why: "A tenancy's Decision history (historyRoles.ts TENANCY_READ).",
+  },
+  viewTenancySchedule: {
+    gate: [A.DIRECTOR, A.CFO],
+    routes: ["getTenancySchedule"],
+    why: "The Tenancy Schedule report: every lease's rent, contacts and notes (TENANCY-SCHEDULE-REPORT decision 5).",
   },
   viewTimesheets: {
     gate: [A.USER],

@@ -38,6 +38,7 @@ import { generateReadSasUrl } from "../blob-storage";
 import { isDevOverrideEnabled } from "../jwt";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { syncMailbox } from "../email/mail-sync";
+import { runTriageStep, syncExtraMailboxes } from "../inboundTriage/steps";
 import { findPoNumber } from "../email/po-ref";
 import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { domainOf, orgEmailDomains } from "../email/sender-auth";
@@ -962,7 +963,10 @@ export async function processEmailSync(message: unknown, context: InvocationCont
     }
   }
 
+  // EB3: other mailboxes (INBOUND_EXTRA_MAILBOXES) and triage of mail to notices@; both are off unless switched on.
+  await syncExtraMailboxes(context, source);
   await parseQueued("processEmailSync", context, deadline);
+  await runTriageStep(context, deadline);
 }
 
 // ── POST /api/triggerEmailParse ────────────────────────────────────────────

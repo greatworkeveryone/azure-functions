@@ -81,7 +81,9 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // deleteOther: the four alias-form deletes (removeRoom, removePoint,
   // removeAttachment, the linkRooms fold), invisible to the FROM-only count
   // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.
-  "src/functions/inspections.ts": { deleteBlob: 1, deleteFrom: 6, deleteOther: 4 },
+  // No deleteBlob: point, room, level and photo removal all write their ledger row first
+  // and leave the files in storage (UX fix round 2, B2).
+  "src/functions/inspections.ts": { deleteFrom: 6, deleteOther: 4 },
   // Removes only the blob this same request just uploaded (fresh randomUUID key) when the register insert did not commit,
   // and only after a fresh read finds no RegisterDocuments row referencing it.
   "src/functions/document-register.ts": { deleteBlob: 1 },
@@ -98,6 +100,11 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
   "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
   "src/functions/vacancies.ts": { deleteFrom: 1 },
+  // REVIEWED (UA1, 24 Oct 2026): the usage purge. Three deletes, all opt-in (USAGE_PURGE_ENABLED), selected positively and in
+  // batches: raw UsageViews past retention whose person-day is rolled up after the day ended and after the session's last
+  // heartbeat, then UsageSessions past retention with no views left whose day is rolled up, then a person's UsageDaily totals go only as whole days older than USAGE_DAILY_RETENTION_DAYS (default 730, never below the raw days),
+  // never UsageDevices. See src/usage/purge.ts and usagePurgeTimer.ts.
+  "src/usage/purge.ts": { deleteFrom: 3 },
   "src/functions/workRequests.ts": { deleteFrom: 1 },
   // REVIEWED (D4, 17 Oct 2026): the one tenancy hard delete, shared by
   // deleteRegisterTenant and deleteTenant. See TENANCY_DRAFT_DELETE below.
@@ -109,8 +116,10 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
 // to it were read under lock and found empty — no jobs, keys, vacancies,
 // occupancies or their history, notes, rent reviews, rent schedule change log,
 // lease documents, car parks, decision-ledger rows (as subject or scope),
-// schedule rows, schedule sign-off or defects periods — and its own ledger row
-// (tenancy.delete_draft) is written before the commit.
+// schedule sign-off, defects periods, schedule change requests or documentation
+// register entries — and every column a person can fill in on the tenancy is
+// empty (src/tenancyDraftContent.ts; D11 re-check S1-2), and its own ledger row
+// (tenancy.delete_draft), holding the whole deleted row, is written before the commit.
 const TENANCY_DRAFT_DELETE = {
   file: "src/tenancy-records.ts",
   fn: "deleteTenancyDraft",

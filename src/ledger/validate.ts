@@ -8,7 +8,14 @@ export class LedgerValidationError extends Error {
   }
 }
 
-const MAX_SNAPSHOT_BYTES = 64 * 1024;
+/** The most a before / after / computed snapshot may hold: its UTF-8 JSON, in bytes. */
+export const LEDGER_MAX_SNAPSHOT_BYTES = 64 * 1024;
+
+/** What the ledger counts against that cap for a snapshot (0 when there is nothing to store). */
+export function snapshotBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return json === undefined ? 0 : Buffer.byteLength(json, "utf8");
+}
 
 // Column widths of dbo.DecisionLedger (migration 094); a test holds the two in
 // step. An entry that would not fit is refused here with a clear message
@@ -28,14 +35,14 @@ const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function assertSnapshot(label: string, value: unknown): void {
   if (value === undefined) return;
-  let json: string | undefined;
+  let bytes: number;
   try {
-    json = JSON.stringify(value);
+    bytes = snapshotBytes(value);
   } catch {
     throw new LedgerValidationError(`${label} is not JSON-serialisable`);
   }
-  if (json !== undefined && Buffer.byteLength(json, "utf8") > MAX_SNAPSHOT_BYTES) {
-    throw new LedgerValidationError(`${label} exceeds ${MAX_SNAPSHOT_BYTES} bytes`);
+  if (bytes > LEDGER_MAX_SNAPSHOT_BYTES) {
+    throw new LedgerValidationError(`${label} exceeds ${LEDGER_MAX_SNAPSHOT_BYTES} bytes`);
   }
 }
 

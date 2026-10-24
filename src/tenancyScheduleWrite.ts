@@ -58,6 +58,8 @@ export type ScheduleMutation<T> =
   | {
       afterUpdate?: (connection: Connection) => Promise<void>;
       column: ScheduleJsonColumn;
+      /** The write changes no figure (a fee's category only, TENANCY-SCHEDULE T11): a signed-off schedule stays signed off and no reason is asked. */
+      keepsSignOff?: boolean;
       kind: "write";
       ledgerEntries: LedgerDraft[];
       result: T;
@@ -242,7 +244,7 @@ export async function runScheduleWrite<T>(
     // An edit to a signed-off schedule clears the sign-off, and says why. Asked
     // after the version and the request itself are known to be good, so nobody
     // is prompted for a reason on a write that would be refused anyway.
-    const priorSignOff = scheduleSignOffFromRow(locked);
+    const priorSignOff = mutation.keepsSignOff ? null : scheduleSignOffFromRow(locked);
     if (priorSignOff && !target.signOffClearReason) {
       await rollbackQuietly(connection);
       return { kind: "signOffReasonRequired", signOff: priorSignOff };

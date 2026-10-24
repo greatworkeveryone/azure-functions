@@ -381,3 +381,28 @@ describe("graphFetchEmails → inbound attachment hygiene", () => {
     expect(typesStored()).toEqual(["application/octet-stream", "application/pdf"]);
   });
 });
+
+describe("graphFetchEmails → reply headers (EB3)", () => {
+  it("reads In-Reply-To and References from the message headers, normalised", async () => {
+    routeGraph([
+      {
+        from: { emailAddress: { address: "tenant@example.test", name: "T" } },
+        hasAttachments: false,
+        id: "g-reply",
+        internetMessageHeaders: [
+          { name: "In-Reply-To", value: "<Parent@Randazzo.Properties>" },
+          { name: "References", value: "<root@randazzo.properties>\r\n <Parent@Randazzo.Properties>" },
+        ],
+        internetMessageId: "<reply@x>",
+      },
+      { from: { emailAddress: { address: "tenant@example.test", name: "T" } }, hasAttachments: false, id: "g-new", internetMessageId: "<new@x>" },
+    ]);
+
+    const emails = await graphFetchEmails("inbox@example.test");
+
+    expect(emails.map((e) => [e.internetMessageId, e.inReplyTo, e.referenceIds])).toEqual([
+      ["<reply@x>", "parent@randazzo.properties", "root@randazzo.properties parent@randazzo.properties"],
+      ["<new@x>", null, null],
+    ]);
+  });
+});

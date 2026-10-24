@@ -48,7 +48,7 @@ export interface CascadeRow {
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 const r4 = (n: number): number => Math.round(n * 10000) / 10000;
 
-const PERIODS_PER_YEAR: Record<MiscFeeFrequency, number> = { annual: 1, monthly: 12, quarterly: 4 };
+export const PERIODS_PER_YEAR: Record<MiscFeeFrequency, number> = { annual: 1, monthly: 12, quarterly: 4 };
 
 /** The override dated inside a row's period (effectiveTo is exclusive), latest first, as the frontend picks it. */
 function overrideFor<T extends { effectiveFrom: string }>(row: ScheduleRow, overrides: readonly T[] | undefined): T | undefined {

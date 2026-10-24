@@ -50,9 +50,13 @@ import {
   type EscalationPolicy,
   type EscalationRow,
   type EscalationStatus,
+  type NextLevelDto,
 } from "./types";
 
 // ── Shared pieces ────────────────────────────────────────────────────────────
+
+/** The label of a level that is a group of named people rather than a role. */
+const NAMED_PEOPLE_LABEL = "Named people";
 
 /** The actor the sweep acts as. */
 export const SWEEP_ACTOR: LedgerActor = { kind: "system", name: "escalationSweepTimer" };
@@ -910,16 +914,44 @@ function resolveFurther(
   });
 }
 
+/** The target "Escalate further" would send this escalation to, or null when there is none. */
+async function nextTarget(
+  connection: Connection,
+  row: EscalationRow,
+  now: Date,
+  users?: readonly DirectoryUser[],
+): Promise<ResolvedTarget | null> {
+  const policy = await getPolicy(connection, row.policyKey, now.getTime());
+  if (!policy) return null;
+  try {
+    return resolveFurther(row, policy, users ?? (await listActiveUsers(connection)), "next_level");
+  } catch {
+    return null;
+  }
+}
+
 /** Whether the ladder has anyone eligible above this escalation's level (the
  *  sweep uses it to tell "move up" from "remind"). */
 export async function hasNextLevel(connection: Connection, row: EscalationRow, now: Date = new Date()): Promise<boolean> {
-  const policy = await getPolicy(connection, row.policyKey, now.getTime());
-  if (!policy) return false;
-  try {
-    return resolveFurther(row, policy, await listActiveUsers(connection), "next_level") !== null;
-  } catch {
-    return false;
-  }
+  return (await nextTarget(connection, row, now)) !== null;
+}
+
+/** Who "Escalate further" would send this escalation to: the role's label and the
+ *  eligible people's names (none when the level is only an env-list mailbox).
+ *  Null when the ladder has nobody above. Read-only; pass `users` to reuse a
+ *  directory already loaded. */
+export async function previewNextLevel(
+  connection: Connection,
+  row: EscalationRow,
+  now: Date = new Date(),
+  users?: readonly DirectoryUser[],
+): Promise<NextLevelDto | null> {
+  const target = await nextTarget(connection, row, now, users);
+  if (!target) return null;
+  return {
+    names: target.users.map((user) => user.name),
+    roleLabel: target.role === null ? NAMED_PEOPLE_LABEL : roleLabel(target.role),
+  };
 }
 
 /**

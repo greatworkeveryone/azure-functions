@@ -8,6 +8,7 @@ export interface InfoSheetRow {
   subheader: string;
   body: string;
   displayOrder: number;
+  strikethrough?: boolean;
 }
 
 export interface InfoSheetSection {

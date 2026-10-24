@@ -12,10 +12,13 @@ import { Sentry } from "./sentry";
 
 /** Every timer the app registers; a guard test keeps this and src in step. */
 export const TIMER_NAMES = [
+  "absenceCoverTimer",
   "accessReportTimer",
+  "commsSendTimer",
   "digestTimer",
   "schedulerTimer",
   "escalationSweepTimer",
+  "leaseEventsGeneratorTimer",
   "ledgerVerifyTimer",
   "myobDailyEmailTimer",
   "myobReadbackTimer",
@@ -27,6 +30,8 @@ export const TIMER_NAMES = [
   "tenancyCpiSyncTimer",
   "tenancyReviewScheduleTimer",
   "timesheetSyncTimer",
+  "usagePurgeTimer",
+  "usageRollupTimer",
 ] as const;
 export type TimerName = (typeof TIMER_NAMES)[number];
 

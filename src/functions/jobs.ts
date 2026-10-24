@@ -50,6 +50,7 @@ import { loadJobForTransition } from "../jobTransitionFacts";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
+import { JOB_PRIORITIES } from "../jobPriorities";
 import { showTestParam, testFlagForCreate } from "../test-data";
 
 // Who may edit, read and archive jobs is in the who-can-do-what table
@@ -226,9 +227,9 @@ const ALLOWED_STATUSES = [
 const ALLOWED_AWAITING_ROLES = ["facilities", "accounts"] as const;
 
 // Job priorities — mirror JOB_PRIORITY_OPTIONS in
-// command-centre/src/components/jobs/JobWRDetailsSection.tsx. The upstream
-// WR priority enum has the same four values, so this gate covers both flows.
-const ALLOWED_PRIORITIES = ["Critical", "High", "Normal", "Low"] as const;
+// command-centre/src/components/jobs/jobPriority.ts (the list lives in ../jobPriorities).
+// The upstream WR priority enum has the same four values, so this gate covers both flows.
+const ALLOWED_PRIORITIES = JOB_PRIORITIES;
 
 const ALLOWED_CREATION_METHODS = ["manual", "wr", "email", "inspection"] as const;
 
