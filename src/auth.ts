@@ -1,22 +1,16 @@
 import { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES } from "tedious";
+import { noteAccess } from "./access/accessEvents";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
+import { acceptedAudiences } from "./apiAudience";
 import { isDevOverrideEnabled, verifyEntraToken } from "./jwt";
 import { Sentry } from "./sentry";
-
-// Audience claim Entra puts on tokens issued for Azure SQL. Used by
-// rolesForRequest to verify the SQL bearer token before trusting its `oid`.
-// Entra emits this with and without a trailing slash depending on token
-// version / scope variant, so we accept both.
-const SQL_AUDIENCE = [
-  "https://database.windows.net/",
-  "https://database.windows.net",
-];
 
 export enum AppRole {
   ACCOUNTS            = "accounts",
   ACCOUNTS_APPROVAL   = "accounts_manager",
   ADMIN               = "admin",
+  CFO                 = "cfo",
   DIRECTOR            = "director",
   FACILITIES          = "facilities",
   FACILITIES_APPROVAL = "facilities_manager",
@@ -48,14 +42,27 @@ export function forbiddenResponse(detail?: string): HttpResponseInit {
   };
 }
 
+// 503 for "we couldn't determine your permissions right now" — a transient
+// failure of the role lookup, NOT an authorization denial. Distinct from 403 so
+// the client retries (react-query treats non-connection 5xx as retryable) and
+// recovers, instead of showing the user an unresolvable "no permission" error.
+// Wording deliberately avoids connection/timeout keywords so the frontend's
+// isConnectionError() classifier doesn't suppress the retry.
+export function serviceUnavailableResponse(): HttpResponseInit {
+  return {
+    status: 503,
+    headers: { "Retry-After": "1" },
+    jsonBody: { error: "Service temporarily unavailable — please retry." },
+  };
+}
+
 // Second arg accepts either a raw Error/unknown (preferred — preserves the
 // stack for Sentry) or a string (legacy). Either way we capture to Sentry so
 // no 500 escapes silently.
 export function errorResponse(message: string, errorOrDetails?: unknown): HttpResponseInit {
-  // Mirror the same dual-condition gate jwt.ts / rolesForRequest already use —
-  // checking only the env flag would let a Production deployment with the flag
-  // accidentally set leak raw error detail to clients. isDevOverrideEnabled()
-  // additionally requires AZURE_FUNCTIONS_ENVIRONMENT !== "Production".
+  // Same gate jwt.ts / rolesForRequest use — checking only the env flag would
+  // let a deployment with the flag accidentally set leak raw error detail to
+  // clients. isDevOverrideEnabled() also requires local Development.
   const isDev = isDevOverrideEnabled();
 
   if (errorOrDetails instanceof Error) {
@@ -82,11 +89,12 @@ export function errorResponse(message: string, errorOrDetails?: unknown): HttpRe
 }
 
 // ── Identity extraction ──────────────────────────────────────────────────────
-// Decodes the JWT payload without signature verification. This is safe here
-// because the same token is passed to Azure SQL, which performs full Entra
-// signature verification end-to-end — a forged token is rejected by SQL before
-// it can do anything. We only use the decoded payload for the `oid` claim (user
-// identity), never for authorization decisions directly.
+// Decodes the JWT payload without signature verification. Handlers no longer
+// pass this token to Azure SQL, so SQL does not verify it for us any more.
+// It's safe here because every call site sits behind requireRole /
+// rolesForRequest, which run verifyEntraToken on this same token before any
+// decoded claim is trusted — that's the trust anchor. Never use these decoders
+// to make an authorization decision on their own.
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
@@ -133,49 +141,87 @@ export function nameFromToken(token: string): string | null {
   return typeof name === "string" ? name : null;
 }
 
-/**
- * Reads the caller's app roles from the X-App-Token header.
- *
- * The app token is an Entra ID token whose audience is this app's clientId
- * (acquired with scope `${clientId}/.default`), so it carries the `roles`
- * claim directly — no Graph call needed.
- *
- * We verify the app token's signature against the tenant's JWKS, then
- * cross-check the OID in both tokens to ensure the app token belongs to the
- * same user as the SQL token. Without verification a forged X-App-Token
- * could claim any role.
- */
-export async function rolesFromAppToken(
-  sqlToken: string,
-  appToken: string,
-): Promise<string[]> {
-  const expectedAudience = process.env.APP_CLIENT_ID ?? "";
-  if (!expectedAudience) return [];
+// Roles come only from dbo.AppUsers (below). The old X-App-Token path read
+// Entra app-role claims nobody maintains and had no callers (SEC-13); any
+// X-App-Token header an old client still sends is ignored.
 
-  const appPayload = await verifyEntraToken(appToken, expectedAudience);
-  if (!appPayload) return [];
+// ── Role lookup: cache + in-flight dedup ──────────────────────────────────────
+// Every authorised request resolves the caller's role from dbo.AppUsers over the
+// shared service connection. A single page load fires many requests for the SAME
+// user (oid), which used to stampede the one tedious connection concurrently;
+// collisions there were swallowed into [] and surfaced as spurious 403s. So we:
+//   1. de-dupe concurrent lookups for the same oid onto one in-flight query, and
+//   2. cache the result briefly so follow-up navigation skips the DB entirely.
+// A *failed* lookup is never cached and is re-thrown (RoleLookupError) so the
+// caller answers a retryable 5xx instead of failing closed to a 403.
 
-  // The SQL token is only used to cross-check OID — we verify it separately
-  // (with its own audience) in rolesForRequest. Decoding the payload here
-  // without verification is fine because the OID match is a defensive check,
-  // not the trust anchor. The trust anchor is the verified app token above.
-  const sqlPayload = decodeJwtPayload(sqlToken);
-  if (!sqlPayload) return [];
-  if (sqlPayload.oid !== appPayload.oid) return [];
+export class RoleLookupError extends Error {
+  readonly cause: unknown;
+  constructor(oid: string, cause: unknown) {
+    super(`Role lookup failed for oid ${oid}`);
+    this.name = "RoleLookupError";
+    this.cause = cause;
+  }
+}
 
-  const roles = appPayload.roles;
-  if (!Array.isArray(roles)) return [];
-  return roles
-    .filter((r): r is string => typeof r === "string")
-    .map((r) => r.toLowerCase());
+// Short TTL: long enough to absorb a page-load burst plus a few seconds of
+// navigation, short enough that a role change propagates quickly.
+const ROLE_CACHE_TTL_MS = 30_000;
+const _roleCache = new Map<string, { roles: string[]; expiresAt: number }>();
+const _roleInflight = new Map<string, Promise<string[]>>();
+
+/** Test-only: drop cached/in-flight role lookups so cases don't bleed together. */
+export function clearRoleCache(): void {
+  _roleCache.clear();
+  _roleInflight.clear();
+}
+
+async function queryRolesForOid(oid: string): Promise<string[]> {
+  let connection;
+  try {
+    connection = await createServiceConnection();
+    const rows = await executeQuery(
+      connection,
+      `SELECT Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
+      [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
+    );
+    const role = rows[0]?.Role as string | null | undefined;
+    return role ? [role.toLowerCase()] : [];
+  } catch (err) {
+    // Do NOT return [] — indistinguishable from "user has no role" and yields a
+    // misleading, unrecoverable 403. Surface it so requireRole answers 503.
+    throw new RoleLookupError(oid, err);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+function lookupRolesForOid(oid: string): Promise<string[]> {
+  const cached = _roleCache.get(oid);
+  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.roles);
+
+  const existing = _roleInflight.get(oid);
+  if (existing) return existing;
+
+  const promise = queryRolesForOid(oid)
+    .then((roles) => {
+      // Only successful lookups are cached — a thrown failure leaves no entry,
+      // so the next request retries rather than serving a stale/empty result.
+      _roleCache.set(oid, { roles, expiresAt: Date.now() + ROLE_CACHE_TTL_MS });
+      return roles;
+    })
+    .finally(() => {
+      _roleInflight.delete(oid);
+    });
+
+  _roleInflight.set(oid, promise);
+  return promise;
 }
 
 export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
-  // Gate the X-Dev-Roles bypass on the same two conditions jwt.ts uses for
-  // signature-skipping — DEV_ROLE_OVERRIDE_ENABLED *and* a non-Production
-  // host. Sharing isDevOverrideEnabled() keeps the two from drifting apart;
-  // previously this checked only the env flag, so a deployment not labelled
-  // Production could have honoured spoofed roles from the header.
+  // Gate the X-Dev-Roles bypass on the same conditions jwt.ts uses for
+  // signature-skipping (switch on, local Development, not Azure-hosted).
+  // Sharing isDevOverrideEnabled() keeps the two from drifting apart.
   if (isDevOverrideEnabled()) {
     const header = request.headers.get("x-dev-roles");
     if (header) {
@@ -199,25 +245,14 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
   // before trusting the `oid` claim. SQL would reject a forged token at the
   // DB layer, but here we look the user up via a service connection — SQL
   // never sees this token, so we must verify it ourselves.
-  const payload = await verifyEntraToken(sqlToken, SQL_AUDIENCE);
+  const payload = await verifyEntraToken(sqlToken, acceptedAudiences());
   if (!payload) return [];
   const oid = typeof payload.oid === "string" ? payload.oid : null;
   if (!oid) return [];
 
-  const connection = await createServiceConnection();
-  try {
-    const rows = await executeQuery(
-      connection,
-      `SELECT Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
-      [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
-    );
-    const role = rows[0]?.Role as string | null | undefined;
-    return role ? [role.toLowerCase()] : [];
-  } catch {
-    return [];
-  } finally {
-    closeConnection(connection);
-  }
+  // Cached + de-duped; throws RoleLookupError on a transient lookup failure
+  // rather than swallowing it into [] (which would read as a 403).
+  return lookupRolesForOid(oid);
 }
 
 /**
@@ -240,7 +275,7 @@ export async function verifiedIdentityFromRequest(
   const token = extractToken(request);
   if (!token) return null;
 
-  const payload = await verifyEntraToken(token, SQL_AUDIENCE);
+  const payload = await verifyEntraToken(token, acceptedAudiences());
   if (!payload || typeof payload.oid !== "string") return null;
 
   const name = typeof payload.name === "string" ? payload.name : null;
@@ -256,6 +291,19 @@ export async function verifiedIdentityFromRequest(
 }
 
 /**
+ * The caller's bearer token claims after full verification (signature, expiry,
+ * issuer, audience), or null. The money gate (src/moneyGate.ts) reads
+ * `auth_time`/`iat` and `amr` from here; keep it on the same audience as
+ * rolesForRequest. Both token kinds carry them: an app-scoped v2 token has
+ * `amr`/`auth_time` when the SPA requests the scope for the same account.
+ */
+export async function verifiedRequestClaims(request: HttpRequest): Promise<Record<string, unknown> | null> {
+  const token = extractToken(request);
+  if (!token) return null;
+  return verifyEntraToken(token, acceptedAudiences());
+}
+
+/**
  * Returns null if the caller has at least one of the required roles,
  * or a 403 HttpResponseInit otherwise. Callers should early-return on the
  * non-null result.
@@ -263,34 +311,56 @@ export async function verifiedIdentityFromRequest(
  * Role hierarchy applied here so call sites don't have to enumerate every
  * superset role:
  *   - `admin` satisfies every check.
- *   - `director` satisfies every non-admin-only check (anything operational).
+ *   - `director` satisfies every non-admin-only check (anything operational),
+ *     so it satisfies a `cfo` check too.
+ *   - `cfo` sits between accounts_manager and director: it satisfies any
+ *     `accounts_manager` or `accounts` check.
  *   - `facilities_manager` satisfies any `facilities` check.
  *   - `accounts_manager`   satisfies any `accounts` check.
+ *   - `user` is the baseline tier — satisfied by ANY caller with an assigned,
+ *     active role. Only Pending / no-role accounts (empty roles) fail it, so a
+ *     call site can gate on `[AppRole.USER]` to mean "any authenticated app
+ *     user" without enumerating every operational role.
  */
+/**
+ * Whether these roles pass a requireRole gate on `allowed`, by the hierarchy
+ * described on requireRole. Pure, so the who-can-do-what table
+ * (action-roles.ts) works out each action's roles by the same rule.
+ */
+export function rolesPassGate(roles: readonly string[], allowed: readonly AppRole[]): boolean {
+  if (roles.includes(AppRole.ADMIN)) return true;
+  // Baseline tier: any assigned, active role satisfies a [USER] gate.
+  if (allowed.includes(AppRole.USER) && roles.length > 0) return true;
+  if (roles.includes(AppRole.DIRECTOR) && allowed.some((r) => r !== AppRole.ADMIN)) return true;
+  if (roles.includes(AppRole.CFO) && (allowed.includes(AppRole.ACCOUNTS_APPROVAL) || allowed.includes(AppRole.ACCOUNTS))) {
+    return true;
+  }
+  if (roles.includes(AppRole.FACILITIES_APPROVAL) && allowed.includes(AppRole.FACILITIES)) return true;
+  if (roles.includes(AppRole.ACCOUNTS_APPROVAL) && allowed.includes(AppRole.ACCOUNTS)) return true;
+  return roles.some((r) => allowed.includes(r as AppRole));
+}
+
 export async function requireRole(
   request: HttpRequest,
   allowed: readonly AppRole[],
 ): Promise<HttpResponseInit | null> {
-  const roles = await rolesForRequest(request);
+  let roles: string[];
+  try {
+    roles = await rolesForRequest(request);
+  } catch (err) {
+    // The role lookup itself failed (transient DB/connection) — distinct from
+    // "user has no role". Fail to a retryable 503, never a misleading 403.
+    Sentry.captureException(err, { extra: { context: "requireRole role lookup" } });
+    return serviceUnavailableResponse();
+  }
 
-  if (roles.includes(AppRole.ADMIN)) return null;
+  // Access log (S10): sampled and deferred, never awaited. Roles are non-empty
+  // only for a token rolesForRequest verified (or the dev override, which
+  // cannot run in Production), so the decoded oid is trusted.
+  const bearer = extractToken(request);
+  noteAccess(request, bearer ? oidFromToken(bearer) : null, roles);
 
-  if (
-    roles.includes(AppRole.DIRECTOR) &&
-    allowed.some((r) => r !== AppRole.ADMIN)
-  ) return null;
-
-  if (
-    roles.includes(AppRole.FACILITIES_APPROVAL) &&
-    allowed.includes(AppRole.FACILITIES)
-  ) return null;
-
-  if (
-    roles.includes(AppRole.ACCOUNTS_APPROVAL) &&
-    allowed.includes(AppRole.ACCOUNTS)
-  ) return null;
-
-  if (roles.some((r) => allowed.includes(r as AppRole))) return null;
+  if (rolesPassGate(roles, allowed)) return null;
 
   return forbiddenResponse(
     `Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`,

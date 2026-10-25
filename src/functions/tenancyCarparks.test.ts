@@ -41,7 +41,7 @@ jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 jest.mock("../rateLimit", () => ({
   checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }),
 }));
@@ -70,9 +76,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
-  createConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
+  createRequestConnection: jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   getCachedTenantList:         jest.Mock;
@@ -87,7 +96,6 @@ const rateLimit = require("../rateLimit") as { checkRateLimit: jest.Mock };
 
 // Trigger the module's app.http registrations so the mock above captures
 // every handler by name.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./tenancy");
 const handlers = (globalThis as unknown as { __tenancyHandlers: Record<string, Handler> }).__tenancyHandlers;
 
@@ -113,7 +121,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   cache.getCachedTenantList.mockReturnValue(null);
   cache.getCachedTenantDetail.mockReturnValue(null);
@@ -435,49 +443,7 @@ describe("upsertCarparksBulk", () => {
 
 // ── deleteCarpark ───────────────────────────────────────────────────────────
 
-describe("deleteCarpark", () => {
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 400 when CarparkId is missing", async () => {
-    const res = await handlers.deleteCarpark(makeRequest({}), ctx);
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/CarparkId required/);
-  });
-
-  it("returns 400 when CarparkId is not a string", async () => {
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: 5 }), ctx);
-    expect(res.status).toBe(400);
-  });
-
-  it("deletes a carpark on the happy path", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { deleted: boolean; carparkId: string };
-    expect(body.deleted).toBe(true);
-    expect(body.carparkId).toBe(VALID_CARPARK_ID);
-    const deleteCall = db.executeQuery.mock.calls.find(
-      ([, sql]: [unknown, string]) => sql.includes("DELETE FROM dbo.Carparks"),
-    );
-    expect(deleteCall).toBeDefined();
-  });
-
-  it("returns 500 when DB throws", async () => {
-    db.executeQuery.mockRejectedValueOnce(new Error("locked"));
-    const res = await handlers.deleteCarpark(makeRequest({ CarparkId: VALID_CARPARK_ID }), ctx);
-    expect(res.status).toBe(500);
-  });
-});
+// deleteCarpark is gone: areas and car parks are archived, never deleted (D10, tenancyPartsArchive.test.ts).
 
 // ── upsertCarparkScheduleGroup ──────────────────────────────────────────────
 
@@ -638,5 +604,53 @@ describe("deleteCarparkScheduleGroup", () => {
     db.executeQuery.mockRejectedValueOnce(new Error("network"));
     const res = await handlers.deleteCarparkScheduleGroup(makeRequest(validDeleteBody()), ctx);
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Car park group writes: versioned and ledgered (PLAN WP23a) ──────────────
+
+describe("car park group writes — versioned and ledgered", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+
+  it("ledgers an upsert as schedule.manual_edit on the car park group", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ CarparkScheduleGroups: null, ScheduleVersion: 0 }])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.upsertCarparkScheduleGroup(makeRequest(validGroupBody({ ScheduleVersion: 0 })), ctx);
+    expect(res.status).toBe(200);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { id: VALID_GROUP_ID, label: "Lot A" },
+      before: null,
+      buildingId: 5,
+      subject: { id: VALID_GROUP_ID, type: "carpark_group" },
+      tenantId: 1,
+    });
+  });
+
+  it("returns 409 when the group is written against a stale ScheduleVersion", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ CarparkScheduleGroups: null, ScheduleVersion: 4, UpdatedByName: "Kim" }]);
+    const res = await handlers.upsertCarparkScheduleGroup(makeRequest(validGroupBody({ ScheduleVersion: 3 })), ctx);
+    expect(res.status).toBe(409);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a group delete when the ledger write fails", async () => {
+    const stored = JSON.stringify([
+      { baseMonthlyRate: 1000, carparkIds: [VALID_CARPARK_ID], commencedAt: "2026-07-01", id: VALID_GROUP_ID, label: "Lot A" },
+    ]);
+    db.executeQuery
+      .mockResolvedValueOnce([{ CarparkScheduleGroups: stored, ScheduleVersion: 1 }])
+      .mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.deleteCarparkScheduleGroup(
+      makeRequest({ BuildingId: 5, groupId: VALID_GROUP_ID, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 });

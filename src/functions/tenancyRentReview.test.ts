@@ -28,6 +28,7 @@ jest.mock("../auth", () => {
     ...actual,
     extractToken:         jest.fn().mockReturnValue("mock-token"),
     requireRole:          jest.fn().mockResolvedValue(null),
+    rolesForRequest:      jest.fn().mockResolvedValue(["accounts"]),
     oidFromToken:         jest.fn().mockReturnValue("caller-oid-123"),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     errorResponse:        jest.fn().mockImplementation((msg: string, detail: string) => ({
@@ -37,11 +38,13 @@ jest.mock("../auth", () => {
   };
 });
 
+// Migration 136 is applied here: the portfolio figures take their commercial-only SQL (portfolioOccupancy.residences.test.ts covers the probe).
+jest.mock("../buildingCategoryColumn", () => ({ buildingCategoryColumnExists: jest.fn().mockResolvedValue(true), resetBuildingCategoryColumnProbe: jest.fn() }));
 jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -59,6 +62,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 const auth = require("../auth") as {
   extractToken:         jest.Mock;
   requireRole:          jest.Mock;
@@ -69,7 +78,7 @@ const db = require("../db") as {
   beginTransaction:    jest.Mock;
   closeConnection:     jest.Mock;
   commitTransaction:   jest.Mock;
-  createConnection:    jest.Mock;
+  createRequestConnection:    jest.Mock;
   executeQuery:        jest.Mock;
   rollbackTransaction: jest.Mock;
 };
@@ -85,7 +94,6 @@ const planner = require("../planner") as {
 
 // Trigger the module's app.http registrations so the mock above captures
 // every handler by name.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./tenancy");
 const handlers = (globalThis as unknown as { __tenancyHandlers: Record<string, Handler> }).__tenancyHandlers;
 
@@ -111,7 +119,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   db.beginTransaction.mockResolvedValue(undefined);
   db.commitTransaction.mockResolvedValue(undefined);
@@ -119,181 +127,6 @@ beforeEach(() => {
   cache.getCachedTenantList.mockReturnValue(null);
   cache.getCachedTenantDetail.mockReturnValue(null);
   planner.resolveActivePlannerTasks.mockResolvedValue(undefined);
-});
-
-// ── applyRentReview ─────────────────────────────────────────────────────────
-
-describe("applyRentReview", () => {
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 60000 }),
-      ctx,
-    );
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 60000 }),
-      ctx,
-    );
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 400 when ReviewId is missing", async () => {
-    const res = await handlers.applyRentReview(
-      makeRequest({ NewRentPerAnnum: 60000 }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/ReviewId required/);
-  });
-
-  it("returns 400 when ReviewId is empty string", async () => {
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "", NewRentPerAnnum: 60000 }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/ReviewId required/);
-  });
-
-  it("returns 400 when NewRentPerAnnum is missing", async () => {
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1" }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/NewRentPerAnnum required/);
-  });
-
-  it("returns 400 when NewRentPerAnnum is not a number", async () => {
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: "60000" }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/NewRentPerAnnum required/);
-  });
-
-  it("returns 400 when NewRentPerAnnum is NaN", async () => {
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: Number.NaN }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-    expect((res.jsonBody as { error: string }).error).toMatch(/NewRentPerAnnum required/);
-  });
-
-  it("returns 404 when the review does not exist", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-missing", NewRentPerAnnum: 60000 }),
-      ctx,
-    );
-    expect(res.status).toBe(404);
-    expect((res.jsonBody as { error: string }).error).toMatch(/Review not found/);
-  });
-
-  it("applies the rent review on the happy path", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([
-        { ReviewId: "rev-1", TenantId: 7, RentPerAnnum: 50000, ReviewIntervalMonths: 12 },
-      ])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000, Source: "manual" }),
-      ctx,
-    );
-
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as {
-      applied: boolean;
-      increasePercent: number;
-      nextReviewDate: string;
-      reviewId: string;
-      tenantId: number;
-    };
-    expect(body.applied).toBe(true);
-    expect(body.reviewId).toBe("rev-1");
-    expect(body.tenantId).toBe(7);
-    expect(body.increasePercent).toBe(10);
-    expect(body.nextReviewDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
-    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
-    expect(db.rollbackTransaction).not.toHaveBeenCalled();
-    expect(cache.invalidateTenant).toHaveBeenCalledWith(7);
-  });
-
-  it("uses the supplied IncreasePercent when provided", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([
-        { ReviewId: "rev-1", TenantId: 7, RentPerAnnum: 50000, ReviewIntervalMonths: 12 },
-      ])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000, IncreasePercent: 4.25 }),
-      ctx,
-    );
-
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { increasePercent: number };
-    expect(body.increasePercent).toBe(4.25);
-  });
-
-  it("fires planner resolve on success", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([
-        { ReviewId: "rev-1", TenantId: 7, RentPerAnnum: 50000, ReviewIntervalMonths: 12 },
-      ])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-
-    await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000 }),
-      ctx,
-    );
-
-    expect(planner.resolveActivePlannerTasks).toHaveBeenCalledWith(
-      "tenant",
-      7,
-      ["rent_review"],
-    );
-  });
-
-  it("rolls back and returns 500 when the UPDATE inside the transaction throws", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([
-        { ReviewId: "rev-1", TenantId: 7, RentPerAnnum: 50000, ReviewIntervalMonths: 12 },
-      ])
-      .mockRejectedValueOnce(new Error("update failed"));
-
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000 }),
-      ctx,
-    );
-
-    expect(res.status).toBe(500);
-    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(db.commitTransaction).not.toHaveBeenCalled();
-    expect(planner.resolveActivePlannerTasks).not.toHaveBeenCalled();
-  });
-
-  it("returns 500 when the initial SELECT throws", async () => {
-    db.executeQuery.mockRejectedValueOnce(new Error("connection lost"));
-    const res = await handlers.applyRentReview(
-      makeRequest({ ReviewId: "rev-1", NewRentPerAnnum: 55000 }),
-      ctx,
-    );
-    expect(res.status).toBe(500);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
-  });
 });
 
 // ── getReviewsDue ───────────────────────────────────────────────────────────
@@ -325,7 +158,8 @@ describe("getReviewsDue", () => {
     const [, sql, params] = db.executeQuery.mock.calls[0] as [unknown, string, unknown[]];
     expect(sql).toContain("NextReviewDate");
     expect(sql).not.toContain("WHERE BuildingId = @BuildingId");
-    expect(params).toEqual([]);
+    // Only the Show test data toggle (D9), off.
+    expect(params).toEqual([expect.objectContaining({ name: "ShowTest", value: false })]);
   });
 
   it("filters by buildingId when supplied", async () => {
@@ -345,9 +179,90 @@ describe("getReviewsDue", () => {
       Array<{ name: string; value: unknown }>,
     ];
     expect(sql).toContain("WHERE BuildingId = @BuildingId");
-    expect(params).toHaveLength(1);
+    expect(params).toHaveLength(2);
     expect(params[0].name).toBe("BuildingId");
     expect(params[0].value).toBe(9);
+  });
+
+  it("leaves out a tenancy whose keyed review has since passed and moved on", async () => {
+    const keyed = JSON.stringify([
+      { baseRentPerAnnum: 100000, effectiveFrom: "2020-07-01", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", methodKind: "commencement", ratePercent: 0 },
+      { effectiveFrom: "2021-07-01", id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", methodKind: "fixed", ratePercent: 3 },
+      { effectiveFrom: "2099-07-01", id: "cccccccc-cccc-cccc-cccc-cccccccccccc", methodKind: "fixed", ratePercent: 3 },
+    ]);
+    db.executeQuery.mockResolvedValueOnce([
+      { TenantId: 1, BuildingId: 5, LegalName: "Keyed Ahead", Status: "current", NextReviewDate: new Date("2021-07-01"), ScheduledRateSteps: keyed },
+      { TenantId: 2, BuildingId: 5, LegalName: "Overdue", Status: "current", NextReviewDate: new Date("2021-07-01") },
+    ]);
+    const res = await handlers.getReviewsDue(makeRequest(undefined), ctx);
+    const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+    expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue"]);
+  });
+
+  describe("lease events", () => {
+    const { addDaysIso, todayInDarwin } = require("../darwinDate") as {
+      addDaysIso: (iso: string, days: number) => string;
+      todayInDarwin: () => string;
+    };
+    const inDays = (days: number) => new Date(`${addDaysIso(todayInDarwin(), days)}T00:00:00Z`);
+
+    it("also asks the database for expiries and option deadlines in the next 90 days", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+      await handlers.getReviewsDue(makeRequest(null), ctx);
+      const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+      expect(sql).toContain("NextReviewDate");
+      expect(sql).toContain("Expiry");
+      expect(sql).toContain("OptionNoticeMonths");
+      expect(sql).toContain("DATEADD(month");
+      expect(sql).toContain("Status <> 'vacated'");
+    });
+
+    it("keeps the building filter in front of the lease-event conditions", async () => {
+      db.executeQuery.mockResolvedValueOnce([]);
+      await handlers.getReviewsDue(makeRequest(null, { buildingId: "9" }), ctx);
+      const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+      expect(sql).toContain("WHERE BuildingId = @BuildingId AND");
+    });
+
+    it("returns a lease that expires in 45 days although its next review is a year away", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 1, BuildingId: 5, LegalName: "Expiring Soon", Status: "current", Expiry: inDays(45), NextReviewDate: inDays(365) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string; daysToExpiry: number }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Expiring Soon"]);
+      expect(tenants[0].daysToExpiry).toBe(45);
+    });
+
+    it("returns a lease whose option deadline is 20 days away", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        {
+          TenantId: 2, BuildingId: 5, LegalName: "Option Deadline", Status: "current",
+          Expiry: inDays(20 + 91), OptionNoticeMonths: 3, NextReviewDate: inDays(400),
+        },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Option Deadline"]);
+    });
+
+    it("leaves out a lease with nothing due in the window", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 3, BuildingId: 5, LegalName: "Far Off", Status: "current", Expiry: inDays(400), NextReviewDate: inDays(400) },
+        { TenantId: 4, BuildingId: 5, LegalName: "Expired Long Ago", Status: "holdover", Expiry: inDays(-200), NextReviewDate: inDays(400) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      expect((res.jsonBody as { tenants: unknown[] }).tenants).toEqual([]);
+    });
+
+    it("still returns an overdue review that has no expiry", async () => {
+      db.executeQuery.mockResolvedValueOnce([
+        { TenantId: 5, BuildingId: 5, LegalName: "Overdue Review", Status: "current", NextReviewDate: inDays(-10) },
+      ]);
+      const res = await handlers.getReviewsDue(makeRequest(null), ctx);
+      const { tenants } = res.jsonBody as { tenants: Array<{ legalName: string }> };
+      expect(tenants.map((tenant) => tenant.legalName)).toEqual(["Overdue Review"]);
+    });
   });
 
   it("returns an empty list when no tenants are due", async () => {
@@ -379,6 +294,27 @@ describe("getPortfolioOccupancy", () => {
     expect(res.status).toBe(403);
   });
 
+  it.each([["facilities"], ["facilities_manager"]])("withholds annualRent from %s but keeps the rest", async (role) => {
+    (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
+    db.executeQuery.mockResolvedValueOnce([
+      { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
+    const { buildings } = res.jsonBody as { buildings: Array<Record<string, unknown>> };
+    expect(buildings[0].annualRent).toBeNull();
+    expect(buildings[0].activeSqm).toBe(800);
+    expect(JSON.stringify(res.jsonBody)).not.toContain("250000");
+  });
+
+  it.each([["accounts_manager"], ["director"], ["admin"]])("returns annualRent to %s", async (role) => {
+    (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
+    db.executeQuery.mockResolvedValueOnce([
+      { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
+    expect((res.jsonBody as { buildings: Array<{ annualRent: number }> }).buildings[0].annualRent).toBe(250000);
+  });
+
   it("returns a building summary on the happy path", async () => {
     db.executeQuery.mockResolvedValueOnce([
       {
@@ -390,7 +326,7 @@ describe("getPortfolioOccupancy", () => {
         WaleNumeratorSqmDays: 800 * 365 * 3,
         WaleDenominatorSqm: 800,
       },
-    ]);
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
@@ -430,7 +366,7 @@ describe("getPortfolioOccupancy", () => {
         WaleNumeratorSqmDays: 0,
         WaleDenominatorSqm: 0,
       },
-    ]);
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
@@ -442,7 +378,7 @@ describe("getPortfolioOccupancy", () => {
   });
 
   it("returns an empty array when no buildings have tenants", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
+    db.executeQuery.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(200);
     expect((res.jsonBody as { buildings: unknown[] }).buildings).toEqual([]);

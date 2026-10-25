@@ -12,6 +12,49 @@ import {
   StorageSharedKeyCredential,
 } from "@azure/storage-blob";
 import { randomUUID } from "crypto";
+import { isAllowedContentType, isInlineSafeType, normaliseMediaType } from "./upload-constants";
+import {
+  assertBlobName,
+  BlobNameShape,
+  isBlobName,
+  KEY_PHOTO_SHAPE,
+  PO_PDF_SHAPE,
+  VACANCY_SHAPE,
+  WR_ATTACHMENTS_SHAPES,
+} from "./blob-names";
+
+/**
+ * The blob host (no port) that an `AzureWebJobsStorage` connection string points
+ * at: `BlobEndpoint` when present, otherwise `{AccountName}.blob.{EndpointSuffix}`.
+ * Null when the string yields neither (e.g. `UseDevelopmentStorage=true`).
+ *
+ * Connection-string keys are matched case-insensitively and split on the first
+ * `=` only, because base64 account keys end in `=` padding.
+ */
+export function blobHostFromConnectionString(connectionString: string | undefined): string | null {
+  if (!connectionString) return null;
+  const parts = new Map<string, string>();
+  for (const segment of connectionString.split(";")) {
+    const eq = segment.indexOf("=");
+    if (eq <= 0) continue;
+    parts.set(segment.slice(0, eq).trim().toLowerCase(), segment.slice(eq + 1).trim());
+  }
+
+  const endpoint = parts.get("blobendpoint");
+  if (endpoint) {
+    try {
+      const host = new URL(endpoint).hostname.toLowerCase();
+      if (host) return host;
+    } catch {
+      // Malformed BlobEndpoint: fall back to the account name below.
+    }
+  }
+
+  const account = parts.get("accountname");
+  const suffix = parts.get("endpointsuffix");
+  if (account && suffix) return `${account}.blob.${suffix}`.toLowerCase();
+  return null;
+}
 
 const CONTAINER_NAME = process.env.ATTACHMENTS_CONTAINER_NAME ?? "wr-attachments";
 const SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -46,6 +89,22 @@ export interface UploadBlobResult {
   url: string; // account URL of the blob (no SAS yet)
 }
 
+// The extension comes from a client-supplied filename and ends up inside a
+// blob path, so anything beyond plain alphanumerics (slashes, dot-segments,
+// spaces) must be stripped — both to keep blob names path-safe and so minted
+// names always satisfy the inspections addAttachment validator.
+export function sanitizeBlobExtension(originalName: string): string {
+  if (!originalName.includes(".")) return "";
+  const rawExt = originalName.split(".").pop() ?? "";
+  return rawExt.replace(/[^A-Za-z0-9]/g, "").slice(0, 10);
+}
+
+// RFC 5987 value: encodeURIComponent plus the characters it leaves bare.
+function contentDispositionFor(originalName: string, inline: boolean): string {
+  const encoded = encodeURIComponent(originalName).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encoded}`;
+}
+
 export async function uploadBlob(
   buffer: Buffer,
   originalName: string,
@@ -53,13 +112,16 @@ export async function uploadBlob(
   keyPrefix: string,
 ): Promise<UploadBlobResult> {
   const container = await getContainerClient();
-  const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
-  const blobName = `${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`;
+  const ext = sanitizeBlobExtension(originalName);
+  const blobName = assertBlobName(`${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`, WR_ATTACHMENTS_SHAPES);
   const blockBlob = container.getBlockBlobClient(blobName);
+  // Only allowlisted types keep their type; only images/PDF render inline.
+  const storedType = isAllowedContentType(contentType) ? normaliseMediaType(contentType) : "application/octet-stream";
+  const inline = isInlineSafeType(storedType);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
-      blobContentType: contentType,
-      blobContentDisposition: `inline; filename="${encodeURIComponent(originalName)}"`,
+      blobContentType: storedType,
+      blobContentDisposition: contentDispositionFor(originalName, inline),
     },
   });
   return { blobName, url: blockBlob.url };
@@ -67,6 +129,8 @@ export async function uploadBlob(
 
 /**
  * Generates a time-limited read SAS URL for a blob in the given container.
+ * Throws BlobNameError, before signing anything, unless the name is one the
+ * server mints for that container (`shapes`).
  * TTL is 4 hours by default. Used both to hand files to myBuildings for ingest
  * and to surface privately-stored vacancy / building-gallery images to clients.
  */
@@ -74,7 +138,9 @@ function generateReadSasUrlForContainer(
   containerName: string,
   blobName: string,
   ttlMs: number,
+  shapes: BlobNameShape | readonly BlobNameShape[],
 ): string {
+  assertBlobName(blobName, shapes);
   const service = getServiceClient();
   if (!cachedAccountKey) {
     throw new Error("Blob account key unavailable — SAS signing requires a shared-key connection string");
@@ -104,12 +170,75 @@ function generateReadSasUrlForContainer(
  * can ingest the file.
  */
 export function generateReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS): string {
-  return generateReadSasUrlForContainer(CONTAINER_NAME, blobName, ttlMs);
+  return generateReadSasUrlForContainer(CONTAINER_NAME, blobName, ttlMs, WR_ATTACHMENTS_SHAPES);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Key handover photos.
+//
+// These are PERMANENT evidence/audit records (who held a key, with a photo of
+// the handover), so they live in their own private `key-photos` container,
+// separate from `wr-attachments`. (wr-attachments used to be reaped 48h after
+// upload by a cleanup timer; that timer is gone, but the separation stays so
+// no future bulk job on attachments can touch key evidence.) Blob names keep
+// the historical `keys/<uuid>.<ext>` shape so stored DB values are unchanged;
+// only the container differs. Reads mint a short-lived SAS at the boundary.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KEY_PHOTOS_CONTAINER = "key-photos";
+
+async function getKeyPhotosContainerClient() {
+  const container = getServiceClient().getContainerClient(KEY_PHOTOS_CONTAINER);
+  await container.createIfNotExists(); // private by default
+  return container;
+}
+
+export async function uploadKeyPhotoBlob(
+  buffer: Buffer,
+  originalName: string,
+  contentType: string,
+): Promise<UploadBlobResult> {
+  const container = await getKeyPhotosContainerClient();
+  const ext = sanitizeBlobExtension(originalName);
+  const blobName = assertBlobName(`keys/${randomUUID()}${ext ? "." + ext : ""}`, KEY_PHOTO_SHAPE);
+  const blockBlob = container.getBlockBlobClient(blobName);
+  // Only allowlisted types keep their type; only images/PDF render inline.
+  const storedType = isAllowedContentType(contentType) ? normaliseMediaType(contentType) : "application/octet-stream";
+  const inline = isInlineSafeType(storedType);
+  await blockBlob.uploadData(buffer, {
+    blobHTTPHeaders: {
+      blobContentType: storedType,
+      blobContentDisposition: contentDispositionFor(originalName, inline),
+    },
+  });
+  return { blobName, url: blockBlob.url };
+}
+
+/**
+ * Time-limited read SAS URL for a key-photo blob in the `key-photos` container.
+ * Key photo names arrive in request bodies, so a stored name that is not a
+ * minted `keys/<uuid>` name gets no URL (null) rather than failing the list.
+ */
+export function keyPhotoReadSasUrl(blobName: string, ttlMs: number = SAS_TTL_MS): string | null {
+  if (!isBlobName(blobName, KEY_PHOTO_SHAPE)) {
+    console.warn("keyPhotoReadSasUrl: refused a stored key photo name that is not a minted keys/<uuid> name");
+    return null;
+  }
+  return generateReadSasUrlForContainer(KEY_PHOTOS_CONTAINER, blobName, ttlMs, KEY_PHOTO_SHAPE);
 }
 
 export async function deleteBlob(blobName: string): Promise<void> {
+  assertBlobName(blobName, WR_ATTACHMENTS_SHAPES);
   const container = await getContainerClient();
   await container.getBlockBlobClient(blobName).deleteIfExists();
+}
+
+export async function downloadBlob(blobName: string): Promise<Buffer> {
+  assertBlobName(blobName, WR_ATTACHMENTS_SHAPES);
+  const container = await getContainerClient();
+  const blockBlob = container.getBlockBlobClient(blobName);
+  const response = await blockBlob.downloadToBuffer();
+  return response;
 }
 
 /**
@@ -117,19 +246,12 @@ export async function deleteBlob(blobName: string): Promise<void> {
  * (`po/{poId}.pdf`), so re-previewing overwrites the same blob rather than
  * leaving orphaned drafts. Returns the blob name for storage on the PO row.
  */
-export async function downloadBlob(blobName: string): Promise<Buffer> {
-  const container = await getContainerClient();
-  const blockBlob = container.getBlockBlobClient(blobName);
-  const response = await blockBlob.downloadToBuffer();
-  return response;
-}
-
 export async function uploadPurchaseOrderPdf(
   purchaseOrderId: number,
   buffer: Buffer,
 ): Promise<UploadBlobResult> {
+  const blobName = assertBlobName(`po/${purchaseOrderId}.pdf`, PO_PDF_SHAPE);
   const container = await getContainerClient();
-  const blobName = `po/${purchaseOrderId}.pdf`;
   const blockBlob = container.getBlockBlobClient(blobName);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
@@ -180,8 +302,10 @@ export async function uploadPublicBlob(
   keyPrefix: string,
 ): Promise<{ blobName: string; url: string }> {
   const container = await getVacanciesContainerClient();
-  const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
-  const blobName = `${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`;
+  // The extension comes from the uploaded file's name: sanitise it like every
+  // other upload, or `a.jpg/../../wr-attachments/x` writes into another container.
+  const ext = sanitizeBlobExtension(originalName);
+  const blobName = assertBlobName(`${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`, VACANCY_SHAPE);
   const blockBlob = container.getBlockBlobClient(blobName);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: { blobContentType: contentType },
@@ -190,6 +314,7 @@ export async function uploadPublicBlob(
 }
 
 export async function deletePublicBlob(blobName: string): Promise<void> {
+  assertBlobName(blobName, VACANCY_SHAPE);
   const container = await getVacanciesContainerClient();
   await container.getBlockBlobClient(blobName).deleteIfExists();
 }
@@ -214,13 +339,14 @@ export function vacanciesBlobNameFromUrl(url: string): string | null {
  * Converts a bare vacancies-container blob URL (as persisted in the DB) into a
  * short-lived read SAS URL the client can load directly. Non-vacancies-container
  * URLs (external CDN, already-signed, etc.) are returned unchanged so callers
- * can map over mixed lists safely.
+ * can map over mixed lists safely; so is a vacancies URL whose name is not a
+ * minted vacancy name, which therefore gets no signature.
  */
 export function vacanciesReadSasUrl(
   url: string,
   ttlMs: number = VACANCY_SAS_TTL_MS,
 ): string {
   const blobName = vacanciesBlobNameFromUrl(url);
-  if (!blobName) return url;
-  return generateReadSasUrlForContainer(VACANCIES_CONTAINER, blobName, ttlMs);
+  if (!blobName || !isBlobName(blobName, VACANCY_SHAPE)) return url;
+  return generateReadSasUrlForContainer(VACANCIES_CONTAINER, blobName, ttlMs, VACANCY_SHAPE);
 }

@@ -1,0 +1,307 @@
+name: Deploy
+
+# Backend pipeline: verify -> deploy-staging -> deploy-prod (manual approval).
+#
+#   push to staging                verify, then staging, then production once
+#                                  the `production` environment is approved
+#   pull request to the same       verify only (no secrets, nothing deployed)
+#
+# The release package is built ONCE in `verify` and the same zip is deployed to
+# staging and then to production, so production runs the bytes staging ran.
+#
+# One-time setup (repo admin / Will). None of this exists until someone does it:
+#   1. Entra app registration `floorplan-deploy` with two federated credentials
+#      (issuer https://token.actions.githubusercontent.com, audience
+#      api://AzureADTokenExchange), one per GitHub environment, subjects
+#        repo:<owner>/<repo>:environment:staging
+#        repo:<owner>/<repo>:environment:production
+#   2. Give that app's service principal `Website Contributor` on rpcc-api-staging
+#      and on rpcc-api2 (deploy + app settings), and read access to the resource
+#      group. Nothing wider.
+#   3. Repository secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+#   4. GitHub environments `staging` and `production`. On `production`, add
+#      Connor as a required reviewer (Settings > Environments > production >
+#      Required reviewers; leave "Prevent self-review" off while Connor is both
+#      the pusher and the reviewer). Restrict both environments to the branch
+#      staging.
+#   5. Environment variables on each environment: AZURE_RESOURCE_GROUP, SQL_SERVER
+#      and SQL_DATABASE (that environment's database), plus PROD_SQL_DATABASE on
+#      `staging`. Database users for floorplan-deploy: db_ddladmin +
+#      db_datareader + db_datawriter on the staging database, db_datareader only
+#      on production.
+#
+# Migrations: staging applies them automatically, before its deploy. Production
+# does not: Will applies them by hand (`npm run migrate -- --apply`, runbook)
+# before approving. The staging job lists what production still needs, and the
+# production job refuses to deploy while anything is pending.
+#
+# The migration steps reach SQL over its public endpoint (GitHub's runners are
+# Azure IPs, let in by "Allow Azure services"). Turning SQL public access off
+# breaks them; plan a self-hosted runner in the VNet before that lockdown step.
+
+on:
+  push:
+    branches: [staging]
+  pull_request:
+    branches: [staging]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  verify:
+    name: Verify and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      build_sha: ${{ steps.meta.outputs.sha }}
+      build_time: ${{ steps.meta.outputs.time }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # .npmrc sets ignore-scripts=true, so no dependency lifecycle script runs.
+      - name: Install from the lockfile
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npx jest --ci
+
+      # High and critical block. The remaining production findings are moderate
+      # (uuid via exceljs, unreachable: only the non-streaming writer is used).
+      # Same gate as security.yml and .githooks/pre-push.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # Every http route needs a role check or a reason to be public. The
+      # frontend-calls-match-backend comparison is a separate command in the
+      # frontend repo (scripts/check-api-calls.cjs --backend <this checkout>).
+      - name: Every route has a role check
+        run: node scripts/check-routes.cjs
+
+      - name: Build metadata
+        id: meta
+        run: |
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # `build` starts with rm -rf dist, so deleted sources cannot keep deploying
+      # from stale output.
+      - name: Build
+        run: npm run build
+
+      # Fresh production-only install from the lockfile into a clean folder, so
+      # the zip holds exactly what the Function App needs (dist, production
+      # node_modules, migrations/ for the startup check, host.json) and nothing
+      # from the working tree (docs, plans, Azurite files, dev dependencies).
+      - name: Assemble release package
+        if: github.event_name == 'push'
+        run: |
+          mkdir release
+          cp -r dist migrations release/
+          cp host.json package.json package-lock.json .npmrc release/
+          if [ -f scripts/migrate.cjs ]; then
+            mkdir release/scripts
+            cp scripts/migrate.cjs release/scripts/
+          fi
+          (cd release && npm ci --omit=dev)
+          (cd release && zip -qry ../release.zip .)
+
+      - name: Upload release package
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release
+          path: release.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: verify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      APP_NAME: rpcc-api-staging
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      SQL_SERVER: ${{ vars.SQL_SERVER }}
+    steps:
+      # The runner needs the source (scripts/lib, compiled dist/migrate); the
+      # release package carries neither, so migrations run from a checkout.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install and build the migration runner
+        run: npm ci && npm run build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+
+      - name: Unpack release package
+        run: unzip -q release.zip -d release
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Before the deploy: several migrations must exist before the code that
+      # reads them (switches.md). A failure stops the job, so staging keeps the
+      # old code on a schema it already understands.
+      - name: Apply migrations (staging)
+        run: node scripts/migrate.cjs --apply --target "$SQL_SERVER/${{ vars.SQL_DATABASE }}"
+
+      - name: Deploy
+        uses: Azure/functions-action@c5060b3b8bb1ebbcb531abd00c822ecbaa8ea656 # v1
+        with:
+          app-name: ${{ env.APP_NAME }}
+          package: release
+
+      # /api/health?deep=true reports these as `commit` and `builtAt`. --output none
+      # matters: without it the command prints every app setting, secrets included.
+      - name: Stamp build metadata
+        run: |
+          az functionapp config appsettings set \
+            --name "$APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --settings "BUILD_SHA=${{ needs.verify.outputs.build_sha }}" "BUILD_TIME=${{ needs.verify.outputs.build_time }}" \
+            --output none
+
+      # `az functionapp show` returns null for defaultHostName on a Flex Consumption
+      # app (older API surface), which left curl with no host; the generic resource
+      # read reports it.
+      - name: Smoke test
+        run: |
+          host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
+          test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
+          curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"
+
+      # Read-only, for whoever approves production: what to apply by hand first.
+      - name: Pending migrations on production (dry run)
+        shell: bash
+        run: |
+          node scripts/migrate.cjs --dry-run --target "$SQL_SERVER/${{ vars.PROD_SQL_DATABASE }}" | tee "$RUNNER_TEMP/pending.txt"
+          {
+            echo "### Production migrations: apply these by hand before approving"
+            echo '```'
+            cat "$RUNNER_TEMP/pending.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-prod:
+    name: Deploy to production
+    needs: [verify, deploy-staging]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Required reviewers are configured on this environment in repo settings.
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      APP_NAME: rpcc-api2
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      SQL_SERVER: ${{ vars.SQL_SERVER }}
+    steps:
+      # Runs after approval. A run left waiting while newer commits reached
+      # staging must not put older code on top of newer code in production; to
+      # roll back, revert on the branch and let the new commit take the same path.
+      - name: Refuse a commit that is no longer the branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${GITHUB_REF_NAME}" --jq .object.sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::${GITHUB_SHA::7} is not the head of ${GITHUB_REF_NAME} (${head::7}). Reject this run and approve the newest one."
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install and build the migration runner
+        run: npm ci && npm run build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+
+      - name: Unpack release package
+        run: unzip -q release.zip -d release
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Migrations are applied by hand in production. Deploying code ahead of
+      # its schema breaks the screens that read it, so refuse instead.
+      - name: Refuse while production has pending migrations
+        shell: bash
+        run: |
+          node scripts/migrate.cjs --dry-run --target "$SQL_SERVER/${{ vars.SQL_DATABASE }}" | tee "$RUNNER_TEMP/pending.txt"
+          if ! grep -q "^Nothing pending\.$" "$RUNNER_TEMP/pending.txt"; then
+            echo "::error::Production has pending migrations. Apply them (npm run migrate -- --apply), then re-run this job."
+            exit 1
+          fi
+
+      - name: Deploy
+        uses: Azure/functions-action@c5060b3b8bb1ebbcb531abd00c822ecbaa8ea656 # v1
+        with:
+          app-name: ${{ env.APP_NAME }}
+          package: release
+
+      - name: Stamp build metadata
+        run: |
+          az functionapp config appsettings set \
+            --name "$APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --settings "BUILD_SHA=${{ needs.verify.outputs.build_sha }}" "BUILD_TIME=${{ needs.verify.outputs.build_time }}" \
+            --output none
+
+      # `az functionapp show` returns null for defaultHostName on a Flex Consumption
+      # app (older API surface), which left curl with no host; the generic resource
+      # read reports it.
+      - name: Smoke test
+        run: |
+          host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
+          test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
+          curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"

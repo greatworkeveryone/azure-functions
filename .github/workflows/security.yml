@@ -1,25 +1,31 @@
 name: Security
 
+# The repo has no `main`; these are the branches that exist and ship.
 on:
   push:
-    branches: [main]
+    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
   pull_request:
-    branches: [main]
+    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
   schedule:
     - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   npm-audit:
     name: npm audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
       - name: Install with scripts ignored
         run: npm ci --ignore-scripts
+      # High/critical findings block. Remaining moderates (uuid via exceljs) are
+      # tracked in CLAUDE.md as an accepted exception.
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Verify registry signatures

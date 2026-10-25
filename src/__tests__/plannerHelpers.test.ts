@@ -10,11 +10,18 @@ import {
   addDaysUTC,
   buildStalledJobTaskDescription,
   buildAwaitingAccountsTaskDescription,
+  buildAwaitingFacilitiesApprovalTaskDescription,
   buildDirectorApprovalTaskDescription,
+  buildOnchargeTaskDescription,
+  escalationThresholdDays,
+  jobLink,
+  getFacilitiesManagerEmails,
+  leaseTaskPlan,
   type PlannerTenantRow,
   type PlannerJobRow,
   type PlannerStalledJobRow,
   type PlannerAccountsJobRow,
+  type PlannerOnchargeJobRow,
 } from "../plannerHelpers";
 
 const BASE_TENANT: PlannerTenantRow = {
@@ -25,8 +32,10 @@ const BASE_TENANT: PlannerTenantRow = {
   firstOccupancy: "L3 / Suite 3A",
   expiry: "2026-09-15",
   optionNoticeMonths: 3,
+  optionPeriods: "1 x 5 years",
   nextReviewDate: "2026-07-01",
   reviewType: "CPI Darwin",
+  scheduleSignedOff: true,
 };
 
 describe("formatDDMMYYYY", () => {
@@ -59,6 +68,26 @@ describe("computeEventDate", () => {
   test("option_notice returns null when optionNoticeMonths is null", () => {
     const t = { ...BASE_TENANT, optionNoticeMonths: null };
     assert.strictEqual(computeEventDate(t, "option_notice"), null);
+  });
+
+  // Option text is how we know a lease has options to exercise (WP25 and the
+  // frontend gate on optionNoticeWindow the same way): "Nil" means no deadline.
+  test.each([null, "", "Nil", "nil", "None", "N/A", "no options", "see lease"])(
+    "option_notice returns null when the option text is %p: there is nothing to give notice of",
+    (optionPeriods) => {
+      assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionPeriods }, "option_notice"), null);
+    },
+  );
+
+  test("option_notice returns null when the notice period is 0, which is how an unset one reads", () => {
+    assert.strictEqual(computeEventDate({ ...BASE_TENANT, optionNoticeMonths: 0 }, "option_notice"), null);
+  });
+
+  test("a Nil option raises no option task but still raises expiry and review tasks", () => {
+    const nil = { ...BASE_TENANT, optionPeriods: "Nil" };
+    assert.strictEqual(computeEventDate(nil, "option_notice"), null);
+    assert.ok(computeEventDate(nil, "lease_expiry") instanceof Date);
+    assert.ok(computeEventDate(nil, "rent_review") instanceof Date);
   });
 
   test("option_notice returns null when expiry is null", () => {
@@ -165,7 +194,7 @@ describe("buildStalledJobTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildStalledJobTaskDescription(STALLED_JOB, "https://app.example.com");
     assert.ok(desc.includes("Smith Tower"));
-    assert.ok(desc.includes("https://app.example.com/jobs/7"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=7"));
   });
 });
 
@@ -173,7 +202,7 @@ describe("buildAwaitingAccountsTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, "https://app.example.com");
     assert.ok(desc.includes("Jones Building"));
-    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
   });
 });
 
@@ -181,7 +210,7 @@ describe("buildDirectorApprovalTaskDescription", () => {
   test("includes building name and link", () => {
     const desc = buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, "https://app.example.com");
     assert.ok(desc.includes("Jones Building"));
-    assert.ok(desc.includes("https://app.example.com/jobs/8"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
   });
 });
 
@@ -204,6 +233,153 @@ describe("buildTaskTitle — remaining trigger types", () => {
     assert.strictEqual(
       buildTaskTitle("Replace roof", "director_approval", 0),
       "Director approval needed — Replace roof",
+    );
+  });
+
+  test("awaiting_facilities_approval (WP18a)", () => {
+    assert.strictEqual(
+      buildTaskTitle("Replace roof", "awaiting_facilities_approval", 0),
+      "Awaiting approval — Replace roof",
+    );
+  });
+});
+
+describe("buildAwaitingFacilitiesApprovalTaskDescription (WP18a)", () => {
+  test("includes building name and job link", () => {
+    const desc = buildAwaitingFacilitiesApprovalTaskDescription(
+      ACCOUNTS_JOB,
+      "https://app.example.com",
+    );
+    assert.ok(desc.includes("Jones Building"));
+    assert.ok(desc.includes("Quote awaiting approval"));
+    assert.ok(desc.includes("https://app.example.com/jobs?jobId=8"));
+  });
+});
+
+// PL1: the web app has no /jobs/:id route (the Jobs board is query-param routed),
+// so a `/jobs/{id}` link in a Planner task 404s. Every job task must use
+// `/jobs?jobId={id}`.
+const ONCHARGE_JOB: PlannerOnchargeJobRow = {
+  jobId: 9,
+  title: "Replace carpet",
+  buildingName: "Jones Building",
+  onchargeAmount: 1250,
+  onchargeNotes: null,
+};
+
+describe("Planner job links (PL1)", () => {
+  const BASE = "https://app.example.com";
+  const descriptions: [string, string, number][] = [
+    ["stalled", buildStalledJobTaskDescription(STALLED_JOB, BASE), 7],
+    ["awaiting accounts", buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["quote approval", buildAwaitingFacilitiesApprovalTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["director approval", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE), 8],
+    ["on-charge", buildOnchargeTaskDescription(ONCHARGE_JOB, BASE), 9],
+  ];
+
+  test.each(descriptions)("%s task links to /jobs?jobId={id}, never a /jobs/{id} path", (_label, desc, jobId) => {
+    assert.ok(desc.includes(`${BASE}/jobs?jobId=${jobId}`), desc);
+    assert.ok(!desc.includes(`${BASE}/jobs/${jobId}`), desc);
+  });
+
+  test.each([
+    ["stalled", buildStalledJobTaskDescription(STALLED_JOB, BASE), `${BASE}/jobs?jobId=7`],
+    ["awaiting accounts", buildAwaitingAccountsTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=invoices`],
+    ["quote approval", buildAwaitingFacilitiesApprovalTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=quotes`],
+    ["director approval (quote)", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE), `${BASE}/jobs?jobId=8&step=quotes`],
+    ["director approval (invoice)", buildDirectorApprovalTaskDescription(ACCOUNTS_JOB, BASE, "invoices"), `${BASE}/jobs?jobId=8&step=invoices`],
+    ["on-charge", buildOnchargeTaskDescription(ONCHARGE_JOB, BASE), `${BASE}/jobs?jobId=9&step=invoices`],
+    ["update due", buildJobTaskDescription({ buildingName: "Jones Building", expectedProgressUpdate: null, jobId: 6, title: "Fix" }, BASE), `${BASE}/jobs?jobId=6`],
+  ])("%s task ends on the step it is about (J6)", (_label, desc, link) => {
+    assert.ok(desc.endsWith(link), desc);
+  });
+
+  test("jobLink builds the query-param deep link", () => {
+    assert.strictEqual(jobLink(BASE, 4821), "https://app.example.com/jobs?jobId=4821");
+  });
+
+  test("jobLink tolerates a trailing slash or stray whitespace on APP_BASE_URL", () => {
+    assert.strictEqual(jobLink("https://app.example.com/", 5), "https://app.example.com/jobs?jobId=5");
+    assert.strictEqual(jobLink(" https://app.example.com// ", 5), "https://app.example.com/jobs?jobId=5");
+  });
+
+  test("on-charge description keeps the amount, notes and a working link", () => {
+    const desc = buildOnchargeTaskDescription({ ...ONCHARGE_JOB, onchargeNotes: "Tenant damage" }, BASE);
+    assert.ok(desc.includes("Jones Building"));
+    assert.ok(desc.includes("On-charge to tenant: $1,250"));
+    assert.ok(desc.includes("Notes: Tenant damage"));
+    assert.ok(desc.endsWith(`${BASE}/jobs?jobId=9&step=invoices`));
+  });
+});
+
+describe("escalationThresholdDays (WP18a)", () => {
+  const EMPTY_ENV: NodeJS.ProcessEnv = {};
+
+  test("defaults by priority with no env overrides", () => {
+    assert.strictEqual(escalationThresholdDays("Critical", EMPTY_ENV), 2);
+    assert.strictEqual(escalationThresholdDays("High", EMPTY_ENV), 4);
+    assert.strictEqual(escalationThresholdDays("Normal", EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays("Low", EMPTY_ENV), 14);
+  });
+
+  test("unknown / null / undefined priority falls back to default (7)", () => {
+    assert.strictEqual(escalationThresholdDays("Bogus", EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays(null, EMPTY_ENV), 7);
+    assert.strictEqual(escalationThresholdDays(undefined, EMPTY_ENV), 7);
+  });
+
+  test("per-priority env overrides win", () => {
+    const env: NodeJS.ProcessEnv = {
+      ESCALATION_THRESHOLD_DAYS_CRITICAL: "1",
+      ESCALATION_THRESHOLD_DAYS_HIGH: "3",
+      ESCALATION_THRESHOLD_DAYS_NORMAL: "5",
+      ESCALATION_THRESHOLD_DAYS_LOW: "10",
+    };
+    assert.strictEqual(escalationThresholdDays("Critical", env), 1);
+    assert.strictEqual(escalationThresholdDays("High", env), 3);
+    assert.strictEqual(escalationThresholdDays("Normal", env), 5);
+    assert.strictEqual(escalationThresholdDays("Low", env), 10);
+  });
+
+  test("DEFAULT env override applies to unknown priorities", () => {
+    const env: NodeJS.ProcessEnv = { ESCALATION_THRESHOLD_DAYS_DEFAULT: "3" };
+    assert.strictEqual(escalationThresholdDays("Bogus", env), 3);
+    assert.strictEqual(escalationThresholdDays(null, env), 3);
+    // Named priorities keep their own defaults unless separately overridden.
+    assert.strictEqual(escalationThresholdDays("Critical", env), 2);
+  });
+
+  test("ignores empty / non-positive / non-integer env values, using the default", () => {
+    assert.strictEqual(
+      escalationThresholdDays("Critical", { ESCALATION_THRESHOLD_DAYS_CRITICAL: "" }),
+      2,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("High", { ESCALATION_THRESHOLD_DAYS_HIGH: "0" }),
+      4,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("Low", { ESCALATION_THRESHOLD_DAYS_LOW: "-5" }),
+      14,
+    );
+    assert.strictEqual(
+      escalationThresholdDays("Normal", { ESCALATION_THRESHOLD_DAYS_NORMAL: "abc" }),
+      7,
+    );
+  });
+});
+
+describe("getFacilitiesManagerEmails (WP18a)", () => {
+  test("empty when env unset", () => {
+    assert.deepStrictEqual(getFacilitiesManagerEmails({}), []);
+  });
+
+  test("splits, trims, and drops empties", () => {
+    assert.deepStrictEqual(
+      getFacilitiesManagerEmails({
+        FACILITIES_MANAGER_EMAILS: " a@x.com , b@x.com ,, c@x.com ",
+      }),
+      ["a@x.com", "b@x.com", "c@x.com"],
     );
   });
 });
@@ -282,11 +458,11 @@ describe("buildJobTaskDescription", () => {
     expectedProgressUpdate: "2026-06-01T00:00:00.000Z",
   };
 
-  test("includes building name, formatted due date, and jobs link", () => {
+  test("includes building name, formatted due date, and a link to the job itself (J6), not the board", () => {
     const desc = buildJobTaskDescription(JOB, BASE_URL);
     assert.ok(desc.includes("Smith Tower"));
     assert.ok(desc.includes("01/06/2026"));
-    assert.ok(desc.includes(`${BASE_URL}/jobs`));
+    assert.ok(desc.endsWith(`${BASE_URL}/jobs?jobId=42`), desc);
   });
 
   test("shows — for missing expectedProgressUpdate", () => {
@@ -349,5 +525,78 @@ describe("groupPlannerTasksByKey", () => {
     const m = groupPlannerTasksByKey(rows);
     expect(m.size).toBe(1);
     expect(m.get("job|7|job_update_due|0")?.PlannerTaskId).toBe("new");
+  });
+});
+
+describe("option notice dates are month-end safe", () => {
+  const BASE_URL = "https://app.example.com";
+
+  test("31 August less 6 months is the last day of February, not early March", () => {
+    const d = computeEventDate({ ...BASE_TENANT, expiry: "2026-08-31", optionNoticeMonths: 6 }, "option_notice");
+    assert.ok(d instanceof Date);
+    assert.strictEqual(toIsoDateString(d), "2026-02-28");
+  });
+
+  test("and the 29th in a leap year", () => {
+    const d = computeEventDate({ ...BASE_TENANT, expiry: "2028-08-31", optionNoticeMonths: 6 }, "option_notice");
+    assert.ok(d instanceof Date);
+    assert.strictEqual(toIsoDateString(d), "2028-02-29");
+  });
+
+  test("the reminder never lands after the deadline", () => {
+    for (const expiry of ["2026-03-31", "2026-05-31", "2026-08-31", "2026-10-31", "2027-12-31"]) {
+      for (const months of [1, 3, 6, 9, 12]) {
+        const d = computeEventDate({ ...BASE_TENANT, expiry, optionNoticeMonths: months }, "option_notice");
+        assert.ok(d instanceof Date);
+        // Whole months earlier, to the same day or the last day of that month.
+        const back = new Date(d);
+        back.setUTCMonth(back.getUTCMonth() + months);
+        assert.ok(back.getTime() <= new Date(expiry).getTime() + 3 * 86_400_000, `${expiry} - ${months}m`);
+        assert.ok(d.getTime() < new Date(expiry).getTime());
+      }
+    }
+  });
+
+  test("the task description names the same clamped deadline", () => {
+    const desc = buildTenantTaskDescription(
+      { ...BASE_TENANT, expiry: "2026-08-31", optionNoticeMonths: 6 },
+      "option_notice",
+      BASE_URL,
+    );
+    assert.ok(desc.includes("Option deadline: 28/02/2026"), desc);
+  });
+});
+
+describe("leaseTaskPlan: no lease tasks for a schedule nobody has signed off (PLAN D7)", () => {
+  const signed = { ...BASE_TENANT, tenantId: 1, scheduleSignedOff: true };
+  const unsigned = { ...BASE_TENANT, tenantId: 2, scheduleSignedOff: false };
+  const unsignedQuiet = { ...BASE_TENANT, tenantId: 3, scheduleSignedOff: false };
+  const row = (EntityId: number, Status: string, TriggerType = "lease_expiry", LeadTimeDays = 90) => ({
+    EntityId,
+    EntityType: "tenant",
+    Id: EntityId * 10,
+    LeadTimeDays,
+    PlannerTaskId: `task-${EntityId}`,
+    Status,
+    TriggerType,
+  });
+
+  test("only signed-off tenancies are eligible for new tasks", () => {
+    const plan = leaseTaskPlan([signed, unsigned, unsignedQuiet], []);
+    assert.deepStrictEqual(plan.eligible.map((t) => t.tenantId), [1]);
+  });
+
+  test("an unsigned tenancy with an active task has it removed", () => {
+    const plan = leaseTaskPlan([signed, unsigned, unsignedQuiet], [row(1, "active"), row(2, "active"), row(2, "active", "rent_review", 60)]);
+    assert.deepStrictEqual(plan.removeFor, [2]);
+  });
+
+  test("a resolved task is already gone, and a signed-off tenancy's tasks stay", () => {
+    const plan = leaseTaskPlan([signed, unsigned], [row(1, "active"), row(2, "resolved")]);
+    assert.deepStrictEqual(plan.removeFor, []);
+  });
+
+  test("nothing to do for no tenancies", () => {
+    assert.deepStrictEqual(leaseTaskPlan([], []), { eligible: [], removeFor: [] });
   });
 });

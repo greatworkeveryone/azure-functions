@@ -5,6 +5,7 @@
 // real DB connection.
 
 import assert from "node:assert";
+import { AwaitingRole, JobStatus } from "../jobStatusMachine";
 
 // ── Guard logic mirrors ───────────────────────────────────────────────────────
 // These replicate the exact conditions checked in the handlers so the tests
@@ -148,3 +149,16 @@ describe("deletePurchaseOrder guards", () => {
     assert.match(result, /sent/i);
   });
 });
+
+// ── Tests: createPurchaseOrder quote-approval guard (WP8) ─────────────────────
+// upsertPurchaseOrder is callable by plain accounts (a wider set than the
+// quote-approval authority), and the machine's PO_CREATED edge moves a job out
+// of (Awaiting Approval, facilities) → Work. Without the guard, creating a PO
+// acts as implicit quote approval — leapfrogging the manager approval limit.
+// The guard blocks PO creation ONLY in that single leapfrog state when the job
+// has no approved quote. Every other state is unaffected (a PO on a job in Work
+// is a no-op transition; a PO on an approved job is the legitimate path).
+
+// The PO quote gate (an approved quote in every job state, contract jobs
+// excepted; J3) is purchaseOrderQuoteRefusal in src/moneyRules.ts, tested in
+// moneyRules.test.ts and through the handler in purchaseOrders.money.test.ts.

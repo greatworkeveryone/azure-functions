@@ -5,6 +5,7 @@ export type TriggerType =
   | "job_update_due"         // legacy — existing tasks only, routes to Facilities
   | "stalled_facilities"     // IsStalled=1 AND AwaitingRole != 'accounts'
   | "awaiting_accounts"      // AwaitingRole = 'accounts'
+  | "awaiting_facilities_approval" // Status='Awaiting Approval' AND AwaitingRole='facilities' (quote sign-off)
   | "director_approval"      // DirectorNeededCount > 0
   | "oncharge_pending"       // IsOnchargeable=1 AND no outgoing invoice yet
   | "lost_key_reported";     // key marked lost — pending facilities decision
@@ -12,7 +13,12 @@ export type TriggerType =
 export const LEAD_TIMES = [90, 60, 30] as const;
 export type LeadTime = (typeof LEAD_TIMES)[number];
 
+import { jobUrl, type JobLinkStep, type JobLinkTarget } from "./jobLinks";
+import { optionNoticeWindow } from "./leaseOptions";
+
 export interface PlannerTenantRow {
+  /** Tenants.IsTest (D9); the timer reads only real tenancies, and Planner refuses a test one. */
+  isTest?: boolean;
   tenantId: number;
   legalName: string;
   tradingName: string | null;
@@ -20,11 +26,17 @@ export interface PlannerTenantRow {
   firstOccupancy: string | null;
   expiry: string | null;
   optionNoticeMonths: number | null;
+  /** The free-text option field: "Nil" or text we can't read means there is no option deadline. */
+  optionPeriods: string | null;
   nextReviewDate: string | null;
   reviewType: string | null;
+  /** Whether someone has signed this tenancy's schedule off as verified (m097). */
+  scheduleSignedOff: boolean;
 }
 
 export interface PlannerJobRow {
+  /** Jobs.IsTest (D9). */
+  isTest?: boolean;
   jobId: number;
   title: string;
   buildingName: string | null;
@@ -61,10 +73,23 @@ export function formatDDMMYYYY(isoDate: string): string {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function subMonthsUTC(date: Date, months: number): Date {
-  return new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - months, date.getUTCDate()),
+/**
+ * The last day to give option notice: the expiry less the notice period,
+ * month-end safe (31 Aug less 6 months is 28/29 Feb, never early March), so a
+ * reminder never lands after the deadline. Null when there is nothing to give
+ * notice of: no option text we can read ("Nil" included), no notice period, or no
+ * expiry. The same rule the lease-events feed and the tenancy screens use
+ * (optionNoticeWindow).
+ */
+function optionDeadlineDate(tenant: PlannerTenantRow): Date | null {
+  if (!tenant.expiry) return null;
+  const expiry = tenant.expiry.slice(0, 10);
+  // The deadline doesn't depend on the day it is asked on; any real date will do.
+  const { deadline } = optionNoticeWindow(
+    { expiry, optionNoticeMonths: tenant.optionNoticeMonths, optionPeriods: tenant.optionPeriods },
+    expiry,
   );
+  return deadline ? new Date(`${deadline}T00:00:00Z`) : null;
 }
 
 export function addDaysUTC(date: Date, days: number): Date {
@@ -78,10 +103,8 @@ export function computeEventDate(
   switch (triggerType) {
     case "lease_expiry":
       return tenant.expiry ? new Date(tenant.expiry) : null;
-    case "option_notice": {
-      if (!tenant.expiry || tenant.optionNoticeMonths == null) return null;
-      return subMonthsUTC(new Date(tenant.expiry), tenant.optionNoticeMonths);
-    }
+    case "option_notice":
+      return optionDeadlineDate(tenant);
     case "rent_review":
       return tenant.nextReviewDate ? new Date(tenant.nextReviewDate) : null;
     default:
@@ -126,6 +149,8 @@ export function buildTaskTitle(
       return `Job stalled — ${displayName}`;
     case "awaiting_accounts":
       return `Awaiting accounts — ${displayName}`;
+    case "awaiting_facilities_approval":
+      return `Awaiting approval — ${displayName}`;
     case "director_approval":
       return `Director approval needed — ${displayName}`;
     case "oncharge_pending":
@@ -150,15 +175,8 @@ export function buildTenantTaskDescription(
     case "lease_expiry":
       return `${prefix}Expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     case "option_notice": {
-      const deadline =
-        tenant.expiry && tenant.optionNoticeMonths != null
-          ? formatDDMMYYYY(
-              subMonthsUTC(
-                new Date(tenant.expiry),
-                tenant.optionNoticeMonths,
-              ).toISOString(),
-            )
-          : "—";
+      const due = optionDeadlineDate(tenant);
+      const deadline = due ? formatDDMMYYYY(due.toISOString()) : "—";
       return `${prefix}Option deadline: ${deadline}\nLease expiry: ${tenant.expiry ? formatDDMMYYYY(tenant.expiry) : "—"}\n${link}`;
     }
     case "rent_review":
@@ -176,7 +194,16 @@ export function buildJobTaskDescription(
   const due = job.expectedProgressUpdate
     ? formatDDMMYYYY(job.expectedProgressUpdate)
     : "—";
-  return `${location ? location + "\n" : ""}Expected update: ${due}\n${appBaseUrl}/jobs`;
+  return `${location ? location + "\n" : ""}Expected update: ${due}\n${jobLink(appBaseUrl, job.jobId)}`;
+}
+
+/** Deep link to a job in the web app. The app has NO `/jobs/:id` path — the
+ *  Jobs board is query-param routed and `?jobId=` opens the job modal, `&step=`
+ *  the tab the task is about (J6). Built by jobLinks.ts, as `buildJobUrl` in
+ *  email/director-emails.ts is; every Planner task that points at a job must go
+ *  through here so the links can't drift again. */
+export function jobLink(appBaseUrl: string, jobId: number, target: JobLinkTarget = {}): string {
+  return jobUrl(appBaseUrl, jobId, target);
 }
 
 export function buildStalledJobTaskDescription(
@@ -185,7 +212,7 @@ export function buildStalledJobTaskDescription(
 ): string {
   const location = job.buildingName ?? "";
   const stalledDate = job.stalledAt ? formatDDMMYYYY(job.stalledAt.slice(0, 10)) : "—";
-  return `${location ? location + "\n" : ""}Stalled since: ${stalledDate}\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Stalled since: ${stalledDate}\n${jobLink(appBaseUrl, job.jobId)}`;
 }
 
 export function buildAwaitingAccountsTaskDescription(
@@ -193,15 +220,25 @@ export function buildAwaitingAccountsTaskDescription(
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Awaiting accounts action\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Awaiting accounts action\n${jobLink(appBaseUrl, job.jobId, { step: "invoices" })}`;
 }
 
-export function buildDirectorApprovalTaskDescription(
+export function buildAwaitingFacilitiesApprovalTaskDescription(
   job: PlannerAccountsJobRow,
   appBaseUrl: string,
 ): string {
   const location = job.buildingName ?? "";
-  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}Quote awaiting approval\n${jobLink(appBaseUrl, job.jobId, { step: "quotes" })}`;
+}
+
+/** `step`: quotes while a quote waits on the director, otherwise invoices. */
+export function buildDirectorApprovalTaskDescription(
+  job: PlannerAccountsJobRow,
+  appBaseUrl: string,
+  step: Extract<JobLinkStep, "invoices" | "quotes"> = "quotes",
+): string {
+  const location = job.buildingName ?? "";
+  return `${location ? location + "\n" : ""}Invoice or quote requires director sign-off\n${jobLink(appBaseUrl, job.jobId, { step })}`;
 }
 
 export function buildOnchargeTaskDescription(
@@ -214,7 +251,69 @@ export function buildOnchargeTaskDescription(
       ? `$${job.onchargeAmount.toLocaleString()}`
       : "TBC";
   const notesLine = job.onchargeNotes ? `\nNotes: ${job.onchargeNotes}` : "";
-  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${appBaseUrl}/jobs/${job.jobId}`;
+  return `${location ? location + "\n" : ""}On-charge to tenant: ${amount}${notesLine}\n${jobLink(appBaseUrl, job.jobId, { step: "invoices" })}`;
+}
+
+// ── Escalation thresholds (WP18a) ────────────────────────────────────────────
+// How many days an assigned, un-acknowledged, non-terminal job may sit before
+// the escalation sweep (src/escalation, policy job.stalled_unacknowledged)
+// escalates it to facilities managers. Keyed by Priority, each env-overridable.
+// Defaults: Critical 2 / High 4 / Normal 7 / Low 14; anything else (or an
+// unset/garbage priority) falls back to DEFAULT (7).
+
+const DEFAULT_ESCALATION_THRESHOLD_DAYS = 7;
+
+/** Read a positive-integer day count from an env var, or return the fallback
+ *  when the var is unset, empty, or not a positive number. */
+function readThresholdEnv(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+): number {
+  const raw = env[key];
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Days a job of the given Priority may age (since the later of last ack /
+ *  status change / creation) before escalating. Pure: env is injected so the
+ *  function is unit-testable without touching process.env. */
+export function escalationThresholdDays(
+  priority: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const fallback = readThresholdEnv(
+    env,
+    "ESCALATION_THRESHOLD_DAYS_DEFAULT",
+    DEFAULT_ESCALATION_THRESHOLD_DAYS,
+  );
+  switch (priority) {
+    case "Critical":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_CRITICAL", 2);
+    case "High":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_HIGH", 4);
+    case "Normal":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_NORMAL", 7);
+    case "Low":
+      return readThresholdEnv(env, "ESCALATION_THRESHOLD_DAYS_LOW", 14);
+    default:
+      return fallback;
+  }
+}
+
+/** Facilities-manager email recipients for escalation, parsed from the
+ *  FACILITIES_MANAGER_EMAILS env var (comma-separated). Empty list when unset.
+ *  The escalation notifier uses it only while no active facilities_manager
+ *  exists. Mirrors getDirectorEmails(). */
+export function getFacilitiesManagerEmails(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const raw = env.FACILITIES_MANAGER_EMAILS ?? "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 export function toIsoDateString(date: Date): string {
@@ -292,4 +391,26 @@ export function groupPlannerTasksByKey(
     m.set(k, r); // last row wins; DB has a unique constraint so this is rare
   }
   return m;
+}
+
+/**
+ * Which tenancies get lease tasks this run (PLAN D7, D21). A schedule nobody has
+ * signed off is unverified, so its 90/60/30-day expiry, option and review tasks
+ * are not raised. `removeFor` is the unsigned tenancies that still have an active
+ * task; the timer takes those down only when PLANNER_UNSIGNED_HOLDBACK_ENABLED
+ * is "true" (plannerFlag.ts) and otherwise just logs them.
+ */
+export function leaseTaskPlan(
+  tenants: readonly PlannerTenantRow[],
+  taskRows: readonly PlannerTaskRowShape[],
+): { eligible: PlannerTenantRow[]; removeFor: number[] } {
+  const withActiveTask = new Set(
+    taskRows.filter((row) => row.Status === "active").map((row) => row.EntityId),
+  );
+  return {
+    eligible: tenants.filter((tenant) => tenant.scheduleSignedOff),
+    removeFor: tenants
+      .filter((tenant) => !tenant.scheduleSignedOff && withActiveTask.has(tenant.tenantId))
+      .map((tenant) => tenant.tenantId),
+  };
 }

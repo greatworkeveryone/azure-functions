@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { createConnection, executeQuery, closeConnection } from "../db";
+import { createRequestConnection, executeQuery, closeConnection } from "../db";
 import { fetchAllBuildings, MyBuilding } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { TYPES } from "tedious";
@@ -18,7 +18,7 @@ async function syncBuildings(request: HttpRequest, context: InvocationContext): 
     context.log(`Fetched ${buildings.length} buildings from myBuildings`);
 
     context.log("Connecting to Azure SQL...");
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     let inserted = 0;
     let updated = 0;

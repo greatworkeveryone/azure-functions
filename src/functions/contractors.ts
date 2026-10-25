@@ -1,13 +1,68 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
+import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchAllContractors, createOrUpdateContractors, MyContractor } from "../mybuildings-client";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
 
 interface UpdateContractorsBody {
-  Contractors?: MyContractor[];
-  contractors?: MyContractor[];
-  ContractorID?: number;
+  Contractors?: unknown;
+  contractors?: unknown;
+}
+
+// Only these reach myBuildings; anything else in the body is dropped.
+const CONTRACTOR_STRING_FIELDS = [
+  "ThirdPartySystem_ContractorID", "ContractorName", "ContractorComments", "ContractorCategory",
+  "ABN", "EmailAddress", "PhoneNumber", "MobileNumber", "ContactFirstName", "ContactLastName",
+] as const;
+const CONTRACTOR_BOOL_FIELDS = ["Active", "Suspended"] as const;
+const MAX_CONTRACTORS_PER_CALL = 100;
+const MAX_STRING_LENGTH = 500;
+
+type SanitiseResult = { ok: true; contractors: MyContractor[] } | { ok: false; error: string };
+
+/** Allowlisted, size-capped copy of the request's contractors, or why not. */
+export function sanitiseContractors(body: unknown): SanitiseResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, error: "Body must be an object" };
+  const b = body as UpdateContractorsBody;
+  const raw = b.Contractors ?? b.contractors ?? [body];
+  if (!Array.isArray(raw)) return { ok: false, error: "Contractors must be an array" };
+  if (raw.length === 0) return { ok: false, error: "Contractors must not be empty" };
+  if (raw.length > MAX_CONTRACTORS_PER_CALL) return { ok: false, error: `At most ${MAX_CONTRACTORS_PER_CALL} contractors per request` };
+
+  const contractors: MyContractor[] = [];
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return { ok: false, error: `Contractors[${i}] must be an object` };
+    const src = item as Record<string, unknown>;
+    const out: MyContractor = {};
+    if (src.ContractorID !== undefined) {
+      if (typeof src.ContractorID !== "number" || !Number.isInteger(src.ContractorID) || src.ContractorID <= 0) {
+        return { ok: false, error: `Contractors[${i}].ContractorID must be a positive integer` };
+      }
+      out.ContractorID = src.ContractorID;
+    }
+    for (const field of CONTRACTOR_STRING_FIELDS) {
+      const v = src[field];
+      if (v === undefined || v === null) continue;
+      if (typeof v !== "string") return { ok: false, error: `Contractors[${i}].${field} must be a string` };
+      if (v.length > MAX_STRING_LENGTH) return { ok: false, error: `Contractors[${i}].${field} exceeds ${MAX_STRING_LENGTH} characters` };
+      out[field] = v;
+    }
+    for (const field of CONTRACTOR_BOOL_FIELDS) {
+      const v = src[field];
+      if (v === undefined || v === null) continue;
+      if (typeof v !== "boolean") return { ok: false, error: `Contractors[${i}].${field} must be true or false` };
+      out[field] = v;
+    }
+    if (Object.keys(out).length === 0) return { ok: false, error: `Contractors[${i}] has no recognised fields` };
+    contractors.push(out);
+  }
+  return { ok: true, contractors };
+}
+
+function contractorSubjectId(c: MyContractor): number | string {
+  return c.ContractorID ?? c.ThirdPartySystem_ContractorID ?? "new";
 }
 
 // POST /api/syncContractors - fetch from myBuildings and upsert into SQL
@@ -24,7 +79,7 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
     const contractors = await fetchAllContractors();
     context.log(`Fetched ${contractors.length} contractors`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     let inserted = 0;
     let updated = 0;
 
@@ -87,7 +142,7 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const contractorId = request.query.get("contractorId");
     const active = request.query.get("active");
@@ -128,15 +183,35 @@ async function handleUpdateContractors(request: HttpRequest, context: Invocation
   const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  let connection;
   try {
-    const body = await request.json() as UpdateContractorsBody;
-    const contractors = body.Contractors ?? body.contractors ?? [body as MyContractor];
+    const body: unknown = await request.json().catch(() => null);
+    const sanitised = sanitiseContractors(body);
+    if (!sanitised.ok) return { status: 400, jsonBody: { error: sanitised.error } };
+    const { contractors } = sanitised;
+
+    connection = await createRequestConnection(token);
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
     context.log(`Updating ${contractors.length} contractors via myBuildings API...`);
     const result = await createOrUpdateContractors(contractors);
+
+    // One ledger row per contractor: what Floorplan sent, after the write succeeded.
+    for (const c of contractors) {
+      await record(connection, {
+        action: "contractor.update",
+        actor,
+        after: c,
+        subject: { id: contractorSubjectId(c), type: "contractor" },
+      });
+    }
     return { status: 200, jsonBody: { message: "Contractors updated", result } };
   } catch (error: any) {
     context.error("Update failed:", error.message);
     return errorResponse("Update failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
   }
 }
 

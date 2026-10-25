@@ -5,14 +5,41 @@
 //   GRAPH_CLIENT_SECRET  — App registration client secret
 //   GRAPH_SENDER_EMAIL   — Mailbox to send from (e.g. floorplan-dev@randazzo.properties)
 //
+//   ORG_EMAIL_DOMAINS    — tenant's accepted domains, for sender auth (src/email/sender-auth.ts)
+//
 // If any credential is absent, graphSendReply throws — callers should catch
 // and record the error rather than blocking the DB write.
 
+import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
+import { replyHeaders } from "./inboundTriage/messageIds";
+import { assertMayLeave, type EgressSubject } from "./test-data";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "./upload-constants";
+
 interface TokenResponse {
-  access_token: string;
+  access_token?: unknown;
+  expires_in?: unknown;
 }
 
-export async function getGraphToken(): Promise<string> {
+// Cached across warm invocations with in-flight de-dup, as getServiceToken in db.ts:
+// an alert fan-out or a mail burst would otherwise POST to Entra once per send.
+let cachedGraphToken: { value: string; expiresAt: number } | null = null;
+let _graphTokenInflight: Promise<string> | null = null;
+// Bumped by clearGraphTokenCache so a fetch already in flight can't repopulate the cache.
+let _graphTokenGeneration = 0;
+const GRAPH_TOKEN_REFRESH_SKEW_MS = 60_000;
+// Entra app-only tokens last 60-90 min; used only if expires_in is missing.
+const GRAPH_TOKEN_DEFAULT_TTL_S = 3_600;
+
+/** Drop the cached Graph token. App permissions are baked in at issue, so a 401/403
+ *  after a new consent needs a fresh token; tests also use it between cases. */
+export function clearGraphTokenCache(): void {
+  cachedGraphToken = null;
+  _graphTokenInflight = null;
+  _graphTokenGeneration += 1;
+}
+
+async function _fetchGraphToken(): Promise<string> {
+  const generation = _graphTokenGeneration;
   const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
   if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
     throw new Error(
@@ -40,7 +67,54 @@ export async function getGraphToken(): Promise<string> {
   }
 
   const data = (await resp.json()) as TokenResponse;
+  if (typeof data.access_token !== "string" || data.access_token === "") {
+    throw new Error("Graph token response had no access_token");
+  }
+  const ttl = typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : GRAPH_TOKEN_DEFAULT_TTL_S;
+  if (generation === _graphTokenGeneration) {
+    cachedGraphToken = { value: data.access_token, expiresAt: Date.now() + ttl * 1000 };
+  }
   return data.access_token;
+}
+
+export async function getGraphToken(): Promise<string> {
+  if (cachedGraphToken && cachedGraphToken.expiresAt > Date.now() + GRAPH_TOKEN_REFRESH_SKEW_MS) {
+    return cachedGraphToken.value;
+  }
+  if (_graphTokenInflight) return _graphTokenInflight;
+  // A failed fetch is never cached, and .finally() frees the slot so the next call retries.
+  const promise: Promise<string> = _fetchGraphToken().finally(() => {
+    if (_graphTokenInflight === promise) _graphTokenInflight = null;
+  });
+  _graphTokenInflight = promise;
+  return promise;
+}
+
+/**
+ * POST a sendMail. A 401 means the cached token is stale: clear it and try once
+ * more. Graph refused the first call outright, so the retry can't duplicate a send.
+ */
+async function postSendMail(senderEmail: string, message: Record<string, unknown>): Promise<void> {
+  const send = async (): Promise<Response> =>
+    fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await getGraphToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message }),
+    });
+
+  let resp = await send();
+  if (resp.status === 401) {
+    clearGraphTokenCache();
+    resp = await send();
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
+  }
 }
 
 /**
@@ -58,6 +132,7 @@ export interface GraphAttachment {
 }
 
 export async function graphSendReply(
+  egress: EgressSubject,
   toAddress: string,
   replySubject: string,
   body: string,
@@ -65,7 +140,8 @@ export async function graphSendReply(
   attachments?: GraphAttachment[],
   ccAddresses?: string[],
 ): Promise<string> {
-  const token = await getGraphToken();
+  assertMayLeave("email", egress);
+  await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
     throw new Error("GRAPH_SENDER_EMAIL not configured");
@@ -99,35 +175,23 @@ export async function graphSendReply(
     }));
   }
 
-  const resp = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ message }),
-    },
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
-  }
+  await postSendMail(senderEmail, message);
 
   // sendMail returns 202 with no body — synthesise a stable identifier
   return `graph-sent-${Date.now()}`;
 }
 
+/** `egress` is what the mail is about; a test record is refused (D9). */
 export async function graphSendMail(
+  egress: EgressSubject,
   toAddress: string | string[],
   subject: string,
   body: string,
   attachments?: GraphAttachment[],
   ccAddresses?: string[],
 ): Promise<void> {
-  const token = await getGraphToken();
+  assertMayLeave("email", egress);
+  await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
     throw new Error("GRAPH_SENDER_EMAIL not configured");
@@ -153,32 +217,19 @@ export async function graphSendMail(
     }));
   }
 
-  const resp = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ message }),
-    },
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
-  }
+  await postSendMail(senderEmail, message);
 }
 
 export async function graphCreateSubscription(
   mailbox: string,
   notificationUrl: string,
   clientState: string,
-): Promise<{ subscriptionId: string; expiresAt: string }> {
+): Promise<{ subscriptionId: string; expiresAt: string; resource: string }> {
   const token = await getGraphToken();
   // Mail subscriptions max out at 4230 minutes (~3 days)
   const expiresAt = new Date(Date.now() + 4230 * 60 * 1000).toISOString();
+
+  const resource = `users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`;
 
   const resp = await fetch("https://graph.microsoft.com/v1.0/subscriptions", {
     method: "POST",
@@ -186,7 +237,7 @@ export async function graphCreateSubscription(
     body: JSON.stringify({
       changeType: "created",
       notificationUrl,
-      resource: `users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`,
+      resource,
       expirationDateTime: expiresAt,
       clientState,
     }),
@@ -198,7 +249,7 @@ export async function graphCreateSubscription(
   }
 
   const data = (await resp.json()) as { id: string; expirationDateTime: string };
-  return { subscriptionId: data.id, expiresAt: data.expirationDateTime };
+  return { subscriptionId: data.id, expiresAt: data.expirationDateTime, resource };
 }
 
 export async function graphRenewSubscription(subscriptionId: string): Promise<string> {
@@ -216,7 +267,8 @@ export async function graphRenewSubscription(subscriptionId: string): Promise<st
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Graph renewSubscription failed: ${resp.status} — ${text}`);
+    // status lets the renew timer replace a subscription Graph has dropped (404).
+    throw Object.assign(new Error(`Graph renewSubscription failed: ${resp.status} — ${text}`), { status: resp.status });
   }
 
   const data = (await resp.json()) as { expirationDateTime: string };
@@ -224,14 +276,47 @@ export async function graphRenewSubscription(subscriptionId: string): Promise<st
 }
 
 export interface GraphEmail {
+  attachmentBlobNames: { blobName: string; fileName: string }[];
+  // Trimmed auth headers for audit / the approval UI (≤ 2000 chars).
+  authenticationResults: string | null;
   graphMessageId: string;
+  /** The Message-ID this email answers (In-Reply-To), normalised: no angle brackets, lower case. */
+  inReplyTo?: string | null;
   internetMessageId: string;
+  /** The ids in its References header, normalised and space separated, newest last. */
+  referenceIds?: string | null;
   subject: string | null;
   fromAddress: string | null;
   fromName: string | null;
   bodyContent: string | null;
   receivedAt: string | null;
-  attachmentBlobNames: { blobName: string; fileName: string }[];
+  // DMARC pass aligned with From, or Exchange-authenticated internal sender.
+  senderAuthenticated: boolean;
+}
+
+function toMessageHeaders(raw: unknown): MessageHeader[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (h): h is MessageHeader =>
+      typeof h === "object" && h !== null && typeof h.name === "string" && typeof h.value === "string",
+  );
+}
+
+// Graph throttles (429) and has bad moments (5xx, dropped connections); one
+// more try after a short pause saves an attachment that would otherwise be
+// stored without its file (DL-13). Anything else is answered as it came.
+const RETRY_DELAY_MS = 300;
+const isTransient = (status: number) => status === 408 || status === 429 || status >= 500;
+
+async function fetchOnceMore(url: string, init: RequestInit): Promise<Response> {
+  try {
+    const resp = await fetch(url, init);
+    if (!isTransient(resp.status)) return resp;
+  } catch {
+    // network failure: fall through to the second attempt
+  }
+  await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+  return fetch(url, init);
 }
 
 async function fetchAttachmentBytes(
@@ -241,7 +326,7 @@ async function fetchAttachmentBytes(
   token: string,
 ): Promise<Buffer> {
   const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments/${attachmentId}/$value`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetchOnceMore(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!resp.ok) {
     throw new Error(`Graph attachment download failed: ${resp.status}`);
   }
@@ -256,7 +341,7 @@ async function fetchAndUploadAttachments(
   const { uploadBlob } = await import("./blob-storage");
 
   const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${graphMessageId}/attachments?$select=id,name,contentType,isInline,size`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetchOnceMore(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!resp.ok) {
     console.error(`[attachments] Graph list failed for msg=${graphMessageId}: ${resp.status} ${await resp.text().catch(() => "")}`);
     return [];
@@ -264,7 +349,6 @@ async function fetchAndUploadAttachments(
 
   const data = (await resp.json()) as { value: any[] };
   const all = data.value ?? [];
-  console.log(`[attachments] msg=${graphMessageId} raw count=${all.length} types=${all.map((a) => a["@odata.type"]).join(",")}`);
 
   // Accept all file attachments that have a name — isInline is unreliable
   // (Outlook often marks image attachments as inline) and contentBytes is
@@ -272,20 +356,31 @@ async function fetchAndUploadAttachments(
   const fileAttachments = all.filter(
     (a) => a["@odata.type"] === "#microsoft.graph.fileAttachment" && a.name,
   );
-  console.log(`[attachments] msg=${graphMessageId} fileAttachments=${fileAttachments.map((a) => `${a.name}(inline=${a.isInline},size=${a.size})`).join("|")}`);
-
   const results: { blobName: string; fileName: string }[] = [];
   for (const att of fileAttachments) {
     try {
+      // Sender-declared size is checked before download, the real length after (it can lie).
+      if (typeof att.size === "number" && att.size > MAX_SIZE_BYTES) {
+        console.warn(`[attachments] skipped ${att.name} for msg=${graphMessageId}: ${att.size} bytes exceeds ${MAX_SIZE_BYTES}`);
+        continue;
+      }
       const buffer = await fetchAttachmentBytes(mailbox, graphMessageId, att.id, token);
+      if (buffer.length > MAX_SIZE_BYTES) {
+        console.warn(`[attachments] skipped ${att.name} for msg=${graphMessageId}: downloaded ${buffer.length} bytes exceeds ${MAX_SIZE_BYTES}`);
+        continue;
+      }
+      // Staff still need non-allowlisted or spoofed files, but they are stored as a download-only octet-stream.
+      const declared = normaliseMediaType(att.contentType ?? "");
+      const storedType = isAllowedContentType(declared) && bytesMatchMediaType(declared, buffer) ? declared : "application/octet-stream";
       const { blobName } = await uploadBlob(
         buffer,
         att.name,
-        att.contentType ?? "application/octet-stream",
-        `email-attachments/${graphMessageId}`,
+        storedType,
+        // Graph ids are URL-safe base64; map the two standard-base64 characters
+        // anyway so the folder always fits EMAIL_ATTACHMENT_SHAPE (blob-names.ts).
+        `email-attachments/${graphMessageId.replace(/\+/g, "-").replace(/\//g, "_")}`,
       );
       results.push({ blobName, fileName: att.name });
-      console.log(`[attachments] uploaded ${att.name} → ${blobName}`);
     } catch (err: any) {
       console.error(`[attachments] failed to upload ${att.name} for msg=${graphMessageId}: ${err?.message}`);
     }
@@ -293,64 +388,116 @@ async function fetchAndUploadAttachments(
   return results;
 }
 
-export async function graphFetchEmails(mailbox: string, sinceDateTime?: string): Promise<GraphEmail[]> {
+export interface GraphEmailPage {
+  /** Messages on this page not already stored, oldest first. */
+  emails: GraphEmail[];
+  /** The newest message on the page, stored before or not: where the
+   *  watermark may move once this page is stored. */
+  newestMessageId: string | null;
+  newestReceivedAt: string | null;
+}
+
+async function toGraphEmail(m: any, mailbox: string, token: string): Promise<GraphEmail> {
+  const attachmentBlobNames =
+    m.hasAttachments && m.id
+      ? await fetchAndUploadAttachments(mailbox, m.id, token).catch((err: any) => {
+          console.error(`[attachments] fetchAndUpload threw for msg=${m.id}: ${err?.message}`);
+          return [];
+        })
+      : [];
+  // Graph occasionally returns a `name` that's just the address echoed
+  // back; null it out so the UI keeps using the address-only render path
+  // for those rather than showing the same string twice.
+  const rawName: string | null = m.from?.emailAddress?.name ?? null;
+  const rawAddress: string | null = m.from?.emailAddress?.address ?? null;
+  const fromName = rawName && rawName !== rawAddress ? rawName : null;
+  const headers = toMessageHeaders(m.internetMessageHeaders);
+  const auth = assessSenderAuth(headers, rawAddress ?? "");
+  const { inReplyTo, referenceIds } = replyHeaders(headers);
+  return {
+    graphMessageId: m.id,
+    inReplyTo,
+    internetMessageId: m.internetMessageId ?? m.id,
+    referenceIds,
+    subject: m.subject ?? null,
+    fromAddress: rawAddress,
+    fromName,
+    bodyContent: m.body?.content ?? null,
+    receivedAt: m.receivedDateTime ?? null,
+    attachmentBlobNames,
+    authenticationResults: auth.summary,
+    senderAuthenticated: auth.authenticated,
+  };
+}
+
+/**
+ * The Inbox since `sinceDateTime`, oldest first, one Graph page (50) at a
+ * time, following @odata.nextLink to the end (DL-13: newest-first with no
+ * paging kept only the newest 50 and skipped the rest for good). The caller
+ * stores each page before asking for the next, so a failure leaves every
+ * earlier page stored and the later ones still unread.
+ */
+export async function* graphFetchEmailPages(
+  mailbox: string,
+  sinceDateTime?: string,
+  knownMessageIds: ReadonlySet<string> = new Set(),
+): AsyncGenerator<GraphEmailPage> {
   const token = await getGraphToken();
 
   const url = new URL(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages`,
   );
-  url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments");
+  // internetMessageHeaders is only returned when $selected; it feeds sender auth.
+  url.searchParams.set("$select", "id,internetMessageId,subject,from,body,receivedDateTime,hasAttachments,internetMessageHeaders");
   if (sinceDateTime) {
     url.searchParams.set("$filter", `receivedDateTime ge ${sinceDateTime}`);
   }
-  url.searchParams.set("$orderby", "receivedDateTime desc");
+  url.searchParams.set("$orderby", "receivedDateTime asc");
   url.searchParams.set("$top", "50");
-
-  const resp = await fetch(url.toString(), {
+  const init = {
     headers: {
       Authorization: `Bearer ${token}`,
       Prefer: 'outlook.body-content-type="text"',
     },
-  });
+  };
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Graph fetch emails failed: ${resp.status} — ${text}`);
+  let next: string | undefined = url.toString();
+  while (next) {
+    const resp = await fetchOnceMore(next, init);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Graph fetch emails failed: ${resp.status} — ${text}`);
+    }
+    const data = (await resp.json()) as { "@odata.nextLink"?: string; value?: any[] };
+    const all = data.value ?? [];
+
+    // The `ge` window always re-lists the newest stored message(s). Drop them
+    // before their attachments are re-uploaded as orphan blobs. Keyed like
+    // upsertGraphEmails keys MessageID.
+    const fresh = all.filter((m) => !knownMessageIds.has(m.internetMessageId ?? m.id));
+    const newest = all.reduce<any>(
+      (latest, m) => (!latest || String(m.receivedDateTime ?? "") >= String(latest.receivedDateTime ?? "") ? m : latest),
+      null,
+    );
+    yield {
+      emails: await Promise.all(fresh.map((m) => toGraphEmail(m, mailbox, token))),
+      newestMessageId: newest ? (newest.internetMessageId ?? newest.id ?? null) : null,
+      newestReceivedAt: newest?.receivedDateTime ?? null,
+    };
+    next = data["@odata.nextLink"];
   }
+}
 
-  const data = (await resp.json()) as { value: any[] };
-
-  const emails = await Promise.all(
-    (data.value ?? []).map(async (m) => {
-      const attachmentBlobNames =
-        m.hasAttachments && m.id
-          ? await fetchAndUploadAttachments(mailbox, m.id, token).catch((err: any) => {
-              console.error(`[attachments] fetchAndUpload threw for msg=${m.id}: ${err?.message}`);
-              return [];
-            })
-          : [];
-      if (!m.hasAttachments) {
-        console.log(`[attachments] skipped msg=${m.id} subject="${m.subject}" — hasAttachments=false`);
-      }
-      // Graph occasionally returns a `name` that's just the address echoed
-      // back; null it out so the UI keeps using the address-only render path
-      // for those rather than showing the same string twice.
-      const rawName: string | null = m.from?.emailAddress?.name ?? null;
-      const rawAddress: string | null = m.from?.emailAddress?.address ?? null;
-      const fromName = rawName && rawName !== rawAddress ? rawName : null;
-      return {
-        graphMessageId: m.id,
-        internetMessageId: m.internetMessageId ?? m.id,
-        subject: m.subject ?? null,
-        fromAddress: rawAddress,
-        fromName,
-        bodyContent: m.body?.content ?? null,
-        receivedAt: m.receivedDateTime ?? null,
-        attachmentBlobNames,
-      };
-    }),
-  );
-
+/** Every page of graphFetchEmailPages in one array (tests, tools). */
+export async function graphFetchEmails(
+  mailbox: string,
+  sinceDateTime?: string,
+  knownMessageIds: ReadonlySet<string> = new Set(),
+): Promise<GraphEmail[]> {
+  const emails: GraphEmail[] = [];
+  for await (const page of graphFetchEmailPages(mailbox, sinceDateTime, knownMessageIds)) {
+    emails.push(...page.emails);
+  }
   return emails;
 }
 

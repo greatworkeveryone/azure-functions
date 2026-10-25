@@ -4,8 +4,17 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import ExcelJS from "exceljs";
-import { TYPES } from "tedious";
-import { createConnection, createServiceConnection, executeQuery, closeConnection } from "../db";
+import { assertSafeXlsx, XlsxRejectedError } from "../xlsx-safe";
+import { type Connection, TYPES } from "tedious";
+import {
+  beginTransaction,
+  closeConnection,
+  commitTransaction,
+  createRequestConnection,
+  createServiceConnection,
+  executeQuery,
+  type SqlParam,
+} from "../db";
 import {
   AppRole,
   extractToken,
@@ -14,9 +23,14 @@ import {
   requireRole,
   oidFromToken,
 } from "../auth";
-import { uploadBlob, generateReadSasUrl } from "../blob-storage";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { uploadKeyPhotoBlob, keyPhotoReadSasUrl } from "../blob-storage";
+import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "../keyRoles";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
+import { parseIsoDateTime } from "../iso-datetime";
+import { cellValueText } from "../xlsx-cells";
 import { syncKeyLostReportedStandalone } from "../keyPlannerSync";
+import { rollbackQuietly, rowVersionHex } from "../tenancyScheduleWrite";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
 const BULK_CREATE_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 const EDIT_KEYS_ROLES   = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
@@ -47,13 +61,12 @@ function callerFromToken(token: string): UserRef {
   return { id, name };
 }
 
-const KEY_STORAGE_LOCATIONS = [
-  "Randazzo Properties Office",
-  "Randazzo Center (Harry Potter Room)",
-  "9 Cavanagh (Plant Room)",
-  "66 Smith (Plant Room)",
-  "Bov Plaza (Site Office)",
-] as const;
+// Storage location is free text ("Cabinet B, hook 14"); the screens suggest
+// what other keys already use. There is deliberately no fixed list.
+
+/** Largest key spreadsheet accepted. A real register is well under 1 MB. */
+const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 2000; // matches serviceScheduleImport
 
 const KEY_SUB_TYPES = [
   "Normal", "BiLock", "Dimpled", "Safe", "Laser Tracked", "Cylinder",
@@ -66,6 +79,9 @@ const CODE_SUB_TYPES = [
 
 const ITEM_TYPES = ["key", "code"] as const;
 const REGISTRATIONS = ["standard", "registered"] as const;
+
+/** Text with something in it: a description of spaces is no description (createKey and updateKey). */
+const hasText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 // ── Notification stub ────────────────────────────────────────────────────────
 // TODO: send Graph API email to key manager when key is overdue
@@ -83,7 +99,8 @@ const KEY_COLUMNS = `
   k.DateAdded, k.Status,
   k.CreatedById, k.CreatedByName, k.CreatedAt,
   k.IsDeleted, k.DeletedAt, k.DeletedById, k.DeletedByName,
-  k.LostAt, k.LostById, k.LostByName, k.LostComment
+  k.LostAt, k.LostById, k.LostByName, k.LostComment,
+  k.Version, k.IsTest
 `;
 
 // Photo SAS URLs are baked into list/detail responses. Tight TTL keeps the
@@ -126,8 +143,10 @@ function formatKey(row: Record<string, unknown>) {
     subType: row.SubType ?? null,
     registration: row.Registration,
     description: row.Description,
+    // The stored reference (a blob name) next to the readable link: an edit sends it back unchanged to keep the photo.
+    photoBlobUrl: (row.PhotoBlobUrl as string | null) ?? null,
     photoUrl: row.PhotoBlobUrl
-      ? generateReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
+      ? keyPhotoReadSasUrl(row.PhotoBlobUrl as string, PHOTO_SAS_TTL_MS)
       : null,
     storageLocation: row.StorageLocation ?? null,
     dateAdded: row.DateAdded,
@@ -146,6 +165,9 @@ function formatKey(row: Record<string, unknown>) {
       ? { id: row.LostById as string, name: (row.LostByName as string) ?? "Unknown user" }
       : null,
     lostComment: (row.LostComment as string | null) ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
+    // Hex of Keys.Version (migration 139): an edit sends it back, a mismatch is a 409.
+    rowVersion: rowVersionHex(row.Version),
   };
 }
 
@@ -163,7 +185,7 @@ async function getKeys(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // OUTER APPLY pulls the single most-recent open batch per key so the row
     // count stays 1:1 with dbo.Keys. Codes can have several concurrent open
@@ -193,8 +215,9 @@ async function getKeys(
          ORDER BY kb.CheckedOutAt DESC
        ) cb
        WHERE k.IsDeleted = 0
+         AND (k.IsTest = 0 OR @ShowTest = 1)
        ORDER BY b.BuildingName, k.KeyNumber`,
-      [],
+      [await showTestParam(request)],
     );
 
     // Fetch all open checkout rows to attach to batches
@@ -224,7 +247,7 @@ async function getKeys(
             checkedOutAt: row.CheckedOutAt,
             expectedReturnAt: row.ExpectedReturnAt,
             checkOutPhotoUrl: row.CheckOutPhotoBlobUrl
-              ? generateReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+              ? keyPhotoReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
               : null,
             notes: row.Notes ?? null,
             isOverdue: row.IsOverdue === 1,
@@ -234,7 +257,7 @@ async function getKeys(
               keyId: co.KeyId,
               checkedInAt: co.CheckedInAt ?? null,
               checkInPhotoUrl: co.CheckInPhotoBlobUrl
-                ? generateReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+                ? keyPhotoReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
                 : null,
             })),
           }
@@ -268,7 +291,7 @@ async function getKeyDetail(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const keyRows = await executeQuery(
       connection,
@@ -286,6 +309,7 @@ async function getKeyDetail(
       `SELECT DISTINCT
          kb.Id AS BatchId, kb.CheckedOutBy, kb.CheckedOutTo,
          kb.CheckedOutAt, kb.ExpectedReturnAt, kb.CheckOutPhotoBlobUrl, kb.Notes,
+         sig.BlobName AS SignatureBlobName,
          CASE WHEN EXISTS (
            SELECT 1 FROM dbo.KeyCheckouts kc2
            WHERE kc2.BatchId = kb.Id AND kc2.KeyId = @Id AND kc2.CheckedInAt IS NULL
@@ -293,6 +317,7 @@ async function getKeyDetail(
          THEN 1 ELSE 0 END AS IsOverdue
        FROM dbo.KeyCheckoutBatches kb
        JOIN dbo.KeyCheckouts kco ON kco.BatchId = kb.Id AND kco.KeyId = @Id
+       LEFT JOIN dbo.Attachments sig ON sig.Id = kb.SignatureAttachmentId
        ORDER BY kb.CheckedOutAt DESC`,
       [{ name: "Id", type: TYPES.Int, value: id }],
     );
@@ -321,9 +346,13 @@ async function getKeyDetail(
       checkedOutAt: row.CheckedOutAt,
       expectedReturnAt: row.ExpectedReturnAt,
       checkOutPhotoUrl: row.CheckOutPhotoBlobUrl
-        ? generateReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+        ? keyPhotoReadSasUrl(row.CheckOutPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
         : null,
       notes: row.Notes ?? null,
+      // Only here, never in the key list: the history is for people who can open a key.
+      signatureUrl: row.SignatureBlobName
+        ? keyPhotoReadSasUrl(row.SignatureBlobName as string, 4 * 60 * 60 * 1000)
+        : null,
       isOverdue: row.IsOverdue === 1,
       checkouts: (checkoutsByBatch.get(row.BatchId as number) ?? []).map((co) => ({
         id: co.Id,
@@ -331,7 +360,7 @@ async function getKeyDetail(
         keyId: co.KeyId,
         checkedInAt: co.CheckedInAt ?? null,
         checkInPhotoUrl: co.CheckInPhotoBlobUrl
-          ? generateReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
+          ? keyPhotoReadSasUrl(co.CheckInPhotoBlobUrl as string, 4 * 60 * 60 * 1000)
           : null,
       })),
     }));
@@ -368,28 +397,34 @@ async function createKey(
     const { BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
             Registration, Description, PhotoBlobUrl, StorageLocation } = body ?? {};
 
-    if (!BuildingId || !Level || !KeyNumber || !Description) {
-      return { status: 400, jsonBody: { error: "BuildingId, Level, KeyNumber, Description required" } };
+    // Level is optional: a building with no configured levels (a house, a
+    // single-storey site) has nothing to pick. It is stored as '' (the column is NOT NULL).
+    if (!BuildingId || !KeyNumber || !hasText(Description)) {
+      return { status: 400, jsonBody: { error: "BuildingId, KeyNumber, Description required" } };
     }
 
+    // D9: admins and directors may create a test key; an admin's "[TEST]" description does too.
+    const testFlag = await testFlagForCreate(request, body?.IsTest, Description);
+    if ("error" in testFlag) return testFlag.error;
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
       `INSERT INTO dbo.Keys
          (BuildingId, TenancyId, Level, KeyNumber, ItemType, SubType,
           Registration, Description, PhotoBlobUrl, StorageLocation,
-          CreatedById, CreatedByName)
+          CreatedById, CreatedByName, IsTest)
        OUTPUT INSERTED.Id
        VALUES
          (@BuildingId, @TenancyId, @Level, @KeyNumber, @ItemType, @SubType,
           @Registration, @Description, @PhotoBlobUrl, @StorageLocation,
-          @CreatedById, @CreatedByName)`,
+          @CreatedById, @CreatedByName, @IsTest)`,
       [
+        { name: "IsTest",          type: TYPES.Bit,      value: testFlag.isTest },
         { name: "BuildingId",      type: TYPES.Int,      value: BuildingId },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-        { name: "Level",           type: TYPES.NVarChar,  value: Level },
+        { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
         { name: "KeyNumber",       type: TYPES.NVarChar,  value: KeyNumber },
         { name: "ItemType",        type: TYPES.NVarChar,  value: ItemType ?? "key" },
         { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
@@ -432,6 +467,50 @@ async function createKey(
 }
 
 // ── PUT /api/updateKey ────────────────────────────────────────────────────────
+// Body: { Id, rowVersion, and any of: TenancyId, Level, SubType, Registration,
+//         Description, PhotoBlobUrl, StorageLocation }
+//
+// Only the fields the request carries are written. One it leaves out is not
+// touched; one sent as null is cleared. Description is required text: it can be
+// changed, not cleared, and a description of spaces is refused as in createKey.
+//
+// rowVersion is the one the key was read with (getKeys, getKeyDetail). The row
+// is read under an update lock and the versions compared before anything is
+// written; if someone changed the key since, nothing is saved and the answer
+// is 409 with the current key (currentState, the shape the client's optimistic
+// mutations read), so the screen can refresh and the person can check their
+// edit against it. Any write to the row moves the version, check-in and
+// check-out included, because they set the storage location too.
+//
+// BuildingId, ItemType and KeyNumber are deliberately never read. A key's
+// building, type and number are fixed when it is registered (the edit form
+// shows them locked), so a body that carries them changes nothing.
+
+/**
+ * What an edit may change, in the order it is written, and what a field sent as
+ * null becomes. Level and Registration are NOT NULL columns, so "cleared" is the
+ * value a key gets when none is given: createKey stores '' for no level and the
+ * column defaults to 'standard'.
+ */
+const EDITABLE_KEY_COLUMNS: ReadonlyArray<{ cleared: string | null; column: string; type: SqlParam["type"] }> = [
+  { cleared: null, column: "TenancyId", type: TYPES.Int },
+  { cleared: "", column: "Level", type: TYPES.NVarChar },
+  { cleared: null, column: "SubType", type: TYPES.NVarChar },
+  { cleared: "standard", column: "Registration", type: TYPES.NVarChar },
+  { cleared: null, column: "Description", type: TYPES.NVarChar },
+  { cleared: null, column: "PhotoBlobUrl", type: TYPES.NVarChar },
+  { cleared: null, column: "StorageLocation", type: TYPES.NVarChar },
+];
+
+const ROW_VERSION_RE = /^[0-9a-f]{16}$/i;
+const STALE_KEY_MESSAGE = "Someone else changed this key — it has been refreshed. Check it and save again.";
+
+/** The key, locked until the transaction ends so two saves cannot both pass the version check. */
+const KEY_FOR_UPDATE_SQL = `SELECT ${KEY_COLUMNS}
+   FROM dbo.Keys k WITH (UPDLOCK, ROWLOCK)
+   JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
+   LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
+   WHERE k.Id = @Id`;
 
 async function updateKey(
   request: HttpRequest,
@@ -445,42 +524,70 @@ async function updateKey(
 
   let connection;
   try {
-    const body = (await request.json()) as any;
-    const { Id, TenancyId, Level, SubType, Registration, Description,
-            PhotoBlobUrl, StorageLocation } = body ?? {};
+    const body = ((await request.json()) as any) ?? {};
+    const { Id, rowVersion } = body;
 
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
+    const readVersion = typeof rowVersion === "string" ? rowVersion.trim().toLowerCase() : "";
+    if (!ROW_VERSION_RE.test(readVersion)) {
+      return {
+        status: 400,
+        jsonBody: {
+          error: "rowVersion required: send back the one the key was read with",
+          code: "ROW_VERSION_REQUIRED",
+        },
+      };
+    }
+    if (body.Description !== undefined && !hasText(body.Description)) {
+      return { status: 400, jsonBody: { error: "Description required" } };
+    }
+    const changes = EDITABLE_KEY_COLUMNS.filter(({ column }) => body[column] !== undefined);
 
-    connection = await createConnection(token);
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Keys
-       SET TenancyId = @TenancyId, Level = @Level, SubType = @SubType,
-           Registration = @Registration, Description = @Description,
-           PhotoBlobUrl = @PhotoBlobUrl, StorageLocation = @StorageLocation
-       WHERE Id = @Id`,
-      [
-        { name: "Id",              type: TYPES.Int,      value: Id },
-        { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
-        { name: "Level",           type: TYPES.NVarChar,  value: Level },
-        { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
-        { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? null },
-        { name: "Description",     type: TYPES.NVarChar,  value: Description },
-        { name: "PhotoBlobUrl",    type: TYPES.NVarChar,  value: PhotoBlobUrl ?? null },
-        { name: "StorageLocation", type: TYPES.NVarChar,  value: StorageLocation ?? null },
-      ],
-    );
+    connection = await createRequestConnection(token);
+    const idParam = { name: "Id", type: TYPES.Int, value: Id };
 
-    const rows = await executeQuery(
-      connection,
-      `SELECT ${KEY_COLUMNS}
-       FROM dbo.Keys k
-       JOIN dbo.Buildings b ON b.BuildingID = k.BuildingId
-       LEFT JOIN dbo.Tenants t ON t.TenantID = k.TenancyId
-       WHERE k.Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
-    return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
+    await beginTransaction(connection);
+    try {
+      const locked = await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]);
+      if (locked.length === 0) {
+        await rollbackQuietly(connection);
+        return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
+      }
+      if (rowVersionHex(locked[0].Version) !== readVersion) {
+        await rollbackQuietly(connection);
+        return {
+          status: 409,
+          jsonBody: {
+            code: "KEY_STALE",
+            currentState: { ...formatKey(locked[0]), currentBatch: null },
+            error: STALE_KEY_MESSAGE,
+          },
+        };
+      }
+
+      // Column names come from EDITABLE_KEY_COLUMNS above, never from the request.
+      if (changes.length > 0) {
+        await executeQuery(
+          connection,
+          `UPDATE dbo.Keys SET ${changes.map(({ column }) => `${column} = @${column}`).join(", ")} WHERE Id = @Id`,
+          [
+            idParam,
+            ...changes.map(({ cleared, column, type }) => ({
+              name: column,
+              type,
+              value: body[column] === null ? cleared : body[column],
+            })),
+          ],
+        );
+      }
+
+      const rows = changes.length > 0 ? await executeQuery(connection, KEY_FOR_UPDATE_SQL, [idParam]) : locked;
+      await commitTransaction(connection);
+      return { status: 200, jsonBody: { key: { ...formatKey(rows[0]), currentBatch: null } } };
+    } catch (error) {
+      await rollbackQuietly(connection);
+      throw error;
+    }
   } catch (error: any) {
     context.error("updateKey failed:", error.message);
     return errorResponse("Failed to update key", error.message);
@@ -489,7 +596,43 @@ async function updateKey(
   }
 }
 
+// ── Transactions ──────────────────────────────────────────────────────────────
+// Reporting a key lost, archiving it, restoring it, and handing keys over or
+// back each change several rows that have to stand or fall together (a key and
+// its checkouts; a handover and its keys). They run as one transaction on rows
+// the transaction has locked first, so a failure half way leaves nothing behind
+// and two people acting on the same key take turns.
+
+interface Outcome {
+  /** Keep what the work wrote. A refusal (404, 409, 400) keeps nothing. */
+  keep: boolean;
+  response: HttpResponseInit;
+}
+const kept = (response: HttpResponseInit): Outcome => ({ keep: true, response });
+const refused = (response: HttpResponseInit): Outcome => ({ keep: false, response });
+const keyNotFound = (): Outcome =>
+  refused({ status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } });
+
+/** Runs `work` as one transaction: commits when it keeps its writes, otherwise rolls back; a throw rolls back and is rethrown. */
+async function inOneTransaction(connection: Connection, work: () => Promise<Outcome>): Promise<HttpResponseInit> {
+  await beginTransaction(connection);
+  try {
+    const { keep, response } = await work();
+    if (keep) await commitTransaction(connection);
+    else await rollbackQuietly(connection);
+    return response;
+  } catch (error) {
+    await rollbackQuietly(connection);
+    throw error;
+  }
+}
+
 // ── POST /api/reportKeyLost ───────────────────────────────────────────────────
+// Closes the key's open checkouts and marks it lost, in one transaction, under a
+// lock on the key. Both writes carry the same moment (the database's clock, read
+// with the lock): the checkouts' CheckedInAt equals the key's LostAt, which is how
+// restoreKey knows which checkouts this report closed. A key that is already lost
+// is refused (409) rather than overwritten, so who reported it first is kept.
 
 async function reportKeyLost(
   request: HttpRequest,
@@ -509,39 +652,56 @@ async function reportKeyLost(
     const lostComment = trimmedComment === "" ? null : trimmedComment;
 
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const conn = connection;
+    const idParam = { name: "Id", type: TYPES.Int, value: Id };
 
-    // Close any open checkout rows for this key
-    await executeQuery(
-      connection,
-      `UPDATE dbo.KeyCheckouts
-       SET CheckedInAt = SYSUTCDATETIME()
-       WHERE KeyId = @Id AND CheckedInAt IS NULL`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
+    const response = await inOneTransaction(conn, async () => {
+      const keyRows = await executeQuery(
+        conn,
+        `SELECT Status, SYSUTCDATETIME() AS Now FROM dbo.Keys WITH (UPDLOCK, ROWLOCK) WHERE Id = @Id`,
+        [idParam],
+      );
+      if (keyRows.length === 0) return keyNotFound();
+      if (keyRows[0].Status === "lost") {
+        return refused({ status: 409, jsonBody: { error: "This key is already reported lost.", code: "ALREADY_LOST" } });
+      }
+      const now = { name: "Now", type: TYPES.DateTime2, value: keyRows[0].Now };
 
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Keys
-       SET Status = 'lost',
-           LostAt = SYSUTCDATETIME(),
-           LostById = @LostById,
-           LostByName = @LostByName,
-           LostComment = @LostComment
-       WHERE Id = @Id`,
-      [
-        { name: "Id",          type: TYPES.Int,      value: Id },
-        { name: "LostById",    type: TYPES.NVarChar, value: caller.id },
-        { name: "LostByName",  type: TYPES.NVarChar, value: caller.name },
-        { name: "LostComment", type: TYPES.NVarChar, value: lostComment },
-      ],
-    );
+      // Close any open checkout rows for this key
+      await executeQuery(
+        conn,
+        `UPDATE dbo.KeyCheckouts
+         SET CheckedInAt = @Now
+         WHERE KeyId = @Id AND CheckedInAt IS NULL`,
+        [idParam, now],
+      );
 
-    // Fire-and-forget — standalone wrapper handles its own connection + errors.
+      await executeQuery(
+        conn,
+        `UPDATE dbo.Keys
+         SET Status = 'lost',
+             LostAt = @Now,
+             LostById = @LostById,
+             LostByName = @LostByName,
+             LostComment = @LostComment
+         WHERE Id = @Id`,
+        [
+          idParam,
+          now,
+          { name: "LostById",    type: TYPES.NVarChar, value: caller.id },
+          { name: "LostByName",  type: TYPES.NVarChar, value: caller.name },
+          { name: "LostComment", type: TYPES.NVarChar, value: lostComment },
+        ],
+      );
+      return kept({ status: 200, jsonBody: { ok: true } });
+    });
+
+    // Fire-and-forget, after the commit — standalone wrapper handles its own connection + errors.
     // A Planner outage must not fail the user's report.
-    void syncKeyLostReportedStandalone(Id);
+    if (response.status === 200) void syncKeyLostReportedStandalone(Id);
 
-    return { status: 200, jsonBody: { ok: true } };
+    return response;
   } catch (error: any) {
     context.error("reportKeyLost failed:", error.message);
     return errorResponse("Failed to report key lost", error.message);
@@ -554,7 +714,9 @@ async function reportKeyLost(
 // Soft delete. The row stays — it's hidden from /getKeys and rejected by
 // /checkoutKeys, but /getKeyDetail still returns it so the UI can offer
 // "Restore". Any open checkouts are force-closed so the audit trail closes
-// cleanly. Mirrors the Jobs archive pattern from migration 041.
+// cleanly, at the same moment as the key's DeletedAt (see reportKeyLost), in
+// one transaction with the delete. Mirrors the Jobs archive pattern from
+// migration 041.
 
 async function deleteKey(
   request: HttpRequest,
@@ -572,51 +734,53 @@ async function deleteKey(
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
 
     const caller = callerFromToken(token);
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const conn = connection;
+    const idParam = { name: "Id", type: TYPES.Int, value: Id };
 
-    const existing = await executeQuery(
-      connection,
-      `SELECT IsDeleted FROM dbo.Keys WHERE Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
-    if (existing.length === 0) {
-      return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
-    }
-    if (existing[0].IsDeleted === true || existing[0].IsDeleted === 1) {
-      return {
-        status: 409,
-        jsonBody: { error: "Key is already deleted.", code: "ALREADY_DELETED" },
-      };
-    }
+    const response = await inOneTransaction(conn, async () => {
+      const existing = await executeQuery(
+        conn,
+        `SELECT IsDeleted, SYSUTCDATETIME() AS Now FROM dbo.Keys WITH (UPDLOCK, ROWLOCK) WHERE Id = @Id`,
+        [idParam],
+      );
+      if (existing.length === 0) return keyNotFound();
+      if (existing[0].IsDeleted === true || existing[0].IsDeleted === 1) {
+        return refused({ status: 409, jsonBody: { error: "Key is already deleted.", code: "ALREADY_DELETED" } });
+      }
+      const now = { name: "Now", type: TYPES.DateTime2, value: existing[0].Now };
 
-    // Close any open checkout rows so the audit trail doesn't leave dangling
-    // batches against a deleted key.
-    await executeQuery(
-      connection,
-      `UPDATE dbo.KeyCheckouts
-       SET CheckedInAt = SYSUTCDATETIME()
-       WHERE KeyId = @Id AND CheckedInAt IS NULL`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
+      // Close any open checkout rows so the audit trail doesn't leave dangling
+      // batches against a deleted key.
+      await executeQuery(
+        conn,
+        `UPDATE dbo.KeyCheckouts
+         SET CheckedInAt = @Now
+         WHERE KeyId = @Id AND CheckedInAt IS NULL`,
+        [idParam, now],
+      );
 
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Keys
-       SET IsDeleted = 1,
-           DeletedAt = SYSUTCDATETIME(),
-           DeletedById = @DeletedById,
-           DeletedByName = @DeletedByName
-       WHERE Id = @Id`,
-      [
-        { name: "Id",            type: TYPES.Int,      value: Id },
-        { name: "DeletedById",   type: TYPES.NVarChar, value: caller.id },
-        { name: "DeletedByName", type: TYPES.NVarChar, value: caller.name },
-      ],
-    );
+      await executeQuery(
+        conn,
+        `UPDATE dbo.Keys
+         SET IsDeleted = 1,
+             DeletedAt = @Now,
+             DeletedById = @DeletedById,
+             DeletedByName = @DeletedByName
+         WHERE Id = @Id`,
+        [
+          idParam,
+          now,
+          { name: "DeletedById",   type: TYPES.NVarChar, value: caller.id },
+          { name: "DeletedByName", type: TYPES.NVarChar, value: caller.name },
+        ],
+      );
+      return kept({ status: 200, jsonBody: { ok: true } });
+    });
 
-    void syncKeyLostReportedStandalone(Id);
+    if (response.status === 200) void syncKeyLostReportedStandalone(Id);
 
-    return { status: 200, jsonBody: { ok: true } };
+    return response;
   } catch (error: any) {
     context.error("deleteKey failed:", error.message);
     return errorResponse("Failed to delete key", error.message);
@@ -628,9 +792,15 @@ async function deleteKey(
 // ── POST /api/restoreKey ──────────────────────────────────────────────────────
 // Reverses both "report lost" and "delete". Brings the key back to
 // Status='active', IsDeleted=0. Used when a lost key turns up or a delete
-// was made in error. Audit (CreatedBy) is preserved; we don't clear
-// DeletedBy/At so the history of the deletion is still visible if anything
-// wants to surface it later.
+// was made in error. Nothing about the earlier event is erased: CreatedBy,
+// DeletedAt/By and LostAt/By/Comment all stay (the key's Status and IsDeleted
+// say what it is now, and the screens read those). The checkouts that the
+// report or the delete closed — the ones closed at exactly the key's LostAt /
+// DeletedAt, with no check-in photo, which a real check-in always has — are
+// reopened, so a key that was out when it was reported lost is out again rather
+// than showing as in storage. Older reports and deletes, made before those two
+// moments were shared, cannot be told apart this way and are left closed.
+// All of it in one transaction.
 
 async function restoreKey(
   request: HttpRequest,
@@ -647,36 +817,52 @@ async function restoreKey(
     const { Id } = ((await request.json()) as any) ?? {};
     if (!Id) return { status: 400, jsonBody: { error: "Id required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const conn = connection;
+    const idParam = { name: "Id", type: TYPES.Int, value: Id };
 
-    const existing = await executeQuery(
-      connection,
-      `SELECT Status, IsDeleted FROM dbo.Keys WHERE Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
-    if (existing.length === 0) {
-      return { status: 404, jsonBody: { error: "Key not found", code: "KEY_NOT_FOUND" } };
-    }
-    const wasDeleted = existing[0].IsDeleted === true || existing[0].IsDeleted === 1;
-    const wasLost = existing[0].Status === "lost";
-    if (!wasDeleted && !wasLost) {
-      return {
-        status: 409,
-        jsonBody: { error: "Key is already active — nothing to restore.", code: "ALREADY_ACTIVE" },
-      };
-    }
+    const response = await inOneTransaction(conn, async () => {
+      const existing = await executeQuery(
+        conn,
+        `SELECT Status, IsDeleted FROM dbo.Keys WITH (UPDLOCK, ROWLOCK) WHERE Id = @Id`,
+        [idParam],
+      );
+      if (existing.length === 0) return keyNotFound();
+      const wasDeleted = existing[0].IsDeleted === true || existing[0].IsDeleted === 1;
+      const wasLost = existing[0].Status === "lost";
+      if (!wasDeleted && !wasLost) {
+        return refused({
+          status: 409,
+          jsonBody: { error: "Key is already active — nothing to restore.", code: "ALREADY_ACTIVE" },
+        });
+      }
 
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Keys
-       SET IsDeleted = 0, DeletedAt = NULL, Status = 'active'
-       WHERE Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Id }],
-    );
+      const reopened = await executeQuery(
+        conn,
+        `UPDATE kc
+         SET CheckedInAt = NULL
+         OUTPUT INSERTED.Id
+         FROM dbo.KeyCheckouts kc
+         JOIN dbo.Keys k ON k.Id = kc.KeyId
+         WHERE kc.KeyId = @Id
+           AND kc.CheckedInAt IS NOT NULL
+           AND kc.CheckInPhotoBlobUrl IS NULL
+           AND ((@WasLost = 1 AND kc.CheckedInAt = k.LostAt)
+             OR (@WasDeleted = 1 AND kc.CheckedInAt = k.DeletedAt))`,
+        [
+          idParam,
+          { name: "WasLost",    type: TYPES.Bit, value: wasLost },
+          { name: "WasDeleted", type: TYPES.Bit, value: wasDeleted },
+        ],
+      );
 
-    void syncKeyLostReportedStandalone(Id);
+      await executeQuery(conn, `UPDATE dbo.Keys SET IsDeleted = 0, Status = 'active' WHERE Id = @Id`, [idParam]);
+      return kept({ status: 200, jsonBody: { ok: true, reopenedCheckouts: reopened.length } });
+    });
 
-    return { status: 200, jsonBody: { ok: true } };
+    if (response.status === 200) void syncKeyLostReportedStandalone(Id);
+
+    return response;
   } catch (error: any) {
     context.error("restoreKey failed:", error.message);
     return errorResponse("Failed to restore key", error.message);
@@ -685,9 +871,63 @@ async function restoreKey(
   }
 }
 
+function signatureInvalid(): HttpResponseInit {
+  return {
+    status: 400,
+    jsonBody: { error: "That signature could not be used. Ask them to sign again.", code: "SIGNATURE_INVALID" },
+  };
+}
+
+/**
+ * The signature must be a PNG this caller stored through uploadKeySignature (the
+ * only thing that writes an Attachments row into the key-photos container, whose
+ * blobs are named keys/...) and no other handover uses. Never trust an
+ * attachment id on its own: it could be anyone's file.
+ */
+async function checkSignature(
+  connection: Awaited<ReturnType<typeof createRequestConnection>>,
+  attachmentId: number,
+  callerId: string,
+): Promise<HttpResponseInit | null> {
+  const rows = await executeQuery(
+    connection,
+    `SELECT a.Id, a.BlobName, a.ContentType, a.UploadedBy,
+            (SELECT TOP 1 kb.Id FROM dbo.KeyCheckoutBatches kb WHERE kb.SignatureAttachmentId = a.Id) AS LinkedBatchId
+       FROM dbo.Attachments a
+      WHERE a.Id = @Id`,
+    [{ name: "Id", type: TYPES.Int, value: attachmentId }],
+  );
+  const row = rows[0];
+  if (
+    !row ||
+    row.UploadedBy !== callerId ||
+    row.ContentType !== "image/png" ||
+    !String(row.BlobName).startsWith("keys/")
+  ) {
+    return signatureInvalid();
+  }
+  if (row.LinkedBatchId != null) {
+    return {
+      status: 409,
+      jsonBody: { error: "That signature has already been used for another handover.", code: "SIGNATURE_ALREADY_USED" },
+    };
+  }
+  return null;
+}
+
 // ── POST /api/checkoutKeys ────────────────────────────────────────────────────
-// Body: { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl, StorageLocation?, Notes? }
-// CheckedOutBy is read from the JWT — not supplied by the caller.
+// Body: { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl, StorageLocation?, Notes?,
+//         SignatureAttachmentId? }
+// CheckedOutBy is read from the JWT — not supplied by the caller. The signature
+// is the id returned by uploadKeySignature; it must be a PNG that this caller
+// uploaded there and that no other handover uses.
+//
+// One transaction: the keys are locked first, in Id order, and only then are they
+// checked ("exists", "active", "not already out"). Two people handing over the
+// same physical key at once therefore take turns, and the second finds the first's
+// checkout and is refused (409 ALREADY_CHECKED_OUT) instead of both succeeding.
+// The batch, its checkouts and any storage-location moves are written together
+// or not at all.
 
 async function checkoutKeys(
   request: HttpRequest,
@@ -696,20 +936,25 @@ async function checkoutKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, CHECKOUT_KEYS_ROLES);
   if (denied) return denied;
 
   let connection;
   try {
     const body = (await request.json()) as any;
     const { KeyIds, CheckedOutTo, ExpectedReturnAt, CheckOutPhotoBlobUrl,
-            StorageLocation, Notes } = body ?? {};
+            StorageLocation, Notes, SignatureAttachmentId } = body ?? {};
 
     if (!Array.isArray(KeyIds) || KeyIds.length === 0) {
       return { status: 400, jsonBody: { error: "KeyIds (non-empty array) required" } };
     }
     if (!CheckedOutTo || !ExpectedReturnAt) {
       return { status: 400, jsonBody: { error: "CheckedOutTo, ExpectedReturnAt required" } };
+    }
+    // Bound as DateTime2: a free-text string would be read in the session language (01/02 = 2 Jan).
+    const expectedReturnAt = parseIsoDateTime(ExpectedReturnAt);
+    if (!expectedReturnAt) {
+      return { status: 400, jsonBody: { error: "ExpectedReturnAt must be an ISO 8601 date or date-time" } };
     }
     // Photo is required when at least one item is a physical key. For codes
     // there's no handover, so it's optional.
@@ -718,125 +963,150 @@ async function checkoutKeys(
         ? CheckOutPhotoBlobUrl
         : null;
 
-    const checkedOutBy = callerFromToken(token).name;
+    const hasSignature = SignatureAttachmentId !== undefined && SignatureAttachmentId !== null;
+    if (hasSignature && !(Number.isInteger(SignatureAttachmentId) && SignatureAttachmentId > 0)) {
+      return signatureInvalid();
+    }
 
-    connection = await createConnection(token);
+    const caller = callerFromToken(token);
+    const checkedOutBy = caller.name;
+
+    connection = await createRequestConnection(token);
+    const conn = connection;
 
     const placeholders = KeyIds.map((_: number, i: number) => `@K${i}`).join(",");
     const params = KeyIds.map((id: number, i: number) => ({ name: `K${i}`, type: TYPES.Int, value: id }));
 
-    // Validate every key exists, isn't soft-deleted, and is in `active` status.
-    // Lost/retired/deleted keys can't be checked out — bail with a granular
-    // error that names the offending keys so the UI can show a useful toast.
-    const keyStateRows = await executeQuery(
-      connection,
-      `SELECT Id, KeyNumber, Status, IsDeleted FROM dbo.Keys WHERE Id IN (${placeholders})`,
-      params,
-    );
-    if (keyStateRows.length !== KeyIds.length) {
-      return {
-        status: 404,
-        jsonBody: { error: "One or more keys could not be found", code: "KEY_NOT_FOUND" },
-      };
-    }
-    const deletedRows = keyStateRows.filter((r: any) => r.IsDeleted === true || r.IsDeleted === 1);
-    if (deletedRows.length > 0) {
-      const nums = deletedRows.map((r: any) => r.KeyNumber).join(", ");
-      return {
-        status: 409,
-        jsonBody: { error: `Deleted — cannot check out: ${nums}`, code: "KEY_DELETED" },
-      };
-    }
-    const inactiveRows = keyStateRows.filter((r: any) => r.Status !== "active");
-    if (inactiveRows.length > 0) {
-      const detail = inactiveRows
-        .map((r: any) => `${r.KeyNumber} (${r.Status})`)
-        .join(", ");
-      return {
-        status: 409,
-        jsonBody: { error: `Not active — cannot check out: ${detail}`, code: "KEY_NOT_ACTIVE" },
-      };
-    }
+    let response: HttpResponseInit;
+    try {
+      response = await inOneTransaction(conn, async () => {
+        if (hasSignature) {
+          const problem = await checkSignature(conn, SignatureAttachmentId as number, caller.id);
+          if (problem) return refused(problem);
+        }
 
-    // Validate no physical key is already checked out. Codes are exempt — a
-    // PIN/access code can be shared with multiple parties at the same time,
-    // so re-sharing is always allowed.
-    const alreadyOut = await executeQuery(
-      connection,
-      `SELECT k.Id, k.KeyNumber FROM dbo.Keys k
-       JOIN dbo.KeyCheckouts kco ON kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
-       WHERE k.Id IN (${placeholders}) AND k.ItemType = 'key'`,
-      params,
-    );
-    if (alreadyOut.length > 0) {
-      const nums = alreadyOut.map((r: any) => r.KeyNumber).join(", ");
-      return {
-        status: 409,
-        jsonBody: { error: `Already checked out: ${nums}`, code: "ALREADY_CHECKED_OUT" },
-      };
-    }
+        // Lock every key before looking at any of them. Validate every key exists,
+        // isn't soft-deleted, and is in `active` status. Lost/retired/deleted keys
+        // can't be checked out — bail with a granular error that names the
+        // offending keys so the UI can show a useful toast.
+        const keyStateRows = await executeQuery(
+          conn,
+          `SELECT Id, KeyNumber, Status, IsDeleted, ItemType FROM dbo.Keys WITH (UPDLOCK, ROWLOCK)
+           WHERE Id IN (${placeholders}) ORDER BY Id`,
+          params,
+        );
+        if (keyStateRows.length !== KeyIds.length) {
+          return refused({
+            status: 404,
+            jsonBody: { error: "One or more keys could not be found", code: "KEY_NOT_FOUND" },
+          });
+        }
+        const deletedRows = keyStateRows.filter((r: any) => r.IsDeleted === true || r.IsDeleted === 1);
+        if (deletedRows.length > 0) {
+          const nums = deletedRows.map((r: any) => r.KeyNumber).join(", ");
+          return refused({
+            status: 409,
+            jsonBody: { error: `Deleted — cannot check out: ${nums}`, code: "KEY_DELETED" },
+          });
+        }
+        const inactiveRows = keyStateRows.filter((r: any) => r.Status !== "active");
+        if (inactiveRows.length > 0) {
+          const detail = inactiveRows
+            .map((r: any) => `${r.KeyNumber} (${r.Status})`)
+            .join(", ");
+          return refused({
+            status: 409,
+            jsonBody: { error: `Not active — cannot check out: ${detail}`, code: "KEY_NOT_ACTIVE" },
+          });
+        }
 
-    // Photo is mandatory when at least one item being checked out is a
-    // physical key. Codes alone are exempt — there's nothing to hand over.
-    if (photoBlob === null) {
-      const physicalRows = await executeQuery(
-        connection,
-        `SELECT 1 FROM dbo.Keys WHERE Id IN (${placeholders}) AND ItemType = 'key'`,
-        params,
-      );
-      if (physicalRows.length > 0) {
-        return {
-          status: 400,
-          jsonBody: {
-            error: "A handover photo is required when checking out a physical key.",
-            code: "PHOTO_REQUIRED",
-          },
-        };
-      }
-    }
+        // Validate no physical key is already checked out. Codes are exempt — a
+        // PIN/access code can be shared with multiple parties at the same time,
+        // so re-sharing is always allowed. The keys are locked, so this cannot
+        // be passed by two handovers at once.
+        const alreadyOut = await executeQuery(
+          conn,
+          `SELECT k.Id, k.KeyNumber FROM dbo.Keys k
+           JOIN dbo.KeyCheckouts kco ON kco.KeyId = k.Id AND kco.CheckedInAt IS NULL
+           WHERE k.Id IN (${placeholders}) AND k.ItemType = 'key'`,
+          params,
+        );
+        if (alreadyOut.length > 0) {
+          const nums = alreadyOut.map((r: any) => r.KeyNumber).join(", ");
+          return refused({
+            status: 409,
+            jsonBody: { error: `Already checked out: ${nums}`, code: "ALREADY_CHECKED_OUT" },
+          });
+        }
 
-    // Create batch
-    const batchInserted = await executeQuery(
-      connection,
-      `INSERT INTO dbo.KeyCheckoutBatches
-         (CheckedOutBy, CheckedOutTo, CheckedOutAt, ExpectedReturnAt, CheckOutPhotoBlobUrl, Notes)
-       OUTPUT INSERTED.Id
-       VALUES
-         (@CheckedOutBy, @CheckedOutTo, SYSUTCDATETIME(), @ExpectedReturnAt, @Photo, @Notes)`,
-      [
-        { name: "CheckedOutBy",  type: TYPES.NVarChar, value: checkedOutBy },
-        { name: "CheckedOutTo",  type: TYPES.NVarChar, value: CheckedOutTo },
-        { name: "ExpectedReturnAt", type: TYPES.NVarChar, value: ExpectedReturnAt },
-        { name: "Photo",         type: TYPES.NVarChar, value: photoBlob },
-        { name: "Notes",         type: TYPES.NVarChar, value: Notes ?? null },
-      ],
-    );
-    const batchId = batchInserted[0].Id as number;
+        // Photo is mandatory when at least one item being checked out is a
+        // physical key. Codes alone are exempt — there's nothing to hand over.
+        if (photoBlob === null && keyStateRows.some((r: any) => r.ItemType === "key")) {
+          return refused({
+            status: 400,
+            jsonBody: {
+              error: "A handover photo is required when checking out a physical key.",
+              code: "PHOTO_REQUIRED",
+            },
+          });
+        }
 
-    // Create one checkout row per key + update storage location
-    for (let i = 0; i < KeyIds.length; i++) {
-      const keyId = KeyIds[i] as number;
-      await executeQuery(
-        connection,
-        `INSERT INTO dbo.KeyCheckouts (BatchId, KeyId) VALUES (@BatchId, @KeyId)`,
-        [
-          { name: "BatchId", type: TYPES.Int, value: batchId },
-          { name: "KeyId",   type: TYPES.Int, value: keyId },
-        ],
-      );
-      if (StorageLocation) {
-        await executeQuery(
-          connection,
-          `UPDATE dbo.Keys SET StorageLocation = @Loc WHERE Id = @KeyId`,
+        // Create batch
+        const batchInserted = await executeQuery(
+          conn,
+          `INSERT INTO dbo.KeyCheckoutBatches
+             (CheckedOutBy, CheckedOutTo, CheckedOutAt, ExpectedReturnAt, CheckOutPhotoBlobUrl, Notes,
+              SignatureAttachmentId)
+           OUTPUT INSERTED.Id
+           VALUES
+             (@CheckedOutBy, @CheckedOutTo, SYSUTCDATETIME(), @ExpectedReturnAt, @Photo, @Notes,
+              @SignatureAttachmentId)`,
           [
-            { name: "Loc",   type: TYPES.NVarChar, value: StorageLocation },
-            { name: "KeyId", type: TYPES.Int,      value: keyId },
+            { name: "CheckedOutBy",  type: TYPES.NVarChar, value: checkedOutBy },
+            { name: "CheckedOutTo",  type: TYPES.NVarChar, value: CheckedOutTo },
+            { name: "ExpectedReturnAt", type: TYPES.DateTime2, value: expectedReturnAt },
+            { name: "Photo",         type: TYPES.NVarChar, value: photoBlob },
+            { name: "Notes",         type: TYPES.NVarChar, value: Notes ?? null },
+            { name: "SignatureAttachmentId", type: TYPES.Int, value: hasSignature ? SignatureAttachmentId : null },
           ],
         );
-      }
+        const batchId = batchInserted[0].Id as number;
+
+        // Create one checkout row per key + update storage location
+        for (let i = 0; i < KeyIds.length; i++) {
+          const keyId = KeyIds[i] as number;
+          await executeQuery(
+            conn,
+            `INSERT INTO dbo.KeyCheckouts (BatchId, KeyId) VALUES (@BatchId, @KeyId)`,
+            [
+              { name: "BatchId", type: TYPES.Int, value: batchId },
+              { name: "KeyId",   type: TYPES.Int, value: keyId },
+            ],
+          );
+          if (StorageLocation) {
+            await executeQuery(
+              conn,
+              `UPDATE dbo.Keys SET StorageLocation = @Loc WHERE Id = @KeyId`,
+              [
+                { name: "Loc",   type: TYPES.NVarChar, value: StorageLocation },
+                { name: "KeyId", type: TYPES.Int,      value: keyId },
+              ],
+            );
+          }
+        }
+
+        return kept({ status: 200, jsonBody: { batchId } });
+      });
+    } catch (error: any) {
+      // Two handovers using one signature: the unique index lets only the first through.
+      if (!error?.message?.includes("UX_KeyCheckoutBatches_SignatureAttachmentId")) throw error;
+      return {
+        status: 409,
+        jsonBody: { error: "That signature has already been used for another handover.", code: "SIGNATURE_ALREADY_USED" },
+      };
     }
 
-    return { status: 200, jsonBody: { batchId } };
+    return response;
   } catch (error: any) {
     context.error("checkoutKeys failed:", error.message);
     return errorResponse("Failed to checkout keys", error.message);
@@ -848,6 +1118,13 @@ async function checkoutKeys(
 // ── POST /api/checkinKeys ─────────────────────────────────────────────────────
 // Body: { CheckoutIds, CheckInPhotoBlobUrl, StorageLocation? }
 // Returns: { checkedIn: number[], remainingInBatches: { batchId, keyNumbers }[] }
+//
+// One transaction. checkedIn is the checkouts this call actually closed — the
+// ones that were still open — and the storage location is written only to the
+// keys of those: a repeat of a check-in (a retry, a second person) closes nothing
+// and moves nothing. The keys the checkouts belong to are locked first, in Id
+// order, as every other write to a key and its checkouts does; taking the rows
+// the other way round deadlocks against a lost report or an archive of the key.
 
 async function checkinKeys(
   request: HttpRequest,
@@ -856,7 +1133,7 @@ async function checkinKeys(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, CHECKIN_KEYS_ROLES);
   if (denied) return denied;
 
   let connection;
@@ -871,68 +1148,82 @@ async function checkinKeys(
       return { status: 400, jsonBody: { error: "CheckInPhotoBlobUrl required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const conn = connection;
 
     const placeholders = CheckoutIds.map((_: number, i: number) => `@C${i}`).join(",");
     const params = CheckoutIds.map((id: number, i: number) => ({ name: `C${i}`, type: TYPES.Int, value: id }));
 
-    // Mark checked in
-    await executeQuery(
-      connection,
-      `UPDATE dbo.KeyCheckouts
-       SET CheckedInAt = SYSUTCDATETIME(), CheckInPhotoBlobUrl = @Photo
-       WHERE Id IN (${placeholders}) AND CheckedInAt IS NULL`,
-      [{ name: "Photo", type: TYPES.NVarChar, value: CheckInPhotoBlobUrl }, ...params],
-    );
-
-    // Get key IDs for storage location update
-    if (StorageLocation) {
-      const coRows = await executeQuery(
-        connection,
-        `SELECT KeyId FROM dbo.KeyCheckouts WHERE Id IN (${placeholders})`,
+    const response = await inOneTransaction(conn, async () => {
+      const owners = await executeQuery(
+        conn,
+        `SELECT DISTINCT KeyId FROM dbo.KeyCheckouts WHERE Id IN (${placeholders}) ORDER BY KeyId`,
         params,
       );
-      for (const row of coRows) {
+      for (const owner of owners) {
         await executeQuery(
-          connection,
-          `UPDATE dbo.Keys SET StorageLocation = @Loc WHERE Id = @KeyId`,
-          [
-            { name: "Loc",   type: TYPES.NVarChar, value: StorageLocation },
-            { name: "KeyId", type: TYPES.Int,      value: row.KeyId },
-          ],
+          conn,
+          `SELECT Id FROM dbo.Keys WITH (UPDLOCK, ROWLOCK) WHERE Id = @KeyId`,
+          [{ name: "KeyId", type: TYPES.Int, value: owner.KeyId }],
         );
       }
-    }
 
-    // Detect incomplete batches after this check-in
-    const affectedBatches = await executeQuery(
-      connection,
-      `SELECT DISTINCT kco.BatchId FROM dbo.KeyCheckouts kco WHERE kco.Id IN (${placeholders})`,
-      params,
-    );
-    const batchIds = affectedBatches.map((r: any) => r.BatchId as number);
-
-    const remainingInBatches: { batchId: number; keyNumbers: string[] }[] = [];
-    for (const batchId of batchIds) {
-      const remaining = await executeQuery(
-        connection,
-        `SELECT k.KeyNumber FROM dbo.KeyCheckouts kco
-         JOIN dbo.Keys k ON k.Id = kco.KeyId
-         WHERE kco.BatchId = @BatchId AND kco.CheckedInAt IS NULL`,
-        [{ name: "BatchId", type: TYPES.Int, value: batchId }],
+      // Mark checked in, and say which: only the ones still open are closed.
+      const closed = await executeQuery(
+        conn,
+        `UPDATE dbo.KeyCheckouts
+         SET CheckedInAt = SYSUTCDATETIME(), CheckInPhotoBlobUrl = @Photo
+         OUTPUT INSERTED.Id, INSERTED.KeyId
+         WHERE Id IN (${placeholders}) AND CheckedInAt IS NULL`,
+        [{ name: "Photo", type: TYPES.NVarChar, value: CheckInPhotoBlobUrl }, ...params],
       );
-      if (remaining.length > 0) {
-        remainingInBatches.push({
-          batchId,
-          keyNumbers: remaining.map((r: any) => r.KeyNumber as string),
-        });
-      }
-    }
 
-    return {
-      status: 200,
-      jsonBody: { checkedIn: CheckoutIds, remainingInBatches },
-    };
+      // The storage location of the keys that were actually checked in
+      if (StorageLocation) {
+        for (const row of closed) {
+          await executeQuery(
+            conn,
+            `UPDATE dbo.Keys SET StorageLocation = @Loc WHERE Id = @KeyId`,
+            [
+              { name: "Loc",   type: TYPES.NVarChar, value: StorageLocation },
+              { name: "KeyId", type: TYPES.Int,      value: row.KeyId },
+            ],
+          );
+        }
+      }
+
+      // Detect incomplete batches after this check-in
+      const affectedBatches = await executeQuery(
+        conn,
+        `SELECT DISTINCT kco.BatchId FROM dbo.KeyCheckouts kco WHERE kco.Id IN (${placeholders})`,
+        params,
+      );
+      const batchIds = affectedBatches.map((r: any) => r.BatchId as number);
+
+      const remainingInBatches: { batchId: number; keyNumbers: string[] }[] = [];
+      for (const batchId of batchIds) {
+        const remaining = await executeQuery(
+          conn,
+          `SELECT k.KeyNumber FROM dbo.KeyCheckouts kco
+           JOIN dbo.Keys k ON k.Id = kco.KeyId
+           WHERE kco.BatchId = @BatchId AND kco.CheckedInAt IS NULL`,
+          [{ name: "BatchId", type: TYPES.Int, value: batchId }],
+        );
+        if (remaining.length > 0) {
+          remainingInBatches.push({
+            batchId,
+            keyNumbers: remaining.map((r: any) => r.KeyNumber as string),
+          });
+        }
+      }
+
+      return kept({
+        status: 200,
+        jsonBody: { checkedIn: closed.map((row: any) => row.Id as number), remainingInBatches },
+      });
+    });
+
+    return response;
   } catch (error: any) {
     context.error("checkinKeys failed:", error.message);
     return errorResponse("Failed to check in keys", error.message);
@@ -959,8 +1250,9 @@ async function uploadKeyPhoto(
     const file = formData.get("photo") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'photo' field required" } };
 
-    const contentType = file.type || "image/jpeg";
-    if (!contentType.startsWith("image/") || contentType === "image/svg+xml") {
+    const contentType = normaliseMediaType(file.type || "image/jpeg");
+    // Same exact allowlist as other uploads (no SVG), images only.
+    if (!contentType.startsWith("image/") || !isAllowedContentType(contentType)) {
       return { status: 415, jsonBody: { error: "Only image files are accepted for key photos" } };
     }
 
@@ -970,8 +1262,11 @@ async function uploadKeyPhoto(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await uploadBlob(buffer, file.name, contentType, "keys");
-    const url = generateReadSasUrl(result.blobName, 15 * 60 * 1000);
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
+    const result = await uploadKeyPhotoBlob(buffer, file.name, contentType);
+    const url = keyPhotoReadSasUrl(result.blobName, 15 * 60 * 1000);
     return { status: 200, jsonBody: { blobName: result.blobName, url } };
   } catch (error: any) {
     context.error("uploadKeyPhoto failed:", error.message);
@@ -989,12 +1284,13 @@ async function keyImportTemplate(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  // Same roles as bulkImportKeys: a role that can't import shouldn't get the template.
+  const denied = await requireRole(request, BULK_CREATE_ROLES);
   if (denied) return denied;
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const buildings = await executeQuery(
       connection,
       `SELECT BuildingName FROM dbo.Buildings WHERE Active = 1 ORDER BY BuildingName`,
@@ -1005,7 +1301,6 @@ async function keyImportTemplate(
     // All subtypes combined — Item Type determines which apply, but XLSX
     // can't do conditional validation without VBA, so we show the full set.
     const allSubTypes = [...KEY_SUB_TYPES, ...CODE_SUB_TYPES];
-    const storageLocations = [...KEY_STORAGE_LOCATIONS];
 
     const wb = new ExcelJS.Workbook();
 
@@ -1023,7 +1318,6 @@ async function keyImportTemplate(
     dvs.add("B2:B1000", { type: "list", allowBlank: true, formulae: [`_Buildings!$A$1:$A$${buildingNames.length || 1}`] });
     dvs.add("F2:F1000", { type: "list", allowBlank: true, formulae: [`_SubTypes!$A$1:$A$${allSubTypes.length}`] });
     dvs.add("H2:H1000", { type: "list", allowBlank: true, formulae: ['"standard,registered"'] });
-    dvs.add("I2:I1000", { type: "list", allowBlank: true, formulae: [`_StorageLocations!$A$1:$A$${storageLocations.length}`] });
 
     // Info sheet — visible reference for valid values
     const infoWs = wb.addWorksheet("Info");
@@ -1034,13 +1328,13 @@ async function keyImportTemplate(
       ["Sub Type (keys)", KEY_SUB_TYPES.join(", ")],
       ["Sub Type (codes)", CODE_SUB_TYPES.join(", ")],
       [null, null],
-      ["Storage Location", null],
-      ...storageLocations.map((loc) => [null, loc]),
+      ["Storage Location", "Any text, e.g. Cabinet B, hook 14. Leave blank if you do not know yet."],
       [null, null],
       ["Notes", null],
       [null, "• Building must match exactly (use the dropdown in the Keys sheet)"],
       [null, "• Tenancy Name is optional — leave blank if not applicable"],
       [null, "• Key Number must be unique per building"],
+      [null, "• Level is optional for a building with no levels"],
       [null, "• Sub Type and Storage Location are optional for codes"],
     ];
     infoData.forEach((row) => infoWs.addRow(row));
@@ -1053,9 +1347,6 @@ async function keyImportTemplate(
 
     const subTypesWs = wb.addWorksheet("_SubTypes", { state: "veryHidden" });
     allSubTypes.forEach((n) => subTypesWs.addRow([n]));
-
-    const storageWs = wb.addWorksheet("_StorageLocations", { state: "veryHidden" });
-    storageLocations.forEach((n) => storageWs.addRow([n]));
 
     const buf = Buffer.from(await wb.xlsx.writeBuffer());
 
@@ -1096,8 +1387,23 @@ async function bulkImportKeys(
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'file' field required" } };
+    if (file.size > MAX_IMPORT_BYTES) {
+      return {
+        status: 413,
+        jsonBody: {
+          error: `That file is ${(file.size / 1024 / 1024).toFixed(0)} MB. Keys sheets are normally under 1 MB; the limit is 10 MB. Save it as .xlsx and remove blank rows.`,
+        },
+      };
+    }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    // Refuse zip bombs before ExcelJS unpacks the file into memory (sprint F, code review 2).
+    try {
+      assertSafeXlsx(buffer);
+    } catch (error) {
+      if (error instanceof XlsxRejectedError) return { status: 400, jsonBody: { error: error.message } };
+      throw error;
+    }
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
     // Use "Keys" sheet by name — don't rely on index since the template has hidden reference sheets
@@ -1109,24 +1415,29 @@ async function bulkImportKeys(
     // Build header→column index map from row 1
     const headerMap = new Map<string, number>();
     ws.getRow(1).eachCell((cell, colNum) => {
-      const h = String(cell.value ?? "").trim();
+      const h = cellValueText(cell.value);
       if (h) headerMap.set(h, colNum);
     });
 
-    // Extract data rows — cells coerced to string matching sheet_to_json({ raw: false }) behaviour
-    const allRows: Record<string, string>[] = [];
+    // Rows entirely blank are skipped (and counted); anything with a value is validated, so a
+    // row missing both Item Type and Building is reported rather than vanishing.
+    const rows: { rowNum: number; cells: Record<string, string> }[] = [];
+    let skipped = 0;
     ws.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return;
-      const r: Record<string, string> = {};
+      const cells: Record<string, string> = {};
       headerMap.forEach((colNum, header) => {
-        r[header] = String(row.getCell(colNum).value ?? "").trim();
+        const cell = row.getCell(colNum);
+        cells[header] = cellValueText(cell.value, cell.numFmt);
       });
-      allRows.push(r);
+      if (Object.values(cells).every((v) => v === "")) skipped++;
+      else rows.push({ rowNum: rowNumber, cells });
     });
-    // Skip trailing blank rows
-    const rows = allRows.filter((r) => (r["Item Type"] ?? "").trim() !== "" || (r["Building"] ?? "").trim() !== "");
+    if (rows.length > MAX_IMPORT_ROWS) {
+      return { status: 400, jsonBody: { error: `Import at most ${MAX_IMPORT_ROWS} rows at a time` } };
+    }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Load buildings for name→id lookup. The Keys FK references Buildings.BuildingID
     // (not Id), so we must read that column or every insert violates FK_Keys_Buildings_BuildingID.
@@ -1149,17 +1460,15 @@ async function bulkImportKeys(
     const duplicatesSkipped: { keyNumber: string; buildingName: string }[] = [];
     const errors: { row: number; reason: string }[] = [];
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const rowNum = i + 2; // 1-indexed, header is row 1
+    for (const { rowNum, cells: r } of rows) {
       const buildingName = (r["Building"] ?? "").trim();
       const keyNumber = (r["Key Number"] ?? "").trim();
       const level = (r["Level"] ?? "").trim();
       const description = (r["Description"] ?? "").trim();
       const itemType = (r["Item Type"] ?? "key").trim().toLowerCase() || "key";
 
-      if (!buildingName || !keyNumber || !level || !description) {
-        errors.push({ row: rowNum, reason: "Building, Key Number, Level, and Description are required" });
+      if (!buildingName || !keyNumber || !description) {
+        errors.push({ row: rowNum, reason: "Building, Key Number, and Description are required" });
         continue;
       }
 
@@ -1176,6 +1485,10 @@ async function bulkImportKeys(
 
       const tenancyName = (r["Tenancy Name"] ?? "").trim();
       const tenancyId = tenancyName ? (tenancyMap.get(tenancyName.toLowerCase().trim()) ?? null) : null;
+      if (tenancyName && tenancyId === null) {
+        errors.push({ row: rowNum, reason: `Tenancy "${tenancyName}" not found` });
+        continue;
+      }
 
       const subType = (r["Sub Type"] ?? "").trim() || null;
       const registration = (r["Registration"] ?? "standard").trim().toLowerCase() || "standard";
@@ -1192,12 +1505,6 @@ async function bulkImportKeys(
           errors.push({ row: rowNum, reason: `Sub Type "${subType}" is not valid for item type "${itemType}"` });
           continue;
         }
-      }
-
-      // Validate storage location if provided
-      if (storageLocation && !(KEY_STORAGE_LOCATIONS as readonly string[]).includes(storageLocation)) {
-        errors.push({ row: rowNum, reason: `Storage location "${storageLocation}" is not a known location` });
-        continue;
       }
 
       try {
@@ -1237,7 +1544,7 @@ async function bulkImportKeys(
 
     return {
       status: 200,
-      jsonBody: { created: created.length, duplicatesSkipped, errors },
+      jsonBody: { created: created.length, duplicatesSkipped, errors, skipped },
     };
   } catch (error: any) {
     context.error("bulkImportKeys failed:", error.message);

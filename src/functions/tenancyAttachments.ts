@@ -8,10 +8,17 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery } from "../db";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, unauthorizedResponse, requireRole, oidFromToken } from "../auth";
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
+
+// A stored name that was never minted (a legacy upload kept its raw file
+// extension) gets no link rather than failing the tenant's whole list (SEC-01).
+function readSasOrNull(blobName: unknown): string | null {
+  return isBlobName(blobName, WR_ATTACHMENTS_SHAPES) ? generateReadSasUrl(blobName) : null;
+}
 
 // ── POST /api/uploadTenancyAttachment (multipart/form-data) ──────────────────
 // Fields: file (binary), tenantId (number)
@@ -45,7 +52,7 @@ async function handleUploadTenancyAttachment(
       return { status: 400, jsonBody: { error: "'tenantId' must be a number" } };
     }
 
-    const contentType = (file as any).type || "application/octet-stream";
+    const contentType = normaliseMediaType((file as any).type || "") || "application/octet-stream"; // stored form, never the raw header
     if (!isAllowedContentType(contentType)) {
       return { status: 415, jsonBody: { error: `File type '${contentType}' is not allowed` } };
     }
@@ -58,12 +65,15 @@ async function handleUploadTenancyAttachment(
     const originalName = (file as any).name as string;
     const extension = originalName.includes(".") ? originalName.split(".").pop() ?? null : null;
     const buffer = Buffer.from(await (file as any).arrayBuffer());
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
 
     context.log(`Uploading tenancy doc ${originalName} (${contentType}, ${size} bytes) for tenant ${tenantId}`);
     const { blobName } = await uploadBlob(buffer, originalName, contentType, `tenancy-${tenantId}`);
     const sasUrl = generateReadSasUrl(blobName);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inserted = await executeQuery(
       connection,
@@ -102,7 +112,19 @@ async function handleUploadTenancyAttachment(
   }
 }
 
-// ── GET /api/getTenancyAttachments?tenantId=X ────────────────────────────────
+// ── GET /api/getTenancyAttachments?tenantId=X[&includeArchived=true] ─────────
+// Archived documents (D4, migration 135) are left out unless includeArchived.
+
+const LIST_DOCUMENTS_SQL = `SELECT a.*
+   FROM TenancyAttachments ta
+   JOIN Attachments a ON a.Id = ta.AttachmentID
+  WHERE ta.TenantId = @TenantId AND a.ArchivedAt IS NULL
+  ORDER BY ta.AttachedAt DESC`;
+const LIST_DOCUMENTS_WITH_ARCHIVED_SQL = `SELECT a.*
+   FROM TenancyAttachments ta
+   JOIN Attachments a ON a.Id = ta.AttachmentID
+  WHERE ta.TenantId = @TenantId
+  ORDER BY ta.AttachedAt DESC`;
 
 async function handleGetTenancyAttachments(
   request: HttpRequest,
@@ -124,19 +146,16 @@ async function handleGetTenancyAttachments(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const includeArchived = request.query.get("includeArchived") === "true";
     const rows = await executeQuery(
       connection,
-      `SELECT a.*
-         FROM TenancyAttachments ta
-         JOIN Attachments a ON a.Id = ta.AttachmentID
-        WHERE ta.TenantId = @TenantId
-        ORDER BY ta.AttachedAt DESC`,
+      includeArchived ? LIST_DOCUMENTS_WITH_ARCHIVED_SQL : LIST_DOCUMENTS_SQL,
       [{ name: "TenantId", type: TYPES.Int, value: tenantId }],
     );
     const attachments = rows.map((r: any) => ({
       ...r,
-      sasUrl: r.MyBuildingsConfirmedAt ? null : generateReadSasUrl(r.BlobName),
+      sasUrl: r.MyBuildingsConfirmedAt ? null : readSasOrNull(r.BlobName),
     }));
     return { status: 200, jsonBody: { attachments, count: attachments.length } };
   } catch (error: any) {

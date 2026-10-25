@@ -41,7 +41,7 @@ jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 jest.mock("../rateLimit", () => ({
   checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }),
 }));
@@ -70,9 +76,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
-  createConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
+  createRequestConnection: jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   invalidateTenantAndBuilding: jest.Mock;
@@ -81,7 +90,6 @@ const rateLimit = require("../rateLimit") as { checkRateLimit: jest.Mock };
 
 // Trigger the module's app.http registrations so the mock above captures
 // every handler by name.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./tenancy");
 const handlers = (globalThis as unknown as { __tenancyHandlers: Record<string, Handler> }).__tenancyHandlers;
 
@@ -111,311 +119,13 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   rateLimit.checkRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0 });
 });
 
-// ── upsertInfoSheetSection ───────────────────────────────────────────────────
-
-describe("upsertInfoSheetSection", () => {
-  const validBody = {
-    TenantId: 1,
-    BuildingId: 5,
-    Section: { id: "sec-1", title: "Section One", displayOrder: 0, rows: [] },
-  };
-
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 429 when rate-limited", async () => {
-    rateLimit.checkRateLimit.mockReturnValue({ allowed: false, retryAfterMs: 30000 });
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(429);
-    expect(res.headers).toEqual({ "Retry-After": "30" });
-  });
-
-  it("returns 400 when TenantId is missing", async () => {
-    const res = await handlers.upsertInfoSheetSection(
-      makeRequest({ BuildingId: 5, Section: { id: "sec-1", title: "Section One" } }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when Section.id is missing", async () => {
-    const res = await handlers.upsertInfoSheetSection(
-      makeRequest({ TenantId: 1, BuildingId: 5, Section: { title: "x" } }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when Section.title is missing", async () => {
-    const res = await handlers.upsertInfoSheetSection(
-      makeRequest({ TenantId: 1, BuildingId: 5, Section: { id: "sec-1" } }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 404 when tenant is not found", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(404);
-  });
-
-  it("upserts and returns 200 + invalidates cache on the happy path", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: null }])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { sections: Array<{ id: string }> };
-    expect(body.sections).toHaveLength(1);
-    expect(body.sections[0].id).toBe("sec-1");
-    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
-  });
-
-  it("returns 500 when the SELECT throws", async () => {
-    db.executeQuery.mockRejectedValueOnce(new Error("db down"));
-    const res = await handlers.upsertInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(500);
-  });
-});
-
-// ── deleteInfoSheetSection ───────────────────────────────────────────────────
-
-describe("deleteInfoSheetSection", () => {
-  const validBody = { TenantId: 1, BuildingId: 5, SectionId: "sec-1" };
-
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 429 when rate-limited", async () => {
-    rateLimit.checkRateLimit.mockReturnValue({ allowed: false, retryAfterMs: 30000 });
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(429);
-  });
-
-  it("returns 400 when SectionId is missing", async () => {
-    const res = await handlers.deleteInfoSheetSection(
-      makeRequest({ TenantId: 1, BuildingId: 5 }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when TenantId is not finite", async () => {
-    const res = await handlers.deleteInfoSheetSection(
-      makeRequest({ TenantId: "abc", BuildingId: 5, SectionId: "sec-1" }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 404 when tenant is not found", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(404);
-  });
-
-  it("deletes and returns 200 + invalidates cache on the happy path", async () => {
-    const existing = JSON.stringify([
-      { id: "sec-1", title: "One", displayOrder: 0, rows: [] },
-      { id: "sec-2", title: "Two", displayOrder: 1, rows: [] },
-    ]);
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: existing }])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ deleted: true, sectionId: "sec-1" });
-    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
-  });
-
-  it("returns 500 when the UPDATE throws", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: "[]" }])
-      .mockRejectedValueOnce(new Error("locked"));
-    const res = await handlers.deleteInfoSheetSection(makeRequest(validBody), ctx);
-    expect(res.status).toBe(500);
-  });
-});
-
-// ── upsertInfoSheetRow ───────────────────────────────────────────────────────
-
-describe("upsertInfoSheetRow", () => {
-  const validBody = {
-    TenantId: 1,
-    BuildingId: 5,
-    SectionId: "sec-1",
-    Row: { id: "row-1", subheader: "Sub", body: "Body", displayOrder: 0 },
-  };
-
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 429 when rate-limited", async () => {
-    rateLimit.checkRateLimit.mockReturnValue({ allowed: false, retryAfterMs: 30000 });
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(429);
-  });
-
-  it("returns 400 when SectionId is missing", async () => {
-    const res = await handlers.upsertInfoSheetRow(
-      makeRequest({ TenantId: 1, BuildingId: 5, Row: { id: "row-1" } }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when Row.id is missing", async () => {
-    const res = await handlers.upsertInfoSheetRow(
-      makeRequest({ TenantId: 1, BuildingId: 5, SectionId: "sec-1", Row: {} }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 404 when tenant is not found", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(404);
-  });
-
-  it("upserts and returns 200 + invalidates cache on the happy path", async () => {
-    const existing = JSON.stringify([
-      { id: "sec-1", title: "One", displayOrder: 0, rows: [] },
-    ]);
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: existing }])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(200);
-    const body = res.jsonBody as { sections: Array<{ id: string; rows: Array<{ id: string }> }> };
-    expect(body.sections[0].rows).toHaveLength(1);
-    expect(body.sections[0].rows[0].id).toBe("row-1");
-    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
-  });
-
-  it("returns 500 when the SELECT throws", async () => {
-    db.executeQuery.mockRejectedValueOnce(new Error("boom"));
-    const res = await handlers.upsertInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(500);
-  });
-});
-
-// ── deleteInfoSheetRow ───────────────────────────────────────────────────────
-
-describe("deleteInfoSheetRow", () => {
-  const validBody = {
-    TenantId: 1,
-    BuildingId: 5,
-    SectionId: "sec-1",
-    RowId: "row-1",
-  };
-
-  it("returns 401 when no token", async () => {
-    auth.extractToken.mockReturnValue(null);
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 403 when role check fails", async () => {
-    auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(403);
-  });
-
-  it("returns 429 when rate-limited", async () => {
-    rateLimit.checkRateLimit.mockReturnValue({ allowed: false, retryAfterMs: 30000 });
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(429);
-  });
-
-  it("returns 400 when RowId is missing", async () => {
-    const res = await handlers.deleteInfoSheetRow(
-      makeRequest({ TenantId: 1, BuildingId: 5, SectionId: "sec-1" }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when BuildingId is not finite", async () => {
-    const res = await handlers.deleteInfoSheetRow(
-      makeRequest({ TenantId: 1, BuildingId: "x", SectionId: "sec-1", RowId: "row-1" }),
-      ctx,
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 404 when tenant is not found", async () => {
-    db.executeQuery.mockResolvedValueOnce([]);
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(404);
-  });
-
-  it("deletes and returns 200 + invalidates cache on the happy path", async () => {
-    const existing = JSON.stringify([
-      {
-        id: "sec-1",
-        title: "One",
-        displayOrder: 0,
-        rows: [
-          { id: "row-1", subheader: "A", body: "1", displayOrder: 0 },
-          { id: "row-2", subheader: "B", body: "2", displayOrder: 1 },
-        ],
-      },
-    ]);
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: existing }])
-      .mockResolvedValueOnce([]);
-
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ deleted: true, sectionId: "sec-1", rowId: "row-1" });
-    expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
-  });
-
-  it("returns 500 when the UPDATE throws", async () => {
-    db.executeQuery
-      .mockResolvedValueOnce([{ InfoSheetSections: "[]" }])
-      .mockRejectedValueOnce(new Error("locked"));
-    const res = await handlers.deleteInfoSheetRow(makeRequest(validBody), ctx);
-    expect(res.status).toBe(500);
-  });
-});
+// The info sheet handlers (D11: row lock, versioned deletes, ledger, 422) are
+// tested in infoSheetVersioned.test.ts.
 
 // ── upsertLeaseAdministration ────────────────────────────────────────────────
 
@@ -481,6 +191,45 @@ describe("upsertLeaseAdministration", () => {
     const body = res.jsonBody as { leaseAdministration: { leaseDocuments: unknown[] } };
     expect(body.leaseAdministration.leaseDocuments).toEqual([]);
     expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
+  });
+
+  const RV = "00000000000007d1";
+  const lockedTenant = { TenantId: 1, RowVersion: Buffer.from(RV, "hex"), UpdatedAt: new Date("2026-10-01T02:00:00Z"), UpdatedByName: "Earlier Editor" };
+
+  it("returns 409 naming who changed it when the RowVersion sent is stale, and writes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]);
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: "00000000000007d2" }), ctx);
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toContain("Earlier Editor");
+    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
+  });
+
+  it("writes when the RowVersion matches, in a transaction, and returns the new one", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000007d3", "hex") }]);
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: RV.toUpperCase() }), ctx);
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as { rowVersion: string }).rowVersion).toBe("00000000000007d3");
+    expect(db.commitTransaction).toHaveBeenCalled();
+  });
+
+  it("still writes when no RowVersion is sent (current client)", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockResolvedValueOnce([]);
+    expect((await handlers.upsertLeaseAdministration(makeRequest(validBody), ctx)).status).toBe(200);
+  });
+
+  it("returns 400 for a malformed RowVersion", async () => {
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: "nope" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("rolls back when the write throws", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockRejectedValueOnce(new Error("db down"));
+    const res = await handlers.upsertLeaseAdministration(makeRequest(validBody), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
   });
 
   it("returns 500 when the SELECT throws", async () => {
@@ -571,6 +320,52 @@ describe("upsertMiscFee", () => {
     const res = await handlers.upsertMiscFee(makeRequest(validBody), ctx);
     expect(res.status).toBe(500);
   });
+
+  // TS3 (T11): a category is a label inside the MiscFees JSON; it changes no figure.
+  describe("category", () => {
+    const storedFees = (): string | undefined => {
+      const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+        | [unknown, string, Array<{ name: string; value: unknown }>]
+        | undefined;
+      return update?.[2].find((p) => p.name === "Value")?.value as string | undefined;
+    };
+
+    it("stores the category with the fee and returns it", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ MiscFees: null }]).mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: "cleaning" } }), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { fees: Array<{ category?: string }> }).fees[0].category).toBe("cleaning");
+      expect(JSON.parse(storedFees() as string)[0]).toMatchObject({ category: "cleaning", id: FEE_ID });
+    });
+
+    it("keeps the other fees' categories when it changes one", async () => {
+      const other = { baseAmount: 50, category: "electricity", commencedAt: "2025-01-01", frequency: "monthly", id: "00000000-0000-4000-8000-0000000000aa", title: "Power" };
+      db.executeQuery
+        .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...validFee, category: "cleaning" }, other]) }])
+        .mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: "outgoings" } }), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { fees: Array<{ category?: string }> }).fees.map((f) => f.category)).toEqual(["outgoings", "electricity"]);
+      expect(JSON.parse(storedFees() as string).map((f: { category?: string }) => f.category)).toEqual(["outgoings", "electricity"]);
+    });
+
+    it("clears the category with null, and stores no key for it", async () => {
+      db.executeQuery
+        .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...validFee, category: "cleaning" }]) }])
+        .mockResolvedValueOnce([]);
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category: null } }), ctx);
+      expect(res.status).toBe(200);
+      expect("category" in (res.jsonBody as { fees: object[] }).fees[0]).toBe(false);
+      expect("category" in JSON.parse(storedFees() as string)[0]).toBe(false);
+    });
+
+    it.each([["rent"], [""], [3], ["Cleaning"]])("returns 400 for the category %p, before any query", async (category) => {
+      const res = await handlers.upsertMiscFee(makeRequest({ ...validBody, fee: { ...validFee, category } }), ctx);
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { error: string }).error).toMatch(/^fee\.category must be one of licenceFee, carBayRent, afterHoursAc/);
+      expect(db.executeQuery).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ── deleteMiscFee ────────────────────────────────────────────────────────────
@@ -658,5 +453,89 @@ describe("deleteMiscFee", () => {
 
     const res = await handlers.deleteMiscFee(makeRequest(validBody), ctx);
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Misc fee writes: versioned and ledgered (PLAN WP23a) ────────────────────
+
+describe("misc fee writes — versioned and ledgered", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const fee = { baseAmount: 100, commencedAt: "2025-01-01", frequency: "monthly", id: FEE_ID, title: "Cleaning" };
+
+  it("ledgers an upsert as schedule.manual_edit on the misc fee, before commit", async () => {
+    const stored = [{ ...fee, baseAmount: 90 }];
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify(stored), ScheduleVersion: 2 }])
+      .mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000000bb", "hex"), ScheduleVersion: 3 }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toMatchObject({ rowVersion: "00000000000000bb", scheduleVersion: 3 });
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { baseAmount: 100, id: FEE_ID },
+      before: { baseAmount: 90, id: FEE_ID },
+      subject: { id: FEE_ID, type: "misc_fee" },
+      tenantId: 1,
+    });
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("ledgers a category change with the fee as it was and as it is (TS3), like any other field of the fee", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify([{ ...fee, category: "cleaning" }]), ScheduleVersion: 2 }])
+      .mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000000bb", "hex"), ScheduleVersion: 3 }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee: { ...fee, category: "outgoings" }, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { category: "outgoings", id: FEE_ID },
+      before: { category: "cleaning", id: FEE_ID },
+    });
+  });
+
+  it("returns 409 when the fee is written against a stale ScheduleVersion", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ MiscFees: "[]", ScheduleVersion: 6, UpdatedByName: "Sam" }]);
+    const res = await handlers.upsertMiscFee(
+      makeRequest({ BuildingId: 5, fee, ScheduleVersion: 2, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toMatch(/Sam/);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("accepts cpiValuePrev on a misc fee CPI override (the dialog sends it)", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: null, ScheduleVersion: 0 }])
+      .mockResolvedValueOnce([]);
+    const withOverride = {
+      ...fee,
+      rateSteps: [{ cpiValue: 140.2, cpiValuePrev: 136.1, effectiveFrom: "2026-07-01", id: FEE_ID_2, methodKind: "cpi" }],
+    };
+    const res = await handlers.upsertMiscFee(makeRequest({ BuildingId: 5, fee: withOverride, TenantId: 1 }), ctx);
+    expect(res.status).toBe(200);
+    const saved = (res.jsonBody as { fees: Array<{ rateSteps: Array<{ cpiValuePrev?: number }> }> }).fees[0];
+    expect(saved.rateSteps[0].cpiValuePrev).toBe(136.1);
+  });
+
+  it("ledgers a deleted fee with its before snapshot", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ MiscFees: JSON.stringify([fee]), ScheduleVersion: 1 }])
+      .mockResolvedValueOnce([]);
+    await handlers.deleteMiscFee(makeRequest({ BuildingId: 5, feeId: FEE_ID, TenantId: 1 }), ctx);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: null,
+      before: { id: FEE_ID, title: "Cleaning" },
+      subject: { id: FEE_ID, type: "misc_fee" },
+    });
   });
 });

@@ -20,6 +20,8 @@ Icon
 ### Node
 # Dependencies
 node_modules/
+# the worktrees link node_modules to the main checkout; ignore the symlink too
+node_modules
 
 # Logs
 *.log
@@ -49,6 +51,7 @@ out/
 
 # Azure Functions local settings (contains secrets)
 local.settings.json
+.review-local/
 
 # dotenv environment variable files
 .env
@@ -65,3 +68,6 @@ local.settings.json
 .yarn/install-state.gz
 .pnp.*
 __blobstorage__
+
+# Personal Claude Code settings
+.claude/settings.local.json

@@ -1,0 +1,202 @@
+[
+  {
+    "BuildingID": 33525,
+    "BuildingName": "9-11 Cavenagh St",
+    "BuildingAddress": "9-11 Cavenagh St",
+    "BuildingCode": "911CS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "B - Car Park",
+      "Ground Floor",
+      "Level 1",
+      "Level 2",
+      "Level 3",
+      "Level 4",
+      "Level 5",
+      "Level 6",
+      "Level 7",
+      "Level 8",
+      "Level 9",
+      "Roof"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33526,
+    "BuildingName": "66 Smith St",
+    "BuildingAddress": "66 Smith St",
+    "BuildingCode": "66SS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "B - Car Park",
+      "Ground Floor",
+      "Level 1",
+      "Level 2",
+      "Level 3",
+      "Level 4",
+      "Level 5",
+      "Level 6",
+      "Level 7 Plant Room"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33527,
+    "BuildingName": "6 Searcy St",
+    "BuildingAddress": "6 Searcy St",
+    "BuildingCode": "6SS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33528,
+    "BuildingName": "Highway House",
+    "BuildingAddress": "14 Palmerston Cct",
+    "BuildingCode": "14PS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor",
+      "Mezzanine Level",
+      "Level 1",
+      "Level 2",
+      "Level 3",
+      "Level 4",
+      "Level 5",
+      "Roof",
+      "Pavilion"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33529,
+    "BuildingName": "45 Stuart Highway",
+    "BuildingAddress": "45 Stuart Highway",
+    "BuildingCode": "45SH",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33530,
+    "BuildingName": "Highway Arcade",
+    "BuildingAddress": "47 Stuart Highway",
+    "BuildingCode": "47SH",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor",
+      "Level 1",
+      "Level 2"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33531,
+    "BuildingName": "Randazzo Centre",
+    "BuildingAddress": "16-18 Katherine Tce",
+    "BuildingCode": "1618KT",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor",
+      "Level 1"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33532,
+    "BuildingName": "30 Daly St",
+    "BuildingAddress": "30 Daly St",
+    "BuildingCode": "30DS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor",
+      "Level 1"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33533,
+    "BuildingName": "19-23 Albatross St",
+    "BuildingAddress": "19-23 Albatross St",
+    "BuildingCode": "1923AS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Building 7",
+      "Building 8",
+      "Building 9",
+      "Building 10",
+      "Building 11"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33534,
+    "BuildingName": "Boulevard Plaza",
+    "BuildingAddress": "1 Palmerston Cct",
+    "BuildingCode": "1PC",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "B - Car Park",
+      "Ground Floor",
+      "Level 1",
+      "Level 2",
+      "Level 3",
+      "Level 4",
+      "Level 5",
+      "Level 6",
+      "Level 7",
+      "Level 8",
+      "Level 9",
+      "Level 10",
+      "Roof"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 33535,
+    "BuildingName": "93 McMinn St",
+    "BuildingAddress": "93 McMinn St",
+    "BuildingCode": "93MS",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Car Park",
+      "Ground Floor"
+    ],
+    "Active": true
+  },
+  {
+    "BuildingID": 35612,
+    "BuildingName": "Palmerston Plus",
+    "BuildingAddress": "Palmerston City NT 0830",
+    "BuildingCode": "2PALM",
+    "RegionID": 3,
+    "Region": "NT",
+    "Levels": [
+      "Carpark",
+      "Ground Floor",
+      "Roof",
+      "Mezzanine"
+    ],
+    "Active": true
+  }
+]

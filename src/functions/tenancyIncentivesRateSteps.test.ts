@@ -41,7 +41,7 @@ jest.mock("../db", () => ({
   beginTransaction:    jest.fn().mockResolvedValue(undefined),
   closeConnection:     jest.fn(),
   commitTransaction:   jest.fn().mockResolvedValue(undefined),
-  createConnection:    jest.fn(),
+  createRequestConnection:    jest.fn(),
   executeQuery:        jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
@@ -59,6 +59,12 @@ jest.mock("../planner", () => ({
   resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Ledger rows are asserted on the mock, never stored (PLAN WP19b owns storage).
+jest.mock("../ledger");
+jest.mock("../ledger/actor", () => ({
+  resolveLedgerActor: jest.fn().mockResolvedValue({ kind: "user", name: "Test User", role: "accounts", userId: 7 }),
+}));
+
 jest.mock("../rateLimit", () => ({
   checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }),
 }));
@@ -70,9 +76,12 @@ const auth = require("../auth") as {
   unauthorizedResponse: jest.Mock;
 };
 const db = require("../db") as {
-  closeConnection:  jest.Mock;
-  createConnection: jest.Mock;
-  executeQuery:     jest.Mock;
+  beginTransaction:    jest.Mock;
+  closeConnection:     jest.Mock;
+  commitTransaction:   jest.Mock;
+  createRequestConnection: jest.Mock;
+  executeQuery:        jest.Mock;
+  rollbackTransaction: jest.Mock;
 };
 const cache = require("../tenant-register-cache") as {
   getCachedTenantList:         jest.Mock;
@@ -87,7 +96,6 @@ const rateLimit = require("../rateLimit") as { checkRateLimit: jest.Mock };
 
 // Trigger the module's app.http registrations so the mock above captures
 // every handler by name.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./tenancy");
 const handlers = (globalThis as unknown as { __tenancyHandlers: Record<string, Handler> }).__tenancyHandlers;
 
@@ -113,7 +121,7 @@ beforeEach(() => {
   auth.requireRole.mockResolvedValue(null);
   auth.oidFromToken.mockReturnValue("caller-oid-123");
   auth.unauthorizedResponse.mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } });
-  db.createConnection.mockResolvedValue({});
+  db.createRequestConnection.mockResolvedValue({});
   db.closeConnection.mockImplementation(() => undefined);
   cache.getCachedTenantList.mockReturnValue(null);
   cache.getCachedTenantDetail.mockReturnValue(null);
@@ -417,6 +425,166 @@ describe("upsertScheduledRateStep", () => {
     const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
     expect(res.status).toBe(500);
   });
+
+  // WP26c: a ratchet exemption is a director's override, written by a review. An
+  // edit keeps it; only a director takes it off, with a reason (the review's
+  // finding 1: an edit that dropped the field silently took the override off).
+  describe("a ratchet exemption (C9, D23, WP26c review)", () => {
+    const ledger = require("../ledger") as { record: jest.Mock };
+    const actorMock = require("../ledger/actor") as { resolveLedgerActor: jest.Mock };
+    const DIRECTOR = { kind: "user", name: "Dana Director", role: "director", userId: 3 };
+    const exemption = { at: "2026-07-03T01:00:00.000Z", byName: "Dana Director", reason: "Agreed with the tenant" };
+    const exemptRow = { effectiveFrom: "2026-07-01", id: STEP_ID, methodKind: "cpi", ratchetExempt: exemption, ratePercent: -2 };
+    const { ratchetExempt: _exemption, ...withoutIt } = exemptRow;
+    const updates = () => db.executeQuery.mock.calls.filter(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+    const entries = () => ledger.record.mock.calls.map(([, entry]: [unknown, Record<string, any>]) => entry);
+    const storedSteps = () => JSON.parse(String((updates()[0][2] as Array<{ name: string; value: unknown }>).find((p) => p.name === "Value")?.value)) as Array<Record<string, unknown>>;
+    const stored = (steps: unknown[] = [exemptRow]) =>
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify(steps) }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    it("can't be added by editing a row, and the attempt is ledgered as denied", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([withoutIt]) }]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: exemptRow })), ctx);
+      expect(res.status).toBe(403);
+      expect((res.jsonBody as { error: string }).error).toMatch(/director's decision/);
+      expect(updates()).toHaveLength(0);
+      expect(db.rollbackTransaction).toHaveBeenCalled();
+      expect(entries()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "exemption_added", subject: { id: STEP_ID, type: "rate_step" }, tenantId: 1 })]);
+    });
+
+    it("can't be changed by editing a row, not even by a director", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ step: { ...exemptRow, ratchetExempt: { ...exemption, reason: "Something else" } } })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect(updates()).toHaveLength(0);
+      expect(entries()).toEqual([expect.objectContaining({ action: "denied", before: { attempted: "schedule.manual_edit", ratchetExempt: exemption }, ruleApplied: "exemption_changed" })]);
+    });
+
+    it.each([
+      ["sends it back as stored", { ...exemptRow, note: "checked" }],
+      ["leaves it off the step (a screen that dropped the field)", { ...withoutIt, note: "checked" }],
+    ])("is kept, exactly as stored, when an editor's edit %s", async (_label, step) => {
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step })), ctx);
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { steps: Array<{ note?: string; ratchetExempt?: unknown }> }).steps[0]).toMatchObject({ note: "checked", ratchetExempt: exemption });
+      expect(JSON.stringify(storedSteps()[0].ratchetExempt)).toBe(JSON.stringify(exemption));
+      expect(entries().map((entry) => entry.action)).toEqual(["schedule.manual_edit"]);
+    });
+
+    it("can't be removed by an editor: 403, ledgered as denied, and the row is unchanged", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "The tenant asked", step: withoutIt })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect((res.jsonBody as { error: string }).error).toBe(
+        "This row carries a director's override of the lease's ratchet. Only a director can remove it, with a reason; your edit wasn't saved.",
+      );
+      expect(updates()).toHaveLength(0);
+      // The edit rolled back; the one commit is the denied row's own small transaction, after it.
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+      expect(db.commitTransaction.mock.invocationCallOrder[0]).toBeGreaterThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
+      expect(entries()).toEqual([
+        expect.objectContaining({
+          action: "denied",
+          actor: expect.objectContaining({ role: "accounts" }),
+          before: { attempted: "schedule.ratchet_exemption_removed", ratchetExempt: exemption },
+          ruleApplied: "not_director",
+          subject: { id: STEP_ID, type: "rate_step" },
+        }),
+      ]);
+    });
+
+    it("is removed by a director, with the reason, ledgered with the exemption as it was", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "  The override was entered on the wrong lease  ", step: withoutIt })),
+        ctx,
+      );
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as { steps: Array<{ ratchetExempt?: unknown }> }).steps[0].ratchetExempt).toBeUndefined();
+      expect(storedSteps()[0]).not.toHaveProperty("ratchetExempt");
+      const removed = entries().find((entry) => entry.action === "schedule.ratchet_exemption_removed");
+      expect(removed).toMatchObject({
+        actor: DIRECTOR,
+        after: { ratchetExempt: null, rowDeleted: false },
+        before: { effectiveFrom: "2026-07-01", ratchetExempt: exemption },
+        reason: "The override was entered on the wrong lease",
+        ruleApplied: "director_removed",
+        subject: { id: STEP_ID, type: "rate_step" },
+        tenantId: 1,
+      });
+      const order = (fn: jest.Mock) => fn.mock.invocationCallOrder.at(-1) as number;
+      expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+    });
+
+    it("isn't removed by a director whose edit leaves the field off without a reason", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      stored([exemptRow]);
+      const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ step: withoutIt })), ctx);
+      expect(res.status).toBe(200);
+      expect(storedSteps()[0].ratchetExempt).toEqual(exemption);
+    });
+
+    it("asks a director to leave the exemption off the row being removed, and has nothing to remove on a row without one", async () => {
+      actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const sent = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "x", step: exemptRow })), ctx);
+      expect(sent.status).toBe(400);
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([withoutIt]) }]);
+      const none = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ RatchetExemptionRemovalReason: "x", step: withoutIt })), ctx);
+      expect(none.status).toBe(400);
+      expect(updates()).toHaveLength(0);
+    });
+
+    it("isn't dropped by making the row a commencement row (403 for an editor)", async () => {
+      db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+      const res = await handlers.upsertScheduledRateStep(
+        makeRequest(validStepEnvelope({ step: { ...withoutIt, baseRentPerAnnum: 100000, methodKind: "commencement", ratePercent: 0 } })),
+        ctx,
+      );
+      expect(res.status).toBe(403);
+      expect(updates()).toHaveLength(0);
+    });
+
+    describe("deleting the row", () => {
+      const del = (over: Record<string, unknown> = {}) =>
+        handlers.deleteScheduledRateStep(makeRequest({ BuildingId: 5, TenantId: 1, stepId: STEP_ID, ...over }), ctx);
+
+      it("is refused for an editor (403, ledgered as denied) and leaves the row", async () => {
+        db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+        const res = await del();
+        expect(res.status).toBe(403);
+        expect((res.jsonBody as { error: string }).error).toMatch(/the row wasn't deleted/);
+        expect(updates()).toHaveLength(0);
+        expect(entries()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "not_director" })]);
+      });
+
+      it("needs a director's reason, and is then ledgered as the exemption's removal", async () => {
+        actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+        db.executeQuery.mockResolvedValueOnce([{ ScheduledRateSteps: JSON.stringify([exemptRow]) }]);
+        expect((await del()).status).toBe(400);
+
+        actorMock.resolveLedgerActor.mockResolvedValueOnce(DIRECTOR);
+        stored([exemptRow]);
+        const res = await del({ RatchetExemptionRemovalReason: "Duplicate row" });
+        expect(res.status).toBe(200);
+        expect(entries().find((entry) => entry.action === "schedule.ratchet_exemption_removed")).toMatchObject({
+          after: { ratchetExempt: null, rowDeleted: true },
+          before: { ratchetExempt: exemption },
+          reason: "Duplicate row",
+        });
+      });
+    });
+  });
 });
 
 // ── deleteScheduledRateStep ─────────────────────────────────────────────────
@@ -504,5 +672,309 @@ describe("deleteScheduledRateStep", () => {
       .mockRejectedValueOnce(new Error("locked"));
     const res = await handlers.deleteScheduledRateStep(makeRequest(validDeleteBody()), ctx);
     expect(res.status).toBe(500);
+  });
+});
+
+// ── Schedule write integrity (PLAN WP23a, F15) ──────────────────────────────
+
+describe("schedule writes — versioned, transactional, ledgered", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const PREV_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const locked = (over: Record<string, unknown> = {}) => ({
+    BuildingId: 5,
+    Incentives: null,
+    ScheduleVersion: 3,
+    ScheduledRateSteps: null,
+    TenantId: 1,
+    UpdatedAt: new Date("2026-10-01T02:00:00Z"),
+    UpdatedByName: "Priya Accounts",
+    ...over,
+  });
+  const sqlCalls = () => db.executeQuery.mock.calls.map(([, sql]: [unknown, string]) => sql);
+
+  it("locks the tenant row inside a transaction before reading the schedule", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([locked()])
+      .mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000000aa", "hex"), ScheduleVersion: 4 }])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ ScheduleVersion: 3 })), ctx);
+    expect(res.status).toBe(200);
+    expect(sqlCalls()[0]).toMatch(/FROM dbo\.Tenants t WITH \(UPDLOCK, ROWLOCK\)/);
+    expect(sqlCalls()[1]).toMatch(/ScheduleVersion = ScheduleVersion \+ 1/);
+    expect(res.jsonBody).toMatchObject({ rowVersion: "00000000000000aa", scheduleVersion: 4 });
+    expect(db.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 409 naming who changed the schedule when ScheduleVersion is stale", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked({ ScheduleVersion: 5 })]);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ ScheduleVersion: 3 })), ctx);
+    expect(res.status).toBe(409);
+    const body = res.jsonBody as { error: string; conflict: { changedBy: string; scheduleVersion: number } };
+    expect(body.error).toMatch(/Priya Accounts/);
+    expect(body.conflict).toMatchObject({ changedBy: "Priya Accounts", scheduleVersion: 5 });
+    expect(sqlCalls().some((sql) => sql.includes("UPDATE dbo.Tenants"))).toBe(false);
+    expect(ledger.record).not.toHaveBeenCalled();
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a malformed ScheduleVersion", async () => {
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope({ ScheduleVersion: "3" })), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("ledgers the step as schedule.manual_edit with before and after, inside the transaction", async () => {
+    const existing = [{ effectiveFrom: "2026-01-01", effectiveTo: "2026-07-01", id: STEP_ID, ratePercent: 2 }];
+    db.executeQuery
+      // NextReviewDate already where the edit leaves it, so only the step is ledgered.
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2027-07-01T00:00:00Z"), ScheduledRateSteps: JSON.stringify(existing) })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    const [, entry] = ledger.record.mock.calls[0];
+    expect(entry).toMatchObject({
+      action: "schedule.manual_edit",
+      actor: { name: "Test User", role: "accounts", userId: 7 },
+      after: { effectiveFrom: "2026-07-01", id: STEP_ID, ratePercent: 5 },
+      before: { effectiveFrom: "2026-01-01", id: STEP_ID, ratePercent: 2 },
+      buildingId: 5,
+      subject: { id: STEP_ID, type: "rate_step" },
+      tenantId: 1,
+    });
+    const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+    expect(order(ledger.record)).toBeLessThan(order(db.commitTransaction));
+  });
+
+  it("adding a row closes the open-ended row before it, and ledgers that too", async () => {
+    const existing = [{ effectiveFrom: "2025-07-01", id: PREV_ID, methodKind: "commencement", ratePercent: 0, baseRentPerAnnum: 100000 }];
+    db.executeQuery
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2027-07-01T00:00:00Z"), ScheduledRateSteps: JSON.stringify(existing) })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    const steps = (res.jsonBody as { steps: Array<{ id: string; effectiveTo?: string }> }).steps;
+    expect(steps.find((s) => s.id === PREV_ID)?.effectiveTo).toBe("2026-07-01");
+    expect(ledger.record).toHaveBeenCalledTimes(2);
+    expect(ledger.record.mock.calls[1][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { effectiveTo: "2026-07-01", id: PREV_ID },
+      before: { id: PREV_ID },
+      subject: { id: PREV_ID, type: "rate_step" },
+    });
+    expect(ledger.record.mock.calls[1][1].before).not.toHaveProperty("effectiveTo");
+    const logInserts = sqlCalls().filter((sql) => sql.includes("INSERT INTO dbo.RentScheduleChangeLog"));
+    expect(logInserts).toHaveLength(2);
+  });
+
+  it("rolls the step back when the ledger write fails", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([locked()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
+  });
+
+  it("ledgers a deleted step with its before snapshot", async () => {
+    const existing = [{ effectiveFrom: "2026-07-01", id: STEP_ID, ratePercent: 5 }];
+    db.executeQuery
+      .mockResolvedValueOnce([locked({ ScheduledRateSteps: JSON.stringify(existing) })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.deleteScheduledRateStep(
+      makeRequest({ BuildingId: 5, ScheduleVersion: 3, stepId: STEP_ID, TenantId: 1 }),
+      ctx,
+    );
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: null,
+      before: { id: STEP_ID, ratePercent: 5 },
+      subject: { id: STEP_ID, type: "rate_step" },
+    });
+  });
+
+  it("ledgers incentive writes as schedule.manual_edit on the incentive", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([locked()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ TenantId: 1, BuildingId: 5, LegalName: "Acme", Status: "current" }])
+      .mockResolvedValueOnce([]);
+    const res = await handlers.upsertTenantIncentive(makeRequest(validIncentiveEnvelope({ ScheduleVersion: 3 })), ctx);
+    expect(res.status).toBe(200);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { id: INCENTIVE_ID, kind: "rentFreeMonths" },
+      before: null,
+      subject: { id: INCENTIVE_ID, type: "incentive" },
+    });
+  });
+
+  it("returns 401, writing nothing, when the caller's token doesn't verify for the ledger", async () => {
+    const actorModule = require("../ledger/actor") as { resolveLedgerActor: jest.Mock };
+    actorModule.resolveLedgerActor.mockResolvedValueOnce(null);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(res.status).toBe(401);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 and rolls back when the ledger refuses the entry", async () => {
+    const ledgerModule = require("../ledger") as { LedgerValidationError: new (message: string) => Error };
+    const refusal = Object.create(ledgerModule.LedgerValidationError.prototype, {
+      message: { value: "Ledger user actor needs a role" },
+    });
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(refusal);
+    const res = await handlers.upsertScheduledRateStep(makeRequest(validStepEnvelope()), ctx);
+    expect(res).toMatchObject({ jsonBody: { error: "Ledger user actor needs a role" }, status: 400 });
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 on a stale incentive write", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked({ ScheduleVersion: 9 })]);
+    const res = await handlers.deleteTenantIncentive(
+      makeRequest({ BuildingId: 5, incentiveId: INCENTIVE_ID, ScheduleVersion: 3, TenantId: 1 }),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+  });
+});
+
+// ── NextReviewDate follows every schedule write (PLAN WP23b, D1) ────────────
+
+describe("schedule writes — next review date", () => {
+  const ledger = require("../ledger") as { record: jest.Mock };
+  const COMMENCEMENT_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const commencementRow = {
+    baseRentPerAnnum: 100000,
+    effectiveFrom: "2024-07-01",
+    id: COMMENCEMENT_ID,
+    methodKind: "commencement",
+    ratePercent: 0,
+  };
+  const locked = (over: Record<string, unknown> = {}) => ({
+    BuildingId: 5,
+    Commencement: new Date("2024-07-01T00:00:00Z"),
+    NextReviewDate: new Date("2025-07-01T00:00:00Z"),
+    ReviewIntervalMonths: 12,
+    ScheduleVersion: 3,
+    ScheduledRateSteps: JSON.stringify([commencementRow]),
+    TenantId: 1,
+    ...over,
+  });
+  const updateCall = () =>
+    db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants")) as
+      | [unknown, string, Array<{ name: string; value: unknown }>]
+      | undefined;
+
+  it("derives NextReviewDate in the same UPDATE and carries the move in the write's first ledger entry", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.upsertScheduledRateStep(
+      makeRequest({
+        BuildingId: 5,
+        step: { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 },
+        TenantId: 1,
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const [, sql, params] = updateCall()!;
+    expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
+    // The earliest review row nothing has settled is next: the CPI row waiting on its index.
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2027-07-01");
+    // A derived date isn't a decision: no row of its own. The new step (first
+    // entry) carries it; the commencement row it closed (second) doesn't.
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual([
+      "schedule.manual_edit",
+      "schedule.manual_edit",
+    ]);
+    const [[, created], [, closed]] = ledger.record.mock.calls;
+    expect(created).toMatchObject({
+      after: { effectiveFrom: "2027-07-01", id: STEP_ID, nextReviewDate: "2027-07-01" },
+      subject: { id: STEP_ID, type: "rate_step" },
+    });
+    expect(created.before).toEqual({ nextReviewDate: "2025-07-01" });
+    expect(closed.subject).toEqual({ id: COMMENCEMENT_ID, type: "rate_step" });
+    expect(closed.after).not.toHaveProperty("nextReviewDate");
+  });
+
+  it("re-derives on a car park, misc fee or incentive write too", async () => {
+    db.executeQuery
+      // A hand-kept date the schedule doesn't support: only a commencement row,
+      // so the first anniversary is the next review.
+      .mockResolvedValueOnce([locked({ NextReviewDate: new Date("2031-01-01T00:00:00Z") })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ TenantId: 1, BuildingId: 5, LegalName: "Acme", Status: "current" }])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertTenantIncentive(makeRequest(validIncentiveEnvelope()), ctx);
+    const [, sql, params] = updateCall()!;
+    expect(sql).toMatch(/NextReviewDate = @NextReviewDate/);
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2025-07-01");
+    expect(ledger.record).toHaveBeenCalledTimes(1);
+    expect(ledger.record.mock.calls[0][1]).toMatchObject({
+      action: "schedule.manual_edit",
+      after: { id: INCENTIVE_ID, nextReviewDate: "2025-07-01" },
+      before: { nextReviewDate: "2031-01-01" },
+      subject: { id: INCENTIVE_ID, type: "incentive" },
+    });
+  });
+
+  it("leaves NextReviewDate alone, and ledgers nothing about it, when it doesn't move", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([locked()])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertScheduledRateStep(
+      makeRequest({ BuildingId: 5, step: { ...commencementRow, note: "checked" }, TenantId: 1 }),
+      ctx,
+    );
+    expect(updateCall()![1]).not.toMatch(/NextReviewDate/);
+    expect(ledger.record.mock.calls.map(([, entry]) => entry.action)).toEqual(["schedule.manual_edit"]);
+    expect(ledger.record.mock.calls[0][1].after).not.toHaveProperty("nextReviewDate");
+    expect(ledger.record.mock.calls[0][1].before).not.toHaveProperty("nextReviewDate");
+  });
+
+  it("a waived review settles its row; the next review is the following anniversary", async () => {
+    const review = { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 };
+    db.executeQuery
+      .mockResolvedValueOnce([
+        locked({
+          LastReviewDate: new Date("2027-07-01T00:00:00Z"),
+          NextReviewDate: new Date("2027-07-01T00:00:00Z"),
+          ScheduledRateSteps: JSON.stringify([commencementRow, review]),
+        }),
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    await handlers.upsertScheduledRateStep(
+      makeRequest({ BuildingId: 5, step: { ...review, resolution: "waived" }, TenantId: 1 }),
+      ctx,
+    );
+    const params = updateCall()![2];
+    expect(params.find((param) => param.name === "NextReviewDate")?.value).toBe("2028-07-01");
+  });
+
+  it("rolls back the derived date with the write when the ledger fails", async () => {
+    db.executeQuery.mockResolvedValueOnce([locked()]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    ledger.record.mockRejectedValueOnce(new Error("ledger unavailable"));
+    const res = await handlers.upsertScheduledRateStep(
+      makeRequest({
+        BuildingId: 5,
+        step: { effectiveFrom: "2027-07-01", id: STEP_ID, methodKind: "cpi", ratePercent: 0 },
+        TenantId: 1,
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 });

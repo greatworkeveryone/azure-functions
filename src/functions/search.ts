@@ -5,10 +5,23 @@ import {
   errorResponse,
   extractToken,
   requireRole,
+  rolesForRequest,
+  rolesPassGate,
   unauthorizedResponse,
+  verifiedIdentityFromRequest,
 } from "../auth";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
+import { checkRateLimit } from "../rateLimit";
 import { escapeLikePattern, validateSearchQuery } from "../searchUtils";
+import { showTestParam } from "../test-data";
+
+// Any role may search, but each group is shown only to the roles its list
+// endpoint allows, so search never reveals what the page would refuse.
+// Mirrors getTenants (functions/tenants.ts) and getKeys (functions/keys.ts).
+export const TENANT_SEARCH_ROLES = [AppRole.ACCOUNTS, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES] as const;
+export const KEY_SEARCH_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
+
+const SEARCH_LIMIT = { limit: 60, windowMs: 60_000 };
 
 export type SearchResultItem = {
   id: number;
@@ -24,7 +37,7 @@ export type SearchResponse = {
   buildings: SearchResultItem[];
 };
 
-type QueryParams = { likeParam: string; prefixParam: string };
+type QueryParams = { likeParam: string; prefixParam: string; showTest: { name: string; type: typeof TYPES.Bit; value: boolean } };
 
 const TENANTS_SQL = `
   SELECT TOP 5
@@ -33,8 +46,10 @@ const TENANTS_SQL = `
     b.BuildingName AS subtitle
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.Id = t.BuildingId
-  WHERE t.LegalName    LIKE @q ESCAPE '\\'
-     OR t.TradingName  LIKE @q ESCAPE '\\'
+  WHERE (t.LegalName  LIKE @q ESCAPE '\\'
+     OR t.TradingName  LIKE @q ESCAPE '\\')
+    AND t.ArchivedAt IS NULL
+    AND (t.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN t.LegalName LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     t.LegalName
@@ -42,11 +57,12 @@ const TENANTS_SQL = `
 
 async function queryTenants(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, TENANTS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -64,6 +80,7 @@ const JOBS_SQL = `
   FROM dbo.Jobs j
   LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
   WHERE j.Title LIKE @q ESCAPE '\\'
+    AND (j.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN j.Title LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     j.Title
@@ -71,11 +88,12 @@ const JOBS_SQL = `
 
 async function queryJobs(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, JOBS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -92,9 +110,10 @@ const KEYS_SQL = `
     CONCAT(k.Level, ' · ', b.BuildingName) AS subtitle
   FROM dbo.[Keys] k
   LEFT JOIN dbo.Buildings b ON b.Id = k.BuildingId
-  WHERE k.KeyNumber  LIKE @q ESCAPE '\\'
+  WHERE (k.KeyNumber  LIKE @q ESCAPE '\\'
      OR k.Description LIKE @q ESCAPE '\\'
-     OR k.Level       LIKE @q ESCAPE '\\'
+     OR k.Level       LIKE @q ESCAPE '\\')
+    AND (k.IsTest = 0 OR @ShowTest = 1)
   ORDER BY
     CASE WHEN k.KeyNumber LIKE @prefix ESCAPE '\\' THEN 0 ELSE 1 END,
     k.KeyNumber
@@ -102,11 +121,12 @@ const KEYS_SQL = `
 
 async function queryKeys(
   conn: import("tedious").Connection,
-  { likeParam, prefixParam }: QueryParams,
+  { likeParam, prefixParam, showTest }: QueryParams,
 ): Promise<SearchResultItem[]> {
   const rows = await executeQuery(conn, KEYS_SQL, [
     { name: "q",      type: TYPES.NVarChar, value: likeParam },
     { name: "prefix", type: TYPES.NVarChar, value: prefixParam },
+    showTest,
   ]);
   return rows.map((r: SqlRow) => ({
     id: r.id as number,
@@ -155,6 +175,20 @@ export async function search(
   const denied = await requireRole(request, [AppRole.USER]);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`search:${identity.oid}`, SEARCH_LIMIT);
+  if (!rl.allowed) {
+    return {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
+      jsonBody: { error: "Rate limit exceeded" },
+    };
+  }
+  const roles = await rolesForRequest(request);
+  const canSeeTenants = rolesPassGate(roles, TENANT_SEARCH_ROLES);
+  const canSeeKeys = rolesPassGate(roles, KEY_SEARCH_ROLES);
+
   const validated = validateSearchQuery(request.query.get("q") ?? undefined);
   if (!validated.ok) {
     return {
@@ -172,15 +206,16 @@ export async function search(
   const params: QueryParams = {
     likeParam: `%${escaped}%`,
     prefixParam: `${escaped}%`,
+    showTest: await showTestParam(request),
   };
 
   let conn;
   try {
-    conn = await createConnection(token);
+    conn = await createRequestConnection(token);
     // tedious connections handle one request at a time; run sequentially.
-    const tenants = await queryTenants(conn, params);
+    const tenants = canSeeTenants ? await queryTenants(conn, params) : [];
     const jobs = await queryJobs(conn, params);
-    const keys = await queryKeys(conn, params);
+    const keys = canSeeKeys ? await queryKeys(conn, params) : [];
     const buildings = await queryBuildings(conn, params);
     return {
       status: 200,

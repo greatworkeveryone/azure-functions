@@ -1,4 +1,4 @@
--- 050_jobs_created_by_id.sql
+-- 080_jobs_created_by_id.sql
 --
 -- Adds dbo.Jobs.CreatedById — the verified Entra OID (NVARCHAR(64)) of the
 -- user who created the job. Lets archive/unarchive authorisation compare an

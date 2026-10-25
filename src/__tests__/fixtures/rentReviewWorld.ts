@@ -1,0 +1,417 @@
+// An in-memory stand-in for the database behind the WP26 rent review endpoints:
+// RentReviews (with the one-open-review unique index), Tenants, the schedule
+// change log, the decision ledger, CpiIndex, occupancies and the live E3 lookup;
+// and, for WP26c, ScheduleChangeRequests.
+// It answers the SQL the code sends by its shape, applies UPDATE ... SET
+// clauses column by column, and snapshots itself on beginTransaction so a
+// rollback really restores every table: tests prove "all or nothing" against
+// what was stored, not just against the calls made. Unknown SQL fails loudly.
+
+type Row = Record<string, unknown>;
+type Param = { name: string; value: unknown };
+
+const OPEN = ["scheduled", "due", "in_progress", "awaiting_index", "referred", "awaiting_approval"];
+const asIso = (value: unknown): string | null =>
+  value instanceof Date ? value.toISOString().slice(0, 10) : typeof value === "string" ? value.slice(0, 10) : null;
+
+export interface WorldState {
+  changeLog: Row[];
+  /** dbo.ScheduleChangeRequests (WP26c). */
+  changes: Row[];
+  cpi: Row[];
+  escalations: Row[];
+  ledger: Row[];
+  occupancySqm: Record<number, number>;
+  reviews: Row[];
+  tenants: Row[];
+}
+
+export class ReviewWorld {
+  state: WorldState = { changeLog: [], changes: [], cpi: [], escalations: [], ledger: [], occupancySqm: {}, reviews: [], tenants: [] };
+  private snapshot: string | null = null;
+  private version = 0xa01;
+  private ledgerId = 1;
+  /** Throw on the ledger INSERT whose row this returns true for (an injected failure). */
+  failLedger: ((row: Row) => boolean) | null = null;
+  /** Throw this error on the statement it returns one for (a deadlock, a unique-index race). */
+  failSql: ((sql: string) => Error | null) | null = null;
+  /** Every statement, in order, for assertions about what ran. */
+  log: string[] = [];
+  committed = 0;
+  rolledBack = 0;
+
+  nextVersion(): string {
+    this.version += 1;
+    return this.version.toString(16).padStart(16, "0");
+  }
+
+  begin(): void {
+    this.snapshot = JSON.stringify({ ...this.state, version: this.version, ledgerId: this.ledgerId });
+  }
+
+  commit(): void {
+    this.snapshot = null;
+    this.committed += 1;
+  }
+
+  rollback(): void {
+    if (this.snapshot) {
+      const saved = JSON.parse(this.snapshot) as WorldState & { ledgerId: number; version: number };
+      this.state = {
+        changeLog: saved.changeLog,
+        changes: saved.changes,
+        cpi: saved.cpi,
+        escalations: saved.escalations,
+        ledger: saved.ledger,
+        occupancySqm: saved.occupancySqm,
+        reviews: saved.reviews,
+        tenants: saved.tenants,
+      };
+      this.version = saved.version;
+      this.ledgerId = saved.ledgerId;
+    }
+    this.snapshot = null;
+    this.rolledBack += 1;
+  }
+
+  /** A JSON picture of every table, for "nothing changed" assertions. */
+  picture(): string {
+    return JSON.stringify(this.state);
+  }
+
+  change(requestId: string): Row {
+    const row = this.state.changes.find((c) => c.RequestId === requestId);
+    if (!row) throw new Error(`no schedule change ${requestId}`);
+    return row;
+  }
+
+  /** A request joined to its tenancy, as scheduleChange/store.ts selects it. */
+  private changeView(change: Row): Row {
+    const tenant = this.tenant(Number(change.TenantId));
+    return { ...change, BuildingId: tenant.BuildingId, LegalName: tenant.LegalName, TradingName: tenant.TradingName ?? null, Version: Buffer.from(String(change.Version), "hex") };
+  }
+
+  review(reviewId: string): Row {
+    const row = this.state.reviews.find((r) => r.ReviewId === reviewId);
+    if (!row) throw new Error(`no review ${reviewId}`);
+    return row;
+  }
+
+  tenant(tenantId: number): Row {
+    const row = this.state.tenants.find((t) => t.TenantId === tenantId);
+    if (!row) throw new Error(`no tenant ${tenantId}`);
+    return row;
+  }
+
+  ledgerRows(): Array<Row & { after: Row | null; before: Row | null; computed: Row | null }> {
+    const json = (value: unknown) => (typeof value === "string" ? (JSON.parse(value) as Row) : null);
+    return this.state.ledger.map((row) => ({ ...row, after: json(row.After), before: json(row.Before), computed: json(row.Computed) }));
+  }
+
+  private resolvedDates(tenantId: number): string | null {
+    const dates = this.state.reviews
+      .filter(
+        (r) =>
+          r.TenantId === tenantId &&
+          ((r.State !== null && r.State !== undefined && ["approved", "completed", "waived"].includes(String(r.State))) ||
+            ((r.State === null || r.State === undefined) && ["completed", "skipped", "waived"].includes(String(r.Status)))),
+      )
+      .map((r) => asIso(r.ScheduledFor));
+    return dates.length ? dates.join(",") : null;
+  }
+
+  /** The review queries' LAST_RETURN: the latest rent_review.return with no submit after it, in progress only. */
+  private lastReturn(review: Row): Row {
+    if (review.State !== "in_progress") return {};
+    const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId);
+    const ret = rows.filter((l) => l.Action === "rent_review.return").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    if (!ret || rows.some((l) => l.Action === "rent_review.submit" && Number(l.LedgerId) > Number(ret.LedgerId))) return {};
+    return { ReturnNote: ret.Reason, ReturnedAt: new Date(String(ret.OccurredAt)), ReturnedByName: ret.ActorName };
+  }
+
+  /** The review queries' LAST_INDEX_ARRIVAL: the latest rent_review.index_available with no submit after it, in progress only. */
+  private indexArrival(review: Row): Row {
+    if (review.State !== "in_progress") return {};
+    const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId);
+    const arrived = rows.filter((l) => l.Action === "rent_review.index_available").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    if (!arrived || rows.some((l) => l.Action === "rent_review.submit" && Number(l.LedgerId) > Number(arrived.LedgerId))) return {};
+    const after = typeof arrived.After === "string" ? (JSON.parse(arrived.After) as Row) : {};
+    return { IndexArrivedAt: new Date(String(arrived.OccurredAt)), IndexArrivedQuarter: after.referenceQuarter ?? null };
+  }
+
+  /** The review queries' APPROVAL_RUNG: the highest E3 rung since the last submit, while waiting for approval. */
+  private approvalRung(review: Row): Row {
+    if (review.State !== "awaiting_approval") return { ApprovalRung: null };
+    const since = review.SubmittedAt instanceof Date ? review.SubmittedAt.getTime() : null;
+    const rungs = this.state.escalations
+      .filter((e) => e.SubjectId === review.ReviewId && e.PolicyKey === "rent_review.approval")
+      .filter((e) => since === null || !(e.CreatedAt instanceof Date) || e.CreatedAt.getTime() >= since)
+      .map((e) => (e.NoIndependentTarget === true || e.NoIndependentTarget === 1 ? 3 : e.TargetRole === "accounts_manager" ? 1 : e.TargetRole === "cfo" ? 2 : 3));
+    return { ApprovalRung: rungs.length > 0 ? Math.max(...rungs) : null };
+  }
+
+  /** The review queries' LAST_CANCEL: a cancelled review's reason from its ledger row. */
+  private cancelReason(review: Row): Row {
+    if (review.State !== "cancelled") return {};
+    const row = this.state.ledger
+      .filter((l) => l.SubjectType === "rent_review" && l.SubjectId === review.ReviewId && l.Action === "rent_review.cancel")
+      .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+    return row ? { CancelReason: row.Reason ?? null } : {};
+  }
+
+  private joined(review: Row): Row {
+    const tenant = this.tenant(Number(review.TenantId));
+    return {
+      ...review,
+      ...this.lastReturn(review),
+      ...this.indexArrival(review),
+      ...this.approvalRung(review),
+      ...this.cancelReason(review),
+      LegalName: tenant.LegalName,
+      OwnerName: review.OwnerUserId ? `User ${review.OwnerUserId}` : null,
+      TenantArchivedAt: tenant.ArchivedAt ?? null,
+      TenantBuildingId: tenant.BuildingId,
+      TenantRentReliefs: tenant.RentReliefs ?? null,
+      TenantStatus: tenant.Status,
+      TradingName: tenant.TradingName ?? null,
+      Version: Buffer.from(String(review.Version), "hex"),
+    };
+  }
+
+  private tenantView(tenant: Row): Row {
+    return { ...tenant, BuildingName: "Tower A", ResolvedReviewDates: this.resolvedDates(Number(tenant.TenantId)) };
+  }
+
+  private checkOpenIndex(): void {
+    const open = new Map<number, number>();
+    for (const r of this.state.reviews) {
+      if (!OPEN.includes(String(r.State))) continue;
+      const n = (open.get(Number(r.TenantId)) ?? 0) + 1;
+      if (n > 1) throw Object.assign(new Error("Cannot insert duplicate key row in object 'dbo.RentReviews' with unique index 'UX_RentReviews_OpenPerTenant'"), { number: 2601 });
+      open.set(Number(r.TenantId), n);
+    }
+  }
+
+  /** Applies "Col = @P, Col = NULL, Col = SYSUTCDATETIME(), Col = 'x', Col = Col + 1" to a row. */
+  private applySet(row: Row, setClause: string, params: Record<string, unknown>): void {
+    for (const raw of setClause.split(",")) {
+      const part = raw.trim();
+      if (!part) continue;
+      const match = part.match(/^\[?(\w+)\]?\s*=\s*([\s\S]+)$/);
+      if (!match) throw new Error(`can't read SET part: ${part}`);
+      const [, column, expr] = match;
+      const value = expr.trim();
+      if (value.startsWith("@")) row[column] = params[value.slice(1)];
+      else if (/^NULL$/i.test(value)) row[column] = null;
+      else if (/^SYSUTCDATETIME\(\)$/i.test(value)) row[column] = new Date();
+      else if (/^'.*'$/.test(value)) row[column] = value.slice(1, -1);
+      else if (new RegExp(`^${column}\\s*\\+\\s*1$`).test(value)) row[column] = Number(row[column] ?? 0) + 1;
+      else throw new Error(`can't evaluate ${value}`);
+    }
+  }
+
+  async execute(sql: string, list: Param[] = []): Promise<Row[]> {
+    this.log.push(sql);
+    const injected = this.failSql?.(sql) ?? null;
+    if (injected) throw injected;
+    const p = Object.fromEntries(list.map((x) => [x.name, x.value]));
+
+    if (/INSERT INTO dbo\.DecisionLedger/.test(sql)) {
+      const row = { ...p, LedgerId: this.ledgerId++, OccurredAt: new Date().toISOString() };
+      if (this.failLedger?.(row)) throw new Error("ledger unavailable (injected)");
+      this.state.ledger.push(row);
+      return [];
+    }
+    if (/^SELECT TOP 1 LedgerId, \[Before\], \[After\]\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
+      const action = (sql.match(/Action = N'([\w.]+)'/) as RegExpMatchArray)[1];
+      const found = this.state.ledger
+        .filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId && r.Action === action)
+        .filter((r) => p.ApplyLedgerId === undefined || Number(r.LedgerId) > Number(p.ApplyLedgerId))
+        .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+      return found ? [{ After: found.After, Before: found.Before, LedgerId: found.LedgerId }] : [];
+    }
+    if (/^SELECT DISTINCT l\.ActorUserId\s+FROM dbo\.DecisionLedger l/.test(sql.trim())) {
+      const rows = this.state.ledger.filter((r) => r.SubjectType === "rent_review" && r.SubjectId === p.ReviewId);
+      const commenced = Math.max(0, ...rows.filter((r) => r.Action === "rent_review.commence").map((r) => Number(r.LedgerId)));
+      const ids = rows
+        .filter((r) => r.Action === "rent_review.basis_update" && Number(r.LedgerId) > commenced && r.ActorUserId !== null && r.ActorUserId !== undefined)
+        .map((r) => Number(r.ActorUserId));
+      return [...new Set(ids)].map((id) => ({ ActorUserId: id }));
+    }
+    if (/^SELECT TOP 1 Action, OccurredAt, ActorName, Reason\s+FROM dbo\.DecisionLedger/.test(sql.trim())) {
+      const found = this.state.ledger
+        .filter((r) => r.SubjectType === "tenancy" && r.SubjectId === p.TenantId && String(r.Action).startsWith("schedule.sign_off"))
+        .sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+      return found ? [{ Action: found.Action, ActorName: found.ActorName, OccurredAt: new Date(String(found.OccurredAt)), Reason: found.Reason ?? null }] : [];
+    }
+    if (/INSERT INTO dbo\.RentScheduleChangeLog/.test(sql)) {
+      this.state.changeLog.push({ ...p });
+      return [];
+    }
+    if (/FROM dbo\.RentScheduleChangeLog/.test(sql)) {
+      const ids = Object.entries(p).filter(([k]) => k.startsWith("Change")).map(([, v]) => v);
+      return this.state.changeLog.filter((r) => r.TenantId === p.TenantId && ids.includes(r.ChangeId));
+    }
+    // The pending loader (scheduleChange/pending.ts): relief requests, reviews awaiting approval.
+    if (/FROM dbo\.ScheduleChangeRequests c\s+INNER JOIN dbo\.Tenants t ON t\.TenantId = c\.TenantId\s+WHERE c\.State = N'pending'/.test(sql)) {
+      return this.state.changes
+        .filter((c) => c.State === "pending" && (p.TenantId === undefined || c.TenantId === p.TenantId))
+        .map((c) => this.changeView(c));
+    }
+    if (/^SELECT r\.ReviewId, r\.TenantId, r\.ScheduledFor, r\.State, r\.Calc/.test(sql.trim())) {
+      return this.state.reviews
+        .filter((r) => r.State === "awaiting_approval" && (p.TenantId === undefined || r.TenantId === p.TenantId))
+        .map((r) => ({ ...r, BuildingId: this.tenant(Number(r.TenantId)).BuildingId, LegalName: this.tenant(Number(r.TenantId)).LegalName, TradingName: this.tenant(Number(r.TenantId)).TradingName ?? null }));
+    }
+    // Schedule change requests (WP26c)
+    if (/INSERT INTO dbo\.ScheduleChangeRequests/.test(sql)) {
+      if (this.state.changes.some((c) => c.RequestId === p.RequestId)) throw Object.assign(new Error("Violation of PRIMARY KEY constraint 'PK_ScheduleChangeRequests'"), { number: 2627 });
+      this.state.changes.push({
+        DecidedAt: null,
+        DecidedById: null,
+        DecidedByName: null,
+        DecisionNote: null,
+        Kind: p.Kind,
+        Payload: p.Payload,
+        Reason: p.Reason,
+        RequestId: p.RequestId,
+        RequestedAt: new Date(),
+        RequestedById: p.RequestedById,
+        RequestedByName: p.RequestedByName,
+        State: "pending",
+        TenantId: p.TenantId,
+        Version: this.nextVersion(),
+      });
+      return [];
+    }
+    if (/^SELECT c\.RequestId, c\.Payload FROM dbo\.ScheduleChangeRequests c/.test(sql.trim())) {
+      return this.state.changes.filter((c) => c.TenantId === p.TenantId && c.State === "pending" && c.Kind === "relief").map((c) => ({ Payload: c.Payload, RequestId: c.RequestId }));
+    }
+    if (/FROM dbo\.ScheduleChangeRequests c[\s\S]*WHERE c\.RequestId = @RequestId/.test(sql)) {
+      const row = this.state.changes.find((c) => c.RequestId === p.RequestId);
+      return row ? [this.changeView(row)] : [];
+    }
+    if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.ScheduleChangeRequests c/.test(sql.trim())) {
+      const states = Object.entries(p).filter(([k]) => k.startsWith("State")).map(([, v]) => v);
+      return this.state.changes
+        .filter((c) => (p.FilterRequestId === undefined || c.RequestId === p.FilterRequestId) && (p.TenantId === undefined || c.TenantId === p.TenantId) && (states.length === 0 || states.includes(c.State)))
+        .sort((a, b) => (b.RequestedAt as Date).getTime() - (a.RequestedAt as Date).getTime())
+        .map((c) => this.changeView(c));
+    }
+    if (/UPDATE dbo\.ScheduleChangeRequests/.test(sql)) {
+      const row = this.state.changes.find((c) => c.RequestId === p.RequestId && c.State === "pending");
+      if (!row) return [];
+      const setClause = (sql.match(/SET([\s\S]*?)OUTPUT/) as RegExpMatchArray)[1];
+      this.applySet(row, setClause, p);
+      row.Version = this.nextVersion();
+      return [{ RequestId: row.RequestId }];
+    }
+
+    // Escalation reads of their own (not a review query's OUTER APPLY over them): nothing here.
+    if (sql.match(/\bFROM\s+(dbo\.\w+)/)?.[1] === "dbo.Escalations") return [];
+    if (/FROM dbo\.CpiIndex/.test(sql)) {
+      return this.state.cpi.filter((r) => r.Region === p.Region && (r.Period === p.PeriodA || r.Period === p.PeriodB));
+    }
+    if (/FROM dbo\.TenantOccupancies/.test(sql)) return [{ Sqm: this.state.occupancySqm[Number(p.TenantId)] ?? 0 }];
+
+    // Reviews
+    if (/WHERE r\.State = 'awaiting_index'/.test(sql)) {
+      return this.state.reviews
+        .filter((r) => r.State === "awaiting_index")
+        .map((r) => ({ ...r, TenantBuildingId: this.tenant(Number(r.TenantId)).BuildingId }));
+    }
+    if (/^SELECT TOP \(@Limit\)[\s\S]*FROM dbo\.RentReviews r/.test(sql.trim())) {
+      return this.state.reviews
+        .filter((r) => r.State !== null && r.State !== undefined && (p.TenantId === undefined || r.TenantId === p.TenantId))
+        .map((r) => this.joined(r));
+    }
+    if (/FROM dbo\.RentReviews r[\s\S]*WHERE r\.ReviewId = @ReviewId/.test(sql)) {
+      const row = this.state.reviews.find((r) => r.ReviewId === p.ReviewId && r.State !== null && r.State !== undefined);
+      return row ? [this.joined(row)] : [];
+    }
+    if (/SELECT TOP 1 ReviewId FROM dbo\.RentReviews/.test(sql)) {
+      const row = this.state.reviews.find((r) => r.TenantId === p.TenantId && r.ReviewId !== p.ReviewId && OPEN.includes(String(r.State)));
+      return row ? [{ ReviewId: row.ReviewId }] : [];
+    }
+    if (/FROM dbo\.RentReviews\s+WHERE TenantId = @TenantId AND State IN/.test(sql)) {
+      return this.state.reviews.filter((r) => r.TenantId === p.TenantId && OPEN.includes(String(r.State))).map((r) => ({ ...r }));
+    }
+    if (/INSERT INTO dbo\.RentReviews/.test(sql)) {
+      const columns = (sql.match(/\(([^)]*)\)\s*VALUES/) as RegExpMatchArray)[1].split(",").map((c) => c.trim());
+      const values = (sql.match(/VALUES\s*\(([\s\S]*)\)\s*$/) as RegExpMatchArray)[1].split(",").map((v) => v.trim());
+      const row: Row = { CreatedAt: new Date(), Version: this.nextVersion() };
+      columns.forEach((column, i) => this.applySet(row, `${column} = ${values[i]}`, p));
+      this.state.reviews.push(row);
+      this.checkOpenIndex();
+      return [];
+    }
+    if (/UPDATE dbo\.RentReviews/.test(sql)) {
+      const setClause = (sql.match(/SET([\s\S]*?)(?:OUTPUT|WHERE)/) as RegExpMatchArray)[1];
+      const where = (sql.match(/WHERE([\s\S]*)$/) as RegExpMatchArray)[1];
+      const states = where.includes("State IN")
+        ? (where.match(/State IN \(([^)]*)\)/) as RegExpMatchArray)[1].split(",").map((s) => s.trim()).map((s) => (s.startsWith("@") ? String(p[s.slice(1)]) : s.replace(/'/g, "")))
+        : [(where.match(/State = '(\w+)'/) as RegExpMatchArray)[1]];
+      const row = this.state.reviews.find((r) => r.ReviewId === p.ReviewId && states.includes(String(r.State)));
+      if (!row) return [];
+      this.applySet(row, setClause, p);
+      row.Version = this.nextVersion();
+      this.checkOpenIndex();
+      return [{ ReviewId: row.ReviewId }];
+    }
+
+    // Tenants
+    if (/^SELECT\s+\(\s*SELECT STRING_AGG[\s\S]*AS ResolvedReviewDates\s+FROM dbo\.Tenants t\s+WHERE t\.TenantId = @TenantId$/.test(sql.trim())) {
+      return [{ ResolvedReviewDates: this.resolvedDates(Number(p.TenantId)) }];
+    }
+    if (/FROM dbo\.Tenants t( WITH \(UPDLOCK, ROWLOCK\))?\s+(LEFT JOIN dbo\.Buildings b ON b\.BuildingID = t\.BuildingId\s+)?WHERE t\.TenantId = @TenantId/.test(sql)) {
+      const tenant = this.state.tenants.find((t) => t.TenantId === p.TenantId);
+      if (!tenant) return [];
+      if (/t\.Status <> 'vacated' AND t\.ArchivedAt IS NULL/.test(sql) && (tenant.Status === "vacated" || tenant.ArchivedAt)) return [];
+      return [this.tenantView(tenant)];
+    }
+    if (/^SELECT r\.ReviewId, r\.TenantId, r\.ScheduledFor, r\.NewRentPerAnnum,/.test(sql.trim())) {
+      // rentCache.ts DUE_CACHES_SQL: the latest APPLY deferred the cache, the date has come, nothing written since.
+      const today = String(p.Today);
+      return this.state.reviews
+        .filter((r) => ["approved", "completed"].includes(String(r.State)) && String(asIso(r.ScheduledFor)) <= today)
+        .filter((r) => {
+          const rows = this.state.ledger.filter((l) => l.SubjectType === "rent_review" && l.SubjectId === r.ReviewId);
+          const apply = rows.filter((l) => l.Action === "rent_review.apply").sort((a, b) => Number(b.LedgerId) - Number(a.LedgerId))[0];
+          if (!apply || (JSON.parse(String(apply.After)) as Row).rentPerAnnumCache !== "deferred") return false;
+          return !rows.some((l) => l.Action === "rent_review.rent_cache" && Number(l.LedgerId) > Number(apply.LedgerId));
+        })
+        .map((r) => {
+          const t = this.tenant(Number(r.TenantId));
+          return {
+            ...r,
+            BuildingId: t.BuildingId,
+            CpiCapPercent: t.CpiCapPercent,
+            CpiFloorPercent: t.CpiFloorPercent,
+            RentPerAnnum: t.RentPerAnnum,
+            ReviewRatchet: t.ReviewRatchet,
+            ScheduledRateSteps: t.ScheduledRateSteps,
+            TenantArchivedAt: t.ArchivedAt ?? null,
+            TenantStatus: t.Status,
+          };
+        });
+    }
+    if (/UPDATE dbo\.Tenants SET/.test(sql) || /^UPDATE dbo\.Tenants\s+SET RentPerAnnum/.test(sql.trim())) {
+      const setClause = (sql.match(/SET([\s\S]*?)OUTPUT/) as RegExpMatchArray)[1];
+      const tenant = this.tenant(Number(p.TenantId));
+      if (/RentPerAnnum = @Expected/.test(sql) && (tenant.RentPerAnnum ?? null) !== (p.Expected ?? null)) return [];
+      this.applySet(tenant, setClause, p);
+      return [{ ScheduleVersion: tenant.ScheduleVersion }];
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  }
+}
+
+/** Wires a world into the mocked ../db module. */
+export function useWorld(world: () => ReviewWorld, db: Record<string, jest.Mock>): void {
+  db.executeQuery.mockImplementation((_c: unknown, sql: string, params?: Param[]) => world().execute(sql, params));
+  db.beginTransaction.mockImplementation(async () => world().begin());
+  db.commitTransaction.mockImplementation(async () => world().commit());
+  db.rollbackTransaction.mockImplementation(async () => world().rollback());
+  db.createRequestConnection.mockResolvedValue({});
+  db.closeConnection.mockImplementation(() => undefined);
+}

@@ -51,12 +51,28 @@ module.exports = [
             "updateSet",
             "unlinkedClause",
             "idList",
+            // List/search endpoints: WHERE fragments assembled only from literal
+            // `Col = @param` strings (values bound via the params array), a
+            // `TOP <const>` clause, and `@paramName` placeholder lists for
+            // `IN (...)`. No user value ever reaches the SQL text — verified by a
+            // security audit (2026-07) across inspections / keys / planner /
+            // workRequests / quotes / invoices / jobs. See PR discussion.
+            "whereSql",
+            "whereSqlA",
+            "whereSqlB",
+            "topClause",
+            "paginationSuffix",
+            "placeholders",
+            "idParamList",
           ],
           allowFunctionCalls: [
             "workRequestSelectColumns",
             // Array .join(...) of fragments composed from literal column
             // strings — the fragments themselves are safe by construction.
             "join",
+            // Returns " OFFSET <int> ROWS FETCH NEXT <int> ROWS ONLY" built from
+            // server-clamped integers only (see pagination.ts).
+            "paginationSqlSuffix",
           ],
         },
       ],

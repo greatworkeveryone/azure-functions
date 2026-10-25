@@ -1,22 +1,30 @@
 import { app, HttpRequest, HttpResponseInit } from "@azure/functions";
-import { runMigrations } from "../migrate";
+import { checkMigrations, runMigrations, startupMigrationMode } from "../migrate";
+import { resolveMigrationTarget } from "../migrate-cli";
+import { createServiceRequestConnection } from "../db";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
-import { extractToken, oidFromToken, userInfoFromToken } from "../auth";
+import { extractToken, oidFromToken } from "../auth";
+import { audienceConfigProblem } from "../apiAudience";
+import { devOverrideMisconfigured } from "../jwt";
+import { forbiddenSettingsSet } from "../config/envContract";
+import { sentryRequestContext } from "./sentryRequestContext";
 
 initSentry();
 
-// Refuse to boot if production + dev role override would coexist. That
-// combination lets any caller spoof roles via the X-Dev-Roles header and
-// must never reach a deployed environment.
-if (
-  process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production" &&
-  process.env.DEV_ROLE_OVERRIDE_ENABLED === "true"
-) {
+// Refuse to boot if the dev role override is switched on anywhere it cannot
+// apply — any Azure-hosted app, or a host not labelled Development. The switch
+// is inert there (jwt.ts), but a set switch means someone expected a bypass.
+if (devOverrideMisconfigured()) {
   throw new Error(
-    "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true in a Production environment. Unset it in the Function App configuration.",
+    "Refusing to start: DEV_ROLE_OVERRIDE_ENABLED is true outside local Development. Unset it in the Function App configuration.",
   );
 }
+
+// api-only bearers cannot be used to open a per-caller SQL connection, so the
+// SQL_USER_CONNECTION rollback lever would silently break.
+const audienceProblem = audienceConfigProblem();
+if (audienceProblem) throw new Error(`Refusing to start: ${audienceProblem}`);
 
 // Capture any error thrown from a handler. Azure Functions are short-lived,
 // so we must await Sentry.flush() — without it the worker can be torn down
@@ -27,40 +35,9 @@ app.hook.postInvocation(async (hookContext) => {
   Sentry.withScope((scope) => {
     scope.setTag("function", hookContext.invocationContext.functionName);
     if (request) {
-      // Strip credential-bearing headers before handing them to Sentry —
-      // otherwise the bearer token (and our X-App-Token) ship out with every
-      // captured exception. Match case-insensitively because Functions' header
-      // iterator may surface either casing depending on the runtime.
-      const REDACTED_HEADERS = new Set([
-        "authorization",
-        "x-app-token",
-        "cookie",
-        "proxy-authorization",
-      ]);
-      const headers: Record<string, string> = {};
-      request.headers.forEach((value, key) => {
-        headers[key] = REDACTED_HEADERS.has(key.toLowerCase()) ? "[redacted]" : value;
-      });
-      scope.setSDKProcessingMetadata({
-        normalizedRequest: {
-          method: request.method,
-          url: request.url,
-          headers,
-        },
-      });
-
-      const token = extractToken(request);
-      if (token) {
-        const oid = oidFromToken(token);
-        const userInfo = userInfoFromToken(token);
-        if (oid || userInfo) {
-          scope.setUser({
-            id: oid ?? undefined,
-            email: userInfo?.email,
-            username: userInfo?.name,
-          });
-        }
-      }
+      const { normalizedRequest, user } = sentryRequestContext(request, extractToken(request), oidFromToken);
+      scope.setSDKProcessingMetadata({ normalizedRequest });
+      if (user) scope.setUser(user);
     }
     Sentry.captureException(hookContext.error);
   });
@@ -84,20 +61,46 @@ app.hook.postInvocation((hookContext) => {
 });
 
 // Runs once when the function app initialises, before any requests are served.
-// If migrations fail the app refuses to start — better than serving requests
-// against a schema that's out of date.
+// Production only checks (DL-11): the app identity has no DDL rights, and
+// migrations are applied by hand with `npm run migrate -- --apply`. A pending
+// or changed migration is logged and sent to Sentry; it never stops the API.
+// RUN_MIGRATIONS_ON_STARTUP=true (and local Docker) apply instead, and then a
+// failure refuses to start rather than serve a half-migrated schema.
+/* eslint-disable no-console -- startup migration diagnostics; the Functions request logger isn't available in the appStart hook, and no request data is logged */
 app.hook.appStart(async (_context) => {
-  const isProduction = process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production";
-  const isLocalSql = process.env.LOCAL_SQL === "true";
-
-  // Run migrations in production (Azure SQL) and when using the local Docker DB
-  // (SA account has full DDL). Skip otherwise — Azure SQL per-user accounts
-  // don't have DDL permissions in dev.
-  if (!isProduction && !isLocalSql) {
-    console.log("startup: skipping migrations (not Azure and not local Docker DB)");
+  const forbidden = forbiddenSettingsSet(process.env);
+  if (forbidden.length > 0) {
+    const names = forbidden.map((f) => f.name).join(", ");
+    console.warn(`startup: settings that must be unset in Production: ${names}`);
+    Sentry.captureMessage(`Settings that must be unset in Production: ${names}`, "warning");
+  }
+  const mode = startupMigrationMode(process.env);
+  const log = (msg: string) => console.log(msg);
+  if (mode === "skip") {
+    log("startup: skipping migrations (not Production and not local Docker DB)");
     return;
   }
-  console.log("startup: running migrations");
-  await runMigrations((msg) => console.log(msg));
-  console.log("startup: migrations complete");
+  if (mode === "apply") {
+    log("startup: applying migrations");
+    const target = resolveMigrationTarget({ target: null }, process.env);
+    await runMigrations(createServiceRequestConnection, log, { lockTimeoutMs: 120_000, target });
+    return;
+  }
+  try {
+    const status = await checkMigrations(createServiceRequestConnection);
+    const problems = [
+      ...status.pending.map((f) => `pending ${f.name}`),
+      ...status.changed.map((c) => `changed since applied ${c.name}`),
+    ];
+    if (problems.length === 0) {
+      log("startup: migrations up to date");
+      return;
+    }
+    console.warn(`startup: migrations need attention: ${problems.join(", ")}`);
+    Sentry.captureMessage(`Migrations need attention: ${problems.join(", ")}`, "warning");
+  } catch (err) {
+    console.error("startup: migration check failed", err);
+    Sentry.captureException(err);
+  }
 });
+/* eslint-enable no-console */

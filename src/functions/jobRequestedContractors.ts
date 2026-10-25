@@ -8,11 +8,12 @@ import {
   beginTransaction,
   closeConnection,
   commitTransaction,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
 
@@ -60,7 +61,7 @@ async function getJobRequestedContractors(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
@@ -91,7 +92,7 @@ async function addJobRequestedContractor(
   // Accounts can drive the quote-request flow too — when work originates
   // from a tenancy enquiry they often add the contractor themselves rather
   // than waiting on a facilities manager.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;
@@ -106,7 +107,7 @@ async function addJobRequestedContractor(
       return { status: 400, jsonBody: { error: "contractorName (string) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     await beginTransaction(connection);
     try {
@@ -192,7 +193,7 @@ async function removeJobRequestedContractor(
   if (!token) return unauthorizedResponse();
 
   // Mirrors addJobRequestedContractor — whoever can add can also undo.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;
@@ -207,7 +208,7 @@ async function removeJobRequestedContractor(
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -274,7 +275,7 @@ async function toggleRequestedContractorSent(
 
   // Same set as add/remove — toggling whether the request email has been
   // sent is part of the same workflow.
-  const denied = await requireRole(request, [AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
   if (denied) return denied;
 
   let connection;
@@ -292,7 +293,7 @@ async function toggleRequestedContractorSent(
       return { status: 400, jsonBody: { error: "requestSent (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const updated = await executeQuery(
       connection,

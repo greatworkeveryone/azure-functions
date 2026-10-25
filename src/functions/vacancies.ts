@@ -1,8 +1,10 @@
 // azure-functions/src/functions/vacancies.ts
 
+import { sqlDateToIso } from "../nextReviewDate";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
+import { assertMayLeave, readIsTest, showTestParam, TestDataEgressError, testFlagForCreate, testRecordResponse, type EgressSubject } from "../test-data";
 import {
   AppRole,
   extractToken,
@@ -11,7 +13,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
+import { blobHostFromConnectionString, uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
@@ -37,15 +39,33 @@ const VACANCY_ROLES = [
 // known-public CDN hosts. Without this we'd happily fetch
 // http://169.254.169.254/... (the IMDS endpoint), arbitrary internal hosts, or
 // attacker-controlled domains. Allowlist is env-driven so deploys can extend it
-// without code changes; defaults to the public blob CDN host.
-const DEFAULT_VACANCY_IMAGE_HOSTS = "cmctest.blob.core.windows.net";
+// without code changes; by default it is the blob host of the storage account
+// the app itself uses (AzureWebJobsStorage), so it follows the real account
+// instead of a name baked into the code.
+export function allowedVacancyImageHosts(
+  env: { AzureWebJobsStorage?: string; VACANCY_IMAGE_ALLOWED_HOSTS?: string },
+  warn: (message: string) => void = console.warn,
+): ReadonlySet<string> {
+  let hosts = env.VACANCY_IMAGE_ALLOWED_HOSTS;
+  if (hosts === undefined) {
+    const derived = blobHostFromConnectionString(env.AzureWebJobsStorage);
+    if (!derived) {
+      warn(
+        "vacancies: no image host is allowed — VACANCY_IMAGE_ALLOWED_HOSTS is unset and AzureWebJobsStorage has no blob host. Vacancy image URLs will be rejected.",
+      );
+    }
+    hosts = derived ?? "";
+  }
+  return new Set(
+    hosts
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter((h) => h.length > 0),
+  );
+}
 
-const ALLOWED_VACANCY_IMAGE_HOSTS: ReadonlySet<string> = new Set(
-  (process.env.VACANCY_IMAGE_ALLOWED_HOSTS ?? DEFAULT_VACANCY_IMAGE_HOSTS)
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter((h) => h.length > 0),
-);
+// Evaluated once at load, so a missing host is logged once.
+const ALLOWED_VACANCY_IMAGE_HOSTS: ReadonlySet<string> = allowedVacancyImageHosts(process.env);
 
 // Reject any URL that resolves (textually) to a private/loopback IP literal.
 // Defence-in-depth — the allowlist check already filters out IP literal hosts
@@ -81,6 +101,19 @@ function isAzuriteUrl(url: URL): boolean {
   const host = url.hostname.toLowerCase();
   if (host !== "127.0.0.1" && host !== "localhost") return false;
   return url.port === "10000";
+}
+
+// Bare stored form of an image URL: no query (SAS token) or fragment. Null if unparseable.
+export function bareVacancyImageUrl(raw: string): string | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const url = new URL(raw);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 export function isAllowedVacancyImageUrl(raw: string): boolean {
@@ -133,13 +166,16 @@ function rowToVacancy(row: SqlRow): Record<string, unknown> {
     wordpressSlug: row.WordPressSlug ?? null,
     lastSyncedAt: row.LastSyncedAt ?? null,
     tenancyId: row.TenancyId ?? null,
+    // WP33: a renewal decided as "vacating" sets it (migration 106); absent before 106.
+    availableFrom: sqlDateToIso(row.AvailableFrom),
+    isTest: row.IsTest === true || row.IsTest === 1,
     createdAt: row.CreatedAt,
     updatedAt: row.UpdatedAt,
   };
 }
 
 async function fetchVacancyRow(
-  connection: Awaited<ReturnType<typeof createConnection>>,
+  connection: Awaited<ReturnType<typeof createRequestConnection>>,
   vacancyId: number,
 ): Promise<SqlRow | null> {
   const rows = await executeQuery(
@@ -167,6 +203,7 @@ function rowToVacancySummary(row: SqlRow): Record<string, unknown> {
     firstImageUrl: images[0] ?? heroImageUrl,
     lastSyncedAt: row.LastSyncedAt ?? null,
     tenancyId: row.TenancyId ?? null,
+    isTest: row.IsTest === true || row.IsTest === 1,
   };
 }
 
@@ -183,15 +220,16 @@ async function handleGetVacancies(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT v.Id, v.Title, v.Address, v.Status, v.Images, v.LastSyncedAt, v.TenancyId,
+      `SELECT v.Id, v.Title, v.Address, v.Status, v.Images, v.LastSyncedAt, v.TenancyId, v.IsTest,
               v.BuildingId, b.BuildingName, b.HeroImageUrl
        FROM dbo.Vacancies v
        LEFT JOIN dbo.Buildings b ON b.BuildingID = v.BuildingId
+       WHERE (v.IsTest = 0 OR @ShowTest = 1)
        ORDER BY v.CreatedAt DESC`,
-      [],
+      [await showTestParam(request)],
     );
     return { jsonBody: { vacancies: rows.map(rowToVacancySummary) } };
   } catch (error: any) {
@@ -220,14 +258,14 @@ async function handleGetVacantTenancies(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT t.TenantId, t.LegalName, t.BuildingId, b.BuildingName,
               o.OccupancyId, o.Level, o.Area, o.SizeSqm
        FROM dbo.Tenants t
        INNER JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
-       LEFT JOIN dbo.TenantOccupancies o ON o.TenantId = t.TenantId
+       LEFT JOIN dbo.TenantOccupancies o ON o.TenantId = t.TenantId AND o.ArchivedAt IS NULL
        WHERE t.Status = 'vacated'
        ORDER BY b.BuildingName, t.TenantId, o.Level, o.Area`,
       [],
@@ -296,6 +334,7 @@ async function handleCreateVacancy(
   let connection;
   try {
     const body = (await request.json()) as {
+      IsTest?: boolean;
       tenancyId?: number;
       buildingId?: number;
       title?: string;
@@ -303,15 +342,21 @@ async function handleCreateVacancy(
     const tenancyId = typeof body.tenancyId === "number" ? body.tenancyId : null;
     const buildingId = typeof body.buildingId === "number" ? body.buildingId : null;
     const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "New vacancy";
+    // D9: admins and directors may create a test vacancy; an admin's "[TEST]" title does too.
+    const testFlag = await testFlagForCreate(request, body.IsTest, title);
+    if ("error" in testFlag) return testFlag.error;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    // A vacancy of a test tenancy is a test vacancy too (D9 review).
+    const isTest = testFlag.isTest || (tenancyId !== null && (await readIsTest(connection, "tenancy", tenancyId)));
 
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO dbo.Vacancies (Title, Status, AdditionalDetails, Images, TenancyId, BuildingId)
+      `INSERT INTO dbo.Vacancies (Title, Status, AdditionalDetails, Images, TenancyId, BuildingId, IsTest)
        OUTPUT INSERTED.*
-       VALUES (@Title, 'draft', '[]', '[]', @TenancyId, @BuildingId)`,
+       VALUES (@Title, 'draft', '[]', '[]', @TenancyId, @BuildingId, @IsTest)`,
       [
+        { name: "IsTest", type: TYPES.Bit, value: isTest },
         { name: "Title", type: TYPES.NVarChar, value: title },
         { name: "TenancyId", type: TYPES.Int, value: tenancyId },
         { name: "BuildingId", type: TYPES.Int, value: buildingId },
@@ -350,7 +395,7 @@ async function handleGetVacancy(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT v.*, b.HeroImageUrl
@@ -412,7 +457,7 @@ async function handleUpdateVacancy(
       ? JSON.stringify(body.additionalDetails)
       : undefined;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const updated = await executeQuery(
       connection,
@@ -477,12 +522,12 @@ async function handleDeleteVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Fetch images before deleting so we can clean up Blob Storage
     const rows = await executeQuery(
       connection,
-      `SELECT Images, WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,
+      `SELECT Images, SlotImages, WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
@@ -490,22 +535,32 @@ async function handleDeleteVacancy(
     const images: string[] = JSON.parse((rows[0].Images as string) ?? "[]");
     const wpPostId = rows[0].WordPressPostId as number | null;
 
-    // Unpublish from WordPress if published
+    // A live WordPress post must come down first; if it can't, keep the record so the user can retry.
     if (wpPostId) {
-      await unpublishFromWordPress(wpPostId);
+      try {
+        await unpublishFromWordPress(wpPostId);
+      } catch (err) {
+        console.error(`deleteVacancy: WordPress unpublish failed for vacancy ${body.id}:`, err);
+        return {
+          status: 502,
+          jsonBody: { error: "Could not unpublish this vacancy from WordPress. Nothing was deleted; try again." },
+        };
+      }
     }
 
-    // Delete all blobs
-    for (const url of images) {
-      const blobName = extractBlobName(url);
-      if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
-    }
-
+    // Row first (single atomic statement, no dependent rows), then blobs best-effort:
+    // a failed blob delete leaves an orphan, never a row pointing at missing files.
     await executeQuery(
       connection,
       `DELETE FROM dbo.Vacancies WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
+
+    const slotImages: string[] = Object.values(JSON.parse((rows[0].SlotImages as string) ?? "{}") as Record<string, string>);
+    for (const url of [...images, ...slotImages]) {
+      const blobName = extractBlobName(url);
+      if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
+    }
 
     return { status: 200, jsonBody: { deleted: body.id } };
   } catch (error: any) {
@@ -571,7 +626,7 @@ async function handleUploadVacancyImage(
 
     context.log(`Uploaded vacancy image: ${url}`);
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Vacancies
@@ -628,7 +683,7 @@ async function handleDeleteVacancyImage(
       return { status: 400, jsonBody: { error: "Missing 'imageUrl'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -637,8 +692,17 @@ async function handleDeleteVacancyImage(
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
-    const current: string[] = JSON.parse((rows[0].Images as string) ?? "[]");
-    const filtered = current.filter((u) => u !== body.imageUrl);
+    // Compare on the bare form: clients echo back SAS-signed URLs (and older reorders stored them).
+    const current: string[] = (JSON.parse((rows[0].Images as string) ?? "[]") as string[]).map(
+      (u) => bareVacancyImageUrl(u) ?? u,
+    );
+    const target = bareVacancyImageUrl(body.imageUrl);
+    // Only an image this vacancy actually holds may be removed — the URL is the
+    // caller's, and its blob name is what gets deleted (SEC-01 path B).
+    if (!target || !current.includes(target)) {
+      return { status: 404, jsonBody: { error: "Image not found on this vacancy" } };
+    }
+    const filtered = current.filter((u) => u !== target);
 
     const updated = await executeQuery(
       connection,
@@ -655,7 +719,7 @@ async function handleDeleteVacancyImage(
 
     if (!updated[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
-    const blobName = extractBlobName(body.imageUrl);
+    const blobName = extractBlobName(target);
     if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
 
     const row = await fetchVacancyRow(connection, body.id);
@@ -702,16 +766,35 @@ async function handleReorderVacancyImages(
     // SSRF gate — every image URL must pass the host allowlist BEFORE we
     // persist it. Otherwise an attacker who can call this endpoint can store
     // an internal URL that later gets fetched server-side from publishVacancy.
+    // Clients echo the SAS-signed URLs they were served; persist only the bare form.
+    const bareImages: string[] = [];
     for (const url of body.images) {
-      if (!isAllowedVacancyImageUrl(url)) {
+      const bare = bareVacancyImageUrl(url);
+      if (!bare || !isAllowedVacancyImageUrl(bare)) {
         return {
           status: 400,
           jsonBody: { error: "One or more image URLs are not in the allowed host list" },
         };
       }
+      bareImages.push(bare);
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const stored = await executeQuery(
+      connection,
+      `SELECT Images FROM dbo.Vacancies WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: body.id }],
+    );
+    if (!stored[0]) return { status: 404, jsonBody: { error: "Not found" } };
+    // Reorder only: the incoming set must be a permutation of the stored set.
+    const storedBare = (JSON.parse((stored[0].Images as string) ?? "[]") as string[])
+      .map((u) => bareVacancyImageUrl(u) ?? u)
+      .sort();
+    const incomingSorted = [...bareImages].sort();
+    if (storedBare.length !== incomingSorted.length || storedBare.some((u, i) => u !== incomingSorted[i])) {
+      return { status: 400, jsonBody: { error: "Reorder must contain exactly the vacancy's current images" } };
+    }
+
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Vacancies
@@ -720,7 +803,7 @@ async function handleReorderVacancyImages(
        OUTPUT INSERTED.*
        WHERE Id = @Id`,
       [
-        { name: "Images", type: TYPES.NVarChar, value: JSON.stringify(body.images) },
+        { name: "Images", type: TYPES.NVarChar, value: JSON.stringify(bareImages) },
         { name: "Id", type: TYPES.Int, value: body.id },
       ],
     );
@@ -784,7 +867,7 @@ async function handleUploadVacancySlotImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Delete existing blob for this slot if present
     const existing = await executeQuery(
@@ -865,7 +948,7 @@ async function handleDeleteVacancySlotImage(
       return { status: 400, jsonBody: { error: "Missing 'vacancyId' or 'slotLabel'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -922,9 +1005,12 @@ function wpAuthHeader(): string {
 }
 
 async function uploadImageToWp(
+  egress: EgressSubject,
   imageUrl: string,
   context?: InvocationContext,
 ): Promise<number | null> {
+  // Outside the catch below: a test vacancy's refusal must not read as "skip this image".
+  assertMayLeave("wordpress", egress);
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
   // SSRF gate before issuing a server-side fetch. Silent reject + log so a
   // single bad URL doesn't fail the whole publish — publishVacancy treats
@@ -959,14 +1045,18 @@ async function uploadImageToWp(
 
 export async function unpublishFromWordPress(wpPostId: number): Promise<void> {
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
-  await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
+  const resp = await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
     method: "POST",
     headers: {
       Authorization: wpAuthHeader(),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ status: "draft" }),
-  }).catch(() => undefined);
+  });
+  // A post already gone (404/410) is as unpublished as it gets; anything else must surface.
+  if (!resp.ok && resp.status !== 404 && resp.status !== 410) {
+    throw new Error(`WordPress unpublish failed: ${resp.status}`);
+  }
 }
 
 // ── POST /api/publishVacancy ─────────────────────────────────────────────────
@@ -999,16 +1089,22 @@ async function handlePublishVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
-      `SELECT v.*, b.BuildingName, b.HeroImageUrl
+      `SELECT v.*, b.BuildingName, b.HeroImageUrl, t.IsTest AS TenancyIsTest
        FROM dbo.Vacancies v
        LEFT JOIN dbo.Buildings b ON b.BuildingID = v.BuildingId
+       LEFT JOIN dbo.Tenants t ON t.TenantId = v.TenancyId
        WHERE v.Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
+
+    // A test vacancy, or a vacancy of a test tenancy, never reaches the website (D9).
+    const flagged = (value: unknown): boolean => value === true || value === 1;
+    const egress = { isTest: flagged(rows[0].IsTest) || flagged(rows[0].TenancyIsTest) };
+    assertMayLeave("wordpress", egress);
 
     const v = rowToVacancy(rows[0]);
     const buildingName = (rows[0].BuildingName as string | null) ?? null;
@@ -1035,7 +1131,7 @@ async function handlePublishVacancy(
     });
     const mediaIds: number[] = [];
     for (const url of safeImages) {
-      const id = await uploadImageToWp(url, context);
+      const id = await uploadImageToWp(egress, url, context);
       if (id !== null) mediaIds.push(id);
     }
 
@@ -1053,6 +1149,7 @@ async function handlePublishVacancy(
       : `${wpBase}/wp/v2/tenancy`;
     const wpMethod = wpPostId ? "PUT" : "POST";
 
+    assertMayLeave("wordpress", egress);
     const wpResp = await fetch(wpEndpoint, {
       method: wpMethod,
       headers: {
@@ -1089,6 +1186,7 @@ async function handlePublishVacancy(
 
     return { jsonBody: { vacancy: rowToVacancy(updated[0]) } };
   } catch (error: any) {
+    if (error instanceof TestDataEgressError) return testRecordResponse();
     return errorResponse("Failed to publish vacancy", error.message);
   } finally {
     if (connection) closeConnection(connection);
@@ -1124,7 +1222,7 @@ async function handleUnpublishVacancy(
       return { status: 400, jsonBody: { error: "Missing 'id'" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,
@@ -1133,7 +1231,14 @@ async function handleUnpublishVacancy(
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
     const existingWpPostId = rows[0].WordPressPostId as number | null;
-    if (existingWpPostId) await unpublishFromWordPress(existingWpPostId);
+    if (existingWpPostId) {
+      try {
+        await unpublishFromWordPress(existingWpPostId);
+      } catch (err) {
+        console.error(`unpublishVacancy: WordPress unpublish failed for vacancy ${body.id}:`, err);
+        return { status: 502, jsonBody: { error: "Could not unpublish this vacancy from WordPress. Try again." } };
+      }
+    }
 
     const updated = await executeQuery(
       connection,
@@ -1167,5 +1272,7 @@ export function extractBlobName(publicUrl: string): string | null {
   const marker = "/vacancies/";
   const idx = publicUrl.indexOf(marker);
   if (idx === -1) return null;
-  return publicUrl.slice(idx + marker.length);
+  const after = publicUrl.slice(idx + marker.length);
+  const cut = after.search(/[?#]/); // a SAS query is never part of the blob name
+  return cut === -1 ? after : after.slice(0, cut);
 }

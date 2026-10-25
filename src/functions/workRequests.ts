@@ -1,9 +1,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
-import { createConnection, executeQuery, closeConnection, SqlParam } from "../db";
+import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
+import { parseMoneyField } from "../money";
 import { assertResolvedWithinThreshold, extractCreatedWorkRequestId, resolveAll } from "../sync-helpers";
 import {
   MAX_LIST_ROWS,
@@ -26,7 +28,6 @@ interface UpdateWorkRequestBody {
 }
 interface UpdateWorkRequestLocalBody {
   WorkRequestID: number;
-  UpdatedBy?: string;
   [key: string]: unknown;
 }
 interface ResetWorkRequestLocalBody { WorkRequestID: number }
@@ -112,6 +113,12 @@ export async function upsertWorkRequest(connection: Connection, wr: MyWorkReques
 // they've been promoted. The filter is a NOT EXISTS against Jobs.WorkRequestID
 // so the result stays correct the instant a Job is created.
 
+/** A whole number from a query string ("12", "-3"); null for anything else ("1&x=2", "12abc", "1.5"). */
+export function parseIntegerParam(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined || !/^-?\d{1,15}$/.test(raw.trim())) return null;
+  return Number(raw.trim());
+}
+
 async function getWorkRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
@@ -130,6 +137,12 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
   const force = request.query.get("force") === "true";
   const unlinkedOnly = request.query.get("unlinkedOnly") === "true";
 
+  // Validated before it is bound to SQL or sent upstream to myBuildings.
+  const buildingNumber = buildingId ? parseIntegerParam(buildingId) : null;
+  if (buildingId && buildingNumber === null) return { status: 400, jsonBody: { error: "buildingId must be a whole number" } };
+  const statusNumber = statusId ? parseIntegerParam(statusId) : null;
+  if (statusId && statusNumber === null) return { status: 400, jsonBody: { error: "statusId must be a whole number" } };
+
   const unlinkedClause = unlinkedOnly
     ? " AND NOT EXISTS (SELECT 1 FROM Jobs j WHERE j.WorkRequestID = wr.WorkRequestID)"
     : "";
@@ -140,7 +153,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // No buildingId — return all WRs from DB. On force=true also sync all
     // buildings using lastmodifieddate so the dashboard data stays current.
@@ -156,7 +169,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
         const syncFrom = oldest ? new Date(oldest) : new Date(Date.now() - TWO_YEARS_MS);
         const dateStr = toMyBuildingsDate(syncFrom);
         context.log(`Force-syncing all WRs from myBuildings since ${dateStr}`);
-        const workRequests = await fetchWorkRequests(`lastmodifieddate=${dateStr}`);
+        const workRequests = await fetchWorkRequests(new URLSearchParams({ lastmodifieddate: dateStr }).toString());
         context.log(`Fetched ${workRequests.length} work requests from myBuildings`);
 
         // myBuildings' list endpoint does not include BuildingID on each WR
@@ -192,7 +205,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
       const params: SqlParam[] = [];
       if (statusId) {
         whereSqlA += " AND StatusID = @StatusID";
-        params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
+        params.push({ name: "StatusID", type: TYPES.Int, value: (statusNumber as number) });
       }
       if (category) {
         whereSqlA += " AND Category = @Category";
@@ -235,27 +248,33 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     const buildingRows = await executeQuery(
       connection,
       "SELECT WRsLastSyncedAt FROM Buildings WHERE BuildingID = @BuildingID",
-      [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }]
+      [{ name: "BuildingID", type: TYPES.Int, value: (buildingNumber as number) }]
     );
 
     const lastSynced: Date | null = buildingRows[0]?.WRsLastSyncedAt ?? null;
     const isStale = !lastSynced || (Date.now() - new Date(lastSynced).getTime() > CACHE_TTL_MS);
 
-    if (force || isStale) {
+    // Manual buildings (negative IDs, migration 093) don't exist in myBuildings.
+    const isManualBuilding = (buildingNumber as number) <= 0;
+
+    if (!isManualBuilding && (force || isStale)) {
       // Both force and incremental syncs use lastmodifieddate to avoid pulling
       // the entire WR history. Force sync resets to the 2-year default window;
       // incremental sync uses the last-synced timestamp for minimal fetching.
       const syncFrom = (force || !lastSynced)
         ? new Date(Date.now() - TWO_YEARS_MS)
         : new Date(lastSynced);
-      const syncParams = `buildingID=${buildingId}&lastmodifieddate=${toMyBuildingsDate(syncFrom)}`;
+      const syncParams = new URLSearchParams({
+        buildingID: String(buildingNumber),
+        lastmodifieddate: toMyBuildingsDate(syncFrom),
+      }).toString();
       context.log(`Syncing WRs from myBuildings: building=${buildingId}, params=${syncParams}`);
       const workRequests = await fetchWorkRequests(syncParams);
       context.log(`Fetched ${workRequests.length} work requests from myBuildings`);
 
       // myBuildings' list endpoint omits BuildingID on WR records. Since we
       // know the building for this sync, backfill it so the DB row is queryable.
-      const { resolved } = resolveAll(workRequests, { fallbackId: parseInt(buildingId) });
+      const { resolved } = resolveAll(workRequests, { fallbackId: (buildingNumber as number) });
       for (const wr of resolved) {
         await upsertWorkRequest(connection, wr);
       }
@@ -264,7 +283,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
       await executeQuery(
         connection,
         "UPDATE Buildings SET WRsLastSyncedAt=GETUTCDATE() WHERE BuildingID=@BuildingID",
-        [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }]
+        [{ name: "BuildingID", type: TYPES.Int, value: (buildingNumber as number) }]
       );
     } else {
       context.log(`Returning cached WRs for building ${buildingId} (last synced: ${lastSynced})`);
@@ -272,11 +291,11 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
 
     // Return from DB with optional filters
     let whereSqlB = `wr.BuildingID = @BuildingID${unlinkedClause}`;
-    const params: SqlParam[] = [{ name: "BuildingID", type: TYPES.Int, value: parseInt(buildingId) }];
+    const params: SqlParam[] = [{ name: "BuildingID", type: TYPES.Int, value: (buildingNumber as number) }];
 
     if (statusId) {
       whereSqlB += " AND StatusID = @StatusID";
-      params.push({ name: "StatusID", type: TYPES.Int, value: parseInt(statusId) });
+      params.push({ name: "StatusID", type: TYPES.Int, value: (statusNumber as number) });
     }
     if (category) {
       whereSqlB += " AND Category = @Category";
@@ -345,7 +364,7 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Get the DB snapshot for comparison
     const existing = await executeQuery(
@@ -404,7 +423,7 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
       return { status: 400, jsonBody: { error: "WorkRequestID is required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Read current DB state for conflict check
     const existing = await executeQuery(
@@ -478,13 +497,15 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
 // ── POST /api/createWorkRequest ───────────────────────────────────────────────
 // Creates the WR in myBuildings, fetches the fresh record back (so we have
 // the authoritative WorkRequestID and LastModifiedDate), upserts it into SQL,
-// and returns the AzureSqlWorkRequest row the frontend expects.
+// and returns the AzureSqlWorkRequest row the frontend expects. Facilities
+// managers, admin and directors (ACTION_ROLES.createWorkRequest): Job Intake
+// offers New request to exactly those roles.
 
 async function handleCreateWorkRequest(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
+  const denied = await requireRole(request, ACTION_ROLES.createWorkRequest.gate);
   if (denied) return denied;
 
   let connection;
@@ -506,7 +527,7 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
     }
 
     // Resolve BuildingID (myBuildings list omits it; payload may have it)
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     let buildingId: number | undefined = fresh.BuildingID ?? (typeof body.BuildingID === "number" ? body.BuildingID : undefined);
     if (!buildingId && fresh.BuildingName) {
       const rows = await executeQuery(
@@ -551,16 +572,28 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
   const denied = await requireRole(request, [AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
 
+  // UpdatedBy is an audit column — stamped from the verified token (SEC-23).
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+
   let connection;
   try {
     const body = (await request.json()) as UpdateWorkRequestLocalBody;
-    const { WorkRequestID, UpdatedBy, ...fields } = body ?? {};
+    const { WorkRequestID, ...fields } = body ?? {};
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
     }
 
     // Only accept known overlay columns; ignore anything else the client sent.
     const accepted = pickOverlayFields(fields);
+
+    // Money columns go through the shared parser: tedious would bind "1,500" as 1 and "12abc" as 12.
+    for (const column of ["TotalCost", "CostNotToExceed"] as const) {
+      if (!(column in accepted)) continue;
+      const parsed = parseMoneyField(accepted[column], column);
+      if (!parsed.ok) return { status: 400, jsonBody: { error: parsed.error } };
+      accepted[column] = parsed.value ?? null;
+    }
 
     // Guard: refuse empty-body calls. Otherwise an empty MERGE would still
     // insert a ghost override row and bump LastModifiedDate without any real
@@ -572,14 +605,14 @@ async function updateWorkRequestLocal(request: HttpRequest, context: InvocationC
       };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const presentColumns = Object.keys(accepted);
     const sql = buildOverlayUpsertSql(presentColumns);
 
     const params: SqlParam[] = [
       { name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID },
-      { name: "UpdatedBy", type: TYPES.NVarChar, value: UpdatedBy ?? null },
+      { name: "UpdatedBy", type: TYPES.NVarChar, value: identity.name },
     ];
     for (const [k, v] of Object.entries(accepted)) {
       const isNumeric = k === "TotalCost" || k === "CostNotToExceed";
@@ -628,7 +661,7 @@ async function resetWorkRequestLocal(request: HttpRequest, context: InvocationCo
     if (!WorkRequestID || typeof WorkRequestID !== "number") {
       return { status: 400, jsonBody: { error: "WorkRequestID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     await executeQuery(
       connection,
       "DELETE FROM WorkRequestOverrides WHERE WorkRequestID = @WorkRequestID",

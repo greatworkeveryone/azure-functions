@@ -38,10 +38,26 @@ Update the values in `local.settings.json`:
 - `MYBUILDINGS_BEARER_TOKEN` — your myBuildings API Bearer token
 - `SQL_SERVER` — your Azure SQL server (e.g. `rpcc-server.database.windows.net`)
 - `SQL_DATABASE` — your database name
+- `TODDLER_URL` — codename-toddler base URL (unset = email AI parsing skipped)
+- `TODDLER_SERVICE_KEY` — must equal toddler's `SERVICE_KEY_COMMAND_CENTRE`; sent as `X-Service-Key`
+- `ORG_EMAIL_DOMAINS` — comma-separated accepted domains of the tenant (e.g. `randazzo.properties`). Mail from these domains counts as sender-authenticated only when Exchange stamped it `X-MS-Exchange-Organization-AuthAs: Internal`; unset = no internal mail is authenticated, so emailed director decisions from colleagues are refused (see `src/email/sender-auth.ts`)
+- `TODDLER_TIMEOUT_MS` — per-email parse request budget (default `180000`)
+- `TODDLER_WARMUP_TIMEOUT_MS` — budget for `POST /warmup` before each parse run (default `240000`; covers a cold GPU replica; capped by the run's 540 s deadline)
+- `AI_PARSE_BATCH_SIZE` — upper bound on emails per parse run (default `5`); the deadline usually stops a run first
+- `AI_PARSE_SKIP_SENDERS` — optional comma list of sender substrings (e.g. `no-reply@,notifications@mybuildings`), matched case-insensitively against the From address; include the `@` to avoid broad matches. Matching mail is classified `unknown` without a model call
+- `GRAPH_MAILBOX_ACTIVE` — `dev` (default) or `prod`: which of `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD` the Graph sync, subscription and `syncEmailsNow` use. After switching, the renew timer subscribes the new mailbox on its next run; mail older than the newest synced email isn't back-filled
+- `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD` — the two mailbox addresses
+- `AzureWebJobsStorage` — hosts the `email-sync` queue (webhook / manual sync / admin trigger -> `processEmailSync`) and `email-sync-poison`; no extra setting. Locally, run Azurite.
+
+Email pipeline behaviour:
+- Parse claims take a 600 s lease; transient failures retry only after it expires (about 10 min apart).
+- Toddler 400/422 responses are permanent: the email is flagged, not retried.
+- The daily retry also enqueues a mail sync, a backstop if the Graph webhook subscription dies (gap of up to a day).
+- `host.json`: `functionTimeout` 10 min; queue `batchSize` 1, `maxDequeueCount` 3, `visibilityTimeout` 30 s.
 
 Dev-only flags (already present in the checked-in `local.settings.json`; safe to leave on locally, never set in prod):
 - `DEV_EMAIL_OVERRIDE` — when set, email handlers send to this address instead of the real recipient.
-- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect.
+- `DEV_ROLE_OVERRIDE_ENABLED: "true"` — makes `rolesForRequest()` honour the `X-Dev-Roles` header sent by the frontend's DEV role switcher. Lets you exercise role-gated endpoints (e.g. director approval) without re-assigning Entra app roles. Logs a `[auth] DEV ROLE OVERRIDE active` warning to the func terminal whenever it takes effect. Applies only when `AZURE_FUNCTIONS_ENVIRONMENT` is `Development` (Core Tools sets it locally) and the host is not an Azure app (`WEBSITE_INSTANCE_ID` unset); anywhere else the switch is ignored and startup refuses to boot (SEC-04).
 
 ### 4. Start the local SQL Server (Docker)
 
@@ -70,7 +86,18 @@ docker compose up -d
 The `local.settings.json` is already configured for Docker (`LOCAL_SQL=true`, `SQL_SERVER=localhost`). To switch back to Azure SQL temporarily, set `LOCAL_SQL=false` and restore the `SQL_SERVER` / `SQL_DATABASE` values.
 
 ### 5. Apply database migrations
-The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. The function host applies them automatically on startup via `runMigrations()`. For a brand-new Docker DB, just start the app and all migrations will run.
+The full schema (and any incremental changes) lives in `migrations/` as numbered `.sql` files. Against the local Docker DB (`LOCAL_SQL=true`) the function host applies them on startup, so for a brand-new Docker DB just start the app.
+
+**Production applies them by hand.** The app's service principal has no DDL rights, so startup only logs pending migrations (and warns Sentry):
+
+```bash
+npm run migrate -- --target <server>/<database>           # dry run: pending, changed and invalid files, as your `az login`
+npm run migrate -- --target <server>/<database> --apply   # apply them — your account needs DDL rights
+```
+
+There is no default database: pass `--target` or set both `SQL_SERVER` and `SQL_DATABASE`. `npm run migrate` compiles first. Each file applies in one transaction together with its `schema_migrations` row (unless it declares `-- NOTRANSACTION` or manages its own transaction), runs are serialised by an app lock, an applied file whose checksum changed stops the run, and `--apply` refuses uncommitted changes under `migrations/` unless you pass `--allow-dirty`. Rehearse on a restored copy first. Setting `RUN_MIGRATIONS_ON_STARTUP=true` re-enables applying on startup, which only works with a DDL-capable identity.
+
+Email-pipeline migrations `089_job_events_source_email.sql` → `092_email_provenance_auth.sql` apply like the rest (by hand in prod). `getEmails` / `getEmail` / `ingestEmail` select 092's columns, so apply them before deploying code that reads them. `091_emails_messageid_unique.sql` skips the unique index with a PRINT if duplicate `MessageID`s exist but is still recorded in `schema_migrations`; after resolving the duplicates, delete its row there and re-run `npm run migrate -- --apply` to create the index.
 
 To apply manually (e.g. to inspect state):
 ```bash
@@ -93,10 +120,9 @@ curl -X POST http://localhost:7071/api/syncBuildings
 ```
 
 ### 7. Deploy to Azure
-1. Run `npm run build`
-2. In VS Code → Azure panel → right-click **rpcc-functions** → **Deploy to Function App...**
+Deploys run from GitHub Actions, not from a laptop. A push to `dev/launch-readiness` runs `.github/workflows/deploy.yml`: verify (type check, lint, tests, audit, route check), deploy to `rpcc-api-staging`, then wait for the `production` environment's reviewer before deploying the same package to `rpcc-api2`. The one-time Azure and GitHub setup is listed at the top of that workflow. The workflow does not apply database migrations.
 
-All functions deploy together as a single app. To add a new function, create a file in `src/functions/`, register it with `app.http()`, build, and redeploy.
+All functions deploy together as a single app. To add a new function, create a file in `src/functions/`, register it with `app.http()`, and push.
 
 ### 8. Set environment variables in Azure
 In Azure Portal → Function App → Configuration → Application settings. Add:
@@ -104,8 +130,19 @@ In Azure Portal → Function App → Configuration → Application settings. Add
 - `MYBUILDINGS_BEARER_TOKEN`
 - `SQL_SERVER`
 - `SQL_DATABASE`
+- `TODDLER_URL`
+- `TODDLER_SERVICE_KEY`
+- `ORG_EMAIL_DOMAINS`
+- `GRAPH_MAILBOX_ACTIVE` (optional, `dev` | `prod`, default `dev`)
+- `GRAPH_MAILBOX_DEV` / `GRAPH_MAILBOX_PROD`
+- `TODDLER_TIMEOUT_MS` (optional, default 180000)
+- `TODDLER_WARMUP_TIMEOUT_MS` (optional, default 240000)
+- `AI_PARSE_BATCH_SIZE` (optional, default 5)
+- `AI_PARSE_SKIP_SENDERS` (optional)
+- `CORS_EXTRA_ORIGINS` (optional, staging only): comma-separated browser origins allowed in addition to the built-in list, e.g. the staging frontend's origin. Exact match; wildcards are ignored. The Function App's own Azure CORS setting must stay empty or include the same origin, otherwise the platform answers preflights first.
+- `BUILD_SHA`, `BUILD_TIME`: set by the deploy workflow, reported by `/api/health?deep=true`.
 
-These are NOT deployed from `local.settings.json` — that file is local only.
+`AzureWebJobsStorage` must also be set (it hosts the `email-sync` queue). These are NOT deployed from `local.settings.json` — that file is local only.
 
 ### 9. Enable Entra ID authentication (Easy Auth)
 After deploying and confirming the functions work:
@@ -137,14 +174,23 @@ This protects all endpoints at the platform level — unauthenticated requests a
 1. React app authenticates user via MSAL (Entra ID)
 2. React app acquires a token scoped to `https://database.windows.net/user_impersonation`
 3. React app calls the Azure Function with that token in the Authorization header
-4. Azure Function uses the user's token to connect to Azure SQL (permissions enforced per user)
+4. Azure Function connects to Azure SQL as the app's service principal; authorisation is enforced by `requireRole` against `dbo.AppUsers`, not by SQL grants
 5. For sync: Function also calls myBuildings API with the stored Bearer token to fetch data
 6. Data is upserted into the Buildings table
 
 ## Auth flow
 
 ```
-User → MSAL login → React App → Azure Function → Azure SQL (user's token)
+User → MSAL login → React App → Azure Function → Azure SQL (service principal)
+                                       │                ↑
+                                       │      authorisation happens HERE,
+                                       │      not at the SQL layer:
+                                       └───── requireRole vs dbo.AppUsers
                                        ↓
                               myBuildings API (static Bearer token)
 ```
+
+The caller's Entra token is still sent and verified — it establishes identity
+and drives `requireRole`. It is no longer used to connect to SQL. See
+[Database access model](docs/db-access.md) for why, and for how to onboard a
+new user (there is no SQL step).

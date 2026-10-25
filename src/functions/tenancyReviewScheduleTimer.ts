@@ -1,111 +1,97 @@
-// tenancyReviewScheduleTimer — daily housekeeping for the rent-review machinery.
-//
-// Three things per run:
-//   1. For tenants with `ReviewIntervalMonths` set but no `NextReviewDate`,
-//      derive it from `LastReviewDate` (or `Commencement`) + interval.
-//   2. For tenants whose `NextReviewDate` has passed and there's no upcoming
-//      `RentReviews` row for that date, insert one with status `due`.
-//   3. Flip `RentReviews.Status`: `upcoming` → `due` once `ScheduledFor` is
-//      within 30 days, `due` → `overdue` once `ScheduledFor` is in the past.
-//
-// Idempotent — safe to re-run on the same day.
-
 import { app, InvocationContext, Timer } from "@azure/functions";
-import { TYPES } from "tedious";
-import { closeConnection, createServiceConnection, executeQuery } from "../db";
+import { closeConnection, createServiceRequestConnection } from "../db";
+import { generatorMode, reviewWindowDays, runReviewGenerator } from "../rentReview/generator";
 import { Sentry } from "../sentry";
+import { runTimer, type TimerCounts } from "../timerRuns";
 
-function randomUuid(): string {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
+// ── Timer trigger: daily, 02:00 UTC (11:30 in Darwin) ────────────────────────
+// The rent review generator (PLAN WP25, src/rentReview/generator.ts): keeps one
+// open review per live tenancy (not vacated, not archived), for its next review
+// date (scheduled, then due once inside REVIEW_WINDOW_DAYS, default 60). A lease
+// marked "no review clause" (ReviewType 'none') gets none, unless a schedule step
+// on the date names a method. It replaces the old housekeeping timer, whose
+// inserts always failed the RentReviews ReviewType check and which has been off
+// in production.
+//
+// Opt-in, because it writes in bulk:
+//   RENT_REVIEW_GENERATOR_ENABLED=true   the generator writes
+//   RENT_REVIEW_GENERATOR_DRY_RUN=true   logs, with counts, what it would schedule or
+//                                        move to due, and writes nothing (wins over ENABLED)
+//   neither                              it does nothing and does not touch the database
+//   REVIEW_WINDOW_DAYS                   days before a review's date it becomes due (default 60)
+// Turn the dry run on first and read the counts in the log: the first live run
+// schedules one review for every tenancy that has a review clause, and those
+// already past their date start out due and overdue.
+//
+// After its own work each run escalates (WP26, PLAN §3.4): E1 for a review not
+// commenced 14 days before its date, E2 for an overdue one, and catch-up for
+// E3 (rentReview/escalations.ts). Live runs only; a dry run logs and counts what
+// it would raise. ESCALATION_SWEEP_MAX_ACTIONS (default 100) caps them per run,
+// so the first live run's backlog is raised over several days.
+//
+// Each run also writes the RentPerAnnum cache of a review applied ahead of its
+// date once the date has come (WP26 L10, rentReview/rentCache.ts); a dry run
+// logs what it would write.
+//
+// WEBSITE_TIME_ZONE is not set in production, so the schedule runs in UTC; the
+// generator works on the Darwin date (todayInDarwin) itself. runTimer records
+// each run's counts in dbo.TimerRuns; a tenancy that fails fails the run.
+
+export async function tenancyReviewScheduleTimer(_timer: Timer, context: InvocationContext): Promise<TimerCounts | void> {
+  const mode = generatorMode();
+  if (mode === "off") {
+    context.log(
+      "tenancyReviewScheduleTimer: off. Set RENT_REVIEW_GENERATOR_DRY_RUN=true to see what it would do, then RENT_REVIEW_GENERATOR_ENABLED=true.",
+    );
+    return;
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
 
-async function tenancyReviewScheduleTimer(
-  _timer: Timer,
-  context: InvocationContext,
-): Promise<void> {
-  context.log("tenancyReviewScheduleTimer: starting");
   let connection;
   try {
-    connection = await createServiceConnection();
-
-    // 1. Backfill NextReviewDate where it can be derived.
-    const backfill = await executeQuery(
+    // A fresh connection, not the shared singleton: the generator runs transactions.
+    connection = await createServiceRequestConnection();
+    const report = await runReviewGenerator({
       connection,
-      `UPDATE dbo.Tenants SET
-         NextReviewDate = DATEADD(month, ReviewIntervalMonths, COALESCE(LastReviewDate, Commencement))
-       OUTPUT INSERTED.TenantId
-       WHERE NextReviewDate IS NULL
-         AND ReviewIntervalMonths IS NOT NULL
-         AND COALESCE(LastReviewDate, Commencement) IS NOT NULL
-         AND Status <> 'vacated'`,
-    );
-    context.log(`backfilled NextReviewDate for ${backfill.length} tenants`);
-
-    // 2. Insert RentReviews rows for tenants with NextReviewDate but no
-    //    matching upcoming/due row.
-    const candidates = await executeQuery(
-      connection,
-      `SELECT t.TenantId, t.NextReviewDate, t.ReviewType
-       FROM dbo.Tenants t
-       WHERE t.NextReviewDate IS NOT NULL
-         AND t.Status <> 'vacated'
-         AND t.ReviewType <> 'none'
-         AND NOT EXISTS (
-           SELECT 1 FROM dbo.RentReviews r
-           WHERE r.TenantId = t.TenantId
-             AND r.ScheduledFor = t.NextReviewDate
-             AND r.Status IN ('upcoming','due','overdue')
-         )`,
-    );
-    let inserted = 0;
-    for (const row of candidates) {
-      try {
-        await executeQuery(
-          connection,
-          `INSERT INTO dbo.RentReviews
-             (ReviewId, TenantId, ScheduledFor, Status, ReviewType)
-           VALUES (@ReviewId, @TenantId, @ScheduledFor, 'upcoming', @ReviewType)`,
-          [
-            { name: "ReviewId", type: TYPES.NVarChar, value: randomUuid() },
-            { name: "TenantId", type: TYPES.Int, value: row.TenantId as number },
-            { name: "ScheduledFor", type: TYPES.Date, value: row.NextReviewDate },
-            { name: "ReviewType", type: TYPES.NVarChar, value: row.ReviewType as string },
-          ],
-        );
-        inserted++;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        context.error(
-          `failed to insert RentReviews row for TenantId ${row.TenantId}:`,
-          message,
-        );
-        Sentry.captureException(err, {
-          extra: { context: `tenancyReviewScheduleTimer insert TenantId=${row.TenantId}` },
-        });
-      }
+      dryRun: mode === "dry-run",
+      log: (message) => context.log(message),
+      escalate: true,
+      rentCaches: true,
+      onError: (error, tenantId) =>
+        Sentry.captureException(error, { extra: { context: `tenancyReviewScheduleTimer TenantId=${tenantId}` } }),
+      warn: (message) => context.warn(message),
+      windowDays: reviewWindowDays(),
+    });
+    if (report.errors.length > 0) {
+      throw new Error(
+        `Rent review generator: ${report.errors.length} tenancy(ies) failed; first: ${report.errors[0].message}`,
+      );
     }
-    context.log(`inserted ${inserted} new RentReviews rows`);
-
-    // 3. Flip statuses based on the calendar.
-    const flipped = await executeQuery(
-      connection,
-      `UPDATE dbo.RentReviews SET Status = CASE
-         WHEN ScheduledFor < CAST(SYSUTCDATETIME() AS DATE) THEN 'overdue'
-         ELSE 'due'
-       END
-       OUTPUT INSERTED.ReviewId
-       WHERE Status IN ('upcoming','due')
-         AND ScheduledFor <= DATEADD(day, 30, CAST(SYSUTCDATETIME() AS DATE))`,
-    );
-    context.log(`flipped status on ${flipped.length} RentReviews rows`);
-
-    context.log("tenancyReviewScheduleTimer: complete");
+    const cacheErrors = report.rentCaches?.errors ?? [];
+    if (cacheErrors.length > 0) {
+      throw new Error(`Rent review generator: ${cacheErrors.length} rent cache(s) failed; first: ${cacheErrors[0].message}`);
+    }
+    const escalationErrors = report.escalations?.errors ?? [];
+    if (escalationErrors.length > 0) {
+      throw new Error(
+        `Rent review generator: ${escalationErrors.length} review escalation(s) failed; first: ${escalationErrors[0].message}`,
+      );
+    }
+    return {
+      drift: report.drift.length,
+      dryRun: report.dryRun,
+      escalationsEnded: report.escalations?.ended ?? 0,
+      escalationsRaised: report.escalations?.raised ?? 0,
+      raced: report.raced,
+      rentCachesSkipped: report.rentCaches?.skipped ?? 0,
+      rentCachesWritten: report.rentCaches?.written ?? 0,
+      scheduled: report.scheduled,
+      tenancies: report.tenancies,
+      unchanged: report.unchanged,
+      windowsOpened: report.windowsOpened,
+    };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    context.error("tenancyReviewScheduleTimer: fatal:", message);
+    context.error("tenancyReviewScheduleTimer failed:", message);
     Sentry.captureException(error, { extra: { context: "tenancyReviewScheduleTimer fatal" } });
     throw error;
   } finally {
@@ -114,8 +100,7 @@ async function tenancyReviewScheduleTimer(
   }
 }
 
-// Runs daily at 02:00 UTC (~11:30 ACST)
 app.timer("tenancyReviewScheduleTimer", {
   schedule: "0 0 2 * * *",
-  handler: tenancyReviewScheduleTimer,
+  handler: runTimer("tenancyReviewScheduleTimer", tenancyReviewScheduleTimer),
 });

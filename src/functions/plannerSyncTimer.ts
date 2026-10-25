@@ -2,8 +2,11 @@ import { app, type InvocationContext, type Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
+import { runsContractorFlow } from "../jobKinds";
 import {
   syncJobAwaitingAccounts,
+  syncJobAwaitingFacilitiesApproval,
   syncJobDirectorApproval,
   syncJobOnchargePending,
   syncJobStalled,
@@ -14,7 +17,9 @@ import {
   graphCreatePlannerTask,
   graphGetGroupMembers,
   graphGetPlannerTask,
+  resolveActivePlannerTasks,
 } from "../planner";
+import { plannerSyncEnabled, plannerUnsignedHoldbackEnabled } from "../plannerFlag";
 import {
   buildJobTaskDescription,
   buildTaskTitle,
@@ -22,6 +27,7 @@ import {
   computeEventDate,
   groupPlannerTasksByKey,
   isInWindow,
+  leaseTaskPlan,
   LEAD_TIMES,
   plannerTaskKey,
   toIsoDateString,
@@ -43,7 +49,6 @@ const TENANT_TRIGGER_TYPES: TriggerType[] = [
  * show whether the last sync succeeded and surface any error message.
  */
 async function recordPlannerSyncOutcome(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   connection: any,
   rowId: number,
   error: string | null,
@@ -70,6 +75,10 @@ export async function plannerSyncTimer(
   _timer: Timer,
   context: InvocationContext,
 ): Promise<void> {
+  // Planner is being retired: unless PLANNER_SYNC_ENABLED is "true" this run does
+  // nothing, whatever else (APP_BASE_URL, the PLANNER_* ids) is set.
+  if (!plannerSyncEnabled()) return;
+
   context.log("plannerSyncTimer: starting");
 
   const {
@@ -115,15 +124,20 @@ export async function plannerSyncTimer(
          COALESCE(b.BuildingName, '') AS BuildingName,
          (SELECT TOP 1 Level + ' / ' + Area
           FROM dbo.TenantOccupancies
-          WHERE TenantId = t.TenantId
+          WHERE TenantId = t.TenantId AND ArchivedAt IS NULL
           ORDER BY Level, Area) AS FirstOccupancy,
          CONVERT(VARCHAR(10), t.Expiry, 120) AS Expiry,
          t.OptionNoticeMonths,
+         t.OptionPeriods,
          CONVERT(VARCHAR(10), t.NextReviewDate, 120) AS NextReviewDate,
-         t.ReviewType
+         t.ReviewType,
+         t.ScheduleSignedOffAt,
+         t.IsTest
        FROM dbo.Tenants t
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
        WHERE t.Status NOT IN ('vacated')
+         AND t.ArchivedAt IS NULL
+         AND t.IsTest = 0
          AND (t.Expiry IS NOT NULL OR t.NextReviewDate IS NOT NULL)`,
     );
 
@@ -135,8 +149,11 @@ export async function plannerSyncTimer(
       firstOccupancy: (r.FirstOccupancy as string | null) ?? null,
       expiry: (r.Expiry as string | null) ?? null,
       optionNoticeMonths: (r.OptionNoticeMonths as number | null) ?? null,
+      optionPeriods: typeof r.OptionPeriods === "string" ? r.OptionPeriods : null,
       nextReviewDate: (r.NextReviewDate as string | null) ?? null,
       reviewType: (r.ReviewType as string | null) ?? null,
+      scheduleSignedOff: Boolean(r.ScheduleSignedOffAt),
+      isTest: Boolean(r.IsTest),
     }));
 
     let created = 0;
@@ -164,7 +181,42 @@ export async function plannerSyncTimer(
         );
     const tenantTaskByKey = groupPlannerTasksByKey(tenantTaskRows as PlannerTaskRowShape[]);
 
-    for (const tenant of tenants) {
+    // A schedule nobody has signed off is unverified: raise no lease tasks for
+    // it (PLAN D7, D21). Taking down the ones already open changes live Planner
+    // data in bulk, so it only happens when PLANNER_UNSIGNED_HOLDBACK_ENABLED is
+    // "true"; otherwise they are left alone and the log says which.
+    const plan = leaseTaskPlan(tenants, tenantTaskRows as PlannerTaskRowShape[]);
+    const openTasks = new Map<number, number>();
+    for (const row of tenantTaskRows as PlannerTaskRowShape[]) {
+      if (row.Status === "active") openTasks.set(row.EntityId, (openTasks.get(row.EntityId) ?? 0) + 1);
+    }
+    if (plan.removeFor.length > 0) {
+      const describe = (tenantId: number) => `${tenantId} (${openTasks.get(tenantId) ?? 0} open lease tasks)`;
+      if (!plannerUnsignedHoldbackEnabled()) {
+        context.log(
+          `plannerSyncTimer: ${plan.removeFor.length} unsigned tenancies still have open lease tasks, not removed because PLANNER_UNSIGNED_HOLDBACK_ENABLED is not "true": ${plan.removeFor.map(describe).join(", ")}`,
+        );
+      } else {
+        let removedTasks = 0;
+        let removedTenancies = 0;
+        for (const tenantId of plan.removeFor) {
+          try {
+            await resolveActivePlannerTasks("tenant", tenantId, TENANT_TRIGGER_TYPES);
+            removedTasks += openTasks.get(tenantId) ?? 0;
+            removedTenancies++;
+            context.log(`plannerSyncTimer: removed ${openTasks.get(tenantId) ?? 0} open lease tasks for unsigned tenancy ${tenantId}`);
+          } catch (err: unknown) {
+            context.warn(
+              `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+        context.log(`plannerSyncTimer: removed ${removedTasks} open lease tasks across ${removedTenancies} unsigned tenancies`);
+      }
+    }
+
+    for (const tenant of plan.eligible) {
       for (const triggerType of TENANT_TRIGGER_TYPES) {
         const eventDate = computeEventDate(tenant, triggerType);
         if (!eventDate) continue;
@@ -193,6 +245,7 @@ export async function plannerSyncTimer(
           if (existing.length === 0) {
             try {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -246,6 +299,7 @@ export async function plannerSyncTimer(
           if (rowStatus === "resolved") {
             try {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -290,6 +344,7 @@ export async function plannerSyncTimer(
               await recordPlannerSyncOutcome(connection, rowId, null);
             } else {
               const taskId = await graphCreatePlannerTask({
+                egress: { isTest: tenant.isTest },
                 planId,
                 bucketId,
                 title,
@@ -335,12 +390,13 @@ export async function plannerSyncTimer(
 
     const jobRows = await executeQuery(
       connection,
-      `SELECT j.JobID, j.Title,
+      `SELECT j.JobID, j.Title, j.Kind, j.IsTest,
               COALESCE(b.BuildingName, '') AS BuildingName,
               CONVERT(VARCHAR(23), j.ExpectedProgressUpdate, 126) AS ExpectedProgressUpdate
        FROM Jobs j
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
        WHERE j.IsArchived = 0
+         AND j.IsTest = 0
          AND j.Status <> 'Done'
          AND j.ExpectedProgressUpdate IS NOT NULL
          -- Sargable form: compare the indexed column directly to the start of
@@ -349,12 +405,16 @@ export async function plannerSyncTimer(
          AND j.ExpectedProgressUpdate < DATEADD(DAY, 1, CAST(SYSUTCDATETIME() AS DATE))`,
     );
 
-    const jobs: PlannerJobRow[] = jobRows.map((r) => ({
-      jobId: r.JobID as number,
-      title: r.Title as string,
-      buildingName: (r.BuildingName as string | null) ?? null,
-      expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
-    }));
+    // Admin / Accounts jobs (plan D2) have no contractor to chase, so no update task.
+    const jobs: PlannerJobRow[] = jobRows
+      .filter((r) => runsContractorFlow(r.Kind))
+      .map((r) => ({
+        jobId: r.JobID as number,
+        title: r.Title as string,
+        buildingName: (r.BuildingName as string | null) ?? null,
+        expectedProgressUpdate: (r.ExpectedProgressUpdate as string | null) ?? null,
+        isTest: Boolean(r.IsTest),
+      }));
 
     let jobCreated = 0;
     let jobSkipped = 0;
@@ -396,6 +456,7 @@ export async function plannerSyncTimer(
       if (existing.length === 0) {
         try {
           const taskId = await graphCreatePlannerTask({
+            egress: { isTest: job.isTest },
             planId: jobPlanId,
             bucketId: jobBucketId,
             title,
@@ -439,6 +500,7 @@ export async function plannerSyncTimer(
             await recordPlannerSyncOutcome(connection, rowId, null);
           } else {
             const taskId = await graphCreatePlannerTask({
+              egress: { isTest: job.isTest },
               planId: jobPlanId,
               bucketId: jobBucketId,
               title,
@@ -471,6 +533,7 @@ export async function plannerSyncTimer(
       } else {
         try {
           const taskId = await graphCreatePlannerTask({
+            egress: { isTest: job.isTest },
             planId: jobPlanId,
             bucketId: jobBucketId,
             title,
@@ -518,7 +581,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'stalled_facilities'
-       WHERE (j.IsStalled = 1 AND j.IsArchived = 0 AND j.Status <> 'Done'
+       WHERE (j.IsTest = 0 AND j.IsStalled = 1 AND j.IsArchived = 0 AND j.Status <> 'Done'
               AND (j.AwaitingRole IS NULL OR j.AwaitingRole = 'facilities'))
           OR (pt.Status = 'active')`,
     );
@@ -558,7 +621,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'awaiting_accounts'
-       WHERE (j.IsArchived = 0 AND j.Status <> 'Done' AND j.AwaitingRole = 'accounts')
+       WHERE (j.IsTest = 0 AND j.IsArchived = 0 AND j.Status <> 'Done' AND j.AwaitingRole = 'accounts')
           OR (pt.Status = 'active')`,
     );
 
@@ -585,6 +648,46 @@ export async function plannerSyncTimer(
     }
     context.log(`plannerSyncTimer: awaiting_accounts — processed=${awaitingProcessed} errors=${awaitingErrors}`);
 
+    // ── Awaiting facilities approval (Facilities plan) ─────────────────────
+    // Reconciliation sweep — eager fire happens from addQuote (quote received
+    // moves the job to Awaiting Approval/facilities) and upsertJob; this catches
+    // missed fires + auto-resolves jobs that left (Awaiting Approval, facilities)
+    // without us being notified.
+
+    const awaitingFacilitiesRows = await executeQuery(
+      connection,
+      `SELECT DISTINCT j.JobID
+       FROM dbo.Jobs j
+       LEFT JOIN dbo.PlannerTasks pt
+         ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
+        AND pt.TriggerType = 'awaiting_facilities_approval'
+       WHERE (j.IsTest = 0 AND j.IsArchived = 0 AND j.Status = 'Awaiting Approval' AND j.AwaitingRole = 'facilities')
+          OR (pt.Status = 'active')`,
+    );
+
+    let awaitingFacilitiesProcessed = 0;
+    let awaitingFacilitiesErrors = 0;
+    for (const r of awaitingFacilitiesRows) {
+      const jobId = r.JobID as number;
+      try {
+        await syncJobAwaitingFacilitiesApproval(jobId, {
+          connection,
+          facilitiesMembers,
+          appBaseUrl: APP_BASE_URL,
+          log: (msg) => context.log(msg),
+        });
+        awaitingFacilitiesProcessed++;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.error(`plannerSyncTimer: awaiting_facilities_approval failed for JobID ${jobId}:`, message);
+        Sentry.captureException(err, {
+          tags: { source: "planner_sync_timer", trigger: "awaiting_facilities_approval", jobId: String(jobId) },
+        });
+        awaitingFacilitiesErrors++;
+      }
+    }
+    context.log(`plannerSyncTimer: awaiting_facilities_approval — processed=${awaitingFacilitiesProcessed} errors=${awaitingFacilitiesErrors}`);
+
     // ── Director approval (Accounts plan) ──────────────────────────────────
     // Reconciliation sweep — eager fires happen from approveJobInvoice and
     // approveQuote (create) + directorApproveJobInvoice / directorApproveQuote
@@ -599,7 +702,7 @@ export async function plannerSyncTimer(
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'director_approval'
        WHERE (
-              j.IsArchived = 0 AND j.Status <> 'Done' AND (
+              j.IsTest = 0 AND j.IsArchived = 0 AND j.Status <> 'Done' AND (
                 EXISTS (SELECT 1 FROM dbo.JobInvoices ji
                         WHERE ji.JobID = j.JobID AND ji.Status = 'approved')
                 OR EXISTS (SELECT 1 FROM dbo.Quotes q
@@ -645,7 +748,7 @@ export async function plannerSyncTimer(
        LEFT JOIN dbo.PlannerTasks pt
          ON pt.EntityType = 'job' AND pt.EntityId = j.JobID
         AND pt.TriggerType = 'oncharge_pending'
-       WHERE (j.IsOnchargeable = 1 AND j.IsArchived = 0 AND j.Status <> 'Done')
+       WHERE (j.IsTest = 0 AND j.IsOnchargeable = 1 AND j.IsArchived = 0 AND j.Status <> 'Done')
           OR (pt.Status = 'active')`,
     );
 
@@ -720,6 +823,11 @@ export async function plannerSyncTimer(
     }
     const resolved = resolvedIds.length;
     context.log(`plannerSyncTimer: resolved ${resolved} overdue tasks`);
+
+    // Escalating stalled and unassigned jobs is no longer done here: it moved to
+    // escalationSweepTimer (src/escalation), which runs every 30 minutes and does
+    // not depend on the PLANNER_* settings this timer needs.
+
     context.log("plannerSyncTimer: complete");
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -738,5 +846,5 @@ export async function plannerSyncTimer(
 
 app.timer("plannerSyncTimer", {
   schedule: "0 30 2 * * *",
-  handler: plannerSyncTimer,
+  handler: runTimer("plannerSyncTimer", plannerSyncTimer),
 });

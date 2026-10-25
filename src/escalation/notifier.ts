@@ -1,0 +1,442 @@
+// Escalation emails (PLAN §3.7, D21). They run after the escalation is
+// committed and never block or undo it:
+//
+//   raise      -> email the targets
+//   supersede  -> email the new level, and tell the previous level (FYI)
+//   resolve    -> email the raiser, when a person raised it
+//
+// An email is a pointer into Floorplan with a link, never the place a decision
+// is made. The recipients are active AppUsers by role (FACILITIES_MANAGER_EMAILS
+// stands in only while no active facilities_manager exists), every address goes
+// through resolveRecipient so DEV_EMAIL_OVERRIDE is honoured, and a send that
+// fails is recorded as failed, never as delivered, and retried later with back-off
+// (the sweep calls retryDue).
+
+import type { Connection } from "tedious";
+import { resolveAlertChannels, type AlertChannel } from "../alerts/channel";
+import { isFeatureEnabledForRoles } from "../features/flags";
+import { teamsMode } from "../teams/config";
+import { resolveRecipient } from "../email-recipient";
+import { reportSystemHealth } from "../email/role-recipients";
+import { graphSendMail } from "../graph";
+import { formatDarwinDateTime } from "../ledger/darwinTime";
+import { assertMayLeave, NOT_A_RECORD, readIsTest, TEST_RECORD_MESSAGE, testKindOfSubject, type EgressSubject } from "../test-data";
+import { getAdapter } from "./adapters/registry";
+import { absoluteLink, fallbackEmailsByRole, MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig } from "./config";
+import { buildDecisionEmail } from "./decisionEmail";
+import { askedOfIds, ladderOf, namedTargetIds } from "./decisionRows";
+import { buildNextStepEmail } from "./nextStepEmail";
+import { alertKind, deliverUrgentAlerts, isAlertEvent, isUrgentAlert } from "./urgentAlert";
+import { normaliseRole, ROLES, roleLabel } from "./roles";
+import { listActiveUsers, recordNotification } from "./store";
+import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
+
+/** `egress` is what the email is about; a test record's is refused (D9). */
+export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
+
+export type NotifyEvent = "follow_up" | "raise" | "reminder" | "supersede";
+
+export interface NotifyOptions {
+  /** Whether the teamsAlerts flag lets this role be alerted (default: dbo.FeatureFlags, fail closed). */
+  alertFlag?: (role: string) => Promise<boolean>;
+  /** Real-time alert channels for urgent events (default: whatever the env switches on). */
+  channels?: readonly AlertChannel[];
+  /** Tries before giving up in this call (default 1: HTTP requests don't wait). */
+  attempts?: number;
+  /** First wait between tries, doubled each time (default 500 ms). */
+  backoffMs?: number;
+  /** What a call adds to the row's NotificationAttempts, which the retry limit
+   *  counts. "all" (the default) counts every try; "failures" counts only the tries
+   *  that failed, so a reminder that goes out first time costs the row nothing and
+   *  a request reminded five times is not "out of tries" at its first hiccup. */
+  countAttempts?: "all" | "failures";
+  env?: NodeJS.ProcessEnv;
+  log?: (message: string) => void;
+  now?: () => Date;
+  sendMail?: SendMail;
+  sleep?: (ms: number) => Promise<void>;
+  /** The directory, when the caller already loaded it. */
+  users?: readonly DirectoryUser[];
+}
+
+export interface NotifyOutcome {
+  attempts: number;
+  /** "teams" when a real-time alert told at least one target. */
+  channel?: "email" | "teams";
+  error: string | null;
+  recipients: string[];
+  state: NotificationState;
+}
+
+// Told when nobody independent is at the level (NoIndependentTarget).
+const OVERSIGHT_ROLES: ReadonlySet<string> = new Set([ROLES.director, ROLES.admin]);
+
+const defaultSend: SendMail = (to, subject, body, egress) => graphSendMail(egress, to, subject, body);
+
+/** What an escalation email is about: a job, tenancy, rent review, schedule
+ *  change, defects period (through its tenancy) or money record (decisions,
+ *  reviews, sweeps all come through here), or no record at all (system health,
+ *  service schedules). */
+async function egressFor(connection: Connection, row: EscalationRow): Promise<EgressSubject> {
+  const kind = testKindOfSubject(row.subjectType);
+  if (!kind) return NOT_A_RECORD;
+  const numeric = Number(row.subjectId);
+  const id = kind === "rent_review" || kind === "schedule_change" ? row.subjectId : numeric;
+  if (typeof id === "number" && !Number.isInteger(id)) return { isTest: false };
+  return { isTest: await readIsTest(connection, kind, id) };
+}
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const NOTE_IN_EMAIL_MAX = 300;
+
+// ── Who to tell ──────────────────────────────────────────────────────────────
+
+function excludedUserIds(row: EscalationRow): Set<number> {
+  const excluded = new Set<number>();
+  const named = row.context?.excludeUserIds;
+  if (Array.isArray(named)) for (const id of named) if (typeof id === "number") excluded.add(id);
+  const ladder = ladderOf(row.context);
+  if (ladder === null) {
+    if (row.raisedByUserId !== null) excluded.add(row.raisedByUserId);
+    return excluded;
+  }
+  // A next step's ladder is about its owner, not about whoever handed it on. The owner is
+  // not told that their own step has moved up to their manager, though they are told it at
+  // their own level; and the person who handed it on is not told of what they did at that
+  // level, but is eligible further up, as the ladder already treats them (they may well be
+  // the only manager there is).
+  if (ladder.userId !== null && row.targetUserId !== ladder.userId) excluded.add(ladder.userId);
+  if (row.level <= 1 && row.raisedByUserId !== null) excluded.add(row.raisedByUserId);
+  return excluded;
+}
+
+/** The people an escalation row is for. A row that is flagged NoIndependentTarget
+ *  tells the directors and admin, since there is no one else to look at it. */
+export function targetUsers(row: EscalationRow, users: readonly DirectoryUser[]): DirectoryUser[] {
+  const excluded = excludedUserIds(row);
+  const active = users.filter((user) => !excluded.has(user.userId));
+  if (row.noIndependentTarget) {
+    return active.filter((user) => OVERSIGHT_ROLES.has(normaliseRole(user.role)));
+  }
+  if (row.targetUserId !== null) return active.filter((user) => user.userId === row.targetUserId);
+  // A level of several named people: they are in the row's context (a decision request's).
+  const named = namedTargetIds(row);
+  if (named.length > 0) return active.filter((user) => named.includes(user.userId));
+  const role = normaliseRole(row.targetRole);
+  return role === "" ? [] : active.filter((user) => normaliseRole(user.role) === role);
+}
+
+/** The names of the people a row was raised to ask, for an email that says so. */
+export function askedOfNames(row: EscalationRow, users: readonly DirectoryUser[]): string[] {
+  return askedOfIds(row)
+    .map((id) => users.find((user) => user.userId === id)?.name)
+    .filter((name): name is string => Boolean(name));
+}
+
+/** Email addresses to send to: the target users', or the env list when a
+ *  facilities_manager level has no active user. DEV_EMAIL_OVERRIDE applied. */
+export function targetAddresses(row: EscalationRow, users: readonly DirectoryUser[], env: NodeJS.ProcessEnv = process.env): string[] {
+  let real = targetUsers(row, users).map((user) => user.email);
+  if (real.every((address) => !address) && normaliseRole(row.targetRole) === ROLES.facilitiesManager && !row.noIndependentTarget) {
+    // No active facilities manager to tell: the env list stands in, minus the raiser.
+    reportSystemHealth("no active facilities_manager in AppUsers; escalations go to FACILITIES_MANAGER_EMAILS");
+    const raiserEmail = users.find((user) => user.userId === row.raisedByUserId)?.email?.toLowerCase();
+    real = (fallbackEmailsByRole(env)[ROLES.facilitiesManager] ?? []).filter((address) => address.toLowerCase() !== raiserEmail);
+  }
+  return uniqueAddresses(real);
+}
+
+function uniqueAddresses(real: readonly (string | null | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const address of real) {
+    const resolved = resolveRecipient(address).address;
+    if (!resolved) continue;
+    const key = resolved.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(resolved);
+  }
+  return result;
+}
+
+// ── What to say ──────────────────────────────────────────────────────────────
+
+const HEADLINES: Record<NotifyEvent | "fyi" | "resolved", string> = {
+  follow_up: "A new email about this arrived, so the clock on it has restarted.",
+  fyi: "This has moved up a level because it wasn't picked up in time. You don't need to do anything.",
+  raise: "Something needs your attention in Floorplan.",
+  reminder: "This is still waiting for someone to pick it up.",
+  resolved: "This has been resolved.",
+  supersede: "This has been escalated to you.",
+};
+
+function reasonLine(row: EscalationRow): string[] {
+  const lines: string[] = [];
+  if (row.reason) lines.push(`Reason: ${REASON_LABELS[row.reason as ManualReason] ?? row.reason}`);
+  if (row.note) lines.push(`Note: ${row.note.length > NOTE_IN_EMAIL_MAX ? `${row.note.slice(0, NOTE_IN_EMAIL_MAX)}...` : row.note}`);
+  return lines;
+}
+
+/** Subject and body for one email. Plain text; the link is the point of it. A
+ *  decision request has its own wording (decisionEmail.ts) and so has a next step
+ *  (nextStepEmail.ts); `askedOf` names the people it was asked of, or handed to, for
+ *  those. */
+export function buildEmail(
+  kind: NotifyEvent | "fyi" | "resolved",
+  row: EscalationRow,
+  link: string | null,
+  askedOf: readonly string[] = [],
+): { body: string; subject: string } {
+  const decision = buildDecisionEmail(kind, row, link, askedOf);
+  if (decision) return decision;
+  const nextStep = buildNextStepEmail(kind, row, link, askedOf);
+  if (nextStep) return nextStep;
+  const prefix: Record<typeof kind, string> = {
+    follow_up: "New email on an escalation",
+    fyi: "FYI, moved up",
+    raise: row.urgent ? "URGENT escalation" : "Escalation",
+    reminder: "Reminder",
+    resolved: "Resolved",
+    supersede: row.urgent ? "URGENT escalated to you" : "Escalated to you",
+  };
+  const lines = [
+    "Hi,",
+    "",
+    HEADLINES[kind],
+    "",
+    row.summary,
+    ...reasonLine(row),
+    `Raised by: ${row.raisedByKind === "system" ? "Floorplan (automatic)" : row.raisedByName}`,
+    `Goes to: ${roleLabel(row.targetRole)}`,
+  ];
+  if (kind !== "resolved" && row.dueAt) lines.push(`Respond by: ${formatDarwinDateTime(row.dueAt)} Darwin time`);
+  lines.push("", link ? `Open it in Floorplan: ${link}` : "Open Floorplan to see it.");
+  lines.push("", "This email only points you to Floorplan. Decisions are made there, not by replying.");
+  return { body: `${lines.join("\n")}\n`, subject: `${prefix[kind]}: ${row.summary}`.slice(0, 250) };
+}
+
+function linkFor(row: EscalationRow, env: NodeJS.ProcessEnv): string | null {
+  const adapter = getAdapter(row.subjectType);
+  return adapter ? absoluteLink(adapter.deepLink(row.subjectId, row), env) : null;
+}
+
+/** The in-app path an alert opens, or null when the subject has no adapter. */
+function linkRoute(row: EscalationRow): string | null {
+  return getAdapter(row.subjectType)?.deepLink(row.subjectId, row) ?? null;
+}
+
+// ── Sending ──────────────────────────────────────────────────────────────────
+
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+}
+
+async function sendWithRetry(
+  send: SendMail,
+  to: string[],
+  subject: string,
+  body: string,
+  egress: EgressSubject,
+  options: NotifyOptions,
+): Promise<{ attempts: number; error: string | null }> {
+  const total = Math.max(1, Math.trunc(options.attempts ?? 1));
+  const sleep = options.sleep ?? defaultSleep;
+  let delay = options.backoffMs ?? 500;
+  let error: string | null = null;
+  for (let attempt = 1; attempt <= total; attempt += 1) {
+    try {
+      await send(to, subject, body, egress);
+      return { attempts: attempt, error: null };
+    } catch (caught) {
+      error = errorText(caught);
+      if (attempt < total) {
+        await sleep(delay);
+        delay *= 2;
+      }
+    }
+  }
+  return { attempts: total, error };
+}
+
+async function remember(
+  connection: Connection,
+  row: EscalationRow,
+  outcome: NotifyOutcome,
+  now: Date,
+  options: NotifyOptions,
+): Promise<void> {
+  try {
+    await recordNotification(
+      connection,
+      row.escalationId,
+      {
+        attemptedAt: now,
+        channel: outcome.channel ?? "email",
+        error: outcome.error,
+        notifiedAt: outcome.state === "sent" ? now : null,
+        state: outcome.state,
+      },
+      options.countAttempts === "failures" && outcome.state === "sent" ? 0 : outcome.attempts,
+    );
+  } catch (error) {
+    // The escalation is committed and the email may have gone; bookkeeping that
+    // can't be written is logged and the sweep's retry will sort it out.
+    options.log?.(`escalation ${row.escalationId}: could not record the notification outcome: ${errorText(error)}`);
+    return;
+  }
+  // J6: the subject's own flag (Jobs.EscalatedAt) is set only once a send is on
+  // record, so it is brought in step now that one is.
+  if (outcome.state !== "sent") return;
+  try {
+    await getAdapter(row.subjectType)?.onChange?.(connection, row);
+  } catch (error) {
+    options.log?.(`escalation ${row.escalationId}: could not update the subject after the email went: ${errorText(error)}`);
+  }
+}
+
+/**
+ * Tells the people an escalation row is for and records how it went on the row:
+ * sent only after a send succeeded; failed (with the error) after a send failed;
+ * pending while settings are missing, with nothing counted; none when there is
+ * no one with an address to tell. Never throws.
+ */
+export async function notifyTargets(
+  connection: Connection,
+  row: EscalationRow,
+  event: NotifyEvent,
+  options: NotifyOptions = {},
+): Promise<NotifyOutcome> {
+  const env = options.env ?? process.env;
+  const now = (options.now ?? (() => new Date()))();
+  let outcome: NotifyOutcome;
+  try {
+    const missing = missingNotificationConfig(env);
+    const egress = await egressFor(connection, row);
+    if (egress !== NOT_A_RECORD && egress.isTest) {
+      // Nobody is told about a test job, and there is nothing to retry.
+      outcome = { attempts: 0, error: TEST_RECORD_MESSAGE, recipients: [], state: "none" };
+    } else if (missing.length > 0) {
+      outcome = { attempts: 0, error: `Notification settings are missing: ${missing.join(", ")}`, recipients: [], state: "pending" };
+    } else {
+      const users = options.users ?? (await listActiveUsers(connection));
+      // D21: an urgent raise, reminder or supersede is tried as a real-time alert first. Not on
+      // a retry of a failed send, which would alert the people already told a second time.
+      const route = linkRoute(row);
+      // Gate: ops mode on (TEAMS_ALERTS_ENABLED / _DRY_RUN) AND flag teamsAlerts enabled for the
+      // target's role; otherwise that person just gets the email.
+      const alerted =
+        isAlertEvent(event) && isUrgentAlert(row) && route !== null && row.notificationState !== "failed" && teamsMode(env) !== "off"
+          ? await deliverUrgentAlerts(
+              targetUsers(row, users),
+              event,
+              route,
+              egress,
+              options.channels ?? resolveAlertChannels(env, { connection }),
+              {
+                kind: alertKind(event, row),
+                log: options.log,
+                mayAlert: (user) => (options.alertFlag ?? ((role) => isFeatureEnabledForRoles("teamsAlerts", [role], { connection })))(user.role),
+              },
+            )
+          : null;
+      const told = alerted?.toldUserIds ?? new Set<number>();
+      const channel = told.size > 0 ? "teams" : "email";
+      const recipients =
+        told.size > 0
+          ? uniqueAddresses(targetUsers(row, users).filter((user) => !told.has(user.userId)).map((user) => user.email))
+          : targetAddresses(row, users, env);
+      if (recipients.length === 0) {
+        // Everyone with an address was told by alert, or no one is there to tell.
+        outcome =
+          told.size > 0
+            ? { attempts: 0, channel, error: null, recipients, state: "sent" }
+            : { attempts: 0, error: "No one with an email address is at this level", recipients, state: "none" };
+      } else {
+        const { body, subject } = buildEmail(event, row, linkFor(row, env), askedOfNames(row, users));
+        const sent = await sendWithRetry(options.sendMail ?? defaultSend, recipients, subject, body, egress, options);
+        outcome = { attempts: sent.attempts, channel, error: sent.error, recipients, state: sent.error === null ? "sent" : "failed" };
+      }
+    }
+  } catch (error) {
+    outcome = { attempts: 0, error: errorText(error), recipients: [], state: "failed" };
+  }
+  await remember(connection, row, outcome, now, options);
+  return outcome;
+}
+
+/** Tells the previous level that the escalation has moved up. One try; it is a
+ *  courtesy and is not tracked on the row. People who are also in the new level
+ *  already got the real email and are left out. */
+export async function notifyPreviousLevel(
+  connection: Connection,
+  previous: EscalationRow,
+  next: EscalationRow,
+  options: NotifyOptions = {},
+): Promise<void> {
+  const env = options.env ?? process.env;
+  try {
+    if (missingNotificationConfig(env).length > 0) return;
+    const users = options.users ?? (await listActiveUsers(connection));
+    const already = new Set(targetAddresses(next, users, env).map((address) => address.toLowerCase()));
+    const recipients = targetAddresses(previous, users, env).filter((address) => !already.has(address.toLowerCase()));
+    if (recipients.length === 0) return;
+    const egress = await egressFor(connection, next);
+    assertMayLeave("email", egress);
+    const { body, subject } = buildEmail("fyi", next, linkFor(next, env), askedOfNames(next, users));
+    await (options.sendMail ?? defaultSend)(recipients, subject, body, egress);
+  } catch (error) {
+    options.log?.(`escalation ${previous.escalationId}: could not tell the previous level: ${errorText(error)}`);
+  }
+}
+
+/** Tells a person who raised an escalation that it is resolved. One try, not tracked. */
+export async function notifyRaiserResolved(
+  connection: Connection,
+  row: EscalationRow,
+  options: NotifyOptions = {},
+): Promise<void> {
+  const env = options.env ?? process.env;
+  try {
+    if (row.raisedByKind !== "user" || row.raisedByUserId === null) return;
+    if (row.resolvedByUserId !== null && row.resolvedByUserId === row.raisedByUserId) return;
+    if (missingNotificationConfig(env).length > 0) return;
+    const users = options.users ?? (await listActiveUsers(connection));
+    const raiser = users.find((user) => user.userId === row.raisedByUserId);
+    const recipients = uniqueAddresses([raiser?.email]);
+    if (recipients.length === 0) return;
+    const egress = await egressFor(connection, row);
+    assertMayLeave("email", egress);
+    const { body, subject } = buildEmail("resolved", row, linkFor(row, env), askedOfNames(row, users));
+    await (options.sendMail ?? defaultSend)(recipients, subject, body, egress);
+  } catch (error) {
+    options.log?.(`escalation ${row.escalationId}: could not tell the raiser: ${errorText(error)}`);
+  }
+}
+
+// ── Retrying ─────────────────────────────────────────────────────────────────
+
+const RETRY_BASE_MS = 15 * 60_000;
+const RETRY_MAX_MS = 8 * 60 * 60_000;
+/** A pending send younger than this may still be in flight in the request that made it. */
+const PENDING_GRACE_MS = 5 * 60_000;
+
+/** Wait before send number `attempts + 1`: 15 min, 30 min, 1 h, 2 h ... up to 8 h. */
+export function retryDelayMs(attempts: number): number {
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
+}
+
+/** Whether the sweep should try this row's notification again now. */
+export function isRetryDue(row: EscalationRow, now: Date): boolean {
+  if (row.status !== "open") return false;
+  const last = (row.lastNotificationAttemptAt ?? row.createdAt).getTime();
+  if (row.notificationState === "pending") return now.getTime() - last >= PENDING_GRACE_MS;
+  if (row.notificationState === "failed") {
+    return row.notificationAttempts < MAX_NOTIFICATION_ATTEMPTS && now.getTime() - last >= retryDelayMs(row.notificationAttempts);
+  }
+  return false;
+}
+
+/** The email a retry sends is the one the row would have got first. */
+export function eventForRetry(row: EscalationRow): NotifyEvent {
+  return row.parentEscalationId === null ? "raise" : "supersede";
+}

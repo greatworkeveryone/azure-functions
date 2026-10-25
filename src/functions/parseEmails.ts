@@ -1,14 +1,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Email AI parsing — batch worker + admin-only flagged read.
+// Email AI parsing — timer-driven worker + admin-only flagged read.
 //
-// `runParseBatch` is the shared batch worker:
-//   1. Atomically claims a batch of unparsed rows (incrementing attempts).
-//   2. Pre-extracts PO#/Quote# hints via regex (cheap, deterministic).
-//   3. Calls codename-toddler's /parse-incoming for each one.
-//   4. Writes the classification/data/confidence back to Emails.
+// Every trigger runs `parseQueued`:
+//   1. Cheap queue check — no unparsed rows → return before touching toddler,
+//      so the GPU Container App stays at zero replicas overnight.
+//   2. POST /warmup — absorbs the cold start (image pull + model load) so the
+//      per-email timeout is only ever measured against a warm model.
+//   3. `runParseBatch` — deadline-driven: claims ONE row at a time, stops
+//      claiming once less than TODDLER_TIMEOUT_MS + 30 s remains before
+//      invocation start + 540 s (host.json functionTimeout is 10 min).
 //
-// It is invoked from `graphNotification` on inbound mail (real-time) and from
-// the admin-only `triggerEmailParse` HTTP endpoint (manual recovery).
+// Triggers — no HTTP handler parses:
+//   - `processEmailSync` (Storage queue "email-sync"): fed by the Graph
+//     webhook, the manual sync button and `triggerEmailParse`; syncs the
+//     mailbox first, then parses.
+//   - `parseEmailsTimer` (every 2 min): parse-only backstop for lost/failed
+//     messages — it never syncs the mailbox.
+//   - `parseEmailsDailyRetry` (02:00 UTC): once-a-day safety net; parses and
+//     enqueues one mail sync (the only mailbox backstop if the webhook dies).
 //
 // `getFlaggedEmails` is the read-side for the dev-only Flagged Incoming page.
 // It returns rows where the AI flagged low confidence, errored, or never
@@ -16,19 +25,83 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { TYPES } from "tedious";
-import { closeConnection, createConnection, executeQuery, SqlRow } from "../db";
+import { TYPES, type Connection } from "tedious";
+import {
+  closeConnection,
+  createRequestConnection,
+  createServiceRequestConnection,
+  executeQuery,
+  SqlRow,
+} from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
+import { isDevOverrideEnabled } from "../jwt";
+import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
+import { syncMailbox } from "../email/mail-sync";
+import { runTriageStep, syncExtraMailboxes } from "../inboundTriage/steps";
+import { findPoNumber } from "../email/po-ref";
+import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
+import { domainOf, orgEmailDomains } from "../email/sender-auth";
+import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
+import { runTimer } from "../timerRuns";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const TODDLER_URL = process.env.TODDLER_URL ?? "";
-const TODDLER_TIMEOUT_MS = Number(process.env.TODDLER_TIMEOUT_MS ?? "180000");
-const BATCH_SIZE = Number(process.env.AI_PARSE_BATCH_SIZE ?? "5");
+// Must equal toddler's SERVICE_KEY_COMMAND_CENTRE. /parse-incoming rejects
+// anonymous calls with 401, so without it every parse burns a retry.
+const TODDLER_SERVICE_KEY = process.env.TODDLER_SERVICE_KEY ?? "";
+
+// The service key and SAS URLs go in these requests: https only, except
+// loopback or the local dev override. Throws a config error otherwise.
+export function assertSafeToddlerUrl(url: string, devOverride: boolean = isDevOverrideEnabled()): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("TODDLER_URL is not a valid URL");
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !devOverride && !loopback) {
+    throw new Error("TODDLER_URL must use https: (the service key and file URLs are sent to it)");
+  }
+}
+
+// A user token, or null for the service identity (timers and queue triggers
+// have no caller; a SQL_USER_CONNECTION rollback must not hand them a user path).
+type DbToken = string | null;
+
+function openConnection(token: DbToken): Promise<Connection> {
+  return token === null ? createServiceRequestConnection() : createRequestConnection(token);
+}
+
+// Positive integer from an env string, else `fallback` — a typo must not
+// become NaN and silently stop the runner.
+export function positiveIntFromEnv(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
+const TODDLER_TIMEOUT_MS = positiveIntFromEnv(process.env.TODDLER_TIMEOUT_MS, 180_000);
+// Warm-up budget covers a cold Container App replica: image pull plus a model
+// load from Azure Files. Toddler answers within 230 s; parseQueued shrinks this
+// further if the run's deadline is closer.
+const TODDLER_WARMUP_TIMEOUT_MS = positiveIntFromEnv(process.env.TODDLER_WARMUP_TIMEOUT_MS, 240_000);
+// Upper bound on emails per run. The deadline below normally stops a run first.
+const MAX_EMAILS_PER_RUN = positiveIntFromEnv(process.env.AI_PARSE_BATCH_SIZE, 5);
 const MAX_ATTEMPTS = 3;
+// A claim is exclusive for this long. Must be >= functionTimeout (600 s) so a
+// live run never loses its row; a killed run's row frees up after it.
+const CLAIM_LEASE_SECONDS = 600;
+// host.json functionTimeout is 10 min (Consumption maximum). Every run gets a
+// deadline of invocation start + 540 s; warm-up counts against it.
+export const RUN_BUDGET_MS = 540_000;
+// Claim another email only while a full toddler timeout plus 30 s of
+// write-back still fits before the deadline.
+const MIN_EMAIL_BUDGET_MS = TODDLER_TIMEOUT_MS + 30_000;
+let budgetWarned = false;
 
 // ── Hint extraction ─────────────────────────────────────────────────────────
 // Cheap regex pass. The results are soft signals — passed into the prompt
@@ -36,8 +109,6 @@ const MAX_ATTEMPTS = 3;
 // even when the LLM misses it. Keep patterns conservative to avoid false
 // positives; the model is the fallback when the regex comes up empty.
 
-const PO_PATTERN =
-  /\b(?:P\.?O\.?|Purchase\s*Order)[\s:#-]*([A-Z0-9][A-Z0-9-]{1,20})\b/i;
 const QUOTE_PATTERN =
   /\b(?:Quote|Q)[\s:#-]+([A-Z0-9][A-Z0-9-]{1,20})\b/i;
 
@@ -51,52 +122,142 @@ export function extractHints(
   body: string | null | undefined,
 ): ExtractedHints {
   const haystack = `${subject ?? ""}\n${body ?? ""}`;
-  const po = haystack.match(PO_PATTERN);
   const quote = haystack.match(QUOTE_PATTERN);
   return {
-    poNumber: po?.[1] ?? null,
+    // Current (66Sm261013) and legacy (260419-PO-42-ACM-7) numbers; src/email/po-ref.ts.
+    poNumber: findPoNumber(haystack),
     quoteNumber: quote?.[1] ?? null,
   };
 }
 
 // ── Toddler client ──────────────────────────────────────────────────────────
 
-interface ToddlerAttachmentRef {
+export interface ToddlerAttachmentRef {
   fileName: string;
   sasUrl: string;
   contentType?: string | null;
+}
+
+export type ToddlerClassification =
+  | "job"
+  | "job-update"
+  | "quote"
+  | "quote-approval"
+  | "invoice"
+  | "unknown";
+
+// Context from our own DB, rendered into the prompt outside the attachment
+// fences. Mirrors KnownJob / AwaitingDirectorQuote in toddler's
+// models/incoming.py — keep the field names in step.
+export interface AwaitingDirectorQuote {
+  quoteId: number;
+  quoteNumber: string | null;
+  amount: number | null;
+}
+
+export interface KnownJob {
+  jobId: number;
+  title: string | null;
+  status: string | null;
+  contractorName: string | null;
+  awaitingDirectorQuote: AwaitingDirectorQuote | null;
+}
+
+// Toddler withholds money/identity fields for "unknown" senders.
+export type SenderTrust = "internal" | "known-contractor" | "unknown";
+
+export interface WithheldField {
+  field: string;
+  reason: string;
 }
 
 interface ToddlerRequest {
   html: string;
   subject?: string | null;
   fromAddress?: string | null;
+  senderTrust: SenderTrust;
   hints: { poNumber?: string | null; quoteNumber?: string | null };
   attachments: ToddlerAttachmentRef[];
+  knownJob?: KnownJob;
+}
+
+export interface DocumentField {
+  value: string | number | null;
+  confidence: number;
 }
 
 interface ToddlerResponse {
-  classification: "job" | "quote" | "invoice" | "unknown";
+  classification: ToddlerClassification;
   confidence: "high" | "medium" | "low";
   data: Record<string, unknown>;
+  documentFields?: Record<string, DocumentField> | null;
+  suspicious?: boolean;
+  suspicionReasons?: string[];
+  withheldFields?: unknown;
   modelVersion: string;
   rawResponse: string | null;
   error: string | null;
+}
+
+// ── Skip-senders ────────────────────────────────────────────────────────────
+// AI_PARSE_SKIP_SENDERS: comma-separated, case-insensitive substring match
+// against the sender address; include the "@" (e.g. "@mybuildings.example.com")
+// to avoid broad matches. Matching rows are classified unknown/high
+// deterministically — no GPU call, and not flagged: there is nothing for a
+// reviewer to second-guess.
+
+const SKIP_SENDERS = (process.env.AI_PARSE_SKIP_SENDERS ?? "")
+  .split(",")
+  .map((p) => p.trim().toLowerCase())
+  .filter((p) => p.length > 0);
+
+const SKIP_SENDER_MODEL_VERSION = "skip-sender@v5";
+
+export function isSkippedSender(fromAddress: string | null): boolean {
+  if (!fromAddress || SKIP_SENDERS.length === 0) return false;
+  const address = fromAddress.toLowerCase();
+  return SKIP_SENDERS.some((pattern) => address.includes(pattern));
+}
+
+function skipSenderResult(): ToddlerResponse {
+  return {
+    classification: "unknown",
+    confidence: "high",
+    data: {},
+    error: null,
+    modelVersion: SKIP_SENDER_MODEL_VERSION,
+    rawResponse: null,
+  };
+}
+
+// Toddler rejected the request itself (400/422): retrying the same payload
+// cannot succeed, so the row is finalised instead of burning its attempts.
+class ToddlerRejectedError extends Error {}
+
+const FIELD_CAPS = { attachmentFileName: 255, fromAddress: 1000, subject: 2000 } as const;
+
+function cap(value: string | null, max: number): string | null {
+  return value === null ? null : value.slice(0, max);
 }
 
 async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), TODDLER_TIMEOUT_MS);
   try {
+    assertSafeToddlerUrl(TODDLER_URL);
     const response = await fetch(`${TODDLER_URL}/parse-incoming`, {
       body: JSON.stringify(req),
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Service-Key": TODDLER_SERVICE_KEY,
+      },
       method: "POST",
       signal: controller.signal,
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(`Toddler ${response.status}: ${text.slice(0, 200)}`);
+      const message = `Toddler ${response.status}: ${text.slice(0, 200)}`;
+      throw response.status === 400 || response.status === 422 ? new ToddlerRejectedError(message) : new Error(message);
     }
     return (await response.json()) as ToddlerResponse;
   } finally {
@@ -104,14 +265,93 @@ async function callToddler(req: ToddlerRequest): Promise<ToddlerResponse> {
   }
 }
 
+// ── Warm-up ─────────────────────────────────────────────────────────────────
+
+function toddlerConfigured(context: InvocationContext, caller: string): boolean {
+  if (!TODDLER_URL) {
+    context.log(`${caller}: TODDLER_URL not configured — skipping (AI service not yet deployed)`);
+    return false;
+  }
+  try {
+    assertSafeToddlerUrl(TODDLER_URL);
+  } catch (err: unknown) {
+    context.error(`${caller}: ${err instanceof Error ? err.message : String(err)} — skipping`);
+    return false;
+  }
+  if (!TODDLER_SERVICE_KEY) {
+    context.error(`${caller}: TODDLER_SERVICE_KEY not configured — skipping (every call would 401)`);
+    return false;
+  }
+  return true;
+}
+
+// POST /warmup loads the model and returns when it is resident. False on any
+// failure (503, 429 rate limit, 401, timeout) — callers skip the batch and the
+// next run retries, so a cold start never burns an email's retry budget.
+export async function warmUpToddler(
+  context: InvocationContext,
+  timeoutMs: number = TODDLER_WARMUP_TIMEOUT_MS,
+): Promise<boolean> {
+  if (!toddlerConfigured(context, "warmUpToddler")) return false;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const started = Date.now();
+  try {
+    const response = await fetch(`${TODDLER_URL}/warmup`, {
+      headers: { "X-Service-Key": TODDLER_SERVICE_KEY },
+      method: "POST",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Toddler warmup ${response.status}: ${text.slice(0, 200)}`);
+    }
+    const body = (await response.json().catch(() => null)) as { elapsedMs?: unknown } | null;
+    const toddlerMs = body?.elapsedMs;
+    const suffix = typeof toddlerMs === "number" && Number.isFinite(toddlerMs) ? ` (toddler ${toddlerMs}ms)` : "";
+    context.log(`warmUpToddler: model ready after ${Date.now() - started}ms${suffix}`);
+    return true;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    context.error(`warmUpToddler: failed after ${Date.now() - started}ms —`, message);
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Same predicate as claimOne, lease included: only rows a runner could claim
+// now count, so a leased-only queue doesn't warm the scale-to-zero GPU.
+// Hits IX_Emails_AIParse_Queue.
+async function hasUnparsedEmails(token: DbToken): Promise<boolean> {
+  const connection = await openConnection(token);
+  try {
+    const rows = await executeQuery(
+      connection,
+      `SELECT TOP (1) EmailID
+         FROM Emails
+        WHERE AIParsedAt IS NULL
+          AND AIParseAttempts < @MaxAttempts
+          AND (AIClaimedAt IS NULL OR AIClaimedAt < DATEADD(SECOND, -@LeaseSeconds, SYSUTCDATETIME()))`,
+      [
+        { name: "MaxAttempts", type: TYPES.Int, value: MAX_ATTEMPTS },
+        { name: "LeaseSeconds", type: TYPES.Int, value: CLAIM_LEASE_SECONDS },
+      ],
+    );
+    return rows.length > 0;
+  } finally {
+    closeConnection(connection);
+  }
+}
+
 // ── Reset failed emails back into the queue ────────────────────────────────
 // Clears parse state on emails that errored or hit max retries so they can
-// be picked up again on the next claimBatch call. Only resets rows that
+// be picked up again on the next claimOne call. Only resets rows that
 // failed — successfully classified emails (AIClassification IS NOT NULL,
 // AIParseError IS NULL) are left untouched.
 
-async function resetFailedEmails(token: string): Promise<number> {
-  const connection = await createConnection(token);
+async function resetFailedEmails(token: DbToken): Promise<number> {
+  const connection = await openConnection(token);
   try {
     const rows = (await executeQuery(
       connection,
@@ -124,7 +364,8 @@ async function resetFailedEmails(token: string): Promise<number> {
               AIConfidence      = NULL,
               AIParsedData      = NULL,
               AIRawResponse     = NULL,
-              AIModelVersion    = NULL
+              AIModelVersion    = NULL,
+              AIClaimedAt       = NULL
         WHERE AIParsedAt IS NOT NULL
           AND (AIParseError IS NOT NULL
                OR AIClassification IS NULL)`,
@@ -142,59 +383,238 @@ interface ClaimedEmail {
   Body: string | null;
   EmailID: number;
   FromAddress: string | null;
+  MatchedJobID: number | null;
+  SenderAuthenticated: boolean | null;
+  Source: string | null;
   Subject: string | null;
 }
 
-async function claimBatch(
-  token: string,
-  batchSize: number,
-): Promise<ClaimedEmail[]> {
-  const connection = await createConnection(token);
+// Rows that burned through their retries: stamp AIParsedAt so the queue
+// filter stops picking them up, flag them for admin review, record why.
+// Skips rows still leased — their last attempt may yet succeed.
+// Idempotent; runs on every parseQueued tick (even idle) and in runParseBatch
+// for direct callers (emails.ts, graphWebhook).
+async function expireExhausted(token: DbToken): Promise<void> {
+  const connection = await openConnection(token);
   try {
-    // Mark rows that have burned through their retries. We stamp AIParsedAt
-    // so the queue filter stops picking them up, flag them for admin review,
-    // and record why. Done in a single UPDATE for idempotency.
     await executeQuery(
       connection,
       `UPDATE Emails
          SET AIParsedAt = SYSUTCDATETIME(),
              AIFlaggedForReview = 1,
-             AIParseError = ISNULL(AIParseError, 'Max retries exhausted')
+             AIParseError = ISNULL(AIParseError, 'Max retries exhausted'),
+             AIClaimedAt = NULL
        WHERE AIParsedAt IS NULL
-         AND AIParseAttempts >= @MaxAttempts`,
-      [{ name: "MaxAttempts", type: TYPES.Int, value: MAX_ATTEMPTS }],
-    );
-
-    // Atomic claim: bump the attempt counter and return the rows in one
-    // statement so two concurrent workers can't pick up the same row.
-    const rows = (await executeQuery(
-      connection,
-      `UPDATE TOP (@BatchSize) Emails
-         SET AIParseAttempts = AIParseAttempts + 1
-         OUTPUT inserted.EmailID, inserted.Subject, inserted.FromAddress,
-                inserted.Body, inserted.AttachmentBlobs
-       WHERE AIParsedAt IS NULL
-         AND AIParseAttempts < @MaxAttempts`,
+         AND AIParseAttempts >= @MaxAttempts
+         AND (AIClaimedAt IS NULL OR AIClaimedAt < DATEADD(SECOND, -@LeaseSeconds, SYSUTCDATETIME()))`,
       [
-        { name: "BatchSize", type: TYPES.Int, value: batchSize },
         { name: "MaxAttempts", type: TYPES.Int, value: MAX_ATTEMPTS },
+        { name: "LeaseSeconds", type: TYPES.Int, value: CLAIM_LEASE_SECONDS },
       ],
-    )) as unknown as ClaimedEmail[];
-
-    return rows;
+    );
   } finally {
     closeConnection(connection);
   }
 }
 
+// Claims ONE row under a lease: bump attempts and stamp AIClaimedAt in one
+// statement. The statement commits at once, so the lease (not a held lock) is
+// what keeps concurrent runners (queue, timer, daily retry) off the row while
+// toddler works; UPDLOCK + READPAST stop two claims racing for the same row.
+// Final write-backs clear the lease; transient errors keep it so the retry
+// waits for expiry; a killed run's row frees after the lease and
+// has spent one attempt.
+async function claimOne(token: DbToken): Promise<ClaimedEmail | null> {
+  const connection = await openConnection(token);
+  try {
+    const rows = (await executeQuery(
+      connection,
+      `WITH claimable AS (
+         SELECT TOP (1) EmailID, Subject, FromAddress, Body, AttachmentBlobs,
+                MatchedJobID, Source, SenderAuthenticated, AIParseAttempts, AIClaimedAt
+           FROM Emails WITH (ROWLOCK, UPDLOCK, READPAST)
+          WHERE AIParsedAt IS NULL
+            AND AIParseAttempts < @MaxAttempts
+            AND (AIClaimedAt IS NULL OR AIClaimedAt < DATEADD(SECOND, -@LeaseSeconds, SYSUTCDATETIME()))
+          ORDER BY EmailID
+       )
+       UPDATE claimable
+          SET AIParseAttempts = AIParseAttempts + 1,
+              AIClaimedAt = SYSUTCDATETIME()
+       OUTPUT inserted.EmailID, inserted.Subject, inserted.FromAddress,
+              inserted.Body, inserted.AttachmentBlobs, inserted.MatchedJobID,
+              inserted.Source, inserted.SenderAuthenticated`,
+      [
+        { name: "MaxAttempts", type: TYPES.Int, value: MAX_ATTEMPTS },
+        { name: "LeaseSeconds", type: TYPES.Int, value: CLAIM_LEASE_SECONDS },
+      ],
+    )) as unknown as ClaimedEmail[];
+    return rows[0] ?? null;
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+// ── Known-job context ──────────────────────────────────────────────────────
+// One SELECT per matched email. Contractor name comes from the approved
+// quote, else the latest PO, else the awaiting-director quote. The awaiting_director quote (if any) is what
+// lets the model read a director's "Approved" reply as quote-approval.
+
+interface KnownJobRow {
+  AwaitingQuoteAmount: number | string | null;
+  AwaitingQuoteID: number | null;
+  AwaitingQuoteNumber: string | null;
+  ContractorName: string | null;
+  JobID: number;
+  Status: string | null;
+  Title: string | null;
+}
+
+async function loadKnownJob(token: DbToken, jobId: number): Promise<KnownJob | null> {
+  const connection = await openConnection(token);
+  try {
+    const rows = (await executeQuery(
+      connection,
+      `SELECT j.JobID, j.Title, j.Status,
+              COALESCE(aq.ContractorName, po.ContractorName, dq.ContractorName) AS ContractorName,
+              dq.QuoteID AS AwaitingQuoteID,
+              dq.QuoteNumber AS AwaitingQuoteNumber,
+              dq.Amount AS AwaitingQuoteAmount
+         FROM Jobs j
+         LEFT JOIN Quotes aq ON aq.QuoteID = j.ApprovedQuoteID
+         OUTER APPLY (SELECT TOP (1) p.ContractorName
+                        FROM PurchaseOrders p
+                       WHERE p.JobID = j.JobID
+                       ORDER BY p.CreatedAt DESC, p.PurchaseOrderID DESC) po
+         OUTER APPLY (SELECT TOP (1) q.QuoteID, q.QuoteNumber, q.Amount, q.ContractorName
+                        FROM Quotes q
+                       WHERE q.JobID = j.JobID AND q.Status = 'awaiting_director'
+                       ORDER BY q.CreatedAt DESC, q.QuoteID DESC) dq
+        WHERE j.JobID = @JobID`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+    )) as unknown as KnownJobRow[];
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      jobId: row.JobID,
+      title: row.Title,
+      status: row.Status,
+      contractorName: row.ContractorName,
+      awaitingDirectorQuote:
+        row.AwaitingQuoteID == null
+          ? null
+          : {
+              quoteId: row.AwaitingQuoteID,
+              quoteNumber: row.AwaitingQuoteNumber,
+              amount: row.AwaitingQuoteAmount == null ? null : Number(row.AwaitingQuoteAmount),
+            },
+    };
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+// ── Sender trust ───────────────────────────────────────────────────────────
+// From is spoofable, so trust needs a Graph-sourced, authenticated row first.
+
+async function isActiveContractor(token: DbToken, address: string): Promise<boolean> {
+  const connection = await openConnection(token);
+  try {
+    const rows = await executeQuery(
+      connection,
+      `SELECT TOP (1) 1 AS Found
+         FROM Contractors
+        WHERE LOWER(LTRIM(RTRIM(EmailAddress))) = @Email AND Active = 1 AND Suspended = 0`,
+      [{ name: "Email", type: TYPES.NVarChar, value: address }],
+    );
+    return rows.length > 0;
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+// Best-effort: a lookup failure means "unknown", never a retry.
+export async function resolveSenderTrust(
+  token: DbToken,
+  email: Pick<ClaimedEmail, "FromAddress" | "SenderAuthenticated" | "Source">,
+  context: InvocationContext,
+): Promise<SenderTrust> {
+  if (email.Source !== "graph" || email.SenderAuthenticated !== true || !email.FromAddress) return "unknown";
+  const address = email.FromAddress.trim().toLowerCase();
+  const domain = domainOf(address);
+  if (!domain) return "unknown";
+  if (orgEmailDomains().includes(domain)) return "internal";
+  try {
+    return (await isActiveContractor(token, address)) ? "known-contractor" : "unknown";
+  } catch (err: unknown) {
+    context.warn("sender trust lookup failed:", err instanceof Error ? err.message : String(err));
+    return "unknown";
+  }
+}
+
+const MAX_WITHHELD_FIELDS = 20;
+const MAX_WITHHELD_LENGTH = 200;
+
+// Runtime-validated: well-formed { field, reason } string pairs only, capped.
+function readWithheldFields(result: ToddlerResponse): WithheldField[] {
+  const raw: unknown = result.withheldFields;
+  if (!Array.isArray(raw)) return [];
+  const out: WithheldField[] = [];
+  for (const item of raw) {
+    if (out.length >= MAX_WITHHELD_FIELDS) break;
+    if (typeof item !== "object" || item === null) continue;
+    const { field, reason } = item as { field?: unknown; reason?: unknown };
+    if (typeof field !== "string" || typeof reason !== "string") continue;
+    out.push({ field: field.slice(0, MAX_WITHHELD_LENGTH), reason: reason.slice(0, MAX_WITHHELD_LENGTH) });
+  }
+  return out;
+}
+
+const MAX_SUSPICION_REASONS = 5;
+const MAX_SUSPICION_REASON_LENGTH = 200;
+
+interface Suspicion {
+  suspicious: true;
+  suspicionReasons: string[];
+}
+
+// Only a real `true` counts; reasons are string items only, capped.
+function readSuspicion(result: ToddlerResponse): Suspicion | null {
+  if (result.suspicious !== true) return null;
+  const raw: unknown = result.suspicionReasons;
+  const reasons = Array.isArray(raw)
+    ? raw.filter((r): r is string => typeof r === "string").slice(0, MAX_SUSPICION_REASONS).map((r) => r.slice(0, MAX_SUSPICION_REASON_LENGTH))
+    : [];
+  return { suspicionReasons: reasons, suspicious: true };
+}
+
+// Low-confidence results go to the admin Flagged page; "unknown" and suspicious
+// emails stay visible in Incoming (the frontend shows a warning).
+function needsReview(result: ToddlerResponse): boolean {
+  if (readSuspicion(result)) return false;
+  return result.classification !== "unknown" && result.confidence === "low";
+}
+
 async function writeSuccess(
-  token: string,
+  token: DbToken,
   emailId: number,
   hints: ExtractedHints,
   result: ToddlerResponse,
+  flagged: boolean,
 ): Promise<void> {
-  const flag = result.confidence === "low" || result.classification === "unknown";
-  const connection = await createConnection(token);
+  // The model must not smuggle its own documentFields past the merge below.
+  const {
+    documentFields: _modelDocumentFields,
+    suspicionReasons: _modelSuspicionReasons,
+    suspicious: _modelSuspicious,
+    withheldFields: _modelWithheldFields,
+    ...modelData
+  } = result.data ?? {};
+  const suspicion = readSuspicion(result);
+  const withheld = readWithheldFields(result);
+  // Nothing runs on an unknown, so drop any model-written fields.
+  const data = result.classification === "unknown" ? {} : modelData;
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -208,19 +628,27 @@ async function writeSuccess(
              AIParseError = @Error,
              AIHintPO = @HintPO,
              AIHintQuote = @HintQuote,
-             AIFlaggedForReview = @Flagged
+             AIFlaggedForReview = @Flagged,
+             AIClaimedAt = NULL
        WHERE EmailID = @Id`,
       [
         { name: "Id", type: TYPES.Int, value: emailId },
         { name: "Classification", type: TYPES.NVarChar, value: result.classification },
         { name: "Confidence", type: TYPES.NVarChar, value: result.confidence },
-        { name: "ParsedData", type: TYPES.NVarChar, value: JSON.stringify(result.data ?? {}) },
+        { name: "ParsedData", type: TYPES.NVarChar, value: JSON.stringify({
+            ...data,
+            // Toddler sends documentFields beside data; keep it inside AIParsedData.
+            ...(result.documentFields ? { documentFields: result.documentFields } : {}),
+            ...(suspicion ?? {}),
+            ...(withheld.length > 0 ? { withheldFields: withheld } : {}),
+          }),
+        },
         { name: "RawResponse", type: TYPES.NVarChar, value: result.rawResponse ?? null },
         { name: "ModelVersion", type: TYPES.NVarChar, value: result.modelVersion },
         { name: "Error", type: TYPES.NVarChar, value: result.error?.slice(0, 500) ?? null },
         { name: "HintPO", type: TYPES.NVarChar, value: hints.poNumber },
         { name: "HintQuote", type: TYPES.NVarChar, value: hints.quoteNumber },
-        { name: "Flagged", type: TYPES.Bit, value: flag ? 1 : 0 },
+        { name: "Flagged", type: TYPES.Bit, value: flagged ? 1 : 0 },
       ],
     );
   } finally {
@@ -229,14 +657,15 @@ async function writeSuccess(
 }
 
 async function recordTransientError(
-  token: string,
+  token: DbToken,
   emailId: number,
   err: Error,
 ): Promise<void> {
   // Transient failure (network, Toddler down, timeout). Keep AIParsedAt null
-  // so the next run retries — only the error text and hint fields are
-  // touched here. Attempt counter was incremented by claimBatch already.
-  const connection = await createConnection(token);
+  // so a later claim retries; record the error. The lease is kept on purpose:
+  // it stops this run re-claiming the row and burning all attempts in seconds.
+  // Attempt counter was incremented by claimOne already.
+  const connection = await openConnection(token);
   try {
     await executeQuery(
       connection,
@@ -251,24 +680,72 @@ async function recordTransientError(
   }
 }
 
-// ── Attachment hydration (local helper — mirrors emails.ts) ────────────────
-
-function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[] {
-  if (!raw) return [];
-  let names: unknown;
+// Permanent failure: finalise like expireExhausted does — stamp AIParsedAt,
+// flag for review, clear the lease — but with the real error message.
+async function recordPermanentError(token: DbToken, emailId: number, err: Error): Promise<void> {
+  const connection = await openConnection(token);
   try {
-    names = JSON.parse(raw);
+    await executeQuery(
+      connection,
+      `UPDATE Emails
+         SET AIParsedAt = SYSUTCDATETIME(),
+             AIFlaggedForReview = 1,
+             AIParseError = @Error,
+             AIClaimedAt = NULL
+       WHERE EmailID = @Id`,
+      [
+        { name: "Id", type: TYPES.Int, value: emailId },
+        { name: "Error", type: TYPES.NVarChar, value: err.message.slice(0, 500) },
+      ],
+    );
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+// ── Attachment hydration ────────────────────────────────────────────────────
+// AttachmentBlobs holds two shapes: bare blob names (ingestEmail) and
+// { blobName, fileName } objects (Graph sync, src/graph.ts). Accept both —
+// the same rule as hydrateAttachments in emails.ts — and drop anything else.
+
+interface StoredAttachment {
+  blobName: string;
+  fileName: string;
+}
+
+function basename(blobName: string): string {
+  return blobName.split("/").pop() ?? blobName;
+}
+
+function storedAttachment(entry: unknown): StoredAttachment | null {
+  if (typeof entry === "string") {
+    return entry.length > 0 ? { blobName: entry, fileName: basename(entry) } : null;
+  }
+  if (typeof entry !== "object" || entry === null || !("blobName" in entry)) return null;
+  const { blobName, fileName } = entry as { blobName: unknown; fileName?: unknown };
+  if (typeof blobName !== "string" || blobName.length === 0) return null;
+  return {
+    blobName,
+    fileName: typeof fileName === "string" && fileName.length > 0 ? fileName : basename(blobName),
+  };
+}
+
+export function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[] {
+  if (!raw) return [];
+  let entries: unknown;
+  try {
+    entries = JSON.parse(raw);
   } catch {
     return [];
   }
-  if (!Array.isArray(names)) return [];
+  if (!Array.isArray(entries)) return [];
   const hour = 60 * 60 * 1000;
-  return names
-    .filter((n): n is string => typeof n === "string" && n.length > 0)
-    .map((blobName) => ({
-      fileName: blobName.split("/").pop() ?? blobName,
-      sasUrl: generateReadSasUrl(blobName, hour),
-    }));
+  return entries
+    .map(storedAttachment)
+    .filter((a): a is StoredAttachment => a !== null)
+    // A name the mail sync never minted is skipped, not allowed to fail the parse (SEC-01).
+    .filter((a) => isBlobName(a.blobName, WR_ATTACHMENTS_SHAPES))
+    .map(({ blobName, fileName }) => ({ fileName: fileName.slice(0, FIELD_CAPS.attachmentFileName), sasUrl: generateReadSasUrl(blobName, hour) }));
 }
 
 // ── Shared batch runner ────────────────────────────────────────────────────
@@ -280,102 +757,226 @@ export interface ParseBatchResult {
   succeeded: number;
 }
 
-export async function runParseBatch(
-  token: string,
+type EmailOutcome = "succeeded" | "flagged" | "errored";
+
+async function parseClaimedEmail(
+  token: DbToken,
+  email: ClaimedEmail,
   context: InvocationContext,
-): Promise<ParseBatchResult> {
-  if (!TODDLER_URL) {
-    context.log("runParseBatch: TODDLER_URL not configured — skipping (AI service not yet deployed)");
-    return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
-  }
+): Promise<EmailOutcome> {
+  const hints = extractHints(email.Subject, email.Body);
 
-  let claimed: ClaimedEmail[];
-  try {
-    claimed = await claimBatch(token, BATCH_SIZE);
-  } catch (err: any) {
-    context.error("runParseBatch claim failed:", err.message);
-    throw err;
-  }
-
-  if (claimed.length === 0) {
-    return { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
-  }
-
-  context.log(`runParseBatch: claimed ${claimed.length} email(s)`);
-
-  let succeeded = 0;
-  let flagged = 0;
-  let errored = 0;
-
-  for (const email of claimed) {
-    const hints = extractHints(email.Subject, email.Body);
+  if (isSkippedSender(email.FromAddress)) {
     try {
-      const result = await callToddler({
-        attachments: hydrateAttachmentRefs(email.AttachmentBlobs),
-        fromAddress: email.FromAddress,
-        hints,
-        html: email.Body ?? "",
-        subject: email.Subject,
-      });
-      if (result.error && !result.data) {
-        // Toddler returned 200 but the LLM itself errored — treat as transient
-        // so the email stays in the queue and gets retried.
-        await recordTransientError(token, email.EmailID, new Error(result.error));
-        errored++;
-      } else {
-        await writeSuccess(token, email.EmailID, hints, result);
-        succeeded++;
-        if (result.confidence === "low" || result.classification === "unknown") {
-          flagged++;
-        }
-      }
-    } catch (err: any) {
-      await recordTransientError(token, email.EmailID, err).catch((e) =>
-        context.error(`failed to record error for #${email.EmailID}:`, e.message),
+      await writeSuccess(token, email.EmailID, hints, skipSenderResult(), false);
+      return "succeeded";
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      await recordTransientError(token, email.EmailID, error).catch((e: unknown) =>
+        context.error(`failed to record error for #${email.EmailID}:`, e instanceof Error ? e.message : String(e)),
       );
-      errored++;
-      context.error(`parse failed for email #${email.EmailID}:`, err.message);
+      context.error(`skip-sender write failed for email #${email.EmailID}:`, error.message);
+      return "errored";
     }
   }
 
-  return { claimed: claimed.length, errored, flagged, succeeded };
+  try {
+    // Best-effort: a context lookup failure must not cost the email a retry.
+    let knownJob: KnownJob | null = null;
+    if (email.MatchedJobID != null) {
+      knownJob = await loadKnownJob(token, email.MatchedJobID).catch((err: unknown) => {
+        context.warn(`knownJob lookup failed for job #${email.MatchedJobID}:`, err instanceof Error ? err.message : String(err));
+        return null;
+      });
+    }
+    const senderTrust = await resolveSenderTrust(token, email, context);
+    context.info(`email #${email.EmailID} senderTrust=${senderTrust}`);
+    const result = await callToddler({
+      attachments: hydrateAttachmentRefs(email.AttachmentBlobs),
+      fromAddress: cap(email.FromAddress, FIELD_CAPS.fromAddress),
+      hints,
+      senderTrust,
+      html: email.Body ?? "",
+      subject: cap(email.Subject, FIELD_CAPS.subject),
+      ...(knownJob ? { knownJob } : {}),
+    });
+    if (result.error) {
+      // Toddler returned 200 but the LLM itself errored — treat as transient
+      // so the email stays in the queue and gets retried. Toddler always
+      // sends data: {} on failure, so `error` is the only discriminator.
+      await recordTransientError(token, email.EmailID, new Error(result.error));
+      return "errored";
+    }
+    const suspicion = readSuspicion(result);
+    if (suspicion) context.info(`email #${email.EmailID} flagged suspicious by toddler (${suspicion.suspicionReasons.length} reason(s))`);
+    const review = needsReview(result);
+    await writeSuccess(token, email.EmailID, hints, result, review);
+    return review ? "flagged" : "succeeded";
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    const record = err instanceof ToddlerRejectedError ? recordPermanentError : recordTransientError;
+    await record(token, email.EmailID, error).catch((e: unknown) =>
+      context.error(`failed to record error for #${email.EmailID}:`, e instanceof Error ? e.message : String(e)),
+    );
+    if (err instanceof ToddlerRejectedError) context.warn(`email #${email.EmailID} rejected by toddler, finalised as flagged: ${error.message}`);
+    context.error(`parse failed for email #${email.EmailID}:`, error.message);
+    return "errored";
+  }
 }
 
-// ── Timer: parseEmailsDailyRetry ───────────────────────────────────────────
-// Once-a-day safety net for emails left un-parsed because Toddler was down
-// when the Graph webhook fired. Real-time parsing happens in graphNotification;
-// this only catches the failure-mode backlog. Scheduled at 02:00 UTC to share
-// a DB wakeup with the other daily timers (auto-pause-friendly).
-
-async function parseEmailsDailyRetry(
-  _timer: unknown,
+// Deadline-driven: claims ONE row at a time and checks the remaining budget
+// before every claim. `deadline` is epoch ms; callers pass invocation start +
+// RUN_BUDGET_MS so warm-up time counts against it.
+export async function runParseBatch(
+  token: DbToken,
   context: InvocationContext,
-): Promise<void> {
-  const token = process.env.MYBUILDINGS_BEARER_TOKEN;
-  if (!token) {
-    context.error("parseEmailsDailyRetry: MYBUILDINGS_BEARER_TOKEN not set");
-    return;
+  deadline: number = Date.now() + RUN_BUDGET_MS,
+): Promise<ParseBatchResult> {
+  const totals: ParseBatchResult = { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
+  if (!toddlerConfigured(context, "runParseBatch")) return totals;
+
+  if (MIN_EMAIL_BUDGET_MS >= RUN_BUDGET_MS && !budgetWarned) {
+    budgetWarned = true;
+    context.warn(
+      `runParseBatch: per-email budget ${MIN_EMAIL_BUDGET_MS}ms >= run budget ${RUN_BUDGET_MS}ms — the runner will never claim; lower TODDLER_TIMEOUT_MS`,
+    );
   }
 
-  try {
-    const result = await runParseBatch(token, context);
+  await expireExhausted(token);
+
+  while (totals.claimed < MAX_EMAILS_PER_RUN) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < MIN_EMAIL_BUDGET_MS) {
+      context.log(
+        `runParseBatch: ${Math.round(remainingMs / 1000)}s left, under one email's budget — stopping; the next run continues`,
+      );
+      break;
+    }
+    let email: ClaimedEmail | null;
+    try {
+      email = await claimOne(token);
+    } catch (err: unknown) {
+      context.error(
+        `runParseBatch: claim failed after ${totals.claimed} email(s)`,
+        err instanceof Error ? err.message : String(err),
+      );
+      throw err;
+    }
+    if (!email) break;
+    totals.claimed++;
+    const outcome = await parseClaimedEmail(token, email, context);
+    if (outcome === "errored") {
+      totals.errored++;
+    } else {
+      totals.succeeded++;
+      if (outcome === "flagged") totals.flagged++;
+    }
+  }
+
+  if (totals.claimed > 0) {
     context.log(
-      `parseEmailsDailyRetry done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
+      `runParseBatch: claimed ${totals.claimed} email(s) — succeeded=${totals.succeeded}, flagged=${totals.flagged}, errored=${totals.errored}`,
+    );
+  }
+  return totals;
+}
+
+// ── Warm parse: the one path every trigger shares ──────────────────────────
+// config → token → expire exhausted rows (also on idle ticks) → cheap queue
+// check (no toddler call when idle) → warm-up → deadline runner. Warm-up
+// counts against `deadline`; a failed warm-up claims or writes no row. Never throws: failures go to Sentry and
+// the next trigger retries.
+
+async function parseQueued(caller: string, context: InvocationContext, deadline: number): Promise<void> {
+  if (!toddlerConfigured(context, caller)) return;
+  const token = null; // service identity: no user token on timer or queue paths
+
+  try {
+    await expireExhausted(token);
+    if (!(await hasUnparsedEmails(token))) {
+      context.log(`${caller}: no unparsed emails — toddler not called`);
+      return;
+    }
+    const warmUpBudgetMs = Math.min(TODDLER_WARMUP_TIMEOUT_MS, deadline - Date.now() - MIN_EMAIL_BUDGET_MS);
+    if (warmUpBudgetMs <= 0) {
+      context.warn(`${caller}: no time left for warm-up plus one email — the next run continues`);
+      return;
+    }
+    if (!(await warmUpToddler(context, warmUpBudgetMs))) return;
+    const result = await runParseBatch(token, context, deadline);
+    context.log(
+      `${caller} done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    context.error("parseEmailsDailyRetry batch failed:", message);
-    Sentry.captureException(err, { extra: { context: "parseEmailsDailyRetry batch failed" } });
-  } finally {
+    context.error(`${caller} failed:`, message);
+    Sentry.captureException(err, { extra: { context: `${caller} failed` } });
     await Sentry.flush(2000);
   }
 }
 
-// ── POST /api/adminTriggerEmailParse ──────────────────────────────────────
-// Admin-only manual trigger — runs the same batch logic immediately without
-// waiting for the next scheduled tick. Returns the batch summary as JSON.
+// ── Timer: parseEmailsTimer ────────────────────────────────────────────────
+// Every 2 minutes. Timer triggers are singletons, so ticks never overlap.
 
-async function adminTriggerEmailParse(
+export async function parseEmailsTimer(_timer: unknown, context: InvocationContext): Promise<void> {
+  await parseQueued("parseEmailsTimer", context, Date.now() + RUN_BUDGET_MS);
+}
+
+// ── Timer: parseEmailsDailyRetry ───────────────────────────────────────────
+// Once-a-day safety net for anything the 2-minute timer left behind (e.g. a
+// run of warm-up failures). Scheduled at 02:00 UTC to share a DB wakeup with
+// the other daily timers. Also enqueues one mail sync: backstop for a lost
+// Graph webhook or an expired subscription (nothing else polls the mailbox).
+
+export async function parseEmailsDailyRetry(_timer: unknown, context: InvocationContext): Promise<void> {
+  enqueueEmailSync(context, "timer");
+  await parseQueued("parseEmailsDailyRetry", context, Date.now() + RUN_BUDGET_MS);
+}
+
+// ── Queue: processEmailSync ────────────────────────────────────────────────
+// One message per webhook / manual sync / admin trigger. Graph sync (with
+// attachments) then the shared warm parse, inside one deadline. A sync
+// failure rethrows so the queue retries (maxDequeueCount 3, then
+// email-sync-poison); parse failures never throw — they are recorded per row.
+
+export async function processEmailSync(message: unknown, context: InvocationContext): Promise<void> {
+  const deadline = Date.now() + RUN_BUDGET_MS;
+  const source = isEmailSyncMessage(message) ? message.source : "unknown";
+
+  const mailbox = incomingMailbox();
+  if (!mailbox) {
+    context.error(`processEmailSync: ${mailboxConfigError()} — parsing without a sync`);
+  } else {
+    try {
+      const connection = await createServiceRequestConnection();
+      try {
+        const { fetched, since } = await syncMailbox(connection, mailbox);
+        context.log(`processEmailSync (${source}): synced ${fetched} email(s) from ${mailbox} (since=${since ?? "beginning"})`);
+      } finally {
+        closeConnection(connection);
+      }
+    } catch (err: unknown) {
+      context.error("processEmailSync: sync failed:", err instanceof Error ? err.message : String(err));
+      Sentry.captureException(err, { extra: { context: "processEmailSync sync failed", source } });
+      await Sentry.flush(2000);
+      throw err;
+    }
+  }
+
+  // EB3: other mailboxes (INBOUND_EXTRA_MAILBOXES) and triage of mail to notices@; both are off unless switched on.
+  await syncExtraMailboxes(context, source);
+  await parseQueued("processEmailSync", context, deadline);
+  await runTriageStep(context, deadline);
+}
+
+// ── POST /api/triggerEmailParse ────────────────────────────────────────────
+// Admin-only manual trigger. Enqueues an email-sync message and returns 202;
+// processEmailSync runs the sync + warm-up + deadline runner off the queue.
+// ?reset=true first clears failed/errored rows back into the queue (one
+// UPDATE, fast) so a manual trigger can recover from bugs that burned
+// through retries.
+
+export async function adminTriggerEmailParse(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -384,30 +985,19 @@ async function adminTriggerEmailParse(
   const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
 
-  // ?reset=true clears all failed/errored emails back into the queue first,
-  // so a manual trigger can recover from bugs that burned through retries.
-  const reset = request.query.get("reset") === "true";
-  const MAX_EMAILS = 200;
-  const totals: ParseBatchResult & { reset?: number } = { claimed: 0, errored: 0, flagged: 0, succeeded: 0 };
+  if (!toddlerConfigured(context, "adminTriggerEmailParse")) {
+    return { status: 503, jsonBody: { error: "Email AI parsing is not configured (TODDLER_URL / TODDLER_SERVICE_KEY)" } };
+  }
 
   try {
-    if (reset) {
-      totals.reset = await resetFailedEmails(token);
-      context.log(`resetEmailParseQueue: reset ${totals.reset} failed email(s)`);
-    }
-
-    while (totals.claimed < MAX_EMAILS) {
-      const result = await runParseBatch(token, context);
-      totals.claimed += result.claimed;
-      totals.errored += result.errored;
-      totals.flagged += result.flagged;
-      totals.succeeded += result.succeeded;
-      if (result.claimed === 0) break;
-    }
-    return { jsonBody: totals, status: 200 };
-  } catch (error: any) {
-    context.error("adminTriggerEmailParse failed:", error.message);
-    return errorResponse("Email parse batch failed", error.message);
+    const reset = request.query.get("reset") === "true" ? await resetFailedEmails(token) : 0;
+    if (reset > 0) context.log(`adminTriggerEmailParse: reset ${reset} failed email(s)`);
+    enqueueEmailSync(context, "admin");
+    return { status: 202, jsonBody: { queued: true, reset } };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error("adminTriggerEmailParse failed:", message);
+    return errorResponse("Email parse trigger failed", message);
   }
 }
 
@@ -446,7 +1036,7 @@ async function getFlaggedEmails(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const rows = await executeQuery(
       connection,
       `SELECT ${FLAGGED_COLUMNS}
@@ -468,15 +1058,33 @@ async function getFlaggedEmails(
 
 // ── Registrations ──────────────────────────────────────────────────────────
 
+// Every 2 minutes. Singleton, so ticks never overlap; the queue check keeps
+// the GPU at zero replicas when nothing is waiting.
+app.timer("parseEmailsTimer", {
+  handler: runTimer("parseEmailsTimer", parseEmailsTimer),
+  schedule: "0 */2 * * * *",
+});
+
 // Daily at 02:00 UTC — coincides with other daily timers so the DB only
 // wakes once for the batch.
 app.timer("parseEmailsDailyRetry", {
-  handler: parseEmailsDailyRetry,
+  extraOutputs: [emailSyncQueueOutput],
+  handler: runTimer("parseEmailsDailyRetry", parseEmailsDailyRetry),
   schedule: "0 0 2 * * *",
+});
+
+// One message at a time per instance (host.json queues.batchSize 1). Three
+// attempts, then email-sync-poison; the 2-minute timer still parses whatever
+// is queued.
+app.storageQueue("processEmailSync", {
+  connection: "AzureWebJobsStorage",
+  handler: processEmailSync,
+  queueName: EMAIL_SYNC_QUEUE,
 });
 
 app.http("triggerEmailParse", {
   authLevel: "anonymous",
+  extraOutputs: [emailSyncQueueOutput],
   handler: adminTriggerEmailParse,
   methods: ["POST"],
 });

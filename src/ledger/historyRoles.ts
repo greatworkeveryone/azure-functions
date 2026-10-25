@@ -1,0 +1,83 @@
+import { AppRole, rolesPassGate } from "../auth";
+import { VIEW_FACILITIES_ROLES } from "../facilitiesRoles";
+
+// Who may read the Decision history of a subject: whoever may already read that
+// subject through its own endpoint. Each list is copied from the endpoint named
+// beside it and must change with it. requireRole's hierarchy still applies on
+// top: admin passes every check, director any non-admin one, and the manager
+// roles pass their team's check.
+//
+// A subject with no entry here has no read endpoint of its own yet (billing
+// runs, escalations, communications, role and limit changes, ...). Its history
+// is director-only until the package that owns it adds a line below.
+
+// getJob: VIEW_JOBS_ROLES in functions/jobs.ts
+const JOB_READ = [
+  AppRole.ADMIN,
+  AppRole.DIRECTOR,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
+] as const;
+
+// getRegisterTenant in functions/tenancy.ts; getRentReview and getRentReviews share it (rentReview/http.ts)
+const TENANCY_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR] as const;
+
+// getQuotes in functions/quotes.ts
+const QUOTE_READ = [
+  AppRole.ACCOUNTS,
+  AppRole.ACCOUNTS_APPROVAL,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+  AppRole.DIRECTOR,
+] as const;
+
+// getInvoices / getJobInvoices in functions/invoices.ts, getPurchaseOrders in functions/purchaseOrders.ts
+const INVOICE_AND_PO_READ = [AppRole.ACCOUNTS, AppRole.DIRECTOR, AppRole.FACILITIES] as const;
+
+// getPayments in functions/payments.ts
+const PAYMENT_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR] as const;
+
+// getMyobControls in functions/getMyobControls.ts (the CFO's MYOB switches and link)
+const MYOB_CONTROL_READ = [AppRole.CFO] as const;
+// getDefectsPeriods / getDefectsPeriod: VIEW_FACILITIES_ROLES in facilitiesRoles.ts (sprint F)
+const FACILITIES_READ = VIEW_FACILITIES_ROLES;
+
+const DEFAULT_READ = [AppRole.DIRECTOR] as const;
+
+// A Map, not an object: subjectType comes from the query string and a plain
+// object would answer "constructor" with Object.prototype's function.
+const HISTORY_READ_ROLES = new Map<string, readonly AppRole[]>([
+  ["defects_period", FACILITIES_READ],
+  ["invoice", INVOICE_AND_PO_READ],
+  ["job", JOB_READ],
+  ["myob_control", MYOB_CONTROL_READ],
+  ["myob_link", MYOB_CONTROL_READ],
+  ["myob_proposal", MYOB_CONTROL_READ],
+  ["payment", PAYMENT_READ],
+  ["purchase_order", INVOICE_AND_PO_READ],
+  ["quote", QUOTE_READ],
+  // A review is read through getRentReview, which has the tenancy's own gate.
+  ["rent_review", TENANCY_READ],
+  // A schedule change is read through getScheduleChanges, which has the tenancy's own gate.
+  ["schedule_change", TENANCY_READ],
+  ["service_schedule", FACILITIES_READ],
+  ["tenancy", TENANCY_READ],
+  // A note is read through getRegisterTenant / getArchivedTenantNotes, the tenancy's own gate.
+  ["tenancy_note", TENANCY_READ],
+]);
+
+export function historyReadRoles(subjectType: string): readonly AppRole[] {
+  return HISTORY_READ_ROLES.get(subjectType) ?? DEFAULT_READ;
+}
+
+/**
+ * SubjectTypes these roles may read, for scoping a wider ledger query (a job's
+ * payments, a tenancy's notes). null = no restriction (admin/director pass
+ * every history gate, including the director-only default).
+ */
+export function readableSubjectTypes(roles: readonly string[]): string[] | null {
+  if (rolesPassGate(roles, DEFAULT_READ)) return null;
+  return [...HISTORY_READ_ROLES.entries()].filter(([, allowed]) => rolesPassGate(roles, allowed)).map(([type]) => type);
+}

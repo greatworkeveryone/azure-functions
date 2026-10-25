@@ -8,7 +8,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   beginTransaction,
   commitTransaction,
@@ -25,11 +25,68 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
-import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
-import { MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
+import { generateReadSasUrl, uploadBlob } from "../blob-storage";
+import { isAllowedContentType, MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
+import { isDevOverrideEnabled } from "../jwt";
+import { buildInspectionPacket } from "../pdf/inspection-packet";
+import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
+import { showTestParam, testFlagForCreate } from "../test-data";
+import { resolveLedgerActor } from "../ledger/actor";
+import type { LedgerActor } from "../ledger";
+import {
+  levelRemoval,
+  pointRemoval,
+  photoRemoval,
+  recordInspectionRemoval,
+  roomRemoval,
+  type RemovedContributor,
+  type RemovedPoint,
+  type RemovedRoom,
+} from "../inspectionRemovalLedger";
+import { assertPointTextLength, OpRefusal } from "../inspectionLimits";
+import {
+  composeGroupTitle,
+  joinDistinct,
+  parseRaiseGroups,
+  type RaiseGroup,
+} from "../inspectionRaiseGroups";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+// Packet PDFs download every photo; keep one caller from saturating the worker.
+const PACKET_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
+
+// What a job's LevelName and ExactLocation hold when it is edited (jobs.ts MAX_LEN): a job
+// raised from findings in several rooms lists them all, cut to the same width.
+const JOB_LEVEL_NAME_MAX = 100;
+const JOB_EXACT_LOCATION_MAX = 200;
+
+// Hard ceiling on ops per /applyInspectionOps batch — bounds per-request work
+// (each op is several queries inside one transaction on a Basic-tier DB).
+const MAX_OPS_PER_BATCH = 200;
+
+// Matches exactly what uploadInspectionAttachment mints via uploadBlob():
+// `inspections/<uuid>` plus at most one simple extension — no extra path
+// segments or dot-segments. An addAttachment op may only reference blobs that
+// endpoint created; anything else (other containers' prefixes, traversal,
+// double extensions) is rejected.
+const INSPECTION_BLOB_NAME_PATTERN =
+  /^inspections\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[A-Za-z0-9]+)?$/;
+
+export function isValidInspectionBlobName(blobName: unknown): boolean {
+  return typeof blobName === "string" && INSPECTION_BLOB_NAME_PATTERN.test(blobName);
+}
+
+// Raw failure text can leak schema/constraint detail to clients, so the per-op
+// rejection reason is generic in production; dev builds keep the real message.
+// The full error is always logged server-side by the caller.
+// An OpRefusal is the exception: its text is written for the person (a length
+// limit, say) and carries no internal detail, so it always goes through.
+export function opRejectionReason(err: unknown): string {
+  if (err instanceof OpRefusal) return err.message;
+  if (isDevOverrideEnabled() && err instanceof Error && err.message) return err.message;
+  return "Operation could not be applied";
+}
 
 function tooManyRequests(retryAfterMs: number): HttpResponseInit {
   return {
@@ -39,7 +96,17 @@ function tooManyRequests(retryAfterMs: number): HttpResponseInit {
   };
 }
 
-const EDIT_INSPECTIONS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
+// Inspection authors = the field inspectors plus their managers. Includes plain
+// FACILITIES: they walk the building and create/edit/complete/merge inspections.
+// Mirrors the frontend `editInspections` / `mergeInspections` capabilities
+// (command-centre constants/roles.ts) and the deleteInspection own-row rule
+// below — all three must agree on who can author an inspection.
+export const EDIT_INSPECTIONS_ROLES = [
+  AppRole.ADMIN,
+  AppRole.DIRECTOR,
+  AppRole.FACILITIES,
+  AppRole.FACILITIES_APPROVAL,
+] as const;
 
 // ── Caller identity ──────────────────────────────────────────────────────────
 
@@ -99,12 +166,27 @@ interface InspectionApi {
   levels: InspectionApiLevel[];
   mergedFromIds?: number[];
   mergedIntoId?: number;
+  /** A test record (D9). Omitted when false. */
+  isTest?: boolean;
   revision: number;
   status: "complete" | "draft" | "merged";
   title?: string;
 }
 
 const ATTACHMENT_SAS_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+// A finding is blank only when it has NO description AND NO photo: rooms seed
+// with an empty placeholder point, but a point holding just a photo is a real
+// finding. Mirrors the frontend `isBlankInspectionPoint` and the PDF loader
+// (pdf/inspection-packet-loader.ts) — change all three together. Contract: the
+// caller aliases dbo.InspectionPoints as `p`.
+const NON_BLANK_POINT_SQL = `(
+  LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+  OR EXISTS (SELECT 1 FROM dbo.InspectionAttachments att WHERE att.PointId = p.Id)
+)`;
+
+// addLevel stores into dbo.InspectionLevels.Name (NVARCHAR(100), m034).
+export const MAX_LEVEL_NAME_LENGTH = 100;
 
 // Builds a fully nested Inspection from a single ID using 5 batched queries.
 // Stays cheap because each query is a single index lookup keyed on InspectionId.
@@ -114,7 +196,7 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
     `SELECT i.Id, i.BuildingId, b.BuildingName, i.Title, i.Status, i.Revision,
             i.CreatedAt, i.CreatedById, i.CreatedByName,
             i.LastModifiedAt, i.CompletedAt, i.CompletedById, i.CompletedByName,
-            i.MergedIntoId
+            i.MergedIntoId, i.IsTest
      FROM dbo.Inspections i
      JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
      WHERE i.Id = @Id`,
@@ -265,6 +347,7 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
     };
   }
   if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
+  if (i.IsTest === true || i.IsTest === 1) out.isTest = true;
   if (mergeSourceRows.length > 0) {
     out.mergedFromIds = mergeSourceRows.map((r) => r.SourceInspectionId as number);
   }
@@ -288,6 +371,14 @@ function toIso(value: unknown): string {
   return new Date().toISOString();
 }
 
+// A timestamp column for the removal ledger: ISO text, or null when the row has none.
+function isoOrNull(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === "string" ? value : null;
+}
+
+const textOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
 async function bumpRevision(connection: any, inspectionId: number): Promise<number> {
   const rows = await executeQuery(
     connection,
@@ -302,7 +393,7 @@ async function bumpRevision(connection: any, inspectionId: number): Promise<numb
 
 // ── GET /api/getInspections ──────────────────────────────────────────────────
 
-async function getInspections(
+export async function getInspections(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -314,89 +405,100 @@ async function getInspections(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const inspectionRows = await executeQuery(
       connection,
       `SELECT i.Id, i.BuildingId, b.BuildingName, i.Title, i.Status, i.Revision,
               i.CreatedAt, i.CreatedById, i.CreatedByName,
               i.LastModifiedAt, i.CompletedAt, i.CompletedById, i.CompletedByName,
-              i.MergedIntoId
+              i.MergedIntoId, i.IsTest
        FROM dbo.Inspections i
        JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
+       WHERE (i.IsTest = 0 OR @ShowTest = 1)
        ORDER BY i.Id DESC`,
-      [],
+      [await showTestParam(request)],
     );
 
-    const inspectionIds = inspectionRows.map((r) => r.Id as number);
-
-    // Pull structural counts for the list view — three aggregate queries, no
-    // attachments or contributors needed.
-    const idParams = inspectionIds.map((id, idx) => ({ name: `I${idx}`, type: TYPES.Int, value: id }));
-    const idParamList = inspectionIds.map((_, idx) => `@I${idx}`).join(",");
-
-    const levelRows = inspectionIds.length
+    // Pull structural counts for the list view. The aggregates GROUP BY
+    // straight over the child tables (their FKs guarantee every row belongs to
+    // an inspection in the unfiltered list above) instead of materialising one
+    // SQL parameter per inspection id — which would hit SQL Server's 2100-
+    // parameter cap once the list grew past ~2100 inspections.
+    const levelRows = inspectionRows.length
       ? await executeQuery(
           connection,
           `SELECT InspectionId, COUNT(*) AS C FROM dbo.InspectionLevels
-           WHERE InspectionId IN (${idParamList}) GROUP BY InspectionId`,
-          idParams,
+           GROUP BY InspectionId`,
+          [],
         )
       : [];
     const levelCountByInspection = new Map(levelRows.map((r) => [r.InspectionId as number, r.C as number]));
 
     // Match the detail view: only count rooms that have at least one non-blank
-    // inspection point. A room whose only point is the blank seed placeholder is
-    // hidden in the read-only detail body, so it must not inflate the list count.
-    // "Non-blank" uses the same predicate as the filled-points query below.
-    const roomRows = inspectionIds.length
+    // inspection point (description OR photo). A room whose only point is the
+    // blank seed placeholder is hidden in the read-only detail body, so it must
+    // not inflate the list count. "Non-blank" is NON_BLANK_POINT_SQL — the same
+    // predicate as the filled-points query below.
+    const roomRows = inspectionRows.length
       ? await executeQuery(
           connection,
           `SELECT l.InspectionId, COUNT(r.Id) AS C
            FROM dbo.InspectionLevels l
            JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
-           WHERE l.InspectionId IN (${idParamList})
-             AND EXISTS (
+           WHERE EXISTS (
                SELECT 1 FROM dbo.InspectionPoints p
                WHERE p.RoomId = r.Id
-                 AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+                 AND ${NON_BLANK_POINT_SQL}
              )
            GROUP BY l.InspectionId`,
-          idParams,
+          [],
         )
       : [];
     const roomCountByInspection = new Map(roomRows.map((r) => [r.InspectionId as number, r.C as number]));
 
-    const pointRows = inspectionIds.length
+    const pointRows = inspectionRows.length
       ? await executeQuery(
           connection,
           `SELECT l.InspectionId, COUNT(p.Id) AS C
            FROM dbo.InspectionLevels l
            JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
            JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
-           WHERE l.InspectionId IN (${idParamList})
-             AND LEN(LTRIM(RTRIM(ISNULL(p.Description, '')))) > 0
+           WHERE ${NON_BLANK_POINT_SQL}
            GROUP BY l.InspectionId`,
-          idParams,
+          [],
         )
       : [];
     const filledPointCountByInspection = new Map(pointRows.map((r) => [r.InspectionId as number, r.C as number]));
 
-    const raisedPointRows = inspectionIds.length
+    const raisedPointRows = inspectionRows.length
       ? await executeQuery(
           connection,
           `SELECT j.InspectionId, COUNT(DISTINCT j.PointId) AS C
            FROM dbo.InspectionRaisedJobs j
-           WHERE j.InspectionId IN (${idParamList})
            GROUP BY j.InspectionId`,
-          idParams,
+          [],
         )
       : [];
     const raisedPointCountByInspection = new Map(raisedPointRows.map((r) => [r.InspectionId as number, r.C as number]));
 
+    // Distinct jobs created from each inspection. A single job can be raised from
+    // several points (and a point can feed several jobs), so this is COUNT(DISTINCT
+    // JobId) — not the same as raisedPoints (points that have any job).
+    const jobRows = inspectionRows.length
+      ? await executeQuery(
+          connection,
+          `SELECT j.InspectionId, COUNT(DISTINCT j.JobId) AS C
+           FROM dbo.InspectionRaisedJobs j
+           GROUP BY j.InspectionId`,
+          [],
+        )
+      : [];
+    const jobCountByInspection = new Map(jobRows.map((r) => [r.InspectionId as number, r.C as number]));
+
     // Build minimal-but-correct shape for list rows. Detail page calls
     // /getInspection for the full nested structure.
-    const inspections: (InspectionApi & { _counts: { filledPoints: number; levels: number; raisedPoints: number; rooms: number } })[] =
+    const inspections: (InspectionApi & { _counts: { filledPoints: number; jobs: number; levels: number; raisedPoints: number; rooms: number } })[] =
       inspectionRows.map((i) => {
         const iid = i.Id as number;
         const out = {
@@ -412,11 +514,12 @@ async function getInspections(
           title: (i.Title as string | null) ?? undefined,
           _counts: {
             filledPoints: filledPointCountByInspection.get(iid) ?? 0,
+            jobs: jobCountByInspection.get(iid) ?? 0,
             levels: levelCountByInspection.get(iid) ?? 0,
             raisedPoints: raisedPointCountByInspection.get(iid) ?? 0,
             rooms: roomCountByInspection.get(iid) ?? 0,
           },
-        } as InspectionApi & { _counts: { filledPoints: number; levels: number; raisedPoints: number; rooms: number } };
+        } as InspectionApi & { _counts: { filledPoints: number; jobs: number; levels: number; raisedPoints: number; rooms: number } };
         if (i.CompletedAt) {
           out.completedAt = toIso(i.CompletedAt);
           out.completedBy = {
@@ -425,6 +528,7 @@ async function getInspections(
           };
         }
         if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
+        if (i.IsTest === true || i.IsTest === 1) out.isTest = true;
         return out;
       });
 
@@ -454,7 +558,7 @@ async function getInspection(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const inspection = await loadInspection(connection, id);
     if (!inspection) return { status: 404, jsonBody: { error: "Inspection not found" } };
     return { status: 200, jsonBody: { inspection } };
@@ -493,13 +597,17 @@ async function createInspection(
     // Audit identity comes from the verified token, not unverified JWT claims.
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
+    // D9: admins and directors may create a test inspection; an admin's "[TEST]" title does too.
+    const testFlag = await testFlagForCreate(request, body?.IsTest, Title);
+    if ("error" in testFlag) return testFlag.error;
+    connection = await createRequestConnection(token);
     const inserted = await executeQuery(
       connection,
-      `INSERT INTO dbo.Inspections (BuildingId, Title, CreatedById, CreatedByName)
+      `INSERT INTO dbo.Inspections (BuildingId, Title, CreatedById, CreatedByName, IsTest)
        OUTPUT INSERTED.Id
-       VALUES (@BuildingId, @Title, @CreatedById, @CreatedByName)`,
+       VALUES (@BuildingId, @Title, @CreatedById, @CreatedByName, @IsTest)`,
       [
+        { name: "IsTest",        type: TYPES.Bit,       value: testFlag.isTest },
         { name: "BuildingId",    type: TYPES.Int,       value: BuildingId },
         { name: "Title",         type: TYPES.NVarChar,  value: Title ?? null },
         { name: "CreatedById",   type: TYPES.NVarChar,  value: caller.id },
@@ -528,7 +636,7 @@ interface ClientOp {
   op: any;
 }
 
-async function applyInspectionOps(
+export async function applyInspectionOps(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -556,39 +664,66 @@ async function applyInspectionOps(
     if (ops.length === 0) {
       return { status: 400, jsonBody: { error: "ops array must be non-empty" } };
     }
-
-    connection = await createConnection(token);
-
-    // Optional concurrency guard
-    if (typeof baseRevision === "number") {
-      const rev = await executeQuery(
-        connection,
-        `SELECT Revision FROM dbo.Inspections WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
-      );
-      if (rev.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
-      const current = rev[0].Revision as number;
-      if (current !== baseRevision) {
-        const fresh = await loadInspection(connection, inspectionId);
-        return { status: 409, jsonBody: { current: current, error: "revision-mismatch", inspection: fresh } };
-      }
+    if (ops.length > MAX_OPS_PER_BATCH) {
+      return { status: 400, jsonBody: { error: `Too many ops in one batch (max ${MAX_OPS_PER_BATCH})` } };
     }
+
+    connection = await createRequestConnection(token);
 
     await beginTransaction(connection);
     const applied: string[] = [];
     const rejected: { id: string; reason: string }[] = [];
+    // Resolved on first use (a point removal), once per batch: most batches never need it.
+    let ledgerActor: LedgerActor | null = null;
+    const loadLedgerActor = async (conn: any): Promise<LedgerActor> => {
+      if (!ledgerActor) ledgerActor = await resolveLedgerActor(request, conn);
+      if (!ledgerActor) throw new Error("Could not resolve the signed-in user for the decision ledger");
+      return ledgerActor;
+    };
 
     try {
+      // Concurrency + status guard INSIDE the transaction: UPDLOCK/HOLDLOCK
+      // holds a lock on the inspection row so neither its Revision nor its
+      // Status can change between this check and the bumpRevision/commit below
+      // (closes a TOCTOU window under concurrent writers).
+      const rev = await executeQuery(
+        connection,
+        `SELECT Revision, Status FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      if (rev.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Inspection not found" } };
+      }
+      // Completed/merged inspections are read-only — reject the whole batch.
+      if (rev[0].Status !== "draft") {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 409, jsonBody: { error: "Inspection is not editable" } };
+      }
+      if (typeof baseRevision === "number") {
+        const current = rev[0].Revision as number;
+        if (current !== baseRevision) {
+          await rollbackTransaction(connection).catch(() => {});
+          const fresh = await loadInspection(connection, inspectionId);
+          return { status: 409, jsonBody: { current: current, error: "revision-mismatch", inspection: fresh } };
+        }
+      }
+
       for (const queued of ops) {
         if (!queued.id) {
           rejected.push({ id: queued.id ?? "(missing)", reason: "op missing id" });
           continue;
         }
 
+        // Replay check is scoped to (OpId, InspectionId): an op id logged
+        // against another inspection must not be falsely reported "applied".
         const seen = await executeQuery(
           connection,
-          `SELECT 1 AS X FROM dbo.InspectionOperationLog WHERE OpId = @OpId`,
-          [{ name: "OpId", type: TYPES.NVarChar, value: queued.id }],
+          `SELECT 1 AS X FROM dbo.InspectionOperationLog WHERE OpId = @OpId AND InspectionId = @InspectionId`,
+          [
+            { name: "OpId",         type: TYPES.NVarChar, value: queued.id },
+            { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+          ],
         );
         if (seen.length > 0) {
           // Already applied — idempotent no-op
@@ -596,8 +731,12 @@ async function applyInspectionOps(
           continue;
         }
 
+        // Per-op savepoint: a half-applied multi-statement op (e.g. addLevel or
+        // linkRooms) rolls back to here — leaving earlier successful ops intact —
+        // instead of committing torn state with the rest of the batch.
+        await executeQuery(connection, "SAVE TRANSACTION op_sp", []);
         try {
-          await applyOne(connection, inspectionId, queued.op);
+          await applyOne(connection, inspectionId, queued.op, identity, loadLedgerActor);
           await executeQuery(
             connection,
             `INSERT INTO dbo.InspectionOperationLog (OpId, InspectionId, OpType)
@@ -610,8 +749,9 @@ async function applyInspectionOps(
           );
           applied.push(queued.id);
         } catch (err: any) {
-          context.warn(`op ${queued.id} (${queued.op?.type}) failed: ${err.message}`);
-          rejected.push({ id: queued.id, reason: err.message });
+          await executeQuery(connection, "ROLLBACK TRANSACTION op_sp", []).catch(() => {});
+          context.error(`op ${queued.id} (${queued.op?.type}) failed:`, err);
+          rejected.push({ id: queued.id, reason: opRejectionReason(err) });
         }
       }
 
@@ -630,9 +770,119 @@ async function applyInspectionOps(
   }
 }
 
-async function applyOne(connection: any, inspectionId: number, op: any): Promise<void> {
+// What deleting a room, or every room of a level, takes with it through the
+// ON DELETE CASCADE foreign keys: the rooms' text, their points' text and the
+// photo records. Read before the DELETE so the ledger row can hold it. The
+// caller has already tied the room or level to this inspection.
+async function loadRemovedRooms(
+  connection: any,
+  scope: { roomId: string } | { levelId: string },
+): Promise<RemovedRoom[]> {
+  const byRoom = "roomId" in scope;
+  const SCOPE_SQL = byRoom ? "r.Id = @ScopeId" : "r.LevelId = @ScopeId";
+  const rows = await executeQuery(
+    connection,
+    `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+            r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
+            p.Id AS PointId, p.Description AS PointDescription,
+            p.AddedAt AS PointAddedAt, p.AddedById AS PointAddedById, p.AddedByName AS PointAddedByName,
+            a.Id AS AttachmentId, a.BlobName, a.FileName,
+            a.UploadedAt, a.UploadedById, a.UploadedByName
+     FROM dbo.InspectionRooms r
+     LEFT JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
+     LEFT JOIN dbo.InspectionAttachments a ON a.PointId = p.Id
+     WHERE ${SCOPE_SQL}
+     ORDER BY r.SortOrder, r.AddedAt, r.Id, p.SortOrder, p.AddedAt, p.Id, a.UploadedAt, a.Id`,
+    [{ name: "ScopeId", type: TYPES.NVarChar, value: byRoom ? scope.roomId : scope.levelId }],
+  );
+  const rooms = new Map<string, RemovedRoom>();
+  const points = new Map<string, RemovedPoint>();
+  for (const row of rows) {
+    let room = rooms.get(row.RoomId);
+    if (!room) {
+      room = {
+        addedAt: isoOrNull(row.RoomAddedAt),
+        addedById: textOrNull(row.RoomAddedById),
+        addedByName: textOrNull(row.RoomAddedByName),
+        description: row.RoomDescription ?? "",
+        id: row.RoomId,
+        name: row.RoomName,
+        points: [],
+      };
+      rooms.set(row.RoomId, room);
+    }
+    if (row.PointId == null) continue;
+    let point = points.get(row.PointId);
+    if (!point) {
+      point = {
+        addedAt: isoOrNull(row.PointAddedAt),
+        addedById: textOrNull(row.PointAddedById),
+        addedByName: textOrNull(row.PointAddedByName),
+        attachments: [],
+        description: row.PointDescription ?? "",
+        id: row.PointId,
+      };
+      points.set(row.PointId, point);
+      room.points.push(point);
+    }
+    if (row.AttachmentId != null) {
+      point.attachments.push({
+        blobName: row.BlobName,
+        fileName: row.FileName,
+        id: row.AttachmentId,
+        uploadedAt: isoOrNull(row.UploadedAt),
+        uploadedById: textOrNull(row.UploadedById),
+        uploadedByName: textOrNull(row.UploadedByName),
+      });
+    }
+  }
+  return [...rooms.values()];
+}
+
+async function applyOne(
+  connection: any,
+  inspectionId: number,
+  op: any,
+  identity: { oid: string; name: string },
+  loadLedgerActor: (conn: any) => Promise<LedgerActor>,
+): Promise<void> {
   switch (op?.type) {
+    case "updateInspection": {
+      // Only the title is patchable at inspection level. An explicit
+      // `title: null` (or an empty/whitespace-only string) clears it;
+      // Title is NVARCHAR(200) per m034.
+      const rawTitle = op.patch?.title;
+      if (rawTitle !== null && typeof rawTitle !== "string") {
+        throw new Error("updateInspection requires patch.title as a string or null");
+      }
+      const title = typeof rawTitle === "string" ? rawTitle.trim() : null;
+      if (title !== null && title.length > 200) {
+        throw new Error("updateInspection: title exceeds 200 characters");
+      }
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Inspections SET Title = @Title WHERE Id = @InspectionId`,
+        [
+          { name: "Title",        type: TYPES.NVarChar, value: title || null },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      return;
+    }
     case "addLevel": {
+      // Level names are free text: a building with no configured levels (the
+      // family residences, m093) needs "Ground floor" / "Whole property", and a
+      // configured building may add a name that isn't in its list. So the name
+      // is validated here against the column, never against a picklist — and
+      // an over-long one is rejected explicitly rather than as an opaque SQL
+      // truncation error.
+      const levelName = typeof op.name === "string" ? op.name.trim() : "";
+      if (levelName.length === 0) {
+        throw new Error("addLevel requires a non-empty name");
+      }
+      if (levelName.length > MAX_LEVEL_NAME_LENGTH) {
+        throw new Error(`addLevel: name exceeds ${MAX_LEVEL_NAME_LENGTH} characters`);
+      }
       await executeQuery(
         connection,
         `INSERT INTO dbo.InspectionLevels (Id, InspectionId, Name, AddedAt)
@@ -640,7 +890,7 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
         [
           { name: "Id",           type: TYPES.NVarChar, value: op.levelId },
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
-          { name: "Name",         type: TYPES.NVarChar, value: op.name },
+          { name: "Name",         type: TYPES.NVarChar, value: levelName },
           { name: "AddedAt",      type: TYPES.NVarChar, value: op.addedAt },
         ],
       );
@@ -650,14 +900,51 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
          VALUES (@LevelId, @UserId, @UserName)`,
         [
           { name: "LevelId",  type: TYPES.NVarChar, value: op.levelId },
-          { name: "UserId",   type: TYPES.NVarChar, value: op.addedBy?.id ?? "unknown" },
-          { name: "UserName", type: TYPES.NVarChar, value: op.addedBy?.name ?? "Unknown" },
+          // Audit provenance comes from the verified token, never the client op.
+          { name: "UserId",   type: TYPES.NVarChar, value: identity.oid },
+          { name: "UserName", type: TYPES.NVarChar, value: identity.name },
         ],
       );
       return;
     }
     case "removeLevel": {
       // ON DELETE CASCADE handles rooms → points → attachments + contributors.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first, with every room, point and photo record in Before (as
+      // several rows when it is too big for one); a failed ledger write rejects
+      // the op and nothing is deleted. The photo blobs stay in storage (never
+      // removed here).
+      const foundLevel = await executeQuery(
+        connection,
+        `SELECT l.Id AS LevelId, l.Name AS LevelName, l.AddedAt AS LevelAddedAt, i.BuildingId
+         FROM dbo.InspectionLevels l
+         JOIN dbo.Inspections i ON i.Id = l.InspectionId
+         WHERE l.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.levelId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundLevel.length > 0) {
+        const rooms = await loadRemovedRooms(connection, { levelId: op.levelId });
+        // The people who contributed to the level go too (the cascade drops them).
+        const contributorRows = await executeQuery(
+          connection,
+          `SELECT UserId, UserName FROM dbo.InspectionLevelContributors WHERE LevelId = @LevelId ORDER BY UserName, UserId`,
+          [{ name: "LevelId", type: TYPES.NVarChar, value: op.levelId }],
+        );
+        const contributors: RemovedContributor[] = contributorRows.map((c) => ({ id: c.UserId, name: c.UserName }));
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (foundLevel[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: levelRemoval(
+            { addedAt: isoOrNull(foundLevel[0].LevelAddedAt), id: foundLevel[0].LevelId, name: foundLevel[0].LevelName },
+            rooms,
+            contributors,
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE FROM dbo.InspectionLevels WHERE Id = @Id AND InspectionId = @InspectionId`,
@@ -671,16 +958,22 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
     case "addRoom": {
       await executeQuery(
         connection,
+        // INSERT…SELECT scopes the room to a level in THIS inspection: a forged
+        // levelId from another inspection matches no row and inserts nothing.
         `INSERT INTO dbo.InspectionRooms (Id, LevelId, Name, Description, AddedAt, AddedById, AddedByName)
-         VALUES (@Id, @LevelId, @Name, @Description, @AddedAt, @AddedById, @AddedByName)`,
+         SELECT @Id, @LevelId, @Name, @Description, @AddedAt, @AddedById, @AddedByName
+         FROM dbo.InspectionLevels l
+         WHERE l.Id = @LevelId AND l.InspectionId = @InspectionId;
+         IF @@ROWCOUNT = 0 THROW 50409, 'addRoom: level not found in this inspection', 1;`,
         [
-          { name: "Id",          type: TYPES.NVarChar, value: op.roomId },
-          { name: "LevelId",     type: TYPES.NVarChar, value: op.levelId },
-          { name: "Name",        type: TYPES.NVarChar, value: op.name },
-          { name: "Description", type: TYPES.NVarChar, value: op.description ?? null },
-          { name: "AddedAt",     type: TYPES.NVarChar, value: op.addedAt },
-          { name: "AddedById",   type: TYPES.NVarChar, value: op.addedBy?.id ?? "unknown" },
-          { name: "AddedByName", type: TYPES.NVarChar, value: op.addedBy?.name ?? "Unknown" },
+          { name: "Id",           type: TYPES.NVarChar, value: op.roomId },
+          { name: "LevelId",      type: TYPES.NVarChar, value: op.levelId },
+          { name: "Name",         type: TYPES.NVarChar, value: op.name },
+          { name: "Description",  type: TYPES.NVarChar, value: op.description ?? null },
+          { name: "AddedAt",      type: TYPES.NVarChar, value: op.addedAt },
+          { name: "AddedById",    type: TYPES.NVarChar, value: identity.oid },
+          { name: "AddedByName",  type: TYPES.NVarChar, value: identity.name },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
       return;
@@ -716,6 +1009,43 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "removeRoom": {
+      // Same ledger-first rule as removeLevel and removePoint: the room's text,
+      // its level, and each point's text and photo records go in Before.
+      const foundRoom = await executeQuery(
+        connection,
+        `SELECT r.Id AS RoomId, r.Name AS RoomName, r.Description AS RoomDescription,
+                r.AddedAt AS RoomAddedAt, r.AddedById AS RoomAddedById, r.AddedByName AS RoomAddedByName,
+                l.Id AS LevelId, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE r.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.roomId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (foundRoom.length > 0) {
+        const [room] = await loadRemovedRooms(connection, { roomId: op.roomId });
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (foundRoom[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: roomRemoval(
+            {
+              addedAt: isoOrNull(foundRoom[0].RoomAddedAt),
+              addedById: textOrNull(foundRoom[0].RoomAddedById),
+              addedByName: textOrNull(foundRoom[0].RoomAddedByName),
+              description: foundRoom[0].RoomDescription ?? "",
+              id: foundRoom[0].RoomId,
+              levelId: foundRoom[0].LevelId,
+              levelName: foundRoom[0].LevelName,
+              name: foundRoom[0].RoomName,
+            },
+            room?.points ?? [],
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE r
@@ -730,17 +1060,25 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "addPoint": {
+      assertPointTextLength(op.description, "addPoint");
       await executeQuery(
         connection,
+        // INSERT…SELECT scopes the point to a room in THIS inspection: a forged
+        // roomId from another inspection matches no row and inserts nothing.
         `INSERT INTO dbo.InspectionPoints (Id, RoomId, Description, AddedAt, AddedById, AddedByName, LastModifiedAt)
-         VALUES (@Id, @RoomId, @Description, @AddedAt, @AddedById, @AddedByName, @AddedAt)`,
+         SELECT @Id, @RoomId, @Description, @AddedAt, @AddedById, @AddedByName, @AddedAt
+         FROM dbo.InspectionRooms  r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE r.Id = @RoomId AND l.InspectionId = @InspectionId;
+         IF @@ROWCOUNT = 0 THROW 50409, 'addPoint: room not found in this inspection', 1;`,
         [
-          { name: "Id",          type: TYPES.NVarChar, value: op.pointId },
-          { name: "RoomId",      type: TYPES.NVarChar, value: op.roomId },
-          { name: "Description", type: TYPES.NVarChar, value: op.description ?? "" },
-          { name: "AddedAt",     type: TYPES.NVarChar, value: op.addedAt },
-          { name: "AddedById",   type: TYPES.NVarChar, value: op.addedBy?.id ?? "unknown" },
-          { name: "AddedByName", type: TYPES.NVarChar, value: op.addedBy?.name ?? "Unknown" },
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "RoomId",       type: TYPES.NVarChar, value: op.roomId },
+          { name: "Description",  type: TYPES.NVarChar, value: op.description ?? "" },
+          { name: "AddedAt",      type: TYPES.NVarChar, value: op.addedAt },
+          { name: "AddedById",    type: TYPES.NVarChar, value: identity.oid },
+          { name: "AddedByName",  type: TYPES.NVarChar, value: identity.name },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
       return;
@@ -749,6 +1087,7 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       if (op.patch?.description === undefined) {
         throw new Error("updatePoint requires patch.description");
       }
+      assertPointTextLength(op.patch.description, "updatePoint");
       // JOIN Point → Room → Level → Inspection so the WHERE asserts the
       // point actually lives under the inspection this op claims to mutate.
       await executeQuery(
@@ -768,6 +1107,58 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "removePoint": {
+      // Every removal is written to the decision ledger in this same transaction,
+      // with the point's text and its photo records in Before (as several rows when
+      // it is too big for one): if the ledger cannot be written the op is rolled
+      // back to its savepoint and rejected, so nothing goes unlogged. The photo
+      // blobs stay in storage (never removed here).
+      const found = await executeQuery(
+        connection,
+        `SELECT p.Id AS PointId, p.RoomId, p.Description, p.AddedAt, p.AddedById, p.AddedByName,
+                r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
+         FROM dbo.InspectionPoints p
+         JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
+         WHERE p.Id = @Id AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Id",           type: TYPES.NVarChar, value: op.pointId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (found.length > 0) {
+        const photos = await executeQuery(
+          connection,
+          `SELECT a.Id, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName
+           FROM dbo.InspectionAttachments a WHERE a.PointId = @Id ORDER BY a.UploadedAt, a.Id`,
+          [{ name: "Id", type: TYPES.NVarChar, value: op.pointId }],
+        );
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (found[0].BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: pointRemoval(
+            {
+              addedAt: isoOrNull(found[0].AddedAt),
+              addedById: textOrNull(found[0].AddedById),
+              addedByName: textOrNull(found[0].AddedByName),
+              description: found[0].Description ?? "",
+              id: found[0].PointId,
+              levelName: found[0].LevelName,
+              roomId: found[0].RoomId,
+              roomName: found[0].RoomName,
+            },
+            photos.map((photo) => ({
+              blobName: photo.BlobName,
+              fileName: photo.FileName,
+              id: photo.Id,
+              uploadedAt: isoOrNull(photo.UploadedAt),
+              uploadedById: textOrNull(photo.UploadedById),
+              uploadedByName: textOrNull(photo.UploadedByName),
+            })),
+          ),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE p
@@ -783,6 +1174,12 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
       return;
     }
     case "addAttachment": {
+      // Only blobs minted by /uploadInspectionAttachment may be catalogued —
+      // an arbitrary client-supplied name could alias another container path
+      // (job attachments, PO PDFs, …) into this inspection.
+      if (!isValidInspectionBlobName(op.blobName)) {
+        throw new Error("addAttachment: blobName is not an inspection upload");
+      }
       // Guard the insert: the target Point must belong to this inspection.
       // Conditional INSERT … SELECT lets us assert the chain in a single
       // round trip without a separate existence query.
@@ -802,30 +1199,56 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
           { name: "BlobName",       type: TYPES.NVarChar, value: op.blobName },
           { name: "FileName",       type: TYPES.NVarChar, value: op.fileName },
           { name: "UploadedAt",     type: TYPES.NVarChar, value: op.uploadedAt },
-          { name: "UploadedById",   type: TYPES.NVarChar, value: op.uploadedBy?.id ?? "unknown" },
-          { name: "UploadedByName", type: TYPES.NVarChar, value: op.uploadedBy?.name ?? "Unknown" },
+          // Audit provenance comes from the verified token, never the client op.
+          { name: "UploadedById",   type: TYPES.NVarChar, value: identity.oid },
+          { name: "UploadedByName", type: TYPES.NVarChar, value: identity.name },
         ],
       );
       return;
     }
     case "removeAttachment": {
-      // Scope both the BlobName lookup and the DELETE to this inspection via
-      // the Point → Room → Level chain. Without it any attachment Id from
-      // another inspection could be deleted.
+      // Like removePoint, the removal is written to the decision ledger in this
+      // transaction first (the photo record, with who uploaded it and when); a
+      // failed ledger write rejects the op and nothing is removed. The file stays
+      // in storage: a photo can be copied onto a job, and only the record goes.
+      // Both the lookup and the DELETE are scoped to this inspection via the
+      // Point → Room → Level chain, so an attachment Id from another inspection
+      // matches nothing.
       const rows = await executeQuery(
         connection,
-        `SELECT a.BlobName
+        `SELECT a.Id, a.PointId, a.BlobName, a.FileName, a.UploadedAt, a.UploadedById, a.UploadedByName,
+                p.RoomId, r.Name AS RoomName, l.Name AS LevelName, i.BuildingId
          FROM dbo.InspectionAttachments a
          JOIN dbo.InspectionPoints p ON p.Id = a.PointId
          JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
          JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         JOIN dbo.Inspections      i ON i.Id = l.InspectionId
          WHERE a.Id = @Id AND l.InspectionId = @InspectionId`,
         [
           { name: "Id",           type: TYPES.NVarChar, value: op.attachmentId },
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      const blobName = rows[0]?.BlobName as string | undefined;
+      if (rows.length > 0) {
+        const photo = rows[0];
+        await recordInspectionRemoval(connection, {
+          actor: await loadLedgerActor(connection),
+          buildingId: (photo.BuildingId as number | null) ?? null,
+          inspectionId,
+          removal: photoRemoval({
+            blobName: photo.BlobName,
+            fileName: photo.FileName,
+            id: photo.Id,
+            levelName: photo.LevelName,
+            pointId: photo.PointId,
+            roomId: photo.RoomId,
+            roomName: photo.RoomName,
+            uploadedAt: isoOrNull(photo.UploadedAt),
+            uploadedById: textOrNull(photo.UploadedById),
+            uploadedByName: textOrNull(photo.UploadedByName),
+          }),
+        });
+      }
       await executeQuery(
         connection,
         `DELETE a
@@ -839,9 +1262,84 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
           { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
         ],
       );
-      if (blobName) {
-        try { await deleteBlob(blobName); } catch { /* best effort — orphan blob isn't fatal */ }
+      return;
+    }
+    case "linkRooms": {
+      const roomIds: string[] = Array.isArray(op.roomIds) ? op.roomIds : [];
+      if (roomIds.length < 2) {
+        throw new Error("linkRooms requires at least two roomIds");
       }
+      const [keeperId, ...sourceIds] = roomIds;
+
+      // Guard: the keeper must live on the named level of THIS inspection.
+      const keeperRows = await executeQuery(
+        connection,
+        `SELECT 1
+         FROM dbo.InspectionRooms r
+         JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+         WHERE r.Id = @Keeper AND r.LevelId = @LevelId AND l.InspectionId = @InspectionId`,
+        [
+          { name: "Keeper",       type: TYPES.NVarChar, value: keeperId },
+          { name: "LevelId",      type: TYPES.NVarChar, value: op.levelId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
+      if (keeperRows.length === 0) {
+        throw new Error("linkRooms keeper is not on the named level of this inspection");
+      }
+
+      // Re-parent each source room's points into the keeper. The Room->Level
+      // chain + LevelId/InspectionId scoping makes a cross-inspection or
+      // cross-floor source id a harmless no-op.
+      for (const sourceId of sourceIds) {
+        await executeQuery(
+          connection,
+          `UPDATE p
+             SET p.RoomId = @Keeper
+           FROM dbo.InspectionPoints p
+           JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+           JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+           WHERE p.RoomId = @Source AND r.LevelId = @LevelId AND l.InspectionId = @InspectionId`,
+          [
+            { name: "Keeper",       type: TYPES.NVarChar, value: keeperId },
+            { name: "Source",       type: TYPES.NVarChar, value: sourceId },
+            { name: "LevelId",      type: TYPES.NVarChar, value: op.levelId },
+            { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+          ],
+        );
+        await executeQuery(
+          connection,
+          `DELETE r
+           FROM dbo.InspectionRooms r
+           JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+           WHERE r.Id = @Source AND r.LevelId = @LevelId AND l.InspectionId = @InspectionId`,
+          [
+            { name: "Source",       type: TYPES.NVarChar, value: sourceId },
+            { name: "LevelId",      type: TYPES.NVarChar, value: op.levelId },
+            { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+          ],
+        );
+      }
+
+      // Renumber the keeper's points by AddedAt so the reloaded order
+      // (ORDER BY SortOrder, AddedAt) matches the optimistic client order.
+      await executeQuery(
+        connection,
+        `;WITH ordered AS (
+           SELECT p.Id, ROW_NUMBER() OVER (ORDER BY p.AddedAt, p.Id) AS rn
+           FROM dbo.InspectionPoints p
+           JOIN dbo.InspectionRooms  r ON r.Id = p.RoomId
+           JOIN dbo.InspectionLevels l ON l.Id = r.LevelId
+           WHERE p.RoomId = @Keeper AND l.InspectionId = @InspectionId
+         )
+         UPDATE p SET p.SortOrder = o.rn
+         FROM dbo.InspectionPoints p
+         JOIN ordered o ON o.Id = p.Id`,
+        [
+          { name: "Keeper",       type: TYPES.NVarChar, value: keeperId },
+          { name: "InspectionId", type: TYPES.Int,      value: inspectionId },
+        ],
+      );
       return;
     }
     case "complete":
@@ -856,7 +1354,7 @@ async function applyOne(connection: any, inspectionId: number, op: any): Promise
 
 // ── POST /api/completeInspection ─────────────────────────────────────────────
 
-async function completeInspection(
+export async function completeInspection(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -878,23 +1376,37 @@ async function completeInspection(
     if (!inspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
-    await executeQuery(
+    connection = await createRequestConnection(token);
+
+    const rows = await executeQuery(
       connection,
-      `UPDATE dbo.Inspections
-       SET Status = 'complete',
-           CompletedAt = SYSUTCDATETIME(),
-           CompletedById = @CompletedById,
-           CompletedByName = @CompletedByName,
-           LastModifiedAt = SYSUTCDATETIME(),
-           Revision = Revision + 1
-       WHERE Id = @Id AND Status = 'draft'`,
-      [
-        { name: "Id",              type: TYPES.Int,      value: inspectionId },
-        { name: "CompletedById",   type: TYPES.NVarChar, value: caller.id },
-        { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
-      ],
+      `SELECT Status FROM dbo.Inspections WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: inspectionId }],
     );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    const status = rows[0].Status as string;
+    if (status === "merged") {
+      return { status: 400, jsonBody: { error: "Merged inspections cannot be completed" } };
+    }
+    // Already complete → idempotent no-op: return the current row unchanged.
+    if (status === "draft") {
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Inspections
+         SET Status = 'complete',
+             CompletedAt = SYSUTCDATETIME(),
+             CompletedById = @CompletedById,
+             CompletedByName = @CompletedByName,
+             LastModifiedAt = SYSUTCDATETIME(),
+             Revision = Revision + 1
+         WHERE Id = @Id AND Status = 'draft'`,
+        [
+          { name: "Id",              type: TYPES.Int,      value: inspectionId },
+          { name: "CompletedById",   type: TYPES.NVarChar, value: caller.id },
+          { name: "CompletedByName", type: TYPES.NVarChar, value: caller.name },
+        ],
+      );
+    }
     const inspection = await loadInspection(connection, inspectionId);
     return { status: 200, jsonBody: { inspection } };
   } catch (error: any) {
@@ -928,7 +1440,26 @@ async function revertInspection(
     const inspectionId: number | undefined = body?.InspectionId ?? body?.inspectionId;
     if (!inspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+
+    // Ownership gate: base editors may only reopen an inspection they created;
+    // admin / director / facilities_approval may reopen any (mirrors the
+    // own-row gate in deleteInspection).
+    const rows = await executeQuery(
+      connection,
+      `SELECT CreatedById FROM dbo.Inspections WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+    );
+    if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    const roles = await rolesForRequest(request);
+    const canRevertAny =
+      roles.includes(AppRole.ADMIN) ||
+      roles.includes(AppRole.DIRECTOR) ||
+      roles.includes(AppRole.FACILITIES_APPROVAL);
+    if (!canRevertAny && rows[0].CreatedById !== identity.oid) {
+      return forbiddenResponse("You can only reopen inspections you created.");
+    }
+
     await executeQuery(
       connection,
       `UPDATE dbo.Inspections
@@ -955,7 +1486,7 @@ async function revertInspection(
 // Multipart form: 'file' = the blob to upload. Returns { blobName } so the
 // caller can enqueue an addAttachment op via /applyInspectionOps.
 
-async function uploadInspectionAttachment(
+export async function uploadInspectionAttachment(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -974,6 +1505,13 @@ async function uploadInspectionAttachment(
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     if (!file) return { status: 400, jsonBody: { error: "'file' field required" } };
+    // Same allow-list every other upload endpoint enforces (attachments.ts,
+    // keys.ts, tenancyAttachments.ts). Camera uploads sometimes arrive with no
+    // type — default those to JPEG rather than octet-stream.
+    const contentType = file.type || "image/jpeg";
+    if (!isAllowedContentType(contentType)) {
+      return { status: 415, jsonBody: { error: `File type '${contentType}' is not allowed` } };
+    }
     if (file.size > MAX_ATTACHMENT_BYTES) {
       return {
         status: 413,
@@ -985,7 +1523,7 @@ async function uploadInspectionAttachment(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await uploadBlob(buffer, file.name, file.type || "image/jpeg", "inspections");
+    const result = await uploadBlob(buffer, file.name, contentType, "inspections");
     return {
       status: 200,
       jsonBody: {
@@ -1003,27 +1541,19 @@ async function uploadInspectionAttachment(
 // Body: { InspectionId: number }
 // Only draft inspections can be deleted. Blobs are orphaned (no storage cleanup here).
 
-async function deleteInspection(
+export async function deleteInspection(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roles = await rolesForRequest(request);
-  const canDeleteAny =
-    roles.includes(AppRole.ADMIN) || roles.includes(AppRole.FACILITIES_APPROVAL);
-  const canDeleteOwn = roles.includes(AppRole.FACILITIES);
-  if (!canDeleteAny && !canDeleteOwn) return forbiddenResponse();
+  const roleCheck = await requireRole(request, EDIT_INSPECTIONS_ROLES);
+  if (roleCheck) return roleCheck;
 
-  // Audit + own-row check both rely on a *verified* OID. oidFromToken just
-  // parses the JWT body without checking the signature — fine when used
-  // alongside requireRole, but a service-connection write that gates on
-  // identity must compare against the verified value.
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
-  const callerOid = identity.oid;
-  const rl = checkRateLimit(`deleteInspection:${callerOid}`, INSPECTION_WRITE_LIMIT);
+  const rl = checkRateLimit(`deleteInspection:${identity.oid}`, INSPECTION_WRITE_LIMIT);
   if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
@@ -1032,7 +1562,7 @@ async function deleteInspection(
     const { InspectionId } = body ?? {};
     if (!InspectionId) return { status: 400, jsonBody: { error: "InspectionId required" } };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
@@ -1044,33 +1574,59 @@ async function deleteInspection(
       return { status: 400, jsonBody: { error: "Only draft inspections can be deleted" } };
     }
 
-    if (!canDeleteAny && rows[0].CreatedById !== callerOid) {
+    // Ownership gate: base editors may only delete an inspection they created;
+    // admin / director / facilities_approval may delete any (mirrors the
+    // own-row gate in revertInspection).
+    const roles = await rolesForRequest(request);
+    const canDeleteAny =
+      roles.includes(AppRole.ADMIN) ||
+      roles.includes(AppRole.DIRECTOR) ||
+      roles.includes(AppRole.FACILITIES_APPROVAL);
+    if (!canDeleteAny && rows[0].CreatedById !== identity.oid) {
       return forbiddenResponse("You can only delete inspections you created.");
     }
 
-    // Delete non-cascading child rows first.
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-    );
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.InspectionOperationLog WHERE InspectionId = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-    );
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id OR SourceInspectionId = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-    );
-
-    // Deleting the root row cascades to levels → rooms → points → attachments.
-    await executeQuery(
-      connection,
-      `DELETE FROM dbo.Inspections WHERE Id = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-    );
+    // Delete non-cascading child rows first, then the root (which cascades to
+    // levels → rooms → points → attachments). All four run in one transaction
+    // so a mid-sequence failure can't leave a half-deleted inspection behind.
+    await beginTransaction(connection);
+    try {
+      await executeQuery(
+        connection,
+        `DELETE FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+      );
+      await executeQuery(
+        connection,
+        `DELETE FROM dbo.InspectionOperationLog WHERE InspectionId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+      );
+      await executeQuery(
+        connection,
+        `DELETE FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id OR SourceInspectionId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+      );
+      // If this row is a merge target, the source husks still reference it via
+      // Inspections.MergedIntoId (FK, m034) and would make the root DELETE fail
+      // with an FK violation. Detach them and revert them to draft so they
+      // render as normal drafts and become individually deletable again.
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Inspections
+         SET MergedIntoId = NULL, Status = 'draft', LastModifiedAt = SYSUTCDATETIME()
+         WHERE MergedIntoId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+      );
+      await executeQuery(
+        connection,
+        `DELETE FROM dbo.Inspections WHERE Id = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+      );
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
 
     context.log(`deleteInspection: deleted inspection ${InspectionId}`);
     return { status: 200, jsonBody: { deleted: true } };
@@ -1085,7 +1641,7 @@ async function deleteInspection(
 // ── POST /api/mergeInspections ───────────────────────────────────────────────
 // Body: { SourceIds: number[], Title?: string }
 
-async function mergeInspections(
+export async function mergeInspections(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -1110,31 +1666,48 @@ async function mergeInspections(
     }
     const caller: UserRef = { id: identity.oid, name: identity.name };
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
-    // Validate sources: all draft, all same building
     const placeholders = sourceIds.map((_, idx) => `@S${idx}`).join(",");
     const params = sourceIds.map((id, idx) => ({ name: `S${idx}`, type: TYPES.Int, value: id }));
-    const sourceRows = await executeQuery(
-      connection,
-      // eslint-disable-next-line local/no-sql-interpolation -- placeholders is built locally as "@S0,@S1,..." with bound params
-      `SELECT Id, BuildingId, Status FROM dbo.Inspections WHERE Id IN (${placeholders})`,
-      params,
-    );
-    if (sourceRows.length !== sourceIds.length) {
-      return { status: 404, jsonBody: { error: "One or more source inspections not found" } };
-    }
-    if (sourceRows.some((r) => r.Status !== "draft")) {
-      return { status: 400, jsonBody: { error: "Only draft inspections can be merged" } };
-    }
-    const buildingIds = new Set(sourceRows.map((r) => r.BuildingId as number));
-    if (buildingIds.size > 1) {
-      return { status: 400, jsonBody: { error: "All sources must be in the same building" } };
-    }
-    const buildingId = sourceRows[0].BuildingId as number;
 
     await beginTransaction(connection);
     try {
+      // Validate sources under a row lock (UPDLOCK/HOLDLOCK) so a concurrent
+      // completeInspection or merge can't change their status or building
+      // between this check and the merge below.
+      const sourceRows = await executeQuery(
+        connection,
+        `SELECT Id, BuildingId, Status, CreatedById FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id IN (${placeholders})`,
+        params,
+      );
+      if (sourceRows.length !== sourceIds.length) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "One or more source inspections not found" } };
+      }
+      // Ownership gate: base editors may only merge drafts they all created;
+      // admin / director / facilities_approval may merge any (mirrors the
+      // own-row gate in revertInspection / deleteInspection — a merge consumes
+      // its sources irreversibly).
+      const roles = await rolesForRequest(request);
+      const canMergeAny =
+        roles.includes(AppRole.ADMIN) ||
+        roles.includes(AppRole.DIRECTOR) ||
+        roles.includes(AppRole.FACILITIES_APPROVAL);
+      if (!canMergeAny && sourceRows.some((r) => r.CreatedById !== identity.oid)) {
+        await rollbackTransaction(connection).catch(() => {});
+        return forbiddenResponse("You can only merge inspections you created.");
+      }
+      if (sourceRows.some((r) => r.Status !== "draft")) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: "Only draft inspections can be merged" } };
+      }
+      const buildingIds = new Set(sourceRows.map((r) => r.BuildingId as number));
+      if (buildingIds.size > 1) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: "All sources must be in the same building" } };
+      }
+      const buildingId = sourceRows[0].BuildingId as number;
       // Create the merged inspection
       const inserted = await executeQuery(
         connection,
@@ -1153,7 +1726,6 @@ async function mergeInspections(
       // Pull source levels grouped by name → merge into the new inspection
       const sourceLevels = await executeQuery(
         connection,
-        // eslint-disable-next-line local/no-sql-interpolation -- placeholders is built locally as "@S0,@S1,..." with bound params
         `SELECT l.Id, l.InspectionId, l.Name, l.AddedAt, l.SortOrder
          FROM dbo.InspectionLevels l
          WHERE l.InspectionId IN (${placeholders})
@@ -1238,10 +1810,24 @@ async function mergeInspections(
         );
       }
 
+      // Re-parent raised-job links and job backlinks onto the merge target —
+      // loadInspection and the list counts join on InspectionId /
+      // SourceInspectionId, so without this the merged inspection loses all
+      // raised-job linkage.
+      await executeQuery(
+        connection,
+        `UPDATE dbo.InspectionRaisedJobs SET InspectionId = @TargetId WHERE InspectionId IN (${placeholders})`,
+        [...params, { name: "TargetId", type: TYPES.Int, value: newId }],
+      );
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Jobs SET SourceInspectionId = @TargetId WHERE SourceInspectionId IN (${placeholders})`,
+        [...params, { name: "TargetId", type: TYPES.Int, value: newId }],
+      );
+
       // Drop the now-empty source levels (rooms have been re-parented).
       await executeQuery(
         connection,
-        // eslint-disable-next-line local/no-sql-interpolation -- placeholders is built locally as "@S0,@S1,..." with bound params
         `DELETE FROM dbo.InspectionLevels WHERE InspectionId IN (${placeholders})`,
         params,
       );
@@ -1272,6 +1858,15 @@ async function mergeInspections(
 //            Jobs row is created per room, with a combined description and
 //            every contributing point linked to it via InspectionRaisedJobs.
 //
+// Or, in place of PointIds and Mode (SC-AI6, suggested jobs a person reviewed):
+//   Groups: [{ PointIds[], Priority?, Title? }]
+// Each group is exactly one Jobs row from its not-yet-raised points, whatever rooms
+// or levels they sit in. Title (after DescriptionPrefix) and Priority are the
+// person's; without them the job is titled and prioritised as the modes above.
+// Sending Groups together with PointIds or Mode is a 400, so a backend from before
+// this field (which ignores it) refuses the request instead of raising a job per
+// finding. Everything below is shared by both forms: the one route, one transaction.
+//
 // For each Job the endpoint also:
 //   1. Inserts a `creation` JobEvents row (CreationSource = "inspection") so
 //      the activity feed mirrors a manually-created job.
@@ -1282,6 +1877,14 @@ async function mergeInspections(
 //      inspection UI marks the point as "Job raised".
 //
 // All writes run in one transaction — partial raises don't get persisted.
+//
+// Idempotent: a point already linked in dbo.InspectionRaisedJobs is SKIPPED and
+// reported in `skippedPointIds` (never raised twice). A retry after a lost
+// response, or two people raising the same inspection, therefore can't create
+// duplicate jobs. The links are read under an UPDLOCK on the inspection row so
+// concurrent raisers serialise — the second sees the first's links.
+// Response: { jobs, pointIds (raised now), skippedPointIds (already had a job) }.
+// A request whose points were all skipped is a 200 with `jobs: []`.
 
 interface RaiseJobsBody {
   Defaults?: {
@@ -1291,12 +1894,16 @@ interface RaiseJobsBody {
     Priority?: string;
     SubType?: string;
   };
+  /** Validated by parseRaiseGroups before it is used. */
+  Groups?: unknown;
   InspectionId?: number;
   Mode?: "per-point" | "per-room";
   PointIds?: string[];
 }
 
 interface PointContext {
+  /** Photos on the point — a finding can be photo-only (empty description). */
+  attachmentCount: number;
   description: string;
   levelName: string;
   pointId: string;
@@ -1309,7 +1916,14 @@ interface RaisedJobOutput {
   pointIds: string[];
 }
 
-async function raiseJobsFromInspection(
+/** The findings that become one job, and what a person chose for it (only Groups carry a choice). */
+interface JobBatch {
+  points: PointContext[];
+  priority?: string;
+  title?: string;
+}
+
+export async function raiseJobsFromInspection(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -1329,31 +1943,59 @@ async function raiseJobsFromInspection(
     const body = (await request.json()) as RaiseJobsBody;
     const inspectionId = body?.InspectionId;
     const pointIds = Array.isArray(body?.PointIds) ? body.PointIds : [];
-    const mode = body?.Mode === "per-room" ? "per-room" : "per-point";
+    const mode = body?.Mode ?? "per-point";
     const defaults = body?.Defaults ?? {};
 
-    if (!inspectionId || pointIds.length === 0) {
+    // Groups, when sent, are the whole request: PointIds and Mode must not be there beside them.
+    const sentGroups = body?.Groups !== undefined && body?.Groups !== null;
+    let requestedGroups: RaiseGroup[] | null = null;
+    if (sentGroups) {
+      if (!inspectionId) {
+        return { status: 400, jsonBody: { error: "InspectionId and Groups[] required" } };
+      }
+      if (pointIds.length > 0 || (body.Mode !== undefined && body.Mode !== null)) {
+        return { status: 400, jsonBody: { error: "Send Groups, or PointIds with a Mode, not both." } };
+      }
+    } else if (!inspectionId || pointIds.length === 0) {
       return { status: 400, jsonBody: { error: "InspectionId and PointIds[] required" } };
+    }
+    if (!sentGroups && mode !== "per-point" && mode !== "per-room") {
+      return { status: 400, jsonBody: { error: "Mode must be 'per-point' or 'per-room'" } };
     }
     if (!defaults.JobType || !defaults.Priority) {
       return { status: 400, jsonBody: { error: "Defaults.JobType and Defaults.Priority required" } };
+    }
+    if (sentGroups) {
+      const parsed = parseRaiseGroups(body.Groups);
+      if ("error" in parsed) return { status: 400, jsonBody: { error: parsed.error } };
+      requestedGroups = parsed.groups;
     }
 
     const caller: UserRef = { id: identity.oid, name: identity.name };
     const descriptionPrefix = (defaults.DescriptionPrefix ?? "").trim();
     const assignee = (defaults.AssigneeName ?? "").trim() || caller.name;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Hydrate inspection state from the DB — never trust the client for the
     // text/level/room fields that go onto a real Job.
     const inspection = await loadInspection(connection, inspectionId);
+    const inspectionIsTest = inspection?.isTest === true;
     if (!inspection) {
       return { status: 404, jsonBody: { error: "Inspection not found" } };
     }
+    // Jobs are raised from the read-only review of a completed walkthrough —
+    // mirrors the frontend, which only offers this on completed inspections.
+    if (inspection.status !== "complete") {
+      return { status: 400, jsonBody: { error: "Jobs can only be raised from a completed inspection" } };
+    }
 
+    // A repeated id in one request must not raise two jobs for one finding.
+    const requestedPointIds = requestedGroups
+      ? requestedGroups.flatMap((group) => group.pointIds)
+      : Array.from(new Set(pointIds));
     const pointIndex = buildPointIndex(inspection);
-    const missing = pointIds.filter((id) => !pointIndex.has(id));
+    const missing = requestedPointIds.filter((id) => !pointIndex.has(id));
     if (missing.length > 0) {
       return {
         status: 400,
@@ -1361,42 +2003,73 @@ async function raiseJobsFromInspection(
       };
     }
 
-    // Group selected points into one batch per Job-to-create. The `missing`
-    // check above already rejected any id not in pointIndex, so a fresh lookup
-    // here can only miss if the inspection was mutated concurrently — in that
-    // case bail with a 409 rather than crashing on a non-null assertion.
-    const groups: PointContext[][] = [];
-    if (mode === "per-room") {
-      const byRoom = new Map<string, PointContext[]>();
-      for (const id of pointIds) {
-        const ctx = pointIndex.get(id);
-        if (!ctx) {
-          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
-        }
-        const list = byRoom.get(ctx.roomId);
-        if (list) list.push(ctx);
-        else byRoom.set(ctx.roomId, [ctx]);
-      }
-      for (const list of byRoom.values()) groups.push(list);
-    } else {
-      for (const id of pointIds) {
-        const ctx = pointIndex.get(id);
-        if (!ctx) {
-          return { status: 409, jsonBody: { error: `Point ${id} no longer exists`, code: "POINT_GONE" } };
-        }
-        groups.push([ctx]);
-      }
-    }
-
     const raised: RaisedJobOutput[] = [];
+    let raisedPointIds: string[] = [];
+    let skippedPointIds: string[] = [];
 
     await beginTransaction(connection);
     try {
-      for (const group of groups) {
+      // Lock the inspection row first so concurrent raisers (or a retry racing
+      // its own lost response) serialise, then read the existing links under
+      // that lock — the later request sees the earlier one's links and skips
+      // them. Also re-asserts the status gate now that the row can't change.
+      const locked = await executeQuery(
+        connection,
+        `SELECT Status FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      if (locked.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Inspection not found" } };
+      }
+      if (locked[0].Status !== "complete") {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: "Jobs can only be raised from a completed inspection" } };
+      }
+      const linkedRows = await executeQuery(
+        connection,
+        `SELECT DISTINCT PointId FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      const alreadyRaised = new Set(linkedRows.map((row) => row.PointId as string));
+      skippedPointIds = requestedPointIds.filter((id) => alreadyRaised.has(id));
+      raisedPointIds = requestedPointIds.filter((id) => !alreadyRaised.has(id));
+      if (skippedPointIds.length > 0) {
+        context.log(
+          `raiseJobsFromInspection: skipped ${skippedPointIds.length} point(s) of inspection ${inspectionId} that already have a job`,
+        );
+      }
+
+      // Group the points still to raise into one batch per Job-to-create. The
+      // `missing` check above already rejected any id not in pointIndex, so a
+      // fresh lookup here can only miss if the inspection was mutated
+      // concurrently — bail with a 409 rather than crash on a non-null assertion.
+      const grouped = requestedGroups
+        ? groupPointsByRequest(requestedGroups, alreadyRaised, pointIndex)
+        : groupPointsForJobs(raisedPointIds, mode, pointIndex);
+      if ("goneId" in grouped) {
+        await rollbackTransaction(connection).catch(() => {});
+        return {
+          status: 409,
+          jsonBody: { error: `Point ${grouped.goneId} no longer exists`, code: "POINT_GONE" },
+        };
+      }
+
+      for (const batch of grouped.groups) {
+        const group = batch.points;
         const first = group[0];
-        const title = buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
+        const title = batch.title
+          ? composeGroupTitle(descriptionPrefix, batch.title)
+          : buildJobTitle(descriptionPrefix, first.levelName, first.roomName);
         const description = buildJobDescription(group);
         const isPerRoom = group.length > 1 || mode === "per-room";
+        // A group can span rooms and levels; the job's own fields hold them as text.
+        const levelName = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.levelName), JOB_LEVEL_NAME_MAX)
+          : first.levelName;
+        const exactLocation = requestedGroups
+          ? joinDistinct(group.map((ctx) => ctx.roomName), JOB_EXACT_LOCATION_MAX)
+          : first.roomName;
 
         const inserted = await executeQuery(
           connection,
@@ -1404,16 +2077,18 @@ async function raiseJobsFromInspection(
              BuildingID, Title, Description, AssignedTo, Status, AwaitingRole,
              CreationMethod, CreatedBy,
              SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
-             LevelName, ExactLocation, [Type], SubType, Priority
+             LevelName, ExactLocation, [Type], SubType, Priority, IsTest
            )
            OUTPUT INSERTED.JobID
            VALUES (
              @BuildingID, @Title, @Description, @AssignedTo, 'New', 'facilities',
              'inspection', @CreatedBy,
              @SourceInspectionId, @SourceInspectionRoomId, @SourceInspectionPointId,
-             @LevelName, @ExactLocation, @JobType, @SubType, @Priority
+             @LevelName, @ExactLocation, @JobType, @SubType, @Priority, @IsTest
            )`,
           [
+            // A job raised from a test inspection is a test job (D9).
+            { name: "IsTest", type: TYPES.Bit, value: inspectionIsTest },
             { name: "BuildingID",              type: TYPES.Int,      value: inspection.buildingId },
             { name: "Title",                   type: TYPES.NVarChar, value: title },
             { name: "Description",             type: TYPES.NVarChar, value: description },
@@ -1422,11 +2097,11 @@ async function raiseJobsFromInspection(
             { name: "SourceInspectionId",      type: TYPES.Int,      value: inspectionId },
             { name: "SourceInspectionRoomId",  type: TYPES.NVarChar, value: first.roomId },
             { name: "SourceInspectionPointId", type: TYPES.NVarChar, value: isPerRoom ? null : first.pointId },
-            { name: "LevelName",               type: TYPES.NVarChar, value: first.levelName },
-            { name: "ExactLocation",           type: TYPES.NVarChar, value: first.roomName },
+            { name: "LevelName",               type: TYPES.NVarChar, value: levelName },
+            { name: "ExactLocation",           type: TYPES.NVarChar, value: exactLocation },
             { name: "JobType",                 type: TYPES.NVarChar, value: defaults.JobType },
             { name: "SubType",                 type: TYPES.NVarChar, value: defaults.SubType ?? null },
-            { name: "Priority",                type: TYPES.NVarChar, value: defaults.Priority },
+            { name: "Priority",                type: TYPES.NVarChar, value: batch.priority ?? defaults.Priority },
           ],
         );
         const jobId = inserted[0].JobID as number;
@@ -1470,7 +2145,7 @@ async function raiseJobsFromInspection(
       throw err;
     }
 
-    return { status: 200, jsonBody: { jobs: raised, pointIds } };
+    return { status: 200, jsonBody: { jobs: raised, pointIds: raisedPointIds, skippedPointIds } };
   } catch (error: any) {
     context.error("raiseJobsFromInspection failed:", error.message);
     return errorResponse("Failed to raise jobs", error.message);
@@ -1485,6 +2160,7 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
     for (const room of lvl.rooms) {
       for (const point of room.points) {
         index.set(point.id, {
+          attachmentCount: point.attachments.length,
           description: point.description,
           levelName: lvl.name,
           pointId: point.id,
@@ -1497,16 +2173,72 @@ function buildPointIndex(inspection: InspectionApi): Map<string, PointContext> {
   return index;
 }
 
+type GroupedPoints = { groups: JobBatch[] } | { goneId: string };
+
+// One batch of points per Job-to-create: a batch per point, or a batch per room.
+function groupPointsForJobs(
+  pointIds: string[],
+  mode: "per-point" | "per-room",
+  pointIndex: Map<string, PointContext>,
+): GroupedPoints {
+  if (mode === "per-room") {
+    const byRoom = new Map<string, JobBatch>();
+    for (const id of pointIds) {
+      const ctx = pointIndex.get(id);
+      if (!ctx) return { goneId: id };
+      const batch = byRoom.get(ctx.roomId);
+      if (batch) batch.points.push(ctx);
+      else byRoom.set(ctx.roomId, { points: [ctx] });
+    }
+    return { groups: Array.from(byRoom.values()) };
+  }
+  const groups: JobBatch[] = [];
+  for (const id of pointIds) {
+    const ctx = pointIndex.get(id);
+    if (!ctx) return { goneId: id };
+    groups.push({ points: [ctx] });
+  }
+  return { groups };
+}
+
+// One batch per requested group: the group's findings that have no job yet, as one
+// job. A group whose findings all have jobs already makes none.
+function groupPointsByRequest(
+  requested: RaiseGroup[],
+  alreadyRaised: ReadonlySet<string>,
+  pointIndex: Map<string, PointContext>,
+): GroupedPoints {
+  const groups: JobBatch[] = [];
+  for (const group of requested) {
+    const points: PointContext[] = [];
+    for (const id of group.pointIds) {
+      if (alreadyRaised.has(id)) continue;
+      const ctx = pointIndex.get(id);
+      if (!ctx) return { goneId: id };
+      points.push(ctx);
+    }
+    if (points.length > 0) groups.push({ points, priority: group.priority, title: group.title });
+  }
+  return { groups };
+}
+
 function buildJobTitle(prefix: string, levelName: string, roomName: string): string {
   const location = `${levelName} / ${roomName}`;
   return prefix ? `${prefix} ${location}` : location;
 }
 
+// A photo-only finding has no text: say so, rather than raising a job with an
+// empty description (its photos are copied onto the job).
 function buildJobDescription(group: PointContext[]): string {
-  if (group.length === 1) return group[0].description;
+  if (group.length === 1) {
+    const only = group[0];
+    if (only.description.trim().length > 0) return only.description;
+    return only.attachmentCount > 0 ? "(photo only — see attached photos)" : "(no description)";
+  }
   return group
     .map((ctx) => {
-      const text = ctx.description.trim() || "(no description)";
+      const text =
+        ctx.description.trim() || (ctx.attachmentCount > 0 ? "(photo only)" : "(no description)");
       return `• ${text}`;
     })
     .join("\n");
@@ -1549,3 +2281,52 @@ app.http("deleteInspection",          { authLevel: "anonymous", handler: deleteI
 app.http("uploadInspectionAttachment",{ authLevel: "anonymous", handler: uploadInspectionAttachment,methods: ["POST"] });
 app.http("mergeInspections",          { authLevel: "anonymous", handler: mergeInspections,          methods: ["POST"] });
 app.http("raiseJobsFromInspection",   { authLevel: "anonymous", handler: raiseJobsFromInspection,   methods: ["POST"] });
+
+async function getInspectionPacketPdf(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
+  if (denied) return denied;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`inspectionPacketPdf:${identity.oid}`, PACKET_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
+  const inspectionId = Number(request.params.inspectionId);
+  if (!Number.isFinite(inspectionId) || inspectionId <= 0) {
+    return { status: 400, jsonBody: { error: "inspectionId must be a positive number" } };
+  }
+
+  let connection;
+  try {
+    connection = await createRequestConnection(token);
+    const input = await loadInspectionPacketInputs(connection, inspectionId);
+    if (!input) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    const pdf = await buildInspectionPacket(input);
+    return {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="inspection-${inspectionId}-report.pdf"`,
+      },
+      body: pdf,
+    };
+  } catch (error: any) {
+    context.error("getInspectionPacketPdf failed:", error.message);
+    return errorResponse("Build inspection packet failed", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+app.http("getInspectionPacketPdf", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  route: "inspections/{inspectionId}/packet",
+  handler: getInspectionPacketPdf,
+});

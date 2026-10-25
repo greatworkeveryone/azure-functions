@@ -7,17 +7,20 @@ jest.mock("../auth", () => {
     ...actual,
     requireRole: jest.fn(),
     extractToken: jest.fn(() => "fake-token"),
+    verifiedIdentityFromRequest: jest.fn(async () => ({ oid: "user-1", name: "Test User", email: "test@co.com" })),
+    rolesForRequest: jest.fn(async () => ["admin"]),
   };
 });
 
 jest.mock("../db", () => ({
-  createConnection: jest.fn(async () => ({})),
+  createRequestConnection: jest.fn(async () => ({})),
   closeConnection: jest.fn(),
   executeQuery: jest.fn(async () => []),
 }));
 
 import { requireRole } from "../auth";
 import { executeQuery } from "../db";
+import { _resetRateLimitForTests } from "../rateLimit";
 
 function makeRequest(query: Record<string, string>): HttpRequest {
   return {
@@ -30,6 +33,7 @@ const ctx = {} as InvocationContext;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetRateLimitForTests();
   (requireRole as jest.Mock).mockResolvedValue(null);
 });
 
@@ -194,13 +198,14 @@ describe("SQL injection defence", () => {
     }
   });
 
-  it("passes user input only via @q / @prefix parameters", async () => {
+  it("passes user input only via @q / @prefix parameters (plus the server's Show test data flag, D9)", async () => {
     await search(makeRequest({ q: "anything" }), ctx);
 
     for (const call of (executeQuery as jest.Mock).mock.calls) {
       const [, , params] = call;
       for (const p of params) {
-        expect(["q", "prefix"]).toContain(p.name);
+        expect(["q", "prefix", "ShowTest"]).toContain(p.name);
+        if (p.name === "ShowTest") expect(p.value).toBe(false);
       }
     }
   });

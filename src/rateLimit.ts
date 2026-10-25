@@ -68,3 +68,32 @@ function purgeExpired(now: number): void {
     if (bucket.resetAt <= now) buckets.delete(key);
   }
 }
+
+// ── Sign-in (registerSelf) policy, SEC-10 ─────────────────────────────────────
+// Counted only after the token is verified, so anonymous traffic can never
+// fill a bucket. Per user 20/min; per source IP 120/min, high enough that a
+// whole office behind one NAT signing in at 8am is never refused.
+export const SIGN_IN_LIMITS = {
+  perIp: { limit: 120, windowMs: 60_000 },
+  perOid: { limit: 20, windowMs: 60_000 },
+} as const;
+
+/** Which limit refused a sign-in: the person's own, or the address's. */
+export type SignInBucket = "user" | "address";
+
+export type SignInRateLimitResult =
+  | { allowed: true }
+  | { allowed: false; bucket: SignInBucket; retryAfterMs: number };
+
+/**
+ * `address` is the caller's network address from access/clientIp.ts
+ * clientAddress(), or "unknown" when that cannot be read: those callers share
+ * one bucket, so nothing the caller wrote picks theirs.
+ */
+export function checkSignInRateLimit(oid: string, address: string): SignInRateLimitResult {
+  const byOid = checkRateLimit(`registerSelf:oid:${oid}`, SIGN_IN_LIMITS.perOid);
+  if (!byOid.allowed) return { ...byOid, bucket: "user" };
+  const byAddress = checkRateLimit(`registerSelf:ip:${address}`, SIGN_IN_LIMITS.perIp);
+  if (!byAddress.allowed) return { ...byAddress, bucket: "address" };
+  return byAddress;
+}

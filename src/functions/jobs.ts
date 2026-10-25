@@ -1,7 +1,9 @@
+import { initialAdminDeadline } from "../initialAdminDeadline";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
+import { parseMoneyField } from "../money";
 import {
-  createConnection,
+  createRequestConnection,
   executeQuery,
   closeConnection,
   beginTransaction,
@@ -19,7 +21,12 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { checkRateLimit } from "../rateLimit";
+import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
+import { todayInDarwin } from "../darwinDate";
+import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
+import { isWorkCompletion, markServiceJobCompleted } from "../serviceScheduleRuns";
 import {
   MAX_LIST_ROWS,
   parsePagination,
@@ -34,41 +41,21 @@ import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import {
   AwaitingRole,
+  type JobState,
   JobStatus,
   resolveManualTarget,
 } from "../jobStatusMachine";
+import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
+import { loadJobForTransition } from "../jobTransitionFacts";
+import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
+import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
+import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
+import { JOB_PRIORITIES } from "../jobPriorities";
+import { showTestParam, testFlagForCreate } from "../test-data";
 
-// Archive any job — set on Admin / approval-tier roles. Mirrors the frontend
-// `archiveAnyJob` capability in src/constants/roles.ts. Plain "facilities"
-// users get the OR with Job.CreatedBy === caller.name (handled inline).
-const ARCHIVE_ANY_JOB_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS_APPROVAL,
-];
-
-// Anyone who can create or edit jobs. Facilities team owns this day-to-day;
-// approval tiers and admin retain ability to fix things.
-const EDIT_JOBS_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS,
-  AppRole.ACCOUNTS_APPROVAL,
-] as const;
-
-// Anyone who can read jobs. Same set for now — read access is gated only to
-// keep unauthorised tenants/contractors out, not internal staff.
-const VIEW_JOBS_ROLES = [
-  AppRole.ADMIN,
-  AppRole.DIRECTOR,
-  AppRole.FACILITIES,
-  AppRole.FACILITIES_APPROVAL,
-  AppRole.ACCOUNTS,
-  AppRole.ACCOUNTS_APPROVAL,
-] as const;
+// Who may edit, read and archive jobs is in the who-can-do-what table
+// (action-roles.ts: editJobs, viewJobs, archiveAnyJob). Plain "facilities"
+// users archive only the jobs they created (handled inline in archiveJob).
 
 // ── Column lists ─────────────────────────────────────────────────────────────
 // Keep one source of truth so SELECT shapes match what the frontend expects.
@@ -80,27 +67,27 @@ const JOB_COLUMNS = `
   Status, IsStalled, StalledReason, IsInternal, CreationMethod, SourceEmailID,
   SourceInspectionId, SourceInspectionRoomId, SourceInspectionPointId,
   AwaitingRole,
+  PreBlockStatus, PreBlockAwaitingRole,
+  AcknowledgedAt, AcknowledgedBy, EscalatedAt, StatusSince,
   ExpectedProgressUpdate, CompletionDate,
   ApprovedQuoteID, ApprovedBy, ApprovedAt,
   IsOnchargeable, OnchargeAmount, OnchargeNotes,
+  Kind,
+  IsContract,
   TenantID,
   JobCode, LevelName, TenantName, Category, [Type], SubType, Priority,
   ExactLocation, ContactName, ContactPhone, ContactEmail, PersonAffected,
-  IsArchived, ArchivedAt, ArchivedBy,
+  IsArchived, ArchivedAt, ArchivedBy, IsTest,
   CreatedAt, CreatedBy, LastModifiedDate,
-  -- Count of items on this job currently waiting on director sign-off.
-  -- Drives the "Director needed" filter on the Jobs screen. Covers BOTH
-  -- invoices at stage-1 'approved' (awaiting director) and quotes parked
-  -- in 'awaiting_director' after the submitter routed them up.
-  ((SELECT COUNT(*) FROM JobInvoices ji
-      WHERE ji.JobID = Jobs.JobID AND ji.Status = 'approved')
-   + (SELECT COUNT(*) FROM Quotes q
-       WHERE q.JobID = Jobs.JobID AND q.Status = 'awaiting_director')) AS DirectorNeededCount
+  -- What the job's DirectorNeededCount is worked out from (directorNeeded.ts:
+  -- quotes awaiting the director, and stage-1 invoices whose amount needs one).
+  ${DIRECTOR_NEEDED_COLUMNS}
 `;
 
 const JOB_EVENT_COLUMNS = `
   JobEventID, JobID, CreatedAt, CreatedBy, [Text], NewStatus,
   ExpectedProgressDate, IsStalled, EventType, PurchaseOrderID, QuoteID,
+  InvoiceID,
   NewAssignee, NewAwaitingRole, CreationSource
 `;
 
@@ -121,6 +108,8 @@ const JOB_WRITE_COLUMNS = [
   "IsOnchargeable",
   "OnchargeAmount",
   "OnchargeNotes",
+  "Kind",
+  "IsContract",
   "TenantID",
   "CreationMethod",
   "SourceEmailID",
@@ -160,6 +149,7 @@ interface AddJobEventBody {
   EventType?: string;
   PurchaseOrderID?: number;
   QuoteID?: number;
+  InvoiceID?: number;
   NewAssignee?: string;
   NewAssigneeUserID?: number;
   NewAwaitingRole?: string;
@@ -180,6 +170,8 @@ const COLUMN_TYPES: Record<JobColumn, any> = {
   IsOnchargeable: TYPES.Bit,
   OnchargeAmount: TYPES.Decimal,
   OnchargeNotes: TYPES.NVarChar,
+  Kind: TYPES.NVarChar,
+  IsContract: TYPES.Bit,
   TenantID: TYPES.Int,
   CreationMethod: TYPES.NVarChar,
   SourceEmailID: TYPES.Int,
@@ -235,11 +227,28 @@ const ALLOWED_STATUSES = [
 const ALLOWED_AWAITING_ROLES = ["facilities", "accounts"] as const;
 
 // Job priorities — mirror JOB_PRIORITY_OPTIONS in
-// command-centre/src/components/jobs/JobWRDetailsSection.tsx. The upstream
-// WR priority enum has the same four values, so this gate covers both flows.
-const ALLOWED_PRIORITIES = ["Critical", "High", "Normal", "Low"] as const;
+// command-centre/src/components/jobs/jobPriority.ts (the list lives in ../jobPriorities).
+// The upstream WR priority enum has the same four values, so this gate covers both flows.
+const ALLOWED_PRIORITIES = JOB_PRIORITIES;
 
 const ALLOWED_CREATION_METHODS = ["manual", "wr", "email", "inspection"] as const;
+
+// Job kind — reactive Facilities works, scheduled Maintenance servicing (m079)
+// and Admin / Accounts decision jobs. Mirrors JobKind in
+// command-centre/src/types/job.ts; the list lives in ../jobKinds.
+const ALLOWED_KINDS = JOB_KINDS;
+
+// An Admin / Accounts job is in-house for good (plan D2): no quote, PO or
+// invoice. Its kind is fixed when it is raised, so these two refusals keep it
+// that way. Codes are for the frontend, the sentences for the person.
+const ADMIN_KIND_FIXED = {
+  code: "kind_fixed",
+  error: "An Admin / Accounts job keeps its kind, and no other job can become one. Raise a new job instead.",
+} as const;
+const ADMIN_STAYS_INTERNAL = {
+  code: "admin_is_internal",
+  error: "An Admin / Accounts job is always in-house, with no quote, purchase order or invoice, so that can't be switched off.",
+} as const;
 
 const MAX_LEN: Partial<Record<JobColumn, number>> = {
   Title: 200,
@@ -260,6 +269,21 @@ const MAX_LEN: Partial<Record<JobColumn, number>> = {
   OnchargeNotes: 4000,
 };
 
+const BOOLEAN_COLUMNS: JobColumn[] = ["IsStalled", "IsInternal", "IsOnchargeable", "IsContract"];
+const INTEGER_COLUMNS: JobColumn[] = ["BuildingID", "WorkRequestID", "AssignedToUserID", "TenantID", "SourceEmailID", "SourceInspectionId"];
+const DATE_COLUMNS: JobColumn[] = ["ExpectedProgressUpdate", "CompletionDate"];
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,7})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+
+/** yyyy-MM-dd or yyyy-MM-ddTHH:mm[:ss[.fff]][Z|+hh:mm], and a real calendar day. */
+function isIsoDateString(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const m = ISO_DATE.exec(value);
+  if (!m || !Number.isFinite(Date.parse(value))) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Normalises OnchargeAmount in place; every other check is read-only. */
 function validateUpsertBody(
   fields: Partial<Record<JobColumn, unknown>>,
 ): string | null {
@@ -299,11 +323,33 @@ function validateUpsertBody(
   ) {
     return "Invalid CreationMethod";
   }
+  if (
+    fields.Kind !== undefined &&
+    fields.Kind !== null &&
+    !ALLOWED_KINDS.includes(fields.Kind as (typeof ALLOWED_KINDS)[number])
+  ) {
+    return "Invalid Kind";
+  }
+  // Bound to Bit / Int / DateTime2 as sent, tedious would turn "false" into 1,
+  // truncate 1.7 to 1 and read "1" as a date in 2001: check the type first.
+  for (const col of BOOLEAN_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && typeof v !== "boolean") return `${col} must be true or false`;
+  }
+  for (const col of INTEGER_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v))) return `${col} must be a whole number`;
+  }
+  for (const col of DATE_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && !isIsoDateString(v)) return `${col} must be an ISO date or date-time (e.g. 2026-10-23 or 2026-10-23T09:30:00Z)`;
+  }
   if (fields.OnchargeAmount !== undefined && fields.OnchargeAmount !== null) {
-    const n = fields.OnchargeAmount;
-    if (typeof n !== "number" || Number.isNaN(n) || n < 0 || n > 10_000_000) {
-      return "Invalid OnchargeAmount";
-    }
+    // Rewritten to the parsed amount, so "1,500" is stored as 1500, not 1.
+    const parsed = parseMoneyField(fields.OnchargeAmount, "OnchargeAmount");
+    if (!parsed.ok) return parsed.error;
+    if ((parsed.value ?? 0) > 10_000_000) return "Invalid OnchargeAmount";
+    fields.OnchargeAmount = parsed.value;
   }
   for (const [col, limit] of Object.entries(MAX_LEN) as Array<
     [JobColumn, number]
@@ -376,7 +422,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const buildingId = request.query.get("buildingId");
@@ -396,10 +442,13 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     whereParts.push("BuildingID = @BuildingID");
     params.push({ name: "BuildingID", type: TYPES.Int, value: Number(buildingId) });
   }
+  // D9: test jobs only with the admin's Show test data on (counts follow).
+  whereParts.push("(IsTest = 0 OR @ShowTest = 1)");
+  params.push(await showTestParam(request));
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const pagination = parsePagination(request.query);
     const whereSql = whereParts.join(" AND ");
@@ -415,7 +464,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     );
 
     const eventsByJob = await fetchEventsForJobs(connection, jobs.map((j) => j.JobID as number));
-    const payload = jobs.map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
+    const payload = (await withDirectorNeeded(connection, jobs)).map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
 
     // Total is only meaningful when paginating; otherwise count = payload.length.
     let total = payload.length;
@@ -464,7 +513,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const jobId = Number(request.query.get("jobId"));
@@ -474,14 +523,17 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    // D9, as getJobs: a test job opens only with the admin's Show test data on.
+    // J6 opens Done and archived jobs from links by this read, so it must not
+    // open a test job for someone who can't see it (J6b).
     const rows = await executeQuery(
       connection,
-      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
-      [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID AND (IsTest = 0 OR @ShowTest = 1)`,
+      [{ name: "JobID", type: TYPES.Int, value: jobId }, await showTestParam(request)],
     );
     if (rows.length === 0) {
-      return { status: 404, jsonBody: { error: "Job not found" } };
+      return { status: 404, jsonBody: { error: "That job wasn't found, or isn't one you can open." } };
     }
     const events = await executeQuery(
       connection,
@@ -516,7 +568,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
     }));
     return {
       status: 200,
-      jsonBody: { job: { ...rows[0], Events: events, PlannerTasks: plannerTasks } },
+      jsonBody: { job: { ...(await withDirectorNeeded(connection, rows))[0], Events: events, PlannerTasks: plannerTasks } },
     };
   } catch (error: any) {
     context.error("getJob failed:", error.message);
@@ -530,11 +582,11 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
 // Body: { JobID?, ...job columns }. Omit JobID to create; include to update.
 // Events are NOT touched by this endpoint — use addJobEvent for those.
 
-async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function upsertJob(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
 
   // Identity for audit columns (CreatedById, UpdatedBy) must come from the
@@ -566,10 +618,69 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           jsonBody: { error: "BuildingID, Title, Status are required to create a job" },
         };
       }
+      // D4 machine guard (WP18a): a job is always born in 'New'. Any other
+      // status on create would let a payload sidestep the state machine and
+      // start mid-lifecycle. The frontend always creates as 'New'; reject the
+      // rest at the API boundary.
+      if (fields.Status !== "New") {
+        return {
+          status: 400,
+          jsonBody: { error: "Status must be 'New' when creating a job" },
+        };
+      }
+      // A New job is always on the facilities side first (J3): who it waits
+      // on isn't the caller's to choose, here or later (N1).
+      if (fields.AwaitingRole != null && fields.AwaitingRole !== "facilities") {
+        return {
+          status: 422,
+          jsonBody: { code: "awaiting_role_derived", error: "A new job always starts with facilities, so who it waits on can't be set." },
+        };
+      }
+      fields.AwaitingRole = "facilities";
+      // An Admin / Accounts job is stored in-house whatever the payload says: the
+      // kind decides that, not a person, so the manager gate below leaves it alone
+      // and the internal close path (jobTransitionGuard) is open to it.
+      const isAdminJob = fields.Kind === ADMIN_KIND;
+      if (isAdminJob) {
+        fields.IsInternal = true;
+        fields.ExpectedProgressUpdate = `${initialAdminDeadline(fields.Priority as string | undefined)}T00:00:00.000Z`;
+      }
+      // N4 (J2): only a manager starts a job as contract or internal.
+      if (fields.IsContract || (fields.IsInternal && !isAdminJob)) {
+        const refusal = flagChangeRefusal({ actor: { kind: "user", roles: await rolesForRequest(request) }, hasMoneyRecords: false });
+        if (refusal) {
+          return { status: refusal.code === "role_not_permitted" ? 403 : 422, jsonBody: { code: refusal.code, error: refusal.reason } };
+        }
+      }
     } else if (typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID must be a number when provided" } };
     } else if (Object.keys(fields).length === 0) {
       return { status: 400, jsonBody: { error: "No job columns provided — nothing to update" } };
+    } else {
+      // D4 machine guard (WP18a): status + awaiting-role transitions are owned
+      // by the state machine via the addJobEvent endpoint. upsertJob edits the
+      // job's descriptive fields only — never the lifecycle. Reject either write
+      // so a stray payload can't bypass the machine (and leave the old inline
+      // status_change / awaiting_role_change audit blocks below dead, so they
+      // were removed).
+      if (fields.Status !== undefined) {
+        return {
+          status: 422,
+          jsonBody: {
+            error:
+              "Status changes must use the addJobEvent endpoint, not upsertJob.",
+          },
+        };
+      }
+      if (fields.AwaitingRole !== undefined) {
+        return {
+          status: 422,
+          jsonBody: {
+            error:
+              "AwaitingRole changes must use the addJobEvent endpoint, not upsertJob.",
+          },
+        };
+      }
     }
 
     // Enum + length checks against the whitelist. Reject fast so we don't
@@ -579,7 +690,16 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       return { status: 400, jsonBody: { error: validationError } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+
+    // Defects liability periods (sprint F1, LAUNCH-READINESS §5): new planned
+    // maintenance on a covered scope is refused (409) unless a manager books it
+    // anyway with a reason; anything else covered comes back as a warning.
+    const defects =
+      JobID === undefined
+        ? await guardNewJob(connection, request, body as Record<string, unknown>, fields, todayInDarwin())
+        : null;
+    if (defects?.response) return defects.response;
 
     const params: SqlParam[] = [];
     for (const [k, v] of Object.entries(fields)) {
@@ -587,6 +707,8 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
     }
 
     let newJobId: number;
+    // The Priority the job had before this save, for the job.critical hook below.
+    let previousPriority: unknown = null;
 
     if (JobID === undefined) {
       // INSERT — wrap the Jobs insert and the WR-attachment re-parenting in
@@ -599,14 +721,26 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       // ownership compare on archive/unarchive trusts these, so they must
       // not come from the (forgeable) request body.
       fields.CreatedBy = identity.name;
+      // D9: admins and directors may create a test job; an admin's "[TEST]" title does too.
+      const testFlag = await testFlagForCreate(request, (body as Record<string, unknown>).IsTest, fields.Title as string | null | undefined);
+      if ("error" in testFlag) return testFlag.error;
       const filteredParams = params.filter((p) => p.name !== "CreatedBy");
       filteredParams.push({ name: "CreatedBy", type: TYPES.NVarChar, value: identity.name });
+      // Stamp StatusSince at creation (WP18a) so the escalation age clock has a
+      // starting point for the New state; SYSUTCDATETIME() is inlined (no param)
+      // exactly like LastModifiedDate on the UPDATE path.
       const cols = Object.keys(fields);
-      const insertCols = [...cols, "CreatedById"].join(", ");
-      const insertVals = [...cols.map((c) => `@${c}`), "@CreatedById"].join(", ");
+      const insertCols = [...cols, "CreatedById", "StatusSince", "IsTest"].join(", ");
+      const insertVals = [
+        ...cols.map((c) => `@${c}`),
+        "@CreatedById",
+        "SYSUTCDATETIME()",
+        "@IsTest",
+      ].join(", ");
       const insertParams: SqlParam[] = [
         ...filteredParams,
         { name: "CreatedById", type: TYPES.NVarChar, value: identity.oid },
+        { name: "IsTest", type: TYPES.Bit, value: testFlag.isTest },
       ];
 
       await beginTransaction(connection);
@@ -619,6 +753,15 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
           insertParams,
         );
         newJobId = inserted[0].JobID as number;
+
+        if (defects?.override) {
+          await recordDefectsOverride(connection, request, {
+            buildingId: fields.BuildingID as number,
+            callerName: identity.name,
+            jobId: newJobId,
+            override: defects.override,
+          });
+        }
 
         // If the job was created from a Work Request, claim any attachments
         // that arrived with the WR. They were inserted earlier with JobID NULL
@@ -675,13 +818,70 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
 
       await beginTransaction(connection);
       try {
-        // Snapshot the columns we audit before the UPDATE rewrites them.
+        // Snapshot the columns we audit before the UPDATE rewrites them. Status
+        // is read only for the contract-flip guard below — upsertJob can no
+        // longer write Status or AwaitingRole (D4 guard rejects both upstream),
+        // so those diff/event blocks were removed.
         const previousRows = await executeQuery(
           connection,
-          "SELECT Status, AssignedTo, AwaitingRole FROM Jobs WHERE JobID = @JobID",
+          `SELECT Status, AssignedTo, Kind, IsContract, IsInternal, Priority,
+                  CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = Jobs.JobID)
+                         OR EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = Jobs.JobID)
+                         OR EXISTS (SELECT 1 FROM JobInvoices i WHERE i.JobID = Jobs.JobID) THEN 1 ELSE 0 END AS HasMoneyRecords
+             FROM Jobs WITH (UPDLOCK, HOLDLOCK) WHERE JobID = @JobID`,
           [{ name: "JobID", type: TYPES.Int, value: JobID }],
         );
         const previous = previousRows[0]; // may be undefined — the UPDATE 0-row check below handles "Job not found".
+        previousPriority = previous?.Priority ?? null;
+
+        // Admin / Accounts jobs keep their kind and stay in-house (plan D2). No job
+        // becomes one, because only a manager may skip the money path (N4) and
+        // nothing here checks the job has no quote, PO or invoice; and none turns
+        // into another kind, so a decision job never lands on the contractor flow.
+        if (previous !== undefined) {
+          const wasAdmin = previous.Kind === ADMIN_KIND;
+          const changesKind = fields.Kind !== undefined && (fields.Kind === ADMIN_KIND) !== wasAdmin;
+          const unsetsInternal = wasAdmin && fields.IsInternal !== undefined && !fields.IsInternal;
+          if (changesKind || unsetsInternal) {
+            await rollbackTransaction(connection).catch(() => {});
+            return { status: 422, jsonBody: changesKind ? ADMIN_KIND_FIXED : ADMIN_STAYS_INTERNAL };
+          }
+        }
+
+        // N4 (J2): IsContract / IsInternal decide which money path the job
+        // takes, so only a manager changes them, and never once a quote, PO
+        // or invoice exists. Re-sending the value the job has is no change.
+        const flips = (column: "IsContract" | "IsInternal"): boolean =>
+          previous !== undefined && fields[column] !== undefined && Boolean(fields[column]) !== Boolean(previous[column]);
+        if (flips("IsContract") || flips("IsInternal")) {
+          const refusal = flagChangeRefusal({
+            actor: { kind: "user", roles: await rolesForRequest(request) },
+            hasMoneyRecords: Boolean(previous?.HasMoneyRecords),
+          });
+          if (refusal) {
+            await rollbackTransaction(connection).catch(() => {});
+            return { status: refusal.code === "role_not_permitted" ? 403 : 422, jsonBody: { code: refusal.code, error: refusal.reason } };
+          }
+        }
+
+        // Guard the contract flip (WP10): isContract may only change while the
+        // job is still New — flipping it mid-flow would invalidate the quote /
+        // contract path the job has already taken. Reject before the UPDATE so
+        // the change never lands.
+        if (previous && fields.IsContract !== undefined) {
+          const prevContract = Boolean(previous.IsContract);
+          const nextContract = Boolean(fields.IsContract);
+          if (prevContract !== nextContract && previous.Status !== "New") {
+            await rollbackTransaction(connection).catch(() => {});
+            return {
+              status: 422,
+              jsonBody: {
+                error:
+                  "Contract status can only be changed while the job is New.",
+              },
+            };
+          }
+        }
 
         const result = await executeQuery(
           connection,
@@ -696,32 +896,18 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         }
         newJobId = result[0].JobID as number;
 
-        // Diff the three audit-worthy fields and INSERT a JobEvents row per
-        // change. Mirrors the audit trail the frontend used to write via
-        // addJobEvent on success. Only fields explicitly present on the
-        // payload count — an omitted field is "no change", not a clear.
+        // Diff the audit-worthy descriptive fields and INSERT a JobEvents row
+        // per change. Status / AwaitingRole are NOT diffed here — they can't be
+        // written through upsertJob (D4 guard); those transitions and their
+        // audit events flow through addJobEvent. Only fields explicitly present
+        // on the payload count — an omitted field is "no change", not a clear.
         if (previous) {
           // Use the verified identity (token signature checked) so audit rows
           // can't be authored by a forged JWT name claim.
           const caller = { id: identity.oid, name: identity.name };
-          const newStatus = fields.Status as string | null | undefined;
           const newAssignedTo = fields.AssignedTo as string | null | undefined;
-          const newAwaitingRole = fields.AwaitingRole as string | null | undefined;
-
-          if (newStatus !== undefined && newStatus !== previous.Status) {
-            await executeQuery(
-              connection,
-              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewStatus)
-               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewStatus)`,
-              [
-                { name: "JobID", type: TYPES.Int, value: newJobId },
-                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
-                { name: "Text", type: TYPES.NVarChar, value: `Status: ${previous.Status} → ${newStatus}` },
-                { name: "EventType", type: TYPES.NVarChar, value: "status_change" },
-                { name: "NewStatus", type: TYPES.NVarChar, value: newStatus },
-              ],
-            );
-          }
+          const newKind = fields.Kind as string | null | undefined;
+          const newIsContract = fields.IsContract as boolean | number | null | undefined;
 
           if (newAssignedTo !== undefined && newAssignedTo !== previous.AssignedTo) {
             const fromLabel = (previous.AssignedTo as string | null) || "—";
@@ -743,19 +929,60 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
             );
           }
 
-          if (newAwaitingRole !== undefined && newAwaitingRole !== previous.AwaitingRole) {
-            const fromLabel = (previous.AwaitingRole as string | null) || "—";
-            const toLabel = newAwaitingRole || "—";
+          if (newKind !== undefined && newKind !== previous.Kind) {
+            const fromLabel = (previous.Kind as string | null) || "facilities";
+            const toLabel = newKind || "facilities";
             await executeQuery(
               connection,
-              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, NewAwaitingRole)
-               VALUES (@JobID, @CreatedBy, @Text, @EventType, @NewAwaitingRole)`,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
               [
                 { name: "JobID", type: TYPES.Int, value: newJobId },
                 { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
-                { name: "Text", type: TYPES.NVarChar, value: `Handoff: ${fromLabel} → ${toLabel}` },
-                { name: "EventType", type: TYPES.NVarChar, value: "awaiting_role_change" },
-                { name: "NewAwaitingRole", type: TYPES.NVarChar, value: newAwaitingRole },
+                { name: "Text", type: TYPES.NVarChar, value: `Kind: ${fromLabel} → ${toLabel}` },
+                { name: "EventType", type: TYPES.NVarChar, value: "kind_change" },
+              ],
+            );
+          }
+
+          if (fields.IsInternal !== undefined && Boolean(fields.IsInternal) !== Boolean(previous.IsInternal)) {
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                {
+                  name: "Text",
+                  type: TYPES.NVarChar,
+                  value: fields.IsInternal ? "Marked as internal (no quote, PO or invoice)" : "Internal flag removed",
+                },
+                { name: "EventType", type: TYPES.NVarChar, value: "internal_change" },
+              ],
+            );
+          }
+
+          if (
+            newIsContract !== undefined &&
+            Boolean(newIsContract) !== Boolean(previous.IsContract)
+          ) {
+            const toContract = Boolean(newIsContract);
+            await executeQuery(
+              connection,
+              `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+               VALUES (@JobID, @CreatedBy, @Text, @EventType)`,
+              [
+                { name: "JobID", type: TYPES.Int, value: newJobId },
+                { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
+                {
+                  name: "Text",
+                  type: TYPES.NVarChar,
+                  value: toContract
+                    ? "Marked as standing-contract (quotes skipped)"
+                    : "Standing-contract flag removed (quoted flow)",
+                },
+                { name: "EventType", type: TYPES.NVarChar, value: "contract_change" },
               ],
             );
           }
@@ -767,6 +994,17 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
         throw err;
       }
     }
+
+    // job.critical (WP20): a job created or re-prioritised Critical raises an
+    // escalation at once. The save above has committed; this can't fail it.
+    await raiseCriticalJobEscalation({
+      connection,
+      jobId: newJobId,
+      log: (message) => context.warn(message),
+      previousPriority,
+      priority: fields.Priority,
+      request,
+    });
 
     const stored = await executeQuery(
       connection,
@@ -794,7 +1032,13 @@ async function upsertJob(request: HttpRequest, context: InvocationContext): Prom
       await syncJobActionTriggersStandalone(newJobId, (msg) => context.log(msg));
     }
 
-    return { status: 200, jsonBody: { job: { ...stored[0], Events: events } } };
+    return {
+      status: 200,
+      jsonBody: {
+        job: { ...(await withDirectorNeeded(connection, stored))[0], Events: events },
+        ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
+      },
+    };
   } catch (error: any) {
     context.error("upsertJob failed:", error.message);
     return errorResponse("Upsert failed", error.message);
@@ -816,7 +1060,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate. Per-job ownership scoping for plain `facilities`
   // users happens further down once we know the job's CreatedById.
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
   // Identity must come from the verified token — the ownership check below
   // compares it against the stored CreatedById, so an unverified value would
@@ -835,7 +1079,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
   }
 
   const userRoles = await rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const canArchiveAny = userRoles.some((r) => (ACTION_ROLES.archiveAnyJob.gate as readonly string[]).includes(r));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
@@ -845,7 +1089,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Authorisation: load CreatedById + CreatedBy first so we can scope
     // facilities users. This read sits outside the transaction below — it's
@@ -934,7 +1178,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   // Baseline ops-role gate; per-job ownership scoping happens below.
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
   // Identity must come from the verified token — see archiveJob for rationale.
   const identity = await verifiedIdentityFromRequest(request);
@@ -951,7 +1195,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
   }
 
   const userRoles = await rolesForRequest(request);
-  const canArchiveAny = userRoles.some((r) => ARCHIVE_ANY_JOB_ROLES.includes(r as AppRole));
+  const canArchiveAny = userRoles.some((r) => (ACTION_ROLES.archiveAnyJob.gate as readonly string[]).includes(r));
   const isFacilities = userRoles.includes(AppRole.FACILITIES);
 
   let connection;
@@ -961,7 +1205,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     // Permission read — kept outside the transaction (see archiveJob comment).
     const existing = await executeQuery(
@@ -1041,11 +1285,11 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
 //   NewAssignee           → Jobs.AssignedTo
 // Always bumps Jobs.LastModifiedDate.
 
-async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+export async function addJobEvent(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, EDIT_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.editJobs.gate);
   if (roleCheck) return roleCheck;
 
   // CreatedBy on the JobEvents row must come from the verified token. The
@@ -1075,6 +1319,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       EventType,
       PurchaseOrderID,
       QuoteID,
+      InvoiceID,
       NewAssignee,
       NewAssigneeUserID,
       NewAwaitingRole,
@@ -1108,74 +1353,122 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
     if (validationError) {
       return { status: 400, jsonBody: { error: validationError } };
     }
+    // N1 (J2): the awaiting side is derived by the state machine from the
+    // status; a request never writes it, with or without a status change.
+    if (NewAwaitingRole != null) {
+      return {
+        status: 422,
+        jsonBody: {
+          code: "awaiting_role_derived",
+          error: "Who the job waits on follows its status, so it can't be set directly.",
+        },
+      };
+    }
+    // J3: money, contractor, archive and flag entries come from the handler
+    // that made the change, never from a client.
+    const typeRefusal = eventTypeRefusal(EventType);
+    if (typeRefusal) return { status: 422, jsonBody: typeRefusal };
+    if (linkedIdsInvalid({ InvoiceID, PurchaseOrderID, QuoteID })) {
+      return { status: 400, jsonBody: { error: "QuoteID, InvoiceID and PurchaseOrderID must be positive whole numbers" } };
+    }
     const isStalledBit =
       IsStalled == null ? null : IsStalled ? 1 : 0;
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
+    const roles = await rolesForRequest(request);
 
-    // If the caller is changing status, validate the transition against the
-    // state machine and let the machine compute the resulting awaitingRole
-    // (the caller's NewAwaitingRole on a status-change request is advisory
-    // only — the machine wins).
-    let resolvedNewStatus: string | null = NewStatus ?? null;
-    let resolvedNewAwaitingRole: string | null = NewAwaitingRole ?? null;
-    if (NewStatus != null) {
-      const currentRows = await executeQuery(
-        connection,
-        "SELECT Status, AwaitingRole FROM Jobs WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: JobID }],
-      );
-      if (currentRows.length === 0) {
-        return { status: 404, jsonBody: { error: "Job not found" } };
-      }
-      const currentState = {
-        status: currentRows[0].Status as JobStatus,
-        awaitingRole:
-          (currentRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
-      };
-      // Self-transitions (NewStatus equals current Status) are accepted as
-      // no-ops so the activity event still lands in the feed — e.g. "Quote
-      // received" while the job is already Awaiting Approval, or "Invoice
-      // approved" while parked in Awaiting Approval awaiting payment.
-      if (NewStatus === currentState.status) {
-        resolvedNewStatus = currentState.status;
-        resolvedNewAwaitingRole = currentState.awaitingRole;
-      } else {
-        const target = resolveManualTarget(currentState, NewStatus as JobStatus);
-        if (target == null) {
-          return {
-            status: 422,
-            jsonBody: {
-              error: "Illegal status transition",
-              from: currentState.status,
-              to: NewStatus,
-            },
-          };
-        }
-        resolvedNewStatus = target.status;
-        resolvedNewAwaitingRole = target.awaitingRole;
-      }
-    }
-
-    // INSERT JobEvents and the mirror UPDATE Jobs are a logical unit — an
-    // event without the mirror leaves the Jobs row out of date (list views
-    // read from Jobs, not from the event log), and an update without the
-    // event loses the audit trail. Wrap both in one transaction.
+    // Everything below is one transaction: the job is read and locked, the
+    // transition guard decides on exactly that state (J2), and the event and
+    // the mirror UPDATE are written, the UPDATE predicated on the state read.
+    // An event without the mirror leaves the Jobs row out of date (list views
+    // read from Jobs, not from the event log), and an update without the event
+    // loses the audit trail.
+    let resolvedNewStatus: string | null = null;
+    let resolvedNewAwaitingRole: string | null = null;
+    // The state the guard decided on; the mirror UPDATE only lands if the row
+    // still holds it.
+    let expectedState: JobState | null = null;
+    // Pre-block capture/restore for tenant blocks (WP8): capture the composite
+    // the job is leaving when it is blocked, clear it when it is unblocked (the
+    // machine has already applied the restore to the target).
+    let preBlockToCapture: JobState | null = null;
+    let clearsPreBlock = false;
+    // A real transition (not a self-transition no-op) resets the
+    // accountability clock: StatusSince=now, prior acknowledgement and
+    // escalation cleared.
+    let isRealTransition = false;
     let insertedEventId: number;
     await beginTransaction(connection);
     try {
+      const linkRefusal = await linkedRecordRefusal(connection, JobID, { InvoiceID, PurchaseOrderID, QuoteID });
+      if (linkRefusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 422, jsonBody: linkRefusal };
+      }
+      if (NewStatus != null) {
+        const locked = await loadJobForTransition(connection, JobID);
+        if (!locked) {
+          await rollbackTransaction(connection).catch(() => {});
+          return { status: 404, jsonBody: { error: "Job not found" } };
+        }
+        const currentState: JobState = {
+          awaitingRole: locked.current.awaitingRole as AwaitingRole,
+          status: locked.current.status as JobStatus,
+        };
+        if (NewStatus === currentState.status) {
+          // Self-transitions are accepted as no-ops so the activity event
+          // still lands in the feed ("Quote received" while already Awaiting
+          // Approval).
+          resolvedNewStatus = currentState.status;
+          resolvedNewAwaitingRole = currentState.awaitingRole;
+        } else {
+          const preBlockState: JobState | undefined = locked.preBlock
+            ? { awaitingRole: locked.preBlock.awaitingRole as AwaitingRole, status: locked.preBlock.status as JobStatus }
+            : undefined;
+          const machineTarget = resolveManualTarget(currentState, NewStatus as JobStatus, {
+            isContract: locked.facts.isContract,
+            isInternal: locked.facts.isInternal,
+            preBlockState,
+          });
+          const decision = guardTransition({
+            actor: { kind: "user", roles },
+            current: locked.current,
+            facts: locked.facts,
+            machineTarget,
+            request: { kind: "manual", target: NewStatus as GuardStatus },
+          });
+          if (!decision.allowed) {
+            await rollbackTransaction(connection).catch(() => {});
+            return {
+              status: decision.code === "role_not_permitted" ? 403 : 422,
+              jsonBody: { code: decision.code, error: decision.reason, from: currentState.status, to: NewStatus },
+            };
+          }
+          const target: JobState = { awaitingRole: decision.to.awaitingRole as AwaitingRole, status: decision.to.status as JobStatus };
+          resolvedNewStatus = target.status;
+          resolvedNewAwaitingRole = target.awaitingRole;
+          expectedState = currentState;
+          isRealTransition = target.status !== currentState.status || target.awaitingRole !== currentState.awaitingRole;
+          if (target.status === JobStatus.TENANT) {
+            preBlockToCapture = currentState;
+          } else if (currentState.status === JobStatus.TENANT) {
+            clearsPreBlock = true;
+          }
+        }
+      }
+
       const inserted = await executeQuery(
         connection,
         `INSERT INTO JobEvents (
            JobID, CreatedBy, [Text], NewStatus, ExpectedProgressDate, IsStalled,
-           EventType, PurchaseOrderID, QuoteID, NewAssignee, NewAwaitingRole,
-           CreationSource
+           EventType, PurchaseOrderID, QuoteID, InvoiceID, NewAssignee,
+           NewAwaitingRole, CreationSource
          )
          OUTPUT INSERTED.JobEventID
          VALUES (
            @JobID, @CreatedBy, @Text, @NewStatus, @ExpectedProgressDate, @IsStalled,
-           @EventType, @PurchaseOrderID, @QuoteID, @NewAssignee, @NewAwaitingRole,
-           @CreationSource
+           @EventType, @PurchaseOrderID, @QuoteID, @InvoiceID, @NewAssignee,
+           @NewAwaitingRole, @CreationSource
          );`,
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
@@ -1187,6 +1480,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           { name: "EventType", type: TYPES.NVarChar, value: EventType ?? null },
           { name: "PurchaseOrderID", type: TYPES.Int, value: PurchaseOrderID ?? null },
           { name: "QuoteID", type: TYPES.Int, value: QuoteID ?? null },
+          { name: "InvoiceID", type: TYPES.Int, value: InvoiceID ?? null },
           { name: "NewAssignee", type: TYPES.NVarChar, value: NewAssignee ?? null },
           { name: "NewAwaitingRole", type: TYPES.NVarChar, value: resolvedNewAwaitingRole },
           { name: "CreationSource", type: TYPES.NVarChar, value: CreationSource ?? null },
@@ -1251,11 +1545,69 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
           value: resolvedNewAwaitingRole,
         });
       }
-      await executeQuery(
-        connection,
-        `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
-        updateParams,
-      );
+      if (preBlockToCapture != null) {
+        updates.push("PreBlockStatus=@PreBlockStatus", "PreBlockAwaitingRole=@PreBlockAwaitingRole");
+        updateParams.push(
+          { name: "PreBlockStatus", type: TYPES.NVarChar, value: preBlockToCapture.status },
+          { name: "PreBlockAwaitingRole", type: TYPES.NVarChar, value: preBlockToCapture.awaitingRole },
+        );
+      } else if (clearsPreBlock) {
+        updates.push("PreBlockStatus=NULL", "PreBlockAwaitingRole=NULL");
+      }
+      // Acknowledge event (WP18a): stamp who/when in the same transaction as
+      // the event; resets the escalation clock. Never alongside a real
+      // transition, which clears it.
+      if (EventType === "acknowledged" && !isRealTransition) {
+        updates.push("AcknowledgedAt=SYSUTCDATETIME()", "AcknowledgedBy=@AcknowledgedBy");
+        updateParams.push({
+          name: "AcknowledgedBy",
+          type: TYPES.NVarChar,
+          value: identity.name,
+        });
+      }
+      if (isRealTransition) {
+        updates.push(
+          "StatusSince=SYSUTCDATETIME()",
+          "AcknowledgedAt=NULL",
+          "AcknowledgedBy=NULL",
+          "EscalatedAt=NULL",
+        );
+      }
+      if (expectedState) {
+        // Predicated on the state the guard decided on: if the job moved in
+        // between (it can't while the row lock holds, but the write says so
+        // itself), nothing lands and the caller is told.
+        updateParams.push(
+          { name: "ExpectedStatus", type: TYPES.NVarChar, value: expectedState.status },
+          { name: "ExpectedAwaitingRole", type: TYPES.NVarChar, value: expectedState.awaitingRole },
+        );
+        const moved = await executeQuery(
+          connection,
+          `UPDATE Jobs SET ${updates.join(", ")}
+           OUTPUT INSERTED.JobID
+           WHERE JobID = @JobID AND Status = @ExpectedStatus AND ISNULL(AwaitingRole, 'facilities') = @ExpectedAwaitingRole`,
+          updateParams,
+        );
+        if (moved.length === 0) {
+          await rollbackTransaction(connection).catch(() => {});
+          return {
+            status: 409,
+            jsonBody: { code: "job_changed", error: "This job changed while you were saving. Reload it and try again." },
+          };
+        }
+      } else {
+        await executeQuery(
+          connection,
+          `UPDATE Jobs SET ${updates.join(", ")} WHERE JobID = @JobID`,
+          updateParams,
+        );
+      }
+
+      // Service schedules (sprint F2, WP50): completing a scheduled job's work
+      // moves its schedule on to the next due date of the anchor series.
+      if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
+        await markServiceJobCompleted(connection, JobID, identity.name);
+      }
 
       await commitTransaction(connection);
     } catch (err) {
@@ -1275,7 +1627,11 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
             context.warn("plannerResolve (stalled cleared):", err instanceof Error ? err.message : String(err)),
         );
       }
-      if (NewAwaitingRole !== null && NewAwaitingRole !== undefined && NewAwaitingRole !== "accounts") {
+      // Key off the machine-resolved role actually written to the row, not the
+      // caller's advisory NewAwaitingRole — the state machine may have resolved
+      // a different role (or none), so the raw value can resolve/skip the
+      // awaiting_accounts planner task against a value that was never persisted.
+      if (resolvedNewAwaitingRole !== null && resolvedNewAwaitingRole !== undefined && resolvedNewAwaitingRole !== "accounts") {
         resolveActivePlannerTasks("job", JobID, ["awaiting_accounts"]).catch(
           (err: unknown) =>
             context.warn("plannerResolve (awaiting role changed):", err instanceof Error ? err.message : String(err)),
@@ -1298,7 +1654,7 @@ async function addJobEvent(request: HttpRequest, context: InvocationContext): Pr
       `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
-    return { status: 200, jsonBody: { event: eventRow[0], job: jobRow[0] } };
+    return { status: 200, jsonBody: { event: eventRow[0], job: (await withDirectorNeeded(connection, jobRow))[0] } };
   } catch (error: any) {
     context.error("addJobEvent failed:", error.message);
     return errorResponse("Add event failed", error.message);
@@ -1321,7 +1677,7 @@ async function getJobPacketPdf(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const roleCheck = await requireRole(request, VIEW_JOBS_ROLES);
+  const roleCheck = await requireRole(request, ACTION_ROLES.viewJobs.gate);
   if (roleCheck) return roleCheck;
 
   const jobIdStr = request.params.jobId;
@@ -1332,7 +1688,7 @@ async function getJobPacketPdf(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
     const input = await loadJobPacketInputs(connection, jobId);
     const pdf = await buildJobPacket(input);
     return {

@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import {
   closeConnection,
-  createConnection,
+  createRequestConnection,
   executeQuery,
   SqlParam,
 } from "../db";
@@ -11,13 +11,12 @@ import {
   errorResponse,
   extractToken,
   forbiddenResponse,
-  nameFromToken,
-  oidFromToken,
   requireRole,
   rolesForRequest,
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { validateTimesheetData } from "../timesheetData";
 import { checkRateLimit } from "../rateLimit";
 
 const TIMESHEET_UPSERT_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
@@ -44,7 +43,7 @@ interface ApproveTimesheetBody { timesheetId: number; approve: boolean }
 
 const FACILITIES_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as const;
 const ACCOUNTS_ROLES  = [AppRole.ACCOUNTS,   AppRole.ACCOUNTS_APPROVAL]   as const;
-const APPROVAL_ROLES  = [AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
+const APPROVAL_ROLES  = [AppRole.CFO, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
 
 type TimesheetRole = "facilities" | "accounts";
 
@@ -58,11 +57,16 @@ function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
 function managedRoles(roles: string[]): TimesheetRole[] {
-  if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR)) return ["facilities", "accounts"];
+  if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR) || roles.includes(AppRole.CFO)) return ["facilities", "accounts"];
   const out: TimesheetRole[] = [];
   if (roles.includes(AppRole.FACILITIES_APPROVAL)) out.push("facilities");
   if (roles.includes(AppRole.ACCOUNTS_APPROVAL))  out.push("accounts");
   return out;
+}
+
+/** A manager may act on another user's sheet only inside the role groups they manage (admin: all). */
+function canManageRole(roles: string[], sheetRole: string | null | undefined): boolean {
+  return roles.includes(AppRole.ADMIN) || managedRoles(roles).includes(sheetRole as TimesheetRole);
 }
 
 function isApprovalManager(roles: string[]): boolean {
@@ -113,7 +117,7 @@ async function getTimesheet(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     let sql = `
       SELECT TimesheetID, UserID, UserDisplayName, WeekStartDate, Role, Data,
@@ -182,18 +186,22 @@ async function upsertTimesheet(
   let connection;
   try {
     const body = (await request.json()) as UpsertTimesheetBody;
-    const { weekStart, data, userId, userDisplayName, role: bodyRole } = body ?? {};
+    const { weekStart, data, userId, role: bodyRole } = body ?? {};
 
     if (!weekStart || !data) {
       return { status: 400, jsonBody: { error: "weekStart and data are required" } };
     }
 
-    const targetUserId: string = userId ?? callerOid;
-    const targetDisplayName: string = userDisplayName ?? callerName;
+    const dataError = validateTimesheetData(data);
+    if (dataError) return { status: 400, jsonBody: { error: dataError } };
 
+    const targetUserId: string = userId ?? callerOid;
     const isOwnData = targetUserId === callerOid;
     if (!isOwnData && !isApprovalManager(roles)) {
       return forbiddenResponse("Only approval managers can create timesheets for other users");
+    }
+    if (!isOwnData && typeof userId !== "string") {
+      return { status: 400, jsonBody: { error: "userId must be a string" } };
     }
 
     // Determine the role for this timesheet row — claims are authoritative for
@@ -202,20 +210,34 @@ async function upsertTimesheet(
     const suppliedRole: TimesheetRole | null =
       bodyRole && (validRoles as string[]).includes(bodyRole) ? bodyRole as TimesheetRole : null;
 
+    connection = await createRequestConnection(token);
+
+    // A subject other than the caller must be a real, active app user: the
+    // name and role come from their row, never the body, so a fabricated
+    // userId cannot mint a sheet the caller then approves as someone else's.
+    let targetDisplayName: string = callerName;
     let timesheetRole: TimesheetRole | null;
     if (isOwnData) {
       timesheetRole = timesheetRoleFromClaims(roles) ?? suppliedRole;
     } else {
-      const managed = managedRoles(roles);
-      timesheetRole = suppliedRole ?? (managed.length === 1 ? managed[0] : managed[0] ?? null);
+      const subject = await executeQuery(
+        connection,
+        "SELECT DisplayName, Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1",
+        [{ name: "Oid", type: TYPES.NVarChar, value: targetUserId }],
+      );
+      if (subject.length === 0) return { status: 404, jsonBody: { error: "User not found" } };
+      targetDisplayName = ((subject[0].DisplayName as string | null) ?? "").trim() || targetUserId;
+      const subjectRole = timesheetRoleFromClaims([String(subject[0].Role ?? "")]);
+      timesheetRole = subjectRole ?? suppliedRole;
+      if (timesheetRole && !canManageRole(roles, timesheetRole)) {
+        return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${timesheetRole}`);
+      }
     }
-
-    connection = await createConnection(token);
 
     // Check if a timesheet exists and is locked
     const existing = await executeQuery(
       connection,
-      `SELECT TimesheetID, ReadyForApproval, Approved FROM dbo.Timesheets
+      `SELECT TimesheetID, Role, ReadyForApproval, Approved FROM dbo.Timesheets
        WHERE UserID = @UserID AND WeekStartDate = @WeekStartDate`,
       [
         { name: "UserID",        type: TYPES.NVarChar, value: targetUserId },
@@ -225,6 +247,9 @@ async function upsertTimesheet(
 
     if (existing.length > 0) {
       const row = existing[0];
+      if (!isOwnData && !canManageRole(roles, row.Role as string | null)) {
+        return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
+      }
       if (row.ReadyForApproval || row.Approved) {
         return { status: 400, jsonBody: { error: "Timesheet is locked — recall it before editing" } };
       }
@@ -330,11 +355,11 @@ async function submitTimesheetForApproval(
       return { status: 400, jsonBody: { error: "submit (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
-      "SELECT UserID, Approved, ReadyForApproval FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      "SELECT UserID, Role, Approved, ReadyForApproval, Data FROM dbo.Timesheets WHERE TimesheetID = @Id",
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Timesheet not found" } };
@@ -345,8 +370,18 @@ async function submitTimesheetForApproval(
     if (!isOwner && !isApprovalManager(roles)) {
       return forbiddenResponse("Only approval managers can submit for other users");
     }
+    if (!isOwner && !canManageRole(roles, row.Role as string | null)) {
+      return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
+    }
     if (row.Approved) {
       return { status: 400, jsonBody: { error: "Timesheet is already approved — unapprove first" } };
+    }
+
+    if (submit) {
+      let data: unknown;
+      try { data = typeof row.Data === "string" ? JSON.parse(row.Data) : row.Data; } catch { return { status: 400, jsonBody: { error: "Timesheet entries are unreadable" } }; }
+      const invalid = validateTimesheetData(data, true);
+      if (invalid) return { status: 400, jsonBody: { error: invalid } };
     }
 
     await executeQuery(
@@ -389,10 +424,11 @@ async function approveTimesheet(
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
 
-  const callerOid = oidFromToken(token);
-  if (!callerOid) return unauthorizedResponse();
-
-  const callerName = nameFromToken(token) ?? "";
+  // Verified identity: the self-approval compare below must not rest on an unsigned oid.
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const callerOid = identity.oid;
+  const callerName = identity.name ?? "";
   const roles = await rolesForRequest(request);
 
   if (!isApprovalManager(roles)) {
@@ -411,11 +447,11 @@ async function approveTimesheet(
       return { status: 400, jsonBody: { error: "approve (boolean) required" } };
     }
 
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const rows = await executeQuery(
       connection,
-      "SELECT UserID, Role, SentToMyobDate FROM dbo.Timesheets WHERE TimesheetID = @Id",
+      "SELECT UserID, Role, SentToMyobDate, Data FROM dbo.Timesheets WHERE TimesheetID = @Id",
       [{ name: "Id", type: TYPES.Int, value: timesheetId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Timesheet not found" } };
@@ -426,9 +462,15 @@ async function approveTimesheet(
       return forbiddenResponse("Cannot approve your own timesheet");
     }
 
-    const managed = managedRoles(roles);
-    if (!managed.includes(row.Role as TimesheetRole) && !roles.includes(AppRole.ADMIN)) {
-      return forbiddenResponse(`You manage ${managed.join(", ")} timesheets; this is ${row.Role}`);
+    if (!canManageRole(roles, row.Role as string | null)) {
+      return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
+    }
+
+    if (approve) {
+      let data: unknown;
+      try { data = typeof row.Data === "string" ? JSON.parse(row.Data) : row.Data; } catch { return { status: 400, jsonBody: { error: "Timesheet entries are unreadable" } }; }
+      const invalid = validateTimesheetData(data, true);
+      if (invalid) return { status: 400, jsonBody: { error: invalid } };
     }
 
     if (!approve && row.SentToMyobDate) {
@@ -487,7 +529,7 @@ async function getTimesheets(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const qRole             = request.query.get("role");
     const qReadyForApproval = request.query.get("readyForApproval");
@@ -579,7 +621,7 @@ async function getTimesheetUsers(
 
   let connection;
   try {
-    connection = await createConnection(token);
+    connection = await createRequestConnection(token);
 
     const params: SqlParam[] = [];
     const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
@@ -604,55 +646,10 @@ async function getTimesheetUsers(
 }
 
 // ── POST /api/syncTimesheetsToMyob ───────────────────────────────────────────
-// Marks newly approved timesheets as sent to MYOB. Requires approval role.
-// The actual MYOB API call is stubbed — wire in credentials when ready.
-
-export async function runMyobSync(
-  token: string,
-  roles: string[],
-  context: InvocationContext,
-): Promise<{ synced: number; errors: string[] }> {
-  const managed = managedRoles(roles);
-  const errors: string[] = [];
-  let synced = 0;
-
-  const connection = await createConnection(token);
-  try {
-    const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
-    const params: SqlParam[] = managed.map((r, i) => ({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
-
-    const pending = await executeQuery(
-      connection,
-      `SELECT TimesheetID, UserDisplayName, WeekStartDate, Data
-       FROM dbo.Timesheets
-       WHERE Approved = 1 AND SentToMyobDate IS NULL
-         AND Role IN (${PLACEHOLDERS})`,
-      params,
-    );
-
-    for (const row of pending) {
-      try {
-        // TODO: call MYOB API here when credentials are available
-        // await sendToMyob(row);
-
-        await executeQuery(
-          connection,
-          "UPDATE dbo.Timesheets SET SentToMyobDate = GETUTCDATE() WHERE TimesheetID = @Id",
-          [{ name: "Id", type: TYPES.Int, value: row.TimesheetID }],
-        );
-        synced++;
-        context.log(`MYOB sync: stamped TimesheetID ${row.TimesheetID} (${row.UserDisplayName})`);
-      } catch (err: any) {
-        errors.push(`TimesheetID ${row.TimesheetID}: ${err.message}`);
-        context.error(`MYOB sync error for TimesheetID ${row.TimesheetID}:`, err.message);
-      }
-    }
-  } finally {
-    closeConnection(connection);
-  }
-
-  return { errors, synced };
-}
+// Sending timesheets to MYOB is not built (Track T). This used to stamp
+// SentToMyobDate without calling MYOB, a false record in the CFO's audit trail
+// that would also block unapproving (MYOB N11). It now writes nothing and says
+// so; the stamp belongs only after MYOB confirms, once the export exists.
 
 async function syncTimesheetsToMyob(
   request: HttpRequest,
@@ -669,13 +666,8 @@ async function syncTimesheetsToMyob(
     return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
-  try {
-    const result = await runMyobSync(token, roles, context);
-    return { status: 200, jsonBody: result };
-  } catch (error: any) {
-    context.error("syncTimesheetsToMyob failed:", error.message);
-    return errorResponse("MYOB sync failed", error.message);
-  }
+  context.log("syncTimesheetsToMyob: refused, the MYOB timesheet export is not built; nothing stamped");
+  return { status: 501, jsonBody: { error: "MYOB timesheet export not built" } };
 }
 
 // ── Registrations ─────────────────────────────────────────────────────────────

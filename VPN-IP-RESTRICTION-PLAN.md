@@ -1,5 +1,10 @@
 # Persistent Network Gating (Office / VPN IP Restriction) — Implementation Plan
 
+> **Update (Oct 2026):** `POST /api/myobWebhook` and `MYOB_WEBHOOK_KEY` were
+> removed — MYOB's Business API has no webhooks, so the endpoint could never fire.
+> Read every `myobWebhook` / `MYOB_WEBHOOK_KEY` reference below as obsolete; only
+> `graphNotification` still needs to stay reachable from outside the network.
+
 > **For agentic workers:** This is an **infrastructure / Azure-config plan**, not a
 > TDD code plan. Steps use checkbox (`- [ ]`) syntax for tracking. "Verification"
 > steps replace unit tests because there is little-to-no application code to change —
@@ -43,7 +48,7 @@ moved on:
 
 2. **Scheduled work is on timer triggers, not inbound HTTP.**
    `tenancyCpiSyncTimer`, `timesheetSyncTimer`, `tenancyReviewScheduleTimer`,
-   `sqlKeepWarmTimer`, `plannerSyncTimer`, `cleanupAttachments`, `parseEmails` run
+   `plannerSyncTimer`, `parseEmails` run
    *inside* the Functions runtime on a schedule. Access restrictions only affect
    inbound HTTP, so these are unaffected.
 

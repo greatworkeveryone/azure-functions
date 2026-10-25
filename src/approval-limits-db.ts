@@ -1,6 +1,11 @@
 import { Connection } from "tedious";
 import { executeQuery } from "./db";
-import { ApprovalLimit } from "./functions/invoices";
+
+/** One dbo.ApprovalLimits row as SQL returns it. null = unlimited. Applies to quotes and invoices alike. */
+export interface ApprovalLimit {
+  MaxApprovalAmount: number | null;
+  RoleName: string;
+}
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
