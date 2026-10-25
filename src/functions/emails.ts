@@ -1433,7 +1433,11 @@ function isUniqueViolation(err: unknown): boolean {
 // the row then records which mailbox it came from and the reply headers. Without it the statement is
 // exactly what it was before 176, so a database that has not had 176 applied is never asked for them.
 export interface UpsertOptions {
-  inbound?: { mailbox: string };
+  inbound?: {
+    mailbox: string;
+    /** The mailboxes triage reads (lower case): a copy of a stored message that also reached one is moved to it. */
+    triageMailboxes?: readonly string[];
+  };
 }
 
 // UPDLOCK + HOLDLOCK: the range lock spans check and insert, so two
@@ -1458,11 +1462,21 @@ const INSERT_EMAIL_INBOUND = `IF NOT EXISTS (SELECT 1 FROM Emails WITH (UPDLOCK,
                              Source, SenderAuthenticated, AuthenticationResults, Mailbox, InReplyTo, ReferenceIds)
          VALUES (@MessageID, @FromAddress, @FromName, @Subject, @Body, @ReceivedAt, @MatchedJobID, 'unread', @AttachmentBlobs,
                  'graph', @SenderAuthenticated, @AuthenticationResults, @Mailbox, @InReplyTo, @ReferenceIds)
-       ELSE IF @AttachmentBlobs IS NOT NULL
-         UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
-         WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL
-           AND FromAddress = @FromAddress
-           AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1)`;
+       ELSE BEGIN
+         IF @AttachmentBlobs IS NOT NULL
+           UPDATE Emails SET AttachmentBlobs = @AttachmentBlobs
+           WHERE MessageID = @MessageID AND AttachmentBlobs IS NULL
+             AND FromAddress = @FromAddress
+             AND (ISNULL(SenderAuthenticated, 0) = 0 OR @SenderAuthenticated = 1);
+         -- MessageID is unique (091), so a message sent to two mailboxes is stored once, under whichever
+         -- synced first. A copy that also reached a triage mailbox is triage mail: move the row to that
+         -- mailbox while nobody has it. Triage only ever routes rows in a triage mailbox, so a row that is
+         -- not in one has no routing decision to lose. Same sender only, as above.
+         IF @TriageMailboxes IS NOT NULL AND @Mailbox IN (SELECT [value] FROM OPENJSON(@TriageMailboxes))
+           UPDATE Emails SET Mailbox = @Mailbox
+           WHERE MessageID = @MessageID AND FromAddress = @FromAddress AND AssignedToUserId IS NULL
+             AND (Mailbox IS NULL OR Mailbox NOT IN (SELECT [value] FROM OPENJSON(@TriageMailboxes)));
+       END`;
 
 export async function upsertGraphEmails(
   connection: import("tedious").Connection,
@@ -1495,6 +1509,7 @@ export async function upsertGraphEmails(
           ...(options.inbound
             ? [
                 { name: "Mailbox", type: TYPES.NVarChar, value: options.inbound.mailbox },
+                { name: "TriageMailboxes", type: TYPES.NVarChar, value: options.inbound.triageMailboxes?.length ? JSON.stringify(options.inbound.triageMailboxes) : null },
                 { name: "InReplyTo", type: TYPES.NVarChar, value: email.inReplyTo ?? null },
                 { name: "ReferenceIds", type: TYPES.NVarChar, value: email.referenceIds ?? null },
               ]

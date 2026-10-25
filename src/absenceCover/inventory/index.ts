@@ -26,7 +26,7 @@ export async function loadInventory(connection: Connection, input: InventoryInpu
   const absentIds = new Set(ids);
   return [
     ...(await loadJobItems(connection, ids)),
-    ...(await loadDecisionItems(connection, absentIds)),
+    ...(await loadDecisionItems(connection, absentIds, new Map(input.absent.map((person) => [person.userId, person.role])))),
     ...(await loadEscalationItems(connection, ids)),
     ...(await loadApprovalItems(connection, input.absent, input.context)),
     ...(await loadEmailItems(connection, ids, input.emailColumns, input.context)),

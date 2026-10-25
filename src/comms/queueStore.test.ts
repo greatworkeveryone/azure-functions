@@ -102,7 +102,7 @@ describe("sqlQueueStore", () => {
   });
 
   it("writes an event for each recovered recipient and returns the jobs to settle", async () => {
-    s.recoverStale.mockResolvedValue({ failed: [{ correspondenceId: 41, recipientId: 1 }], requeued: [{ correspondenceId: 42, recipientId: 2 }, { correspondenceId: 41, recipientId: 3 }] });
+    s.recoverStale.mockResolvedValue({ failed: [{ correspondenceId: 41, errorCode: "send_unconfirmed", recipientId: 1 }], requeued: [{ correspondenceId: 42, errorCode: "interrupted", recipientId: 2 }, { correspondenceId: 41, errorCode: "interrupted", recipientId: 3 }] });
     const jobs = await sqlQueueStore(conn).recoverStale(10);
     expect(jobs.sort()).toEqual([41, 42]);
     expect(jest.mocked(appendEvent).mock.calls.map((call) => [call[1].recipientId, call[1].toStatus, call[1].errorCode])).toEqual([[1, "failed", "send_unconfirmed"], [2, "queued", "interrupted"], [3, "queued", "interrupted"]]);

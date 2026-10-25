@@ -3,6 +3,7 @@
 // change is conditional on the status it expects and says whether it changed a row.
 
 import { TYPES, type Connection } from "tedious";
+import { MAX_ATTEMPTS } from "./config";
 import { executeQuery, type SqlParam, type SqlRow } from "../db";
 import { JOB_COLUMNS, RECIPIENT_COLUMNS_PREFIXED, toJob, toRecipient } from "./rows";
 import type { QueueItem, RecipientStatus } from "./types";
@@ -113,26 +114,33 @@ export async function saveDraftIds(connection: Connection, recipientId: number, 
 
 export interface StaleRecipient {
   correspondenceId: number;
+  /** Why it was moved: `interrupted` (requeued, or failed once its attempts are used up) or `send_unconfirmed`. */
+  errorCode: string;
   recipientId: number;
 }
 
 /**
- * A recipient claimed `minutes` ago with no outcome means the run died. With no draft it can go again; with a
- * draft the send may or may not have happened, so it is failed for a person to check (never sent twice).
+ * A recipient claimed `minutes` ago with no outcome means the run died. With no draft it can go again, until
+ * it has been claimed `maxAttempts` times: a message that kills every run would otherwise be claimed every
+ * cycle for ever, spending the minute's budget. With a draft the send may or may not have happened, so it is
+ * failed for a person to check (never sent twice).
  */
-export async function recoverStale(connection: Connection, minutes: number): Promise<{ failed: StaleRecipient[]; requeued: StaleRecipient[] }> {
+export async function recoverStale(connection: Connection, minutes: number, maxAttempts: number = MAX_ATTEMPTS): Promise<{ failed: StaleRecipient[]; requeued: StaleRecipient[] }> {
   const rows = await executeQuery(
     connection,
     `UPDATE dbo.CorrespondenceRecipients SET
-        Status = CASE WHEN GraphMessageId IS NULL THEN 'queued' ELSE 'failed' END,
+        Status = CASE WHEN GraphMessageId IS NULL AND Attempts < @MaxAttempts THEN 'queued' ELSE 'failed' END,
         LastErrorCode = CASE WHEN GraphMessageId IS NULL THEN 'interrupted' ELSE 'send_unconfirmed' END,
         UpdatedAt = SYSUTCDATETIME()
-      OUTPUT INSERTED.RecipientId, INSERTED.CorrespondenceId, INSERTED.Status
+      OUTPUT INSERTED.RecipientId, INSERTED.CorrespondenceId, INSERTED.Status, INSERTED.LastErrorCode
       WHERE Status = 'sending' AND LastAttemptAt < DATEADD(minute, -@Minutes, SYSUTCDATETIME())`,
-    [{ name: "Minutes", type: TYPES.Int, value: minutes }],
+    [
+      { name: "Minutes", type: TYPES.Int, value: minutes },
+      { name: "MaxAttempts", type: TYPES.Int, value: maxAttempts },
+    ],
   );
   const pick = (status: string): StaleRecipient[] =>
-    rows.filter((row) => row.Status === status).map((row) => ({ correspondenceId: Number(row.CorrespondenceId), recipientId: Number(row.RecipientId) }));
+    rows.filter((row) => row.Status === status).map((row) => ({ correspondenceId: Number(row.CorrespondenceId), errorCode: String(row.LastErrorCode), recipientId: Number(row.RecipientId) }));
   return { failed: pick("failed"), requeued: pick("queued") };
 }
 

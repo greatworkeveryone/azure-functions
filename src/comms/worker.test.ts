@@ -105,7 +105,7 @@ function fakeSender(over: { draft?: () => Promise<{ graphMessageId: string; inte
 }
 
 const run = (store: Fake, sender: MailSender, over: Partial<WorkerOptions> = {}) =>
-  runCommsQueue({ log: jest.fn(), maxPerMinute: 25, mode: "live", now: () => NOW, sender, store, ...over });
+  runCommsQueue({ fromAddress: "notices@randazzo.properties", log: jest.fn(), maxPerMinute: 25, mode: "live", now: () => NOW, sender, store, ...over });
 
 const item = (recipientOver: Partial<RecipientRow> = {}, jobOver: Partial<JobRow> = {}): QueueItem => ({ job: job(jobOver), recipient: recipient(recipientOver) });
 
@@ -122,6 +122,23 @@ describe("off", () => {
     expect(store.calls).toEqual([]);
     expect(sender.drafts).toEqual([]);
     expect(store.items[0].recipient.status).toBe("queued");
+  });
+});
+
+describe("the sender", () => {
+  it("holds a job queued under any address but the configured sender, calling nothing", async () => {
+    const store = fakeStore([item({}, { fromAddress: "accounts@randazzo.properties" }), item()]);
+    const sender = fakeSender();
+    const report = await run(store, sender);
+    expect(report).toMatchObject({ blocked: 1, sent: 1 });
+    expect(store.outcomes[0].outcome).toMatchObject({ errorCode: "sender_mismatch", status: "blocked" });
+    expect(sender.drafts.map((draft) => draft.from.address)).toEqual(["notices@randazzo.properties"]);
+  });
+
+  it("compares addresses without regard to case or spaces", async () => {
+    const store = fakeStore([item({}, { fromAddress: " Notices@Randazzo.Properties " })]);
+    const report = await run(store, fakeSender());
+    expect(report).toMatchObject({ blocked: 0, sent: 1 });
   });
 });
 
