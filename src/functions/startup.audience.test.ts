@@ -1,3 +1,4 @@
+export {};
 // M7: startup refuses to boot when API_TOKEN_AUDIENCE=api meets SQL_USER_CONNECTION=true.
 jest.mock("@azure/functions", () => ({ app: { hook: { appStart: jest.fn(), postInvocation: jest.fn() }, http: jest.fn() } }));
 jest.mock("../migrate", () => ({ checkMigrations: jest.fn(), runMigrations: jest.fn(), startupMigrationMode: jest.fn() }));

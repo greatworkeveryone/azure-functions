@@ -1,3 +1,4 @@
+export {};
 const captureMessage = jest.fn();
 jest.mock("../sentry", () => ({ Sentry: { captureMessage: (...args: unknown[]) => captureMessage(...args) } }));
 
