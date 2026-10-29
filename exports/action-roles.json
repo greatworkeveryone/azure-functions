@@ -300,6 +300,9 @@
     "cfo",
     "director"
   ],
+  "manageFloorplanImprovements": [
+    "director"
+  ],
   "manageMajorEvents": [
     "admin",
     "cfo",
@@ -420,6 +423,16 @@
   ],
   "recordRenewalOutcome": [
     "director"
+  ],
+  "recordWorkflowSignals": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
   ],
   "rejectInvoice": [
     "accounts_manager",
@@ -649,6 +662,10 @@
   "viewFinanceUsageAnalytics": [
     "admin",
     "cfo",
+    "director"
+  ],
+  "viewFloorplanPerformance": [
+    "admin",
     "director"
   ],
   "viewInspections": [

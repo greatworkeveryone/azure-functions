@@ -104,6 +104,8 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // batches: raw UsageViews past retention whose person-day is rolled up after the day ended and after the session's last
   // heartbeat, then UsageSessions past retention with no views left whose day is rolled up, then a person's UsageDaily totals go only as whole days older than USAGE_DAILY_RETENTION_DAYS (default 730, never below the raw days),
   // never UsageDevices. See src/usage/purge.ts and usagePurgeTimer.ts.
+  // Reviewed: opt-in usage purge only, positive RecordedAt cutoff, >=30 days, bounded 40 x 5000. No business/audit rows.
+  "src/performance/purgeSignals.ts": { deleteFrom: 1 },
   "src/usage/purge.ts": { deleteFrom: 3 },
   "src/functions/workRequests.ts": { deleteFrom: 1 },
   // REVIEWED (D4, 17 Oct 2026): the one tenancy hard delete, shared by

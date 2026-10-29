@@ -1,3 +1,4 @@
+import {purgeWorkflowSignals} from "../performance/purgeSignals";
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
@@ -27,6 +28,8 @@ export async function usagePurgeTimer(_timer: Timer, context: InvocationContext)
   try {
     connection = await createServiceRequestConnection();
     const counts = await purgeUsage(connection, { dailyRetentionDays: dailyRetentionDays(), dryRun: mode === "dry-run", retentionDays: retentionDays() });
+    const workflowSignals=await purgeWorkflowSignals(connection,retentionDays(),mode === "dry-run");
+    context.log("Workflow signal retention",workflowSignals);
     context.log(
       `usagePurgeTimer: before ${counts.cutoffDay}: views ${counts.viewsDeleted} of ${counts.viewsEligible} deleted, ` +
         `sessions ${counts.sessionsDeleted} of ${counts.sessionsEligible}; daily totals before ${counts.dailyCutoffDay}: ${counts.dailyDeleted} of ${counts.dailyEligible}${counts.dryRun ? " (dry run: nothing deleted)" : ""}`,

@@ -22,7 +22,20 @@ const sourceFiles = (dir: string): string[] =>
 // requireSignOffRole (src/scheduleSignOff.ts) is requireRole plus a refusal of admin
 // alone, for the two schedule sign-off routes; schedule-signoff-handlers.test.ts pins it.
 // requireProcedureApprover (src/procedureAccess.ts) is the same for publishProcedure.
-const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|authorizeActor|rolesForRequest|runControllerAction|withCaller|withMajorEvent|withDocumentRegister)\s*(?:<[^>]*>)?\s*\(/;
+// performanceAccess (src/performance/http.ts) requires the capability and then exact director/admin roles;
+// performanceRoutes.test.ts and action-roles.parity.test.ts exercise both read and write boundaries.
+const GATE = /\b(requireRole|requireSignOffRole|requireProcedureApprover|authorize|authorizeWrite|authorizeActor|rolesForRequest|runControllerAction|withCaller|withMajorEvent|withDocumentRegister|performanceAccess)\s*(?:<[^>]*>)?\s*\(/;
+
+describe("the whole-business performance gate", () => {
+  it("retains the shared requireRole check and exact-role refusal", () => {
+    const gate = read(join(SRC,"performance","http.ts"));
+    expect(gate).toMatch(/await requireRole\(/);
+    expect(gate).toContain("ACTION_ROLES.manageFloorplanImprovements.gate");
+    expect(gate).toContain("ACTION_ROLES.viewFloorplanPerformance.gate");
+    expect(gate).toContain("roles.includes(AppRole.DIRECTOR)");
+    expect(gate).toContain("roles.includes(AppRole.ADMIN)&&!write");
+  });
+});
 
 // Routes with no role check, each for a reason that is itself a control.
 describe("the shared MYOB controller gate", () => {

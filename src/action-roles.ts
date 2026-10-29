@@ -524,6 +524,21 @@ export const ACTION_ROLES = {
     routes: ["listAiCalls"],
     why: "Admin → AI activity: the log of every AI call (who, which purpose, how big, how it ended): admin and directors, as Settings and rollout controls (viewAdmin). No route returns stored text.",
   },
+  viewFloorplanPerformance: {
+    gate: [A.ADMIN, A.DIRECTOR], match: "exact",
+    routes: ["getFloorplanPerformance", "getFloorplanAdoption", "getPerformanceImprovements", "getWorkflowFriction"],
+    why: "Whole-business workflow performance, recorded bottlenecks and improvement history; the CFO retains finance-only usage.",
+  },
+  manageFloorplanImprovements: {
+    gate: [A.DIRECTOR], match: "exact",
+    routes: ["savePerformanceImprovement"],
+    why: "Directors set and review operating targets, with revision checks and immutable history; this grants no financial authority.",
+  },
+  recordWorkflowSignals: {
+    gate: [A.USER],
+    routes: ["postWorkflowSignals"],
+    why: "Opt-in bounded request-outcome telemetry for the verified caller; no input content or record identifiers.",
+  },
   viewUsageAnalytics: {
     gate: [A.ADMIN, A.DIRECTOR],
     routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi"],

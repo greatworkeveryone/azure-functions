@@ -3,6 +3,7 @@ import type { InvocationContext, Timer } from "@azure/functions";
 
 jest.mock("@azure/functions", () => ({ ...jest.requireActual("@azure/functions"), app: { timer: jest.fn() } }));
 jest.mock("../db", () => ({ closeConnection: jest.fn(), createServiceRequestConnection: jest.fn(async () => ({})) }));
+jest.mock("../performance/purgeSignals",()=>({purgeWorkflowSignals:jest.fn(async()=>({eligible:0,deleted:0}))}));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn(), flush: jest.fn(async () => true) } }));
 jest.mock("../usage/rollup", () => ({ ...jest.requireActual("../usage/rollup"), rollUpDays: jest.fn(async () => ({ days: 3, inserted: 2, updated: 5 })) }));
 jest.mock("../usage/purge", () => ({
