@@ -105,4 +105,31 @@ describe("upsertGraphEmails", () => {
       SenderAuthenticated: true,
     });
   });
+
+  it("only backfills attachments onto a row from the same sender, never an authenticated row from an unauthenticated message", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1>", { attachmentBlobNames: [{ blobName: "email-attachments/m1/x", fileName: "x.pdf" }] })]);
+
+    const [, sql] = db.executeQuery.mock.calls[0] as [unknown, string];
+    const backfill = sql.slice(sql.indexOf("ELSE IF"));
+    expect(backfill).toMatch(/AttachmentBlobs IS NULL/);
+    expect(backfill).toMatch(/FromAddress = @FromAddress/);
+    expect(backfill).toMatch(/ISNULL\(SenderAuthenticated, 0\) = 0 OR @SenderAuthenticated = 1/);
+  });
+});
+
+describe("a message that reached more than one mailbox", () => {
+  it("moves the stored row to the triage mailbox while nobody has it, same sender only", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1@x>")], { inbound: { mailbox: "notices@example.test", triageMailboxes: ["notices@example.test"] } });
+    const [, sql, params] = db.executeQuery.mock.calls[0] as [unknown, string, { name: string; value: unknown }[]];
+    expect(sql).toMatch(/UPDATE Emails SET Mailbox = @Mailbox/);
+    expect(sql).toMatch(/FromAddress = @FromAddress AND AssignedToUserId IS NULL/);
+    expect(sql).toMatch(/Mailbox IS NULL OR Mailbox NOT IN \(SELECT \[value\] FROM OPENJSON\(@TriageMailboxes\)\)/);
+    expect(params.find((param) => param.name === "TriageMailboxes")?.value).toBe(JSON.stringify(["notices@example.test"]));
+  });
+
+  it("sends no triage list when there is none, so the move can never run", async () => {
+    await upsertGraphEmails(connection, [graphEmail("<m1@x>")], { inbound: { mailbox: "ops@example.test" } });
+    const [, , params] = db.executeQuery.mock.calls[0] as [unknown, string, { name: string; value: unknown }[]];
+    expect(params.find((param) => param.name === "TriageMailboxes")?.value).toBeNull();
+  });
 });

@@ -28,6 +28,7 @@ jest.mock("../auth", () => ({
   unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
   verifiedIdentityFromRequest: jest.fn().mockResolvedValue({ email: "ops@rp", name: "Olive Ops", oid: "olive-oid" }),
 }));
+jest.mock("../moneyGate", () => ({ requireMoneyContext: jest.fn().mockResolvedValue(null) }));
 jest.mock("../blob-storage", () => ({ generateReadSasUrl: jest.fn().mockReturnValue("https://sas") }));
 jest.mock("../graph", () => ({ graphFetchEmails: jest.fn(), graphSendMail: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../rateLimit", () => ({ checkRateLimit: jest.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }) }));
@@ -50,6 +51,7 @@ type Param = { name: string; value: unknown };
 
 const db = require("../db") as { beginTransaction: jest.Mock; commitTransaction: jest.Mock; executeQuery: jest.Mock };
 const decisions = require("../quote-decisions") as { approveDirectorQuote: jest.Mock; rejectQuote: jest.Mock };
+const moneyGate = require("../moneyGate") as { requireMoneyContext: jest.Mock };
 const graph = require("../graph") as { graphSendMail: jest.Mock };
 const { Sentry } = require("../sentry") as { Sentry: { captureMessage: jest.Mock } };
 const { recordEmailQuoteDecision } = require("../functions/emails") as { recordEmailQuoteDecision: Handler };
@@ -220,5 +222,60 @@ describe("facilities-manager escalation recipients", () => {
       expect.stringContaining("facilities_manager"),
       expect.objectContaining({ tags: { category: "system.health" } }),
     );
+  });
+});
+
+describe("recordEmailQuoteDecision with reply-to-approve on: money gate and reply evidence", () => {
+  const SENT = new Date("2026-10-01T00:00:00Z");
+  const REPLY = `${"Approved, go ahead. ".repeat(40)}`;
+
+  function routeFullPath(): void {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/FROM Emails WHERE EmailID/.test(sql)) {
+        return [{ ...EMAIL, Body: REPLY, ReceivedAt: new Date("2026-10-02T00:00:00Z"), SenderAuthenticated: 1, Source: "graph" }];
+      }
+      if (/FROM Quotes WHERE QuoteID/.test(sql)) {
+        return [{ ...QUOTE, DirectorEmailSentAt: SENT, DirectorEmailSentTo: "carlo@randazzo.properties" }];
+      }
+      if (/FROM AppUsers/.test(sql)) return [{ DisplayName: "Carlo", UserID: 1 }];
+      if (/UPDATE Emails/.test(sql)) return [{ EmailID: 42 }];
+      return [];
+    });
+    decisions.approveDirectorQuote.mockResolvedValue({ ok: true, jobId: 9, previousStatus: "awaiting_director", quote: { QuoteID: 7, Status: "approved" } });
+  }
+
+  it("returns the gate's refusal before reading the body or the database", async () => {
+    process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
+    const refusal = { jsonBody: { code: "step_up_required" }, status: 428 };
+    moneyGate.requireMoneyContext.mockResolvedValueOnce(refusal);
+    const request = post({ Decision: "approved", EmailID: 42, QuoteID: 7 });
+
+    const res = await recordEmailQuoteDecision(request, ctx);
+
+    expect(res).toBe(refusal);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(db.executeQuery).not.toHaveBeenCalled();
+    expect(decisions.approveDirectorQuote).not.toHaveBeenCalled();
+  });
+
+  it("does not ask the gate while the switch is off", async () => {
+    routeSql(EMAIL);
+    await recordEmailQuoteDecision(post({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+    expect(moneyGate.requireMoneyContext).not.toHaveBeenCalled();
+  });
+
+  it("ledgers a hash and the first 500 characters of the director's reply beside the operator's Decision", async () => {
+    process.env.EMAIL_REPLY_DECISIONS_ENABLED = "true";
+    routeFullPath();
+
+    const res = await recordEmailQuoteDecision(post({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(200);
+    const insert = calls().find((c: { sql: string }) => /INSERT INTO dbo\.DecisionLedger/.test(c.sql));
+    expect(insert).toBeDefined();
+    const after = JSON.parse(String(insert!.params.After)) as Record<string, unknown>;
+    expect(after.replySha256).toBe(require("node:crypto").createHash("sha256").update(REPLY).digest("hex"));
+    expect(after.replyExcerpt).toBe(REPLY.trim().slice(0, 500));
+    expect(after.sourceEmailId).toBe(42);
   });
 });

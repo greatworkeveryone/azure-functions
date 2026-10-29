@@ -6,7 +6,7 @@ import { TYPES, type Connection } from "tedious";
 import { buildingCategoryColumnExists } from "../../buildingCategoryColumn";
 import { executeQuery } from "../../db";
 import { ACTION_ROLES } from "../../action-roles";
-import { approvalThreshold } from "../config";
+import { approvalThreshold, type CommsMode, commsMode, fromAddress } from "../config";
 import { recentRecipientCount } from "../store";
 import { STAFF_AUDIENCE_ROLES } from "./audienceInput";
 
@@ -23,8 +23,12 @@ export interface BroadcastOptions {
   approvalThreshold: number;
   approvers: { name: string; role: string }[];
   buildings: BroadcastBuilding[];
+  /** The one address every email goes from (COMMS_FROM_ADDRESS). */
+  fromAddress: string;
   /** This person's recipients over the last 24 hours (the count the queue adds a new send to), so the Review step can say beforehand. */
   recentRecipients: number;
+  /** Whether the server sends at all right now: `off` and `dry-run` record a send and hold it back. */
+  sending: CommsMode;
   staffRoles: { count: number; role: string }[];
   trades: string[];
 }
@@ -88,7 +92,9 @@ export async function loadBroadcastOptions(connection: Connection, callerOid: st
     approvalThreshold: approvalThreshold(),
     approvers: approvers.map((row) => ({ name: String(row.DisplayName), role: String(row.Role) })),
     buildings,
+    fromAddress: fromAddress(),
     recentRecipients: await recentRecipientCount(connection, callerOid, false),
+    sending: commsMode(),
     staffRoles: roles.filter((row) => STAFF_AUDIENCE_ROLES.includes(String(row.Role))).map((row) => ({ count: Number(row.N), role: String(row.Role) })).sort((a, b) => byName(a.role, b.role)),
     trades,
   };

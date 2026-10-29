@@ -91,7 +91,7 @@ export function sqlQueueStore(connection: Connection): QueueStore {
           await appendEvent(connection, {
             actor,
             correspondenceId: stale.correspondenceId,
-            errorCode: toStatus === "failed" ? "send_unconfirmed" : "interrupted",
+            errorCode: stale.errorCode,
             fromStatus: "sending",
             recipientId: stale.recipientId,
             toStatus,

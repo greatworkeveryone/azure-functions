@@ -200,7 +200,9 @@ describe("getBroadcastOptions", () => {
         { buildingId: 2, category: "residence", levels: [], name: "Alpha House" },
         { buildingId: 5, category: "commercial", levels: ["Ground", "Level 2", "Level 10"], name: "Mooney Plaza" },
       ],
+      fromAddress: "notices@randazzo.properties",
       recentRecipients: 12,
+      sending: "off",
       staffRoles: [{ count: 1, role: "director" }, { count: 3, role: "facilities" }],
       trades: ["Electrical", "Lifts", "Plumbing"],
     });

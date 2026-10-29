@@ -74,7 +74,8 @@ type SqlRoute = [RegExp, Record<string, unknown>[]];
 function routeSql(routes: SqlRoute[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     const hit = routes.find(([re]) => re.test(sql));
-    return hit ? hit[1] : [];
+    // The atomic send claim (UPDATE ... OUTPUT inserted.X AS Id) succeeds unless a test says otherwise.
+    return hit ? hit[1] : /OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : [];
   });
 }
 

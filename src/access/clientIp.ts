@@ -1,5 +1,7 @@
 import { createHmac } from "node:crypto";
 import { BlockList, isIP, isIPv4 } from "node:net";
+import { isDevOverrideEnabled } from "../jwt";
+import { Sentry } from "../sentry";
 
 // The caller's network address, for the access log (S10) and the money gate
 // (S11). Azure Functions puts the client address in X-Forwarded-For. The header
@@ -110,11 +112,22 @@ export function forwardedSummary(request: HeaderSource): {
 // Without a key the hash is still stable and not the raw value, but an IPv4
 // address can be recovered by trying all 2^32 of them. ACCESS_HASH_KEY (a
 // random secret, Key Vault) closes that; rotating it breaks device continuity
-// for 90 days, so rotate only on a leak.
+// for 90 days, so rotate only on a leak. The fallback keeps the access log
+// working: silent in local dev, one Sentry warning per process elsewhere.
 const FALLBACK_KEY = "floorplan-access-v1";
+let warnedFallback = false;
+
+function hashKey(): string {
+  const key = process.env.ACCESS_HASH_KEY?.trim();
+  if (key) return key;
+  if (!warnedFallback && !isDevOverrideEnabled()) {
+    warnedFallback = true;
+    Sentry.captureMessage("ACCESS_HASH_KEY is unset: access-log hashes use the public fallback key", "warning");
+  }
+  return FALLBACK_KEY;
+}
 
 /** Keyed SHA-256 of an address or user agent: 32 hex characters. */
 export function hashValue(kind: "ip" | "ua", value: string): string {
-  const key = process.env.ACCESS_HASH_KEY?.trim() || FALLBACK_KEY;
-  return createHmac("sha256", key).update(`${kind}:${value}`).digest("hex").slice(0, 32);
+  return createHmac("sha256", hashKey()).update(`${kind}:${value}`).digest("hex").slice(0, 32);
 }

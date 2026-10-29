@@ -4,7 +4,12 @@
 // Every row is checked first; if any row is wrong nothing is written and the
 // answer lists each bad row with its reason (400). Otherwise all rows are added
 // in one transaction, each ledgered. dryRun=true checks and previews without
-// writing. Managers only. Response: { created, preview? } or { errors }.
+// writing. Managers only. Response: { created, duplicatesSkipped, preview? } or { errors }.
+//
+// Idempotent: a row whose natural key (building, asset, location, scope, name,
+// contractor, interval, anchor date) already matches a live schedule, or an
+// earlier row of the file, is skipped and counted in duplicatesSkipped, so a
+// retry after a client timeout adds nothing. Imports run one at a time.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
@@ -17,7 +22,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { planNextDue } from "../serviceScheduleRefs";
 import { loadImportLookups, MAX_IMPORT_BYTES, MAX_IMPORT_ROWS, readImportRows, rowToInput } from "../serviceScheduleImport";
 import { insertRun } from "../serviceScheduleRuns";
-import { insertSchedule } from "../serviceScheduleWrite";
+import { insertSchedule, loadScheduleNaturalKeys, lockServiceScheduleImport, scheduleNaturalKey } from "../serviceScheduleWrite";
 import { XlsxRejectedError } from "../xlsx-safe";
 import type { ScheduleInput } from "../serviceSchedules";
 
@@ -69,15 +74,33 @@ export async function importServiceSchedules(request: HttpRequest, context: Invo
       else valid.push({ buildingName: result.buildingName, input: result.value, lastServiced: result.lastServiced, nextDue: nextDue.value, row: row.row });
     }
     if (errors.length > 0) return { jsonBody: { error: `${errors.length} row(s) need fixing; nothing was imported`, errors }, status: 400 };
+    // Splits `valid` into rows to add and rows whose key is already taken.
+    const split = (known: Set<string>): { fresh: typeof valid; skipped: typeof valid } => {
+      const seen = new Set(known);
+      const fresh: typeof valid = [];
+      const skipped: typeof valid = [];
+      for (const item of valid) {
+        const key = scheduleNaturalKey(item.input);
+        if (seen.has(key)) skipped.push(item);
+        else {
+          seen.add(key);
+          fresh.push(item);
+        }
+      }
+      return { fresh, skipped };
+    };
     if (dryRun) {
-      const preview = valid.map((item) => ({ building: item.buildingName, name: item.input.name, nextDue: item.nextDue, row: item.row }));
-      return { jsonBody: { created: 0, preview }, status: 200 };
+      const { fresh, skipped } = split(await loadScheduleNaturalKeys(conn));
+      const preview = fresh.map((item) => ({ building: item.buildingName, name: item.input.name, nextDue: item.nextDue, row: item.row }));
+      return { jsonBody: { created: 0, duplicatesSkipped: skipped.length, preview }, status: 200 };
     }
 
     const outcome = await inTransaction(conn, async () => {
       const actor = await resolveLedgerActor(request, conn);
       if (!actor) return txFail(unauthorizedResponse());
-      for (const item of valid) {
+      await lockServiceScheduleImport(conn);
+      const { fresh, skipped } = split(await loadScheduleNaturalKeys(conn));
+      for (const item of fresh) {
         const schedule = await insertSchedule(conn, item.input, item.nextDue, auth.caller.name, actor, today);
         // The last service from the spreadsheet becomes history (UX review E3).
         if (item.lastServiced) {
@@ -93,10 +116,10 @@ export async function importServiceSchedules(request: HttpRequest, context: Invo
           });
         }
       }
-      return txOk(valid.length);
+      return txOk({ created: fresh.length, duplicatesSkipped: skipped.length });
     });
     if (!outcome.ok) return outcome.response;
-    return { jsonBody: { created: outcome.value }, status: 200 };
+    return { jsonBody: outcome.value, status: 200 };
   } catch (error) {
     context.error("importServiceSchedules failed:", errorMessage(error));
     return errorResponse("Failed to import service schedules", error);

@@ -104,7 +104,7 @@ function mockSql(routes: Route[]): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     const hit = routes.find((r) => r.match.test(sql));
     if (hit?.reject) throw hit.reject;
-    return hit?.rows ?? [];
+    return hit?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []); // send claim succeeds by default
   });
 }
 
@@ -732,6 +732,64 @@ describe("sendPurchaseOrder", () => {
     expect(res.status).toBe(500);
     expect(db.beginTransaction).not.toHaveBeenCalled();
     expect(ledgerInserts(db.executeQuery)).toHaveLength(0);
+  });
+
+  describe("the send claim", () => {
+    const CLAIM = /UPDATE PurchaseOrders SET SendAttemptedAt = SYSUTCDATETIME\(\)/;
+    const RELEASE = /SET SendAttemptedAt = NULL, SendAttemptedBy = NULL WHERE PurchaseOrderID/;
+    const sentry = (require("../sentry") as { Sentry: { captureException: jest.Mock } }).Sentry;
+    const attempted = new Date("2026-10-23T01:02:03Z");
+
+    it("is taken before the mail leaves and cleared by the SentAt stamp", async () => {
+      const res = await send();
+
+      expect(res.status).toBe(200);
+      expect(orderOf(CLAIM)).toBeLessThan(graph.graphSendMail.mock.invocationCallOrder[0]);
+      const stamp = db.executeQuery.mock.calls.find((c: unknown[]) => /SET SentAt = SYSUTCDATETIME\(\)/.test(String(c[1])));
+      expect(String(stamp?.[1])).toMatch(/SendAttemptedAt = NULL, SendAttemptedBy = NULL/);
+    });
+
+    it("refuses a second click with 409 and the attempted time when an earlier send left its claim", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ SendAttemptedAt: attempted }), stored]);
+
+      const res = await send();
+
+      expect(res.status).toBe(409);
+      expect((res.jsonBody as { error: string }).error).toContain("2026-10-23T01:02:03.000Z");
+      expect((res.jsonBody as { error: string }).error).toContain("check with the contractor");
+      expect(graph.graphSendMail).not.toHaveBeenCalled();
+      expect(orderOf(CLAIM)).toBe(-1);
+    });
+
+    it("loses a race for the claim with the same 409, sending nothing", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po(), { match: CLAIM, rows: [] }, { match: /SELECT SendAttemptedAt FROM PurchaseOrders/, rows: [{ SendAttemptedAt: attempted }] }, stored]);
+
+      const res = await send();
+
+      expect(res).toMatchObject({ status: 409, jsonBody: { code: "po_send_in_progress" } });
+      expect(graph.graphSendMail).not.toHaveBeenCalled();
+    });
+
+    it("gives the claim back when the mail does not go, so a retry is allowed", async () => {
+      graph.graphSendMail.mockRejectedValue(new Error("Graph 503"));
+
+      const res = await send();
+
+      expect(res.status).toBe(500);
+      expect(orderOf(RELEASE)).toBeGreaterThan(graph.graphSendMail.mock.invocationCallOrder[0]);
+    });
+
+    it("keeps the claim and tells Sentry when the mail went but could not be recorded", async () => {
+      mockSql([LEDGER_FAILS, APP_USER, JOB_BUILDING, po(), stored]);
+
+      const res = await send();
+
+      expect(graph.graphSendMail).toHaveBeenCalledTimes(1);
+      expect(res).toMatchObject({ status: 500, jsonBody: { error: expect.stringContaining("Do not send it again") } });
+      expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
+      expect(sentry.captureException).toHaveBeenCalledTimes(1);
+      expect(orderOf(RELEASE)).toBe(-1);
+    });
   });
 
   it("404s an unknown PO", async () => {

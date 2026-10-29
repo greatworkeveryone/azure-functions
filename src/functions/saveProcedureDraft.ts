@@ -1,9 +1,16 @@
-// POST /api/saveProcedureDraft   { slug, title, summary, blocks, category?, audience? }
+// POST /api/saveProcedureDraft   { slug, title, summary, blocks, category?, audience?, updatedAt? }
 //
 // Never touches a published row: it updates the single draft or creates one at the
 // next version number, creating the parent dbo.Procedures row on first save of a
 // new slug. An edit withdraws any request for approval (migration 142): what was
 // asked about is gone.
+//
+// Optional `updatedAt` (alias `version`): the draft's updatedAt as last read (the
+// value this endpoint and getProcedures' createdAt return). When sent and the draft
+// has since been saved, published or removed, nothing is written and the answer is
+// 409 with the current updatedAt. Omitted, the save is last-writer-wins as before.
+// The response carries the new updatedAt and approvalRequestCleared (true when the
+// save withdrew a pending request for approval).
 //
 // An editor writes for their own team: a draft of a procedure written for another
 // team, or a new procedure for another team, is refused (403) before anything is
@@ -56,6 +63,12 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
       .filter((role) => KNOWN_AUDIENCES.includes(role));
     const written = audience.length > 0 ? audience : ["all"];
 
+    const rawToken = body?.updatedAt ?? body?.version;
+    const expectedAt = rawToken === undefined || rawToken === null ? null : new Date(String(rawToken));
+    if (expectedAt !== null && Number.isNaN(expectedAt.getTime())) {
+      return { status: 400, jsonBody: { error: "updatedAt must be the date-time of the draft you were shown" } };
+    }
+
     const author = userInfoFromToken(token);
 
     connection = await createRequestConnection(token);
@@ -68,14 +81,27 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
       if (policy[0]?.EndorsementAuthority !== "executive") return outsideAudienceResponse();
     }
 
-    await executeQuery(
+    const rows = await executeQuery(
       connection,
-      `BEGIN TRANSACTION;
+      `SET XACT_ABORT ON;
+       BEGIN TRANSACTION;
 
        IF NOT EXISTS (SELECT 1 FROM dbo.Procedures WHERE Slug = @Slug)
          INSERT INTO dbo.Procedures (Slug, Category, Audience, SortOrder)
          SELECT @Slug, @Category, @Audience,
                 ISNULL((SELECT MAX(SortOrder) FROM dbo.Procedures), 0) + 1;
+
+       -- The draft as it stands, held until commit: its save time and whether a request is pending.
+       DECLARE @PrevAt DATETIME2(0), @HadRequest BIT = 0;
+       SELECT @PrevAt = CreatedAt, @HadRequest = CASE WHEN ApprovalRequestedAt IS NULL THEN 0 ELSE 1 END
+       FROM dbo.ProcedureVersions WITH (UPDLOCK, HOLDLOCK) WHERE Slug = @Slug AND Status = 'draft';
+
+       IF @ExpectedAt IS NOT NULL AND (@PrevAt IS NULL OR @PrevAt <> CAST(@ExpectedAt AS DATETIME2(0)))
+       BEGIN
+         ROLLBACK TRANSACTION;
+         SELECT 'conflict' AS Outcome, @PrevAt AS UpdatedAt, CAST(0 AS BIT) AS ApprovalRequestCleared;
+         RETURN;
+       END
 
        -- An edit withdraws any request for approval: what was asked about is gone.
        UPDATE dbo.ProcedureVersions
@@ -91,6 +117,9 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
          SELECT @Slug, ISNULL(MAX(VersionNo), 0) + 1, @Title, @Summary, @Blocks, 'draft', @Author
          FROM dbo.ProcedureVersions WHERE Slug = @Slug;
 
+       SELECT 'ok' AS Outcome, CreatedAt AS UpdatedAt, @HadRequest AS ApprovalRequestCleared
+       FROM dbo.ProcedureVersions WHERE Slug = @Slug AND Status = 'draft';
+
        COMMIT TRANSACTION;`,
       [
         { name: "Slug", type: TYPES.NVarChar, value: slug },
@@ -100,10 +129,19 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
         { name: "Summary", type: TYPES.NVarChar, value: summary },
         { name: "Blocks", type: TYPES.NVarChar, value: blocksJson },
         { name: "Author", type: TYPES.NVarChar, value: author?.name ?? author?.email ?? "Unknown" },
+        { name: "ExpectedAt", type: TYPES.DateTime2, value: expectedAt },
       ],
     );
 
-    return { status: 200, jsonBody: { ok: true } };
+    const outcome = rows[0];
+    const updatedAt = outcome?.UpdatedAt instanceof Date ? outcome.UpdatedAt.toISOString() : null;
+    if (outcome?.Outcome === "conflict") {
+      return {
+        status: 409,
+        jsonBody: { current: { updatedAt }, error: "This draft was saved by someone else, or published, since you opened it. Reload to see it as it is now." },
+      };
+    }
+    return { status: 200, jsonBody: { approvalRequestCleared: outcome?.ApprovalRequestCleared === true, ok: true, updatedAt } };
   } catch (error: any) {
     context.error("saveProcedureDraft failed:", error.message);
     return errorResponse("Save procedure draft failed", error.message);

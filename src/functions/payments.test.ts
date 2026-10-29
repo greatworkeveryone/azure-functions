@@ -76,6 +76,7 @@ interface RefusalInput {
   invoice: {
     amount: number | null;
     directorApprovedAt: Date | null;
+    directorRequiredAt?: Date | null;
     direction: string;
     jobId: number;
     paidSoFar: number;
@@ -141,6 +142,7 @@ const FACTS: AuthorityFacts = {
 const INVOICE = {
   amount: 1000 as number | null,
   directorApprovedAt: null as Date | null,
+  directorRequiredAt: null as Date | null,
   direction: "incoming",
   jobId: 9,
   paidSoFar: 0,
@@ -218,6 +220,12 @@ describe("paymentInvoiceRefusal", () => {
     for (const over of [{ jobId: 10 }, { status: "pending" }, { amount: 6000 }, { paidSoFar: 950 }]) {
       expect(check(over)).toBe(refusal(over)?.message);
     }
+  });
+
+  it("a director requirement stamped at approval holds even when today's threshold would not ask for one", () => {
+    expect(refusal({ amount: 100 })).toBeNull();
+    expect(refusal({ amount: 100, directorRequiredAt: new Date() })).toMatchObject({ code: "director_approval_required" });
+    expect(refusal({ amount: 100, directorRequiredAt: new Date(), directorApprovedAt: new Date(), status: "director_approved" })).toBeNull();
   });
 });
 

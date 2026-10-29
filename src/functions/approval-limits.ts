@@ -1,7 +1,8 @@
 // src/functions/approval-limits.ts
 //
-// Admin-only endpoint to upsert a row in dbo.ApprovalLimits. Idempotent.
-// The Roles admin page calls this when an admin edits a per-role limit.
+// CFO/director endpoint (admin is refused) to upsert a row in dbo.ApprovalLimits. Idempotent.
+// The Roles admin page calls this when the CFO or a director edits a per-role limit.
+// Nobody may change the limit of a role they hold themselves (no self-service raise).
 //
 // Changing a limit is a decision (PLAN §3.12): the new value and its ledger row
 // commit together or not at all. Re-saving the value a role already has changes
@@ -59,6 +60,9 @@ export async function setApprovalLimit(
     const roleName = RoleName.trim().toLowerCase();
     // The column is DECIMAL(18,2): settle on whole cents here so the value we
     // compare, store and record are the same number.
+    if (userRoles.some((r) => r.toLowerCase() === roleName)) {
+      return { status: 403, jsonBody: { error: "You cannot change the approval limit of a role you hold" } };
+    }
     const limit = MaxApprovalAmount === null ? null : Math.round(MaxApprovalAmount * 100) / 100;
 
     connection = await createRequestConnection(token);

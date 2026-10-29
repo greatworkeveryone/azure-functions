@@ -13,12 +13,33 @@
 import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
 import { replyHeaders } from "./inboundTriage/messageIds";
 import { assertMayLeave, type EgressSubject } from "./test-data";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "./upload-constants";
 
 interface TokenResponse {
-  access_token: string;
+  access_token?: unknown;
+  expires_in?: unknown;
 }
 
-export async function getGraphToken(): Promise<string> {
+// Cached across warm invocations with in-flight de-dup, as getServiceToken in db.ts:
+// an alert fan-out or a mail burst would otherwise POST to Entra once per send.
+let cachedGraphToken: { value: string; expiresAt: number } | null = null;
+let _graphTokenInflight: Promise<string> | null = null;
+// Bumped by clearGraphTokenCache so a fetch already in flight can't repopulate the cache.
+let _graphTokenGeneration = 0;
+const GRAPH_TOKEN_REFRESH_SKEW_MS = 60_000;
+// Entra app-only tokens last 60-90 min; used only if expires_in is missing.
+const GRAPH_TOKEN_DEFAULT_TTL_S = 3_600;
+
+/** Drop the cached Graph token. App permissions are baked in at issue, so a 401/403
+ *  after a new consent needs a fresh token; tests also use it between cases. */
+export function clearGraphTokenCache(): void {
+  cachedGraphToken = null;
+  _graphTokenInflight = null;
+  _graphTokenGeneration += 1;
+}
+
+async function _fetchGraphToken(): Promise<string> {
+  const generation = _graphTokenGeneration;
   const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = process.env;
   if (!GRAPH_TENANT_ID || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET) {
     throw new Error(
@@ -46,7 +67,54 @@ export async function getGraphToken(): Promise<string> {
   }
 
   const data = (await resp.json()) as TokenResponse;
+  if (typeof data.access_token !== "string" || data.access_token === "") {
+    throw new Error("Graph token response had no access_token");
+  }
+  const ttl = typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : GRAPH_TOKEN_DEFAULT_TTL_S;
+  if (generation === _graphTokenGeneration) {
+    cachedGraphToken = { value: data.access_token, expiresAt: Date.now() + ttl * 1000 };
+  }
   return data.access_token;
+}
+
+export async function getGraphToken(): Promise<string> {
+  if (cachedGraphToken && cachedGraphToken.expiresAt > Date.now() + GRAPH_TOKEN_REFRESH_SKEW_MS) {
+    return cachedGraphToken.value;
+  }
+  if (_graphTokenInflight) return _graphTokenInflight;
+  // A failed fetch is never cached, and .finally() frees the slot so the next call retries.
+  const promise: Promise<string> = _fetchGraphToken().finally(() => {
+    if (_graphTokenInflight === promise) _graphTokenInflight = null;
+  });
+  _graphTokenInflight = promise;
+  return promise;
+}
+
+/**
+ * POST a sendMail. A 401 means the cached token is stale: clear it and try once
+ * more. Graph refused the first call outright, so the retry can't duplicate a send.
+ */
+async function postSendMail(senderEmail: string, message: Record<string, unknown>): Promise<void> {
+  const send = async (): Promise<Response> =>
+    fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await getGraphToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message }),
+    });
+
+  let resp = await send();
+  if (resp.status === 401) {
+    clearGraphTokenCache();
+    resp = await send();
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
+  }
 }
 
 /**
@@ -73,7 +141,7 @@ export async function graphSendReply(
   ccAddresses?: string[],
 ): Promise<string> {
   assertMayLeave("email", egress);
-  const token = await getGraphToken();
+  await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
     throw new Error("GRAPH_SENDER_EMAIL not configured");
@@ -107,22 +175,7 @@ export async function graphSendReply(
     }));
   }
 
-  const resp = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ message }),
-    },
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
-  }
+  await postSendMail(senderEmail, message);
 
   // sendMail returns 202 with no body — synthesise a stable identifier
   return `graph-sent-${Date.now()}`;
@@ -138,7 +191,7 @@ export async function graphSendMail(
   ccAddresses?: string[],
 ): Promise<void> {
   assertMayLeave("email", egress);
-  const token = await getGraphToken();
+  await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
     throw new Error("GRAPH_SENDER_EMAIL not configured");
@@ -164,22 +217,7 @@ export async function graphSendMail(
     }));
   }
 
-  const resp = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ message }),
-    },
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Graph sendMail failed: ${resp.status} — ${text}`);
-  }
+  await postSendMail(senderEmail, message);
 }
 
 export async function graphCreateSubscription(
@@ -321,11 +359,23 @@ async function fetchAndUploadAttachments(
   const results: { blobName: string; fileName: string }[] = [];
   for (const att of fileAttachments) {
     try {
+      // Sender-declared size is checked before download, the real length after (it can lie).
+      if (typeof att.size === "number" && att.size > MAX_SIZE_BYTES) {
+        console.warn(`[attachments] skipped ${att.name} for msg=${graphMessageId}: ${att.size} bytes exceeds ${MAX_SIZE_BYTES}`);
+        continue;
+      }
       const buffer = await fetchAttachmentBytes(mailbox, graphMessageId, att.id, token);
+      if (buffer.length > MAX_SIZE_BYTES) {
+        console.warn(`[attachments] skipped ${att.name} for msg=${graphMessageId}: downloaded ${buffer.length} bytes exceeds ${MAX_SIZE_BYTES}`);
+        continue;
+      }
+      // Staff still need non-allowlisted or spoofed files, but they are stored as a download-only octet-stream.
+      const declared = normaliseMediaType(att.contentType ?? "");
+      const storedType = isAllowedContentType(declared) && bytesMatchMediaType(declared, buffer) ? declared : "application/octet-stream";
       const { blobName } = await uploadBlob(
         buffer,
         att.name,
-        att.contentType ?? "application/octet-stream",
+        storedType,
         // Graph ids are URL-safe base64; map the two standard-base64 characters
         // anyway so the folder always fits EMAIL_ATTACHMENT_SHAPE (blob-names.ts).
         `email-attachments/${graphMessageId.replace(/\+/g, "-").replace(/\//g, "_")}`,

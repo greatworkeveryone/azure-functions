@@ -561,10 +561,11 @@ export const ACTION_ROLES = {
     why: "The CFO or a director sets approval limits; confirmed, money-gated and ledgered (WP55).",
   },
   manageVarianceMargin: {
-    gate: [A.CFO],
+    gate: [A.CFO, A.DIRECTOR, A.ADMIN],
     match: "exact",
+    conditional: [A.DIRECTOR, A.ADMIN],
     routes: ["setApprovalFact"],
-    why: "The CFO sets variance margin and cap; every change is money-gated and ledgered (decision 17).",
+    why: "The CFO sets variance margin and cap; only a director or admin sets the director approval threshold; every change is money-gated and ledgered (decision 17).",
   },
   // Native email (EB1, PLAN §13). The server composes every signature and checks every reply-to; these gates
   // only say who may use the comms routes. Admin passes the gates but is turned away by the handlers of the

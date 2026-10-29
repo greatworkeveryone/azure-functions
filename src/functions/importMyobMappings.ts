@@ -14,6 +14,7 @@ export function importMyobMappings(request: HttpRequest, context: InvocationCont
   return runControllerAction(request, context, {
     failure: "Failed to import the MYOB mappings",
     forbidden: "Only the CFO can import MYOB mappings",
+    moneyGate: true,
     name: "importMyobMappings",
     parse: parseImport,
     work: async (tx, actor, input) => {

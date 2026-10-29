@@ -139,7 +139,7 @@ beforeEach(() => {
   sheet = { InfoSheetSections: STORED, InfoSheetVersion: 4, UpdatedAt: new Date("2026-10-18T02:00:00Z"), UpdatedByName: "Bea Accounts" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/WITH \(UPDLOCK, ROWLOCK\)/.test(sql)) return sheet ? [sheet] : [];
-    if (/OUTPUT INSERTED\.InfoSheetVersion/.test(sql)) return [{ InfoSheetVersion: Number(sheet?.InfoSheetVersion ?? 0) + 1 }];
+    if (/OUTPUT INSERTED\.InfoSheetVersion/.test(sql)) return [{ InfoSheetVersion: Number(sheet?.InfoSheetVersion ?? 0) + 1, RowVersion: Buffer.from("00000000000007d9", "hex") }];
     return [];
   });
 });
@@ -205,7 +205,8 @@ describe.each(DELETES)("%s", (route, body, action, after, before) => {
   it("reads the sheet under the tenancy's row lock and writes it with the version moved on, in one transaction", async () => {
     const res = await send();
     expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual(expect.objectContaining({ deleted: true, infoSheetVersion: 5, sectionId: "sec-1" }));
+    expect(res.jsonBody).toEqual(expect.objectContaining({ deleted: true, infoSheetVersion: 5, rowVersion: "00000000000007d9", sectionId: "sec-1" }));
+    expect(written()?.sql).toMatch(/OUTPUT INSERTED\.InfoSheetVersion, INSERTED\.RowVersion/);
     const locked = calls().find((c) => /WITH \(UPDLOCK, ROWLOCK\)/.test(c.sql));
     expect(locked?.sql).toMatch(/FROM dbo\.Tenants WITH \(UPDLOCK, ROWLOCK\)\s+WHERE TenantId = @TenantId AND BuildingId = @BuildingId/);
     expect(written()?.sql).toMatch(/InfoSheetVersion = InfoSheetVersion \+ 1/);
@@ -293,6 +294,8 @@ describe.each(UPSERTS)("%s", (route, body) => {
     const res = await send();
     expect(res.status).toBe(200);
     expect((res.jsonBody as { infoSheetVersion: number }).infoSheetVersion).toBe(5);
+    // The tenant's new RowVersion, so the next tenancy edit isn't a 409 on the user's own change.
+    expect((res.jsonBody as { rowVersion: string }).rowVersion).toBe("00000000000007d9");
     expect(calls().some((c) => /WITH \(UPDLOCK, ROWLOCK\)/.test(c.sql))).toBe(true);
     expect(written()?.sql).toMatch(/InfoSheetVersion = InfoSheetVersion \+ 1/);
     expect(writtenJson()).toContain(S2);

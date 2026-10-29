@@ -273,6 +273,51 @@ describe("saveProcedureDraft", () => {
     expect(update).toContain("Status = 'draft'");
   });
 
+  /** Answers the save's batch (not the audience lookup before it) with `rows`. */
+  const batchReturns = (rows: unknown[]): void => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (/BEGIN TRANSACTION/.test(sql) ? rows : []));
+  };
+
+  it("returns the new updatedAt and says when the save withdrew a pending approval request", async () => {
+    batchReturns([{ ApprovalRequestCleared: true, Outcome: "ok", UpdatedAt: new Date("2026-10-23T01:02:03Z") }]);
+    const response = await saveProcedureDraft(requestWithBody(validDraft), context);
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ approvalRequestCleared: true, ok: true, updatedAt: "2026-10-23T01:02:03.000Z" });
+  });
+
+  it("reports no withdrawal when nothing was pending", async () => {
+    batchReturns([{ ApprovalRequestCleared: false, Outcome: "ok", UpdatedAt: new Date("2026-10-23T01:02:03Z") }]);
+    expect((await saveProcedureDraft(requestWithBody(validDraft), context)).jsonBody).toMatchObject({ approvalRequestCleared: false });
+  });
+
+  it("sends the version it was shown to the database, and checks it under the draft's lock", async () => {
+    await saveProcedureDraft(requestWithBody({ ...validDraft, updatedAt: "2026-10-23T01:02:03.000Z" }), context);
+    const [, sql, params] = batchCall()!;
+    expect(sql).toMatch(/WITH \(UPDLOCK, HOLDLOCK\) WHERE Slug = @Slug AND Status = 'draft'/);
+    expect(params.find((p: any) => p.name === "ExpectedAt").value).toEqual(new Date("2026-10-23T01:02:03.000Z"));
+    await saveProcedureDraft(requestWithBody({ ...validDraft, version: "2026-10-23T01:02:04.000Z" }), context);
+    expect(db.executeQuery.mock.calls.filter((c) => /BEGIN TRANSACTION/.test(String(c[1])))[1][2].find((p: any) => p.name === "ExpectedAt").value).toEqual(new Date("2026-10-23T01:02:04.000Z"));
+  });
+
+  it("answers 409 with the current updatedAt when the draft moved on, and no success body", async () => {
+    batchReturns([{ ApprovalRequestCleared: false, Outcome: "conflict", UpdatedAt: new Date("2026-10-23T02:00:00Z") }]);
+    const response = await saveProcedureDraft(requestWithBody({ ...validDraft, updatedAt: "2026-10-23T01:02:03.000Z" }), context);
+    expect(response.status).toBe(409);
+    expect((response.jsonBody as any).current).toEqual({ updatedAt: "2026-10-23T02:00:00.000Z" });
+    expect((response.jsonBody as any).ok).toBeUndefined();
+  });
+
+  it("sends no version when the client sent none (last writer wins, as before)", async () => {
+    await saveProcedureDraft(requestWithBody(validDraft), context);
+    expect(batchCall()![2].find((p: any) => p.name === "ExpectedAt").value).toBeNull();
+  });
+
+  it("rejects an unreadable updatedAt before touching the database", async () => {
+    const response = await saveProcedureDraft(requestWithBody({ ...validDraft, updatedAt: "yesterday-ish" }), context);
+    expect(response.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
   it("ignores audience values that are not known roles", async () => {
     await saveProcedureDraft(
       requestWithBody({ ...validDraft, audience: ["facilities", "hacker"] }),

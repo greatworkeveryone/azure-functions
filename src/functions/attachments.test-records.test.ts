@@ -31,7 +31,7 @@ require("./attachments");
 const upload = (app.http.mock.calls.find((c: unknown[]) => c[0] === "uploadAttachment")?.[1] as { handler: Handler }).handler;
 
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
-const file = { arrayBuffer: async () => new ArrayBuffer(4), name: "quote.pdf", size: 4, type: "application/pdf" };
+const file = { arrayBuffer: async () => new TextEncoder().encode("%PDF-1.4").buffer, name: "quote.pdf", size: 8, type: "application/pdf" };
 const request = (fields: Record<string, unknown>) =>
   ({ formData: async () => new Map(Object.entries({ file, ...fields })), headers: { get: () => null } }) as unknown as HttpRequest;
 

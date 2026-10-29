@@ -87,7 +87,7 @@ export async function fetchAllBuildings(): Promise<MyBuilding[]> {
 export async function fetchBuildingById(
   buildingId: number,
 ): Promise<MyBuilding | null> {
-  const data = await apiFetch(`/core/api/buildings/v1?buildingID=${buildingId}`);
+  const data = await apiFetch(`/core/api/buildings/v1?buildingID=${encodeURIComponent(String(buildingId))}`);
   const buildings: MyBuilding[] = data.Data?.Buildings ?? data.Buildings ?? [];
   return buildings.length > 0 ? buildings[0] : null;
 }
@@ -140,7 +140,7 @@ export async function fetchWorkRequests(
 export async function fetchWorkRequestById(
   workRequestId: number,
 ): Promise<MyWorkRequest | null> {
-  const data = await apiFetch(`/core/api/workrequests/v1/${workRequestId}`);
+  const data = await apiFetch(`/core/api/workrequests/v1/${encodeURIComponent(String(workRequestId))}`);
   const wrs: MyWorkRequest[] = data.Data?.WorkRequests ?? data.WorkRequests ?? [];
   return wrs.length > 0 ? wrs[0] : null;
 }
@@ -279,7 +279,7 @@ export async function fetchAllContractors(): Promise<MyContractor[]> {
 export async function fetchContractorById(
   contractorId: number,
 ): Promise<MyContractor | null> {
-  const data = await apiFetch(`/core/api/contractors/v1?contractorID=${contractorId}`);
+  const data = await apiFetch(`/core/api/contractors/v1?contractorID=${encodeURIComponent(String(contractorId))}`);
   const contractors: MyContractor[] = data.Data?.Contractors ?? data.Contractors ?? [];
   return contractors.length > 0 ? contractors[0] : null;
 }

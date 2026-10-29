@@ -38,6 +38,8 @@ export interface QueueStore {
 }
 
 export interface WorkerOptions {
+  /** The one sender (COMMS_FROM_ADDRESS). A job queued under any other address is held, never sent: the app token can send as more mailboxes than this one. */
+  fromAddress: string;
   log: (message: string) => void;
   maxPerMinute: number;
   mode: CommsMode;
@@ -133,6 +135,12 @@ async function handle(item: QueueItem, options: WorkerOptions, live: boolean, no
   }
   // Outside production the address is the override's; the subject says who it was meant for.
   const subject = target.overridden ? `[For ${recipient.address}] ${composed.email.subject}` : composed.email.subject;
+
+  if (job.fromAddress.trim().toLowerCase() !== options.fromAddress.trim().toLowerCase()) {
+    options.log(`commsSend: job ${job.correspondenceId} was queued from a sender that is not the configured one; held`);
+    await store.outcome(item, from, { errorCode: "sender_mismatch", status: "blocked" });
+    return "blocked";
+  }
 
   if (!live) {
     options.log(`commsSend: would send job ${job.correspondenceId} recipient ${recipient.recipientId} (subject of ${subject.length} characters)`);

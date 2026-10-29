@@ -24,7 +24,7 @@ beforeEach(() => db.executeQuery.mockReset());
 describe("listDigestUsers", () => {
   it("reads active users who have a role, with the opt-out flag", async () => {
     db.executeQuery.mockResolvedValue([
-      { DigestLastSentOn: null, DigestOptOut: null, DisplayName: "Fay Field", Email: " fay@x.test ", Role: " Facilities ", UserID: 1 },
+      { DigestLastSentOn: null, DigestOptOut: null, DisplayName: "Fay Field", Email: " fay@x.test ", EntraOid: "oid-1", Role: " Facilities ", UserID: 1 },
       { DigestLastSentOn: "2026-10-13", DigestOptOut: false, DisplayName: "Amy", Email: "amy@x.test", Role: "accounts_manager", UserID: 2 },
       { DigestLastSentOn: " ", DigestOptOut: true, DisplayName: null, Email: "", Role: "director", UserID: "3" },
     ]);
@@ -32,12 +32,13 @@ describe("listDigestUsers", () => {
     expect(lastSql()).toMatch(/FROM dbo\.AppUsers/);
     expect(lastSql()).toMatch(/IsActive = 1/);
     expect(lastSql()).toMatch(/Role IS NOT NULL/);
+    expect(lastSql()).toMatch(/EntraOid/);
     // The date comes back as ISO text, so no time zone can shift the day.
     expect(lastSql()).toMatch(/CONVERT\(CHAR\(10\), DigestLastSentOn, 23\) AS DigestLastSentOn/);
     expect(users).toEqual([
-      { email: "fay@x.test", lastSentOn: null, name: "Fay Field", optedOut: false, role: "facilities", userId: 1 },
-      { email: "amy@x.test", lastSentOn: "2026-10-13", name: "Amy", optedOut: false, role: "accounts_manager", userId: 2 },
-      { email: null, lastSentOn: null, name: "User 3", optedOut: true, role: "director", userId: 3 },
+      { email: "fay@x.test", entraOid: "oid-1", lastSentOn: null, name: "Fay Field", optedOut: false, role: "facilities", userId: 1 },
+      { email: "amy@x.test", entraOid: null, lastSentOn: "2026-10-13", name: "Amy", optedOut: false, role: "accounts_manager", userId: 2 },
+      { email: null, entraOid: null, lastSentOn: null, name: "User 3", optedOut: true, role: "director", userId: 3 },
     ]);
   });
 });

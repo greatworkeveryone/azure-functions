@@ -53,6 +53,7 @@ jest.mock("@azure/storage-blob", () => ({
 }));
 
 import {
+  uploadBlob,
   uploadPublicBlob,
   deletePublicBlob,
   vacanciesReadSasUrl,
@@ -191,4 +192,30 @@ describe("keyPhotoReadSasUrl", () => {
   it("gives no URL for a name that was never minted", () => {
     expect(keyPhotoReadSasUrl("keys/../wr-attachments/x.pdf")).toBeNull();
   });
+});
+
+describe("uploadBlob → disposition and stored type", () => {
+  const headersOf = (): { blobContentType: string; blobContentDisposition: string } =>
+    uploadDataMock.mock.calls[0][1].blobHTTPHeaders;
+
+  it("serves images and PDFs inline with the normalised type", async () => {
+    await uploadBlob(Buffer.from("x"), "a b.pdf", "Application/PDF; charset=x", "attachments/jobs/1");
+    expect(headersOf().blobContentType).toBe("application/pdf");
+    expect(headersOf().blobContentDisposition).toBe("inline; filename*=UTF-8''a%20b.pdf");
+  });
+
+  it("forces download for allowlisted non-image types", async () => {
+    await uploadBlob(Buffer.from("x"), "n.txt", "text/plain", "attachments/jobs/1");
+    expect(headersOf().blobContentType).toBe("text/plain");
+    expect(headersOf().blobContentDisposition.startsWith("attachment;")).toBe(true);
+  });
+
+  it.each(["image/svg+xml", "image/svg+xml; charset=utf-8", "text/html", "application/octet-stream"])(
+    "stores %s as octet-stream attachment",
+    async (type) => {
+      await uploadBlob(Buffer.from("x"), "e'v(il).svg", type, "attachments/jobs/1");
+      expect(headersOf().blobContentType).toBe("application/octet-stream");
+      expect(headersOf().blobContentDisposition).toBe("attachment; filename*=UTF-8''e%27v%28il%29.svg");
+    },
+  );
 });

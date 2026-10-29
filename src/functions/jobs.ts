@@ -1,6 +1,7 @@
 import { initialAdminDeadline } from "../initialAdminDeadline";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
+import { parseMoneyField } from "../money";
 import {
   createRequestConnection,
   executeQuery,
@@ -268,6 +269,21 @@ const MAX_LEN: Partial<Record<JobColumn, number>> = {
   OnchargeNotes: 4000,
 };
 
+const BOOLEAN_COLUMNS: JobColumn[] = ["IsStalled", "IsInternal", "IsOnchargeable", "IsContract"];
+const INTEGER_COLUMNS: JobColumn[] = ["BuildingID", "WorkRequestID", "AssignedToUserID", "TenantID", "SourceEmailID", "SourceInspectionId"];
+const DATE_COLUMNS: JobColumn[] = ["ExpectedProgressUpdate", "CompletionDate"];
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,7})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+
+/** yyyy-MM-dd or yyyy-MM-ddTHH:mm[:ss[.fff]][Z|+hh:mm], and a real calendar day. */
+function isIsoDateString(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const m = ISO_DATE.exec(value);
+  if (!m || !Number.isFinite(Date.parse(value))) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Normalises OnchargeAmount in place; every other check is read-only. */
 function validateUpsertBody(
   fields: Partial<Record<JobColumn, unknown>>,
 ): string | null {
@@ -314,11 +330,26 @@ function validateUpsertBody(
   ) {
     return "Invalid Kind";
   }
+  // Bound to Bit / Int / DateTime2 as sent, tedious would turn "false" into 1,
+  // truncate 1.7 to 1 and read "1" as a date in 2001: check the type first.
+  for (const col of BOOLEAN_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && typeof v !== "boolean") return `${col} must be true or false`;
+  }
+  for (const col of INTEGER_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v))) return `${col} must be a whole number`;
+  }
+  for (const col of DATE_COLUMNS) {
+    const v = fields[col];
+    if (v !== undefined && v !== null && !isIsoDateString(v)) return `${col} must be an ISO date or date-time (e.g. 2026-10-23 or 2026-10-23T09:30:00Z)`;
+  }
   if (fields.OnchargeAmount !== undefined && fields.OnchargeAmount !== null) {
-    const n = fields.OnchargeAmount;
-    if (typeof n !== "number" || Number.isNaN(n) || n < 0 || n > 10_000_000) {
-      return "Invalid OnchargeAmount";
-    }
+    // Rewritten to the parsed amount, so "1,500" is stored as 1500, not 1.
+    const parsed = parseMoneyField(fields.OnchargeAmount, "OnchargeAmount");
+    if (!parsed.ok) return parsed.error;
+    if ((parsed.value ?? 0) > 10_000_000) return "Invalid OnchargeAmount";
+    fields.OnchargeAmount = parsed.value;
   }
   for (const [col, limit] of Object.entries(MAX_LEN) as Array<
     [JobColumn, number]

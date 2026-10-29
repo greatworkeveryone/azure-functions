@@ -14,7 +14,7 @@ import type { Connection } from "tedious";
 import { executeQuery } from "../db";
 import { graphFetchEmailPages } from "../graph";
 import { upsertGraphEmails } from "../functions/emails";
-import { inboundColumnsOn } from "../inboundTriage/config";
+import { inboundColumnsOn, readInboundConfig } from "../inboundTriage/config";
 import { linkReplies } from "../inboundTriage/replyLink";
 
 export interface SyncOptions {
@@ -104,7 +104,7 @@ export async function syncMailbox(connection: Connection, mailbox: string, optio
   const { since, tracked } = await readWatermark(connection, mailbox, options.startFromNow === true);
   // A mailbox with no watermark table cannot be read from "now": there is nowhere to remember it.
   if (options.startFromNow && !tracked) return { fetched: 0, pages: 0, since: null };
-  const inbound = inboundColumnsOn() ? { mailbox: mailbox.toLowerCase() } : undefined;
+  const inbound = inboundColumnsOn() ? { mailbox: mailbox.toLowerCase(), triageMailboxes: readInboundConfig().triageMailboxes } : undefined;
   const known = since ? await knownMessageIdsSince(connection, since) : new Set<string>();
 
   let fetched = 0;

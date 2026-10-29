@@ -306,9 +306,10 @@ describe("promoteEmailToJobUpdate", () => {
 
 describe("recordEmailQuoteDecision", () => {
   const emailWith = (over: Record<string, unknown> = {}): SqlRoute => [
-    /SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated FROM Emails/,
+    /SELECT EmailID, FromAddress, Status, MatchedJobID, ReceivedAt, Source, SenderAuthenticated, Body FROM Emails/,
     [
       {
+        Body: "Approved, go ahead.\n> Please reply approved or rejected",
         EmailID: 42,
         FromAddress: " Carlo@Randazzo.properties ",
         MatchedJobID: 9,
@@ -321,6 +322,7 @@ describe("recordEmailQuoteDecision", () => {
     ],
   ];
   const email: SqlRoute = emailWith();
+  const rejectEmail: SqlRoute = emailWith({ Body: "Rejected, too expensive." });
   const quote = (
     status: string,
     sentTo: string | null = JSON.stringify(["carlo@randazzo.properties", "paolo@randazzo.properties"]),
@@ -544,7 +546,7 @@ describe("recordEmailQuoteDecision", () => {
   });
 
   it("rejects through the shared helper with the note; the actor is server-derived, never the body", async () => {
-    routeSql([email, quote("awaiting_director"), director, flipOk]);
+    routeSql([rejectEmail, quote("awaiting_director"), director, flipOk]);
 
     const res = await recordEmailQuoteDecision(
       makeRequest({ Decision: "rejected", EmailID: 42, Note: "Too expensive", QuoteID: 7, RejectedBy: "Mallory" }),
@@ -565,7 +567,7 @@ describe("recordEmailQuoteDecision", () => {
   });
 
   it("reject from awaiting_director resolves the director Planner task", async () => {
-    routeSql([email, quote("awaiting_director"), director, flipOk]);
+    routeSql([rejectEmail, quote("awaiting_director"), director, flipOk]);
 
     await recordEmailQuoteDecision(makeRequest({ Decision: "rejected", EmailID: 42, QuoteID: 7 }), ctx);
 
@@ -573,7 +575,7 @@ describe("recordEmailQuoteDecision", () => {
   });
 
   it("still returns 200 when the Planner resolve throws", async () => {
-    routeSql([email, quote("awaiting_director"), director, flipOk]);
+    routeSql([rejectEmail, quote("awaiting_director"), director, flipOk]);
     planner.resolveActivePlannerTasks.mockRejectedValue(new Error("graph down"));
 
     const res = await recordEmailQuoteDecision(makeRequest({ Decision: "rejected", EmailID: 42, QuoteID: 7 }), ctx);
@@ -699,6 +701,38 @@ describe("recordEmailQuoteDecision", () => {
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
+  it("422 when the director's reply does not state the recorded decision", async () => {
+    routeSql([emailWith({ Body: "Call me about this one." }), quote("awaiting_director"), director, flipOk]);
+
+    const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(422);
+    expect((res.jsonBody as { error: string }).error).toMatch(/does not clearly state approval/);
+    expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("reply_no_decision");
+  });
+
+  it("422 when the reply says the opposite of the recorded decision", async () => {
+    routeSql([emailWith({ Body: "No, rejected." }), quote("awaiting_director"), director, flipOk]);
+
+    const res = await recordEmailQuoteDecision(makeRequest({ Decision: "approved", EmailID: 42, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(422);
+    expect(quoteDecisions.approveDirectorQuote).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("reply_no_decision");
+  });
+
+  it("422 when the reply says both, and decision words in the quoted request never count", async () => {
+    routeSql([emailWith({ Body: "Approved for A, rejected for B.\n> reply approved" }), quote("awaiting_director"), director, flipOk]);
+
+    const res = await recordEmailQuoteDecision(makeRequest({ Decision: "rejected", EmailID: 42, QuoteID: 7 }), ctx);
+
+    expect(res.status).toBe(422);
+    expect((res.jsonBody as { error: string }).error).toMatch(/both approval and rejection/);
+    expect(quoteDecisions.rejectQuote).not.toHaveBeenCalled();
+    expectOnlyRefusalRow("reply_ambiguous");
+  });
+
   it("400 when Note exceeds 4,000 characters", async () => {
     const res = await recordEmailQuoteDecision(
       makeRequest({ Decision: "rejected", EmailID: 42, Note: "a".repeat(4001), QuoteID: 7 }),
@@ -740,5 +774,50 @@ describe("ingestEmail", () => {
     expect(insert?.sql).not.toMatch(/SenderAuthenticated|AuthenticationResults/);
     expect(Object.keys(insert?.params ?? {})).not.toContain("Source");
     expect(Object.keys(insert?.params ?? {})).not.toContain("SenderAuthenticated");
+  });
+
+  const blob = "email-attachments/abc123/0f8fad5b-d9cb-469f-a165-70867728950e";
+
+  it("409 when an attachment blob already belongs to another email", async () => {
+    routeSql([
+      [/MessageID <> @MessageID/, [{ MessageID: "<real@x>" }]],
+      [/SELECT .* FROM Emails WHERE MessageID/s, [{ EmailID: 1 }]],
+    ]);
+
+    const res = await ingestEmail(
+      makeRequest({ AttachmentBlobs: JSON.stringify([blob]), FromAddress: "mallory@x", MessageID: "<forged@x>" }),
+      ctx,
+    );
+
+    expect(res.status).toBe(409);
+    const check = sqlCalls().find((c) => /MessageID <> @MessageID/.test(c.sql));
+    expect(check?.sql).toMatch(/AttachmentBlobs LIKE @B0 ESCAPE/);
+    expect(check?.params).toMatchObject({ B0: `%${blob}%`, MessageID: "<forged@x>" });
+    expect(sqlCalls().some((c) => /INSERT INTO Emails/.test(c.sql))).toBe(false);
+  });
+
+  it("inserts when no other email owns the blobs", async () => {
+    routeSql([
+      [/MessageID <> @MessageID/, []],
+      [/SELECT .* FROM Emails WHERE MessageID/s, [{ EmailID: 1 }]],
+    ]);
+
+    const res = await ingestEmail(
+      makeRequest({ AttachmentBlobs: JSON.stringify([{ blobName: blob, fileName: "inv.pdf" }]), MessageID: "<new@x>" }),
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sqlCalls().some((c) => /INSERT INTO Emails/.test(c.sql))).toBe(true);
+  });
+
+  it("400 when AttachmentBlobs has more than 50 entries", async () => {
+    const res = await ingestEmail(
+      makeRequest({ AttachmentBlobs: JSON.stringify(Array(51).fill(blob)), MessageID: "<big@x>" }),
+      ctx,
+    );
+
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });

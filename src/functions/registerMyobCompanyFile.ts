@@ -11,6 +11,7 @@ export function registerMyobCompanyFile(request: HttpRequest, context: Invocatio
   return runControllerAction(request, context, {
     failure: "Failed to register the MYOB company file",
     forbidden: "Only the CFO can register MYOB company files",
+    moneyGate: true,
     name: "registerMyobCompanyFile",
     parse: parseRegister,
     work: async (tx, actor, input) => ({ file: await registerCompanyFile(tx, actor, input) }),

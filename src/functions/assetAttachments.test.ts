@@ -92,7 +92,7 @@ function uploadRequest(fields: { assetId?: string; file?: File | null }): HttpRe
   return { formData: async () => form, query: new URLSearchParams() } as unknown as HttpRequest;
 }
 const pdf = (name = "manual.pdf", type = "application/pdf"): File =>
-  new File([new Uint8Array([1, 2, 3, 4])], name, { type });
+  new File([Buffer.from("%PDF-1.4 test")], name, { type });
 
 const liveAsset: Route = { match: ASSET_ROW, rows: [{ ArchivedAt: null, AssetId: 7 }] };
 
@@ -194,6 +194,20 @@ describe("uploadAssetAttachment: rejected before anything is stored", () => {
     expect(blobs.uploadBlob).not.toHaveBeenCalled();
   });
 
+  it("rejects SVG smuggled in with a media-type parameter", async () => {
+    const svg = await uploadAssetAttachment(uploadRequest({ assetId: "7", file: pdf("x.svg", "image/svg+xml; charset=utf-8") }), context);
+    expect(svg.status).toBe(415);
+    expect(blobs.uploadBlob).not.toHaveBeenCalled();
+  });
+
+  it("rejects bytes that do not match the declared image type", async () => {
+    route([liveAsset]);
+    const fake = new File([Buffer.from("<svg><script/></svg>")], "x.png", { type: "image/png" });
+    const response = await uploadAssetAttachment(uploadRequest({ assetId: "7", file: fake }), context);
+    expect(response.status).toBe(415);
+    expect(blobs.uploadBlob).not.toHaveBeenCalled();
+  });
+
   it("rejects files over the size limit", async () => {
     const big = pdf();
     Object.defineProperty(big, "size", { value: MAX_SIZE_BYTES + 1 });
@@ -237,7 +251,7 @@ describe("uploadAssetAttachment: storing the file", () => {
         id: 55,
         originalName: "manual.pdf",
         sasUrl: "https://sas.example/asset-7/abc.pdf",
-        sizeBytes: 4,
+        sizeBytes: 13,
         uploadedAt: "2026-10-13T00:00:00.000Z",
         uploadedBy: "oid-1",
         uploadedByName: "Connor",
@@ -254,7 +268,7 @@ describe("uploadAssetAttachment: storing the file", () => {
       ContentType: "application/pdf",
       Extension: "pdf",
       OriginalName: "manual.pdf",
-      SizeBytes: 4,
+      SizeBytes: 13,
       UploadedBy: "oid-1",
     });
     expect(paramsOf(queries(JUNCTION_INSERT)[0])).toEqual({ AssetId: 7, AttachedBy: "oid-1", AttachmentID: 55 });

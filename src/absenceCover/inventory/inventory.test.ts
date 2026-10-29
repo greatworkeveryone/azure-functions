@@ -62,6 +62,19 @@ describe("jobs", () => {
 });
 
 describe("decision requests", () => {
+  const ROLES = new Map([[1, "director"], [3, "facilities"]]);
+
+  it("needs a cover of the most senior standing among the people asked", async () => {
+    answer([/JobDecisionRequests/, [request({ DecisionMakers: JSON.stringify({ role: null, userIds: [1, 3] }) })]]);
+    const [decision] = await loadDecisionItems(conn, new Set([1, 3]), ROLES);
+    expect(decision.minRole).toBe("director");
+  });
+
+  it("asks no standing when the people asked have no known role", async () => {
+    answer([/JobDecisionRequests/, [request()]]);
+    const [decision] = await loadDecisionItems(conn, new Set([1]), new Map());
+    expect(decision.minRole).toBeNull();
+  });
   const request = (over: Row = {}): Row => ({
     AssignmentMode: "named", AutoEscalate: 1, BuildingName: "Tower A", DecisionMakers: JSON.stringify({ role: null, userIds: [1] }), JobId: 12,
     Question: "Can we go ahead with the roof?", RequestId: 5, RequestedAt: new Date("2026-10-20T00:00:00Z"), RequestedBy: "Dee", RequestedByUserId: 4,
@@ -70,14 +83,14 @@ describe("decision requests", () => {
 
   it("selects only pending named requests on real, open jobs", async () => {
     answer([/JobDecisionRequests/, []]);
-    await loadDecisionItems(conn, new Set([1]));
+    await loadDecisionItems(conn, new Set([1]), ROLES);
     expect(lastSql()).toContain("r.State = N'pending' AND r.AssignmentMode = N'named'");
     expect(lastSql()).toContain("j.IsTest = 0");
   });
 
   it("is an item when every person asked is away, with its tier, deadline and asker", async () => {
     answer([/JobDecisionRequests/, [request({ Tier: "urgent" })]]);
-    const [decision] = await loadDecisionItems(conn, new Set([1]));
+    const [decision] = await loadDecisionItems(conn, new Set([1]), ROLES);
     expect(decision).toMatchObject({
       capability: "respondToDecision", id: "5", importance: "high", move: "decision_makers", ownerUserId: 1, raisedByUserId: 4, type: "decision_request",
     });
@@ -88,17 +101,17 @@ describe("decision requests", () => {
 
   it("is not at risk while one of the people asked is in", async () => {
     answer([/JobDecisionRequests/, [request({ DecisionMakers: JSON.stringify({ role: null, userIds: [1, 3] }) })]]);
-    expect(await loadDecisionItems(conn, new Set([1]))).toEqual([]);
+    expect(await loadDecisionItems(conn, new Set([1]), ROLES)).toEqual([]);
   });
 
   it("counts an emergency, which has no deadline, as due when it was asked", async () => {
     answer([/JobDecisionRequests/, [request({ RespondBy: null, Tier: "emergency" })]]);
-    expect((await loadDecisionItems(conn, new Set([1])))[0].dueAt?.toISOString()).toBe("2026-10-20T00:00:00.000Z");
+    expect((await loadDecisionItems(conn, new Set([1]), ROLES))[0].dueAt?.toISOString()).toBe("2026-10-20T00:00:00.000Z");
   });
 
   it("shortens a long question", async () => {
     answer([/JobDecisionRequests/, [request({ Question: "x".repeat(200) })]]);
-    expect((await loadDecisionItems(conn, new Set([1])))[0].label).toContain(`${"x".repeat(80)}...`);
+    expect((await loadDecisionItems(conn, new Set([1]), ROLES))[0].label).toContain(`${"x".repeat(80)}...`);
   });
 });
 

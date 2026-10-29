@@ -13,6 +13,7 @@ jest.mock("../auth", () => ({
   ...jest.requireActual("../auth"),
   extractToken: () => token,
   requireRole: async (_r: unknown, allowed: string[]) => (jest.requireActual("../auth").rolesPassGate(roles, allowed) ? null : { status: 403 }),
+  rolesForRequest: async () => roles,
   verifiedIdentityFromRequest: async () => ({ email: "mo@example.com", name: "Mo Manager", oid: "mo-oid" }),
 }));
 jest.mock("../ledger/actor", () => ({ resolveLedgerActor: jest.fn(async () => ledgerActor) }));
@@ -78,7 +79,14 @@ describe("assignEmail: input", () => {
 
   it("never takes the person acting from the body: the ledger actor and name come from the token", async () => {
     await assignEmail(request({ ...GOOD, actor: "someone else", actorName: "Eve", oid: "eve" }), context);
-    expect(assignMock.mock.calls[0][2]).toEqual({ ledger: ledgerActor, name: "Mo Manager", oid: "mo-oid" });
+    expect(assignMock.mock.calls[0][2]).toEqual({ ledger: ledgerActor, name: "Mo Manager", oid: "mo-oid", roles: [AppRole.FACILITIES_APPROVAL] });
+  });
+
+  it("answers 403 with the reason when the email is another team's lane to give out", async () => {
+    assignMock.mockResolvedValueOnce({ error: "This email is another team's to give out. Ask its manager.", ok: false, status: 403 });
+    const response = await assignEmail(request(GOOD), context);
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(response.jsonBody ?? response.body)).toMatch(/another team's/);
   });
 });
 

@@ -1,12 +1,23 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import { AppRole, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { financeControlsSnapshot } from "../financeControlsPack";
+import { checkRateLimit } from "../rateLimit";
+
+// Several aggregate scans per call; five a minute per person.
+const PACK_LIMIT = { limit: 5, windowMs: 60_000 };
+
 export async function getFinanceControlsPack(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
   const denied = await requireRole(request, [AppRole.CFO, AppRole.DIRECTOR]);
   if (denied) return denied;
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`financeControlsPack:${identity.oid}`, PACK_LIMIT);
+  if (!rl.allowed) {
+    return { status: 429, headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" } };
+  }
   let connection;
   try {
     connection = await createRequestConnection(token);

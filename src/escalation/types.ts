@@ -93,6 +93,8 @@ export interface EscalationRow {
 /** An active AppUsers row, as the ladder and the notifier need it. */
 export interface DirectoryUser {
   email: string | null;
+  /** AppUsers.EntraOid, the Teams alert address; null until first sign-in. Absent where a caller built the user by hand. */
+  entraOid?: string | null;
   name: string;
   role: string;
   userId: number;

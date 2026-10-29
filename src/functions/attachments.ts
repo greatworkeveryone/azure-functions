@@ -15,7 +15,7 @@ import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, veri
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { uploadAttachment } from "../mybuildings-client";
-import { isAllowedContentType, MAX_SIZE_BYTES } from "../upload-constants";
+import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
@@ -102,7 +102,7 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
       return { status: 400, jsonBody: { error: "'workRequestId' must be a number" } };
     }
 
-    const contentType = (file as any).type || "application/octet-stream";
+    const contentType = normaliseMediaType((file as any).type || "") || "application/octet-stream"; // stored form, never the raw header
     if (!isAllowedContentType(contentType)) {
       return { status: 415, jsonBody: { error: `File type '${contentType}' is not allowed` } };
     }
@@ -114,6 +114,9 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
 
     const originalName = (file as any).name as string;
     const buffer = Buffer.from(await (file as any).arrayBuffer());
+    if (!bytesMatchMediaType(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
 
     // D9: what the file is about, read before anything is stored or sent. A
     // test job's file stays in Floorplan; a work request with no job yet is not
@@ -569,7 +572,7 @@ async function handleDeleteAttachment(
     // strings dominate), so we don't gate on it.
     const rows = await executeQuery(
       connection,
-      `SELECT a.BlobName, a.MyBuildingsConfirmedAt, a.UploadedBy,
+      `SELECT a.BlobName, a.MyBuildingsConfirmedAt, a.UploadedBy, a.OriginalName,
               a.JobID, a.WorkRequestID,
               j.CreatedBy AS JobCreatedBy
          FROM Attachments a
@@ -583,6 +586,8 @@ async function handleDeleteAttachment(
     const blobName = rows[0].BlobName as string;
     const archived = rows[0].MyBuildingsConfirmedAt != null;
     const uploadedBy = rows[0].UploadedBy as string | null;
+    const jobId = typeof rows[0].JobID === "number" ? (rows[0].JobID as number) : null;
+    const fileName = typeof rows[0].OriginalName === "string" ? (rows[0].OriginalName as string) : null;
 
     const callerRoles = await rolesForRequest(request);
     const isAdmin = callerRoles.includes(AppRole.ADMIN);
@@ -616,20 +621,53 @@ async function handleDeleteAttachment(
     if (!archived && !ownsBlob) {
       context.log(`deleteAttachment: row ${attachmentId} removed; its blob is not this row's to delete`);
     }
+
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    // Row first, in one transaction: a file linked to an asset is refused (the FK cascade
+    // would silently drop the link), and the range lock stops a link landing mid-delete.
+    await beginTransaction(connection);
+    try {
+      const assetLinks = await executeQuery(
+        connection,
+        "SELECT TOP 1 AssetId FROM dbo.AssetAttachments WITH (UPDLOCK, HOLDLOCK) WHERE AttachmentID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: attachmentId }],
+      );
+      if (assetLinks.length > 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 409, jsonBody: { error: "This file is attached to an asset. Detach it from the asset before deleting it." } };
+      }
+      await executeQuery(
+        connection,
+        "DELETE FROM Attachments WHERE Id = @Id",
+        [{ name: "Id", type: TYPES.Int, value: attachmentId }],
+      );
+      if (jobId !== null) {
+        const scope = await jobScope(connection, jobId);
+        await record(connection, {
+          action: "attachment.delete",
+          actor,
+          before: { attachmentId, blobName, fileName: fileName ?? null },
+          buildingId: scope.buildingId,
+          jobId: scope.jobId,
+          subject: { id: jobId, type: "job" },
+        });
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+
+    // Blob last, best-effort: an orphaned blob is harmless, a row pointing at a missing blob is not.
     if (!archived && ownsBlob) {
       try {
         await deleteBlob(blobName);
       } catch (err: any) {
-        // Don't fail the row delete if the blob is already gone — log and move on.
         context.warn(`deleteAttachment: blob delete failed for ${blobName}: ${err?.message}`);
       }
     }
-
-    await executeQuery(
-      connection,
-      "DELETE FROM Attachments WHERE Id = @Id",
-      [{ name: "Id", type: TYPES.Int, value: attachmentId }],
-    );
     return { status: 200, jsonBody: { deleted: attachmentId } };
   } catch (error: any) {
     context.error("deleteAttachment failed:", error.message);

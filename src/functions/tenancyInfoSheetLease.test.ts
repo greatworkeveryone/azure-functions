@@ -193,6 +193,45 @@ describe("upsertLeaseAdministration", () => {
     expect(cache.invalidateTenantAndBuilding).toHaveBeenCalledWith(1, 5);
   });
 
+  const RV = "00000000000007d1";
+  const lockedTenant = { TenantId: 1, RowVersion: Buffer.from(RV, "hex"), UpdatedAt: new Date("2026-10-01T02:00:00Z"), UpdatedByName: "Earlier Editor" };
+
+  it("returns 409 naming who changed it when the RowVersion sent is stale, and writes nothing", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]);
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: "00000000000007d2" }), ctx);
+    expect(res.status).toBe(409);
+    expect((res.jsonBody as { error: string }).error).toContain("Earlier Editor");
+    expect(db.executeQuery).toHaveBeenCalledTimes(1);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+    expect(cache.invalidateTenantAndBuilding).not.toHaveBeenCalled();
+  });
+
+  it("writes when the RowVersion matches, in a transaction, and returns the new one", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockResolvedValueOnce([{ RowVersion: Buffer.from("00000000000007d3", "hex") }]);
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: RV.toUpperCase() }), ctx);
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as { rowVersion: string }).rowVersion).toBe("00000000000007d3");
+    expect(db.commitTransaction).toHaveBeenCalled();
+  });
+
+  it("still writes when no RowVersion is sent (current client)", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockResolvedValueOnce([]);
+    expect((await handlers.upsertLeaseAdministration(makeRequest(validBody), ctx)).status).toBe(200);
+  });
+
+  it("returns 400 for a malformed RowVersion", async () => {
+    const res = await handlers.upsertLeaseAdministration(makeRequest({ ...validBody, RowVersion: "nope" }), ctx);
+    expect(res.status).toBe(400);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("rolls back when the write throws", async () => {
+    db.executeQuery.mockResolvedValueOnce([lockedTenant]).mockRejectedValueOnce(new Error("db down"));
+    const res = await handlers.upsertLeaseAdministration(makeRequest(validBody), ctx);
+    expect(res.status).toBe(500);
+    expect(db.rollbackTransaction).toHaveBeenCalled();
+  });
+
   it("returns 500 when the SELECT throws", async () => {
     db.executeQuery.mockRejectedValueOnce(new Error("db down"));
     const res = await handlers.upsertLeaseAdministration(makeRequest(validBody), ctx);

@@ -13,7 +13,7 @@ jest.mock("../ledger", () => ({ record: jest.fn().mockResolvedValue(undefined) }
 const db = jest.requireMock("../db") as { commitTransaction: jest.Mock; executeQuery: jest.Mock; rollbackTransaction: jest.Mock };
 const connection = {} as never;
 const NOW = new Date("2026-10-24T02:00:00Z");
-const ACTOR = { ledger: { kind: "user" as const, name: "Mo Manager", role: "facilities_manager", userId: 2 }, name: "Mo Manager", oid: "mo-oid" };
+const ACTOR = { ledger: { kind: "user" as const, name: "Mo Manager", role: "facilities_manager", userId: 2 }, name: "Mo Manager", oid: "mo-oid", roles: ["facilities_manager"] };
 
 interface World {
   email: Record<string, unknown> | null;
@@ -63,6 +63,28 @@ beforeEach(() => {
 
 const input = (over: Record<string, unknown> = {}) => ({ assigneeUserId: 1, emailId: 5, expectedAssigneeUserId: null, note: null, ...over }) as never;
 const writesTo = (pattern: RegExp) => world.writes.filter((write) => pattern.test(write.sql));
+
+describe("lanes", () => {
+  it("refuses a facilities manager an accounts-lane email, writing nothing", async () => {
+    world.set = { ...world.set!, ContextJson: JSON.stringify({ ...CONTEXT, lane: "accounts" }) };
+    const result = await assignEmail(connection, input(), ACTOR, NOW);
+    expect(result).toEqual({ error: "This email is another team's to give out. Ask its manager.", ok: false, status: 403 });
+    expect(world.writes).toEqual([]);
+  });
+
+  it("lets a director give out any lane, and anyone with the gate give out either-team mail", async () => {
+    world.set = { ...world.set!, ContextJson: JSON.stringify({ ...CONTEXT, lane: "accounts" }) };
+    expect((await assignEmail(connection, input(), { ...ACTOR, roles: ["director"] }, NOW)).ok).toBe(true);
+    world.writes = [];
+    world.set = { ...world.set!, ContextJson: JSON.stringify({ ...CONTEXT, lane: "both" }) };
+    expect((await assignEmail(connection, input(), ACTOR, NOW)).ok).toBe(true);
+  });
+
+  it("treats an email triage never saw as either team's", async () => {
+    world.set = null;
+    expect((await assignEmail(connection, input(), ACTOR, NOW)).ok).toBe(true);
+  });
+});
 
 describe("assigning an email from the queue", () => {
   it("gives it to a suggested person: accepted, with the rank, the reasons and who did it, ledgered as email.assign", async () => {

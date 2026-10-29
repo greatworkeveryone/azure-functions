@@ -16,6 +16,7 @@ import {
   rollbackTransaction,
 } from "../db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
@@ -51,6 +52,16 @@ import {
   purchaseOrderSnapshot,
 } from "../ledger/moneyDecisions";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+
+// PDF rendering is CPU-bound; one caller gets ten a minute.
+const PO_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
+function tooManyRequests(retryAfterMs: number): HttpResponseInit {
+  return {
+    status: 429,
+    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+    jsonBody: { error: "Rate limit exceeded" },
+  };
+}
 import {
   adminRefusal,
   holdsAdmin,
@@ -64,6 +75,7 @@ import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance,
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
+import { Sentry } from "../sentry";
 import type { LedgerActor } from "../ledger/types";
 import { testRecordResponse } from "../test-data";
 
@@ -655,6 +667,11 @@ async function previewPurchaseOrder(
   const denied = await requireRole(request, ACTION_ROLES.sendPurchaseOrder.gate);
   if (denied) return denied;
 
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`previewPurchaseOrder:${identity.oid}`, PO_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
   let connection;
   try {
     const body = (await request.json()) as any;
@@ -813,6 +830,17 @@ interface SendPurchaseOrderBody {
   SentByEmail?: string;
 }
 
+function sendClaimedResponse(attemptedAt: Date | null): HttpResponseInit {
+  const when = attemptedAt ? ` (attempted at ${new Date(attemptedAt).toISOString()})` : "";
+  return {
+    status: 409,
+    jsonBody: {
+      code: "po_send_in_progress",
+      error: `A send is already in progress or was attempted${when}; check with the contractor before sending again.`,
+    },
+  };
+}
+
 async function sendPurchaseOrder(
   request: HttpRequest,
   context: InvocationContext,
@@ -829,9 +857,14 @@ async function sendPurchaseOrder(
     });
     return denied;
   }
+  // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts
+  const gate = await requireMoneyContext(request);
+  if (gate) return gate;
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`sendPurchaseOrder:${identity.oid}`, PO_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   let connection;
   try {
@@ -852,7 +885,7 @@ async function sendPurchaseOrder(
       `SELECT c.EmailAddress, po.PDFBlobName, po.PONumber,
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
-              po.EstimatedCost, po.CostNotToExceed, po.SentAt,
+              po.EstimatedCost, po.CostNotToExceed, po.SentAt, po.SendAttemptedAt,
               CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -882,6 +915,8 @@ async function sendPurchaseOrder(
     const emailBody = (contractorRows[0].EmailBody as string | null) ?? "";
     const scope = await jobScope(connection, contractorRows[0].JobID as number | null | undefined);
     const previousSentAt = contractorRows[0].SentAt as Date | null | undefined;
+    // An earlier send left its claim: the mail may have gone unrecorded.
+    if (contractorRows[0].SendAttemptedAt) return sendClaimedResponse(contractorRows[0].SendAttemptedAt as Date);
 
     // J3: a PO goes out only from a job that takes money changes and rests on
     // an approved quote (contract jobs excepted), before any email leaves.
@@ -956,31 +991,62 @@ async function sendPurchaseOrder(
       } · pdf=${pdfBlobName}`,
     );
 
-    const pdfBuffer = await downloadBlob(pdfBlobName);
-    // A body-supplied CC would let any caller have the company mailbox copy an
-    // arbitrary outside address.
-    const ccAddresses = [identity.email];
-    await graphSendMail(
-      egress,
-      recipient.address,
-      emailSubject,
-      emailBody,
+    // The send claim, taken before the mail leaves. It is cleared with the SentAt
+    // stamp below; if that write fails after the mail went, it stays, and the
+    // next send is refused until someone has checked with the contractor.
+    const claimed = await executeQuery(
+      connection,
+      `UPDATE PurchaseOrders SET SendAttemptedAt = SYSUTCDATETIME(), SendAttemptedBy = @By
+       OUTPUT inserted.PurchaseOrderID AS Id
+       WHERE PurchaseOrderID = @Id AND SendAttemptedAt IS NULL`,
       [
-        {
-          fileName: `${poNumber ?? `PO-${PurchaseOrderID}`}.pdf`,
-          contentType: "application/pdf",
-          contentBase64: pdfBuffer.toString("base64"),
-        },
+        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+        { name: "By", type: TYPES.NVarChar, value: identity.name },
       ],
-      ccAddresses,
     );
+    if (claimed.length === 0) {
+      const current = await executeQuery(connection, "SELECT SendAttemptedAt FROM PurchaseOrders WHERE PurchaseOrderID = @Id", [
+        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+      ]);
+      return sendClaimedResponse((current[0]?.SendAttemptedAt as Date | null | undefined) ?? null);
+    }
+
+    try {
+      const pdfBuffer = await downloadBlob(pdfBlobName);
+      // A body-supplied CC would let any caller have the company mailbox copy an
+      // arbitrary outside address.
+      const ccAddresses = [identity.email];
+      await graphSendMail(
+        egress,
+        recipient.address,
+        emailSubject,
+        emailBody,
+        [
+          {
+            fileName: `${poNumber ?? `PO-${PurchaseOrderID}`}.pdf`,
+            contentType: "application/pdf",
+            contentBase64: pdfBuffer.toString("base64"),
+          },
+        ],
+        ccAddresses,
+      );
+    } catch (err) {
+      // The mail did not go: give the claim back so the retry is allowed.
+      await executeQuery(
+        connection,
+        "UPDATE PurchaseOrders SET SendAttemptedAt = NULL, SendAttemptedBy = NULL WHERE PurchaseOrderID = @Id",
+        [{ name: "Id", type: TYPES.Int, value: PurchaseOrderID }],
+      ).catch(() => undefined);
+      throw err;
+    }
 
     await beginTransaction(connection);
     try {
       await executeQuery(
         connection,
         `UPDATE PurchaseOrders
-         SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME()
+         SET SentAt = SYSUTCDATETIME(), SentBy = @SentBy, UpdatedAt = SYSUTCDATETIME(),
+             SendAttemptedAt = NULL, SendAttemptedBy = NULL
          WHERE PurchaseOrderID = @Id`,
         [
           { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
@@ -1011,7 +1077,14 @@ async function sendPurchaseOrder(
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
-      throw err;
+      // The mail is out and unrecorded. The claim stays, so a second click is
+      // refused rather than sending the PO again.
+      Sentry.captureException(err, { extra: { note: "PO email sent but not recorded", purchaseOrderId: PurchaseOrderID } });
+      context.error("sendPurchaseOrder: sent but not recorded:", err instanceof Error ? err.message : String(err));
+      return {
+        status: 500,
+        jsonBody: { error: "The purchase order email was sent, but recording it failed. Do not send it again; check with the contractor." },
+      };
     }
     await noticeVariance(connection, actor, sendJobId, recordedVariance);
     const stored = await executeQuery(

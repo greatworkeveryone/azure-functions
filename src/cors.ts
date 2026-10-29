@@ -5,9 +5,16 @@ import { HttpRequest, HttpResponseInit } from "@azure/functions";
 const ALLOWED_ORIGINS = [
   "https://floorplan.randazzo.properties",
   "https://zealous-forest-041fd6a00.7.azurestaticapps.net",
-  "http://localhost:3000",
-  "http://localhost:5173",
 ];
+
+// Local dev servers: never allowed in Production (same env check as sentry.ts).
+const LOCAL_ORIGINS = ["http://localhost:3000", "http://localhost:5173"];
+
+function builtInOrigins(): string[] {
+  return process.env.AZURE_FUNCTIONS_ENVIRONMENT === "Production"
+    ? ALLOWED_ORIGINS
+    : [...ALLOWED_ORIGINS, ...LOCAL_ORIGINS];
+}
 
 // CORS_EXTRA_ORIGINS: comma-separated browser origins to allow in addition to
 // the list above. Set on the staging Function App only (its staging frontend).
@@ -34,10 +41,13 @@ function extraOrigins(): string[] {
 
 export function corsHeaders(origin: string): Record<string, string> {
   const allowedOrigin =
-    ALLOWED_ORIGINS.includes(origin) || extraOrigins().includes(origin)
+    builtInOrigins().includes(origin) || extraOrigins().includes(origin)
       ? origin
       : ALLOWED_ORIGINS[0];
   return {
+    // Merged into every response (functions/startup.ts), so this is also where
+    // the one security header the API sets lives.
+    "X-Content-Type-Options": "nosniff",
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",

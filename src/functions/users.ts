@@ -17,6 +17,7 @@ import {
   rolesForRequest,
   unauthorizedResponse,
   verifiedIdentityFromRequest,
+  verifiedRequestClaims,
 } from "../auth";
 import { noteSignIn } from "../access/accessEvents";
 import { clientAddress } from "../access/clientIp";
@@ -105,6 +106,20 @@ export async function getAppUsers(
 const MANAGE_USER_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR] as const;
 const VALID_ROLES = new Set(Object.values(AppRole));
 
+// Separation of duties: a director could otherwise mint a second director or
+// cfo identity and approve their own proposals. Only admin assigns, changes or
+// deactivates these roles. Mirrored in the frontend capability map (roles.ts).
+const ADMIN_ONLY_ROLES: ReadonlySet<string> = new Set([AppRole.ADMIN, AppRole.DIRECTOR, AppRole.CFO]);
+const ADMIN_ONLY_ROLES_MESSAGE = "Only admins can assign or edit the admin, director and cfo roles";
+
+/** Whether a member account (not a B2B guest or an app) presents these claims. */
+export function isMemberUserClaims(claims: Record<string, unknown>): boolean {
+  // acct: "0" member, "1" guest. idtyp: "user" | "app". Both optional claims.
+  if (claims.acct === "1" || claims.acct === 1) return false;
+  if (claims.idtyp !== undefined && claims.idtyp !== "user") return false;
+  return true;
+}
+
 interface UpsertAppUserBody {
   userId?: number;
   displayName?: string;
@@ -154,11 +169,8 @@ export async function upsertAppUser(
       if (!VALID_ROLES.has(role as AppRole)) {
         return { status: 400, jsonBody: { error: `Invalid role: ${role}` } };
       }
-      if (role === AppRole.ADMIN && !callerIsAdmin) {
-        return {
-          status: 403,
-          jsonBody: { error: "Only admins can assign the admin role" },
-        };
+      if (ADMIN_ONLY_ROLES.has(role) && !callerIsAdmin) {
+        return { status: 403, jsonBody: { error: ADMIN_ONLY_ROLES_MESSAGE } };
       }
     }
 
@@ -202,22 +214,35 @@ export async function upsertAppUser(
       const targetOid     = (oldRows[0].EntraOid as string | null | undefined) ?? null;
       const oldActive     = oldRows[0].IsActive !== false;
 
-      if (oldRole === AppRole.ADMIN && !callerIsAdmin) {
-        return {
-          status: 403,
-          jsonBody: { error: "Only admins can edit admin users" },
-        };
+      if (oldRole !== null && ADMIN_ONLY_ROLES.has(oldRole) && !callerIsAdmin) {
+        return { status: 403, jsonBody: { error: ADMIN_ONLY_ROLES_MESSAGE } };
       }
 
       if (targetOid && targetOid === callerOid) {
         return { status: 403, jsonBody: { error: "Cannot edit your own account" } };
       }
 
-      // An omitted role leaves the stored role as it is (it used to be written as NULL).
+      // An omitted role leaves the role as it is; an explicit null clears it.
       const newRole = role === undefined ? oldRole : role;
       // An edit that omits isActive leaves the account as it is; defaulting to
       // true here used to reactivate a deactivated account on every role change.
       const newActive = isActive ?? oldActive;
+
+      // Never leave the app without an active admin.
+      if (oldRole === AppRole.ADMIN && oldActive && (!newActive || newRole !== AppRole.ADMIN)) {
+        const others = await executeQuery(
+          connection,
+          `SELECT COUNT(*) AS Remaining FROM dbo.AppUsers
+           WHERE Role = @Admin AND IsActive = 1 AND UserID <> @UserID`,
+          [
+            { name: "Admin",  type: TYPES.NVarChar, value: AppRole.ADMIN },
+            { name: "UserID", type: TYPES.Int,      value: userId },
+          ],
+        );
+        if (((others[0]?.Remaining as number | undefined) ?? 0) < 1) {
+          return { status: 409, jsonBody: { error: "Cannot deactivate or demote the last active admin" } };
+        }
+      }
 
       // The role or activation change, its UserRoleAudit row and its ledger rows
       // commit or roll back together: no ledger row, no decision.
@@ -412,15 +437,9 @@ export async function registerSelf(
       [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
     );
     if (byOid.length > 0) {
+      // Email is set at invite or first registration only. preferred_username
+      // is mutable, and the director-reply check trusts the stored address.
       const { UserID, Role } = byOid[0] as { UserID: number; Role: string | null };
-      await executeQuery(
-        connection,
-        `UPDATE dbo.AppUsers SET Email = @Email WHERE UserID = @UserID`,
-        [
-          { name: "Email",  type: TYPES.NVarChar, value: email },
-          { name: "UserID", type: TYPES.Int,      value: UserID },
-        ],
-      );
       return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
@@ -444,6 +463,20 @@ export async function registerSelf(
       };
     }
     if (byEmail.length === 1) {
+      // A pre-invite is claimed by a member account only: a guest's
+      // preferred_username is neither verified nor unique to them.
+      const claims = await verifiedRequestClaims(request);
+      if (!claims) return unauthorizedResponse();
+      if (!isMemberUserClaims(claims)) {
+        Sentry.captureMessage("pre-invite claim refused: not a member account", {
+          level: "warning",
+          extra: { email },
+        });
+        return {
+          status: 403,
+          jsonBody: { error: "This invite can only be claimed by a member account — contact admin" },
+        };
+      }
       const { UserID, Role, DisplayName } = byEmail[0] as {
         UserID: number;
         Role: string | null;

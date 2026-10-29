@@ -12,9 +12,12 @@ describe("formatYYMMDD", () => {
     assert.strictEqual(formatYYMMDD(d), "001231");
   });
 
-  test("uses UTC (not local) to stay deterministic across servers", () => {
-    const d = new Date(Date.UTC(2026, 3, 19, 23, 59, 59));
-    assert.strictEqual(formatYYMMDD(d), "260419");
+  test("uses the Darwin date (UTC+9:30), whatever the server's zone", () => {
+    // 23:59 UTC on the 19th is 09:29 on the 20th in Darwin.
+    assert.strictEqual(formatYYMMDD(new Date(Date.UTC(2026, 3, 19, 23, 59, 59))), "260420");
+    // 20:00 UTC on the 18th is 05:30 on the 19th in Darwin: not yesterday.
+    assert.strictEqual(formatYYMMDD(new Date(Date.UTC(2026, 3, 18, 20, 0, 0))), "260419");
+    assert.strictEqual(formatYYMMDD(new Date(Date.UTC(2026, 3, 19, 14, 29, 59))), "260419");
   });
 });
 

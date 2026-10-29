@@ -6,6 +6,8 @@ import {
   normaliseLegacyEnds,
   parseSteps,
   upsertStep,
+  upsertGroup,
+  upsertMiscFee,
   deleteStep,
   resolveScheduleAnnual,
   NOT_FOUND,
@@ -392,6 +394,48 @@ describe("computeScheduleRows — lease terms (mirrored in FE scheduleReview tes
     const steps = [comm("1", "2024-07-01", 100000, 100), cpiStep("2", "2025-07-01", 110, 100)];
     assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01").annual, 110000);
     assert.strictEqual(resolveScheduleAnnual(steps, 0, 100, "2025-08-01", { cpiCapPercent: 4 }).annual, 104000);
+  });
+});
+
+describe("upsertStep — omitted fields", () => {
+  it("keeps stored sqm, flagComment, reviewId and resolution the client omitted", () => {
+    const stored = { id: "aaa", effectiveFrom: "2026-07-01", ratePercent: 6, sqm: 120, flagComment: "check", reviewId: "r1", resolution: "settled" } as unknown as ScheduledRateStep;
+    const [out] = upsertStep([stored], { id: "aaa", effectiveFrom: "2026-07-01", ratePercent: 4 });
+    assert.strictEqual(out.ratePercent, 4);
+    assert.strictEqual(out.sqm, 120);
+    assert.strictEqual(out.flagComment, "check");
+    assert.strictEqual(out.reviewId, "r1");
+    assert.strictEqual(out.resolution, "settled");
+  });
+
+  it("lets the client overwrite sqm when it sends one", () => {
+    const [out] = upsertStep([{ id: "aaa", effectiveFrom: "2026-07-01", ratePercent: 6, sqm: 120 }], { id: "aaa", effectiveFrom: "2026-07-01", ratePercent: 6, sqm: 90 });
+    assert.strictEqual(out.sqm, 90);
+  });
+});
+
+describe("upsertGroup — rateSteps", () => {
+  const gid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const steps = [{ id: "cccccccc-cccc-cccc-cccc-cccccccccccc", effectiveFrom: "2027-07-01" }];
+  const stored = { id: gid, label: "A", carparkIds: ["1"], baseMonthlyRate: 100, commencedAt: "2026-07-01", rateSteps: steps };
+  const edit = { id: gid, label: "B", carparkIds: ["1"], baseMonthlyRate: 110, commencedAt: "2026-07-01" };
+
+  it("carries stored rateSteps forward when the edit omits them", () => {
+    const [out] = upsertGroup([stored] as never, edit);
+    assert.strictEqual(out.label, "B");
+    assert.deepStrictEqual(out.rateSteps, steps);
+  });
+
+  it("clears them on an explicit empty array", () => {
+    const [out] = upsertGroup([stored] as never, { ...edit, rateSteps: [] });
+    assert.deepStrictEqual(out.rateSteps, []);
+  });
+
+  it("misc fees keep stored rateSteps too", () => {
+    const fee = { id: "f1", title: "T", frequency: "monthly" as const, baseAmount: 5, commencedAt: "2026-07-01", rateSteps: [{ id: "s1", effectiveFrom: "2027-07-01" }] };
+    const [out] = upsertMiscFee([fee], { id: "f1", title: "T2", frequency: "monthly", baseAmount: 6, commencedAt: "2026-07-01" });
+    assert.strictEqual(out.title, "T2");
+    assert.strictEqual(out.rateSteps?.length, 1);
   });
 });
 

@@ -72,7 +72,7 @@ const call = (name: string, body: Record<string, unknown>) => {
 
 type Route = { match: RegExp; rows?: Record<string, unknown>[] };
 function mockSql(routes: Route[]): void {
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? []);
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? (/OUTPUT inserted\.\w+ AS Id/.test(sql) ? [{ Id: 1 }] : []));
 }
 const sqls = (): string[] => db.executeQuery.mock.calls.map((c: unknown[]) => String(c[1]));
 const wrote = (re: RegExp) => sqls().some((sql) => re.test(sql));

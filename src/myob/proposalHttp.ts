@@ -6,7 +6,8 @@
 //                     (never admin on its own: decision 4)
 //   approve and send  the myobController capability, role cfo
 //   withdraw          the proposer, or the CFO
-// A further network and MFA gate on these money endpoints is sprint S11's.
+// The money endpoints (propose, approve and send) pass `guard`: role check, then
+// the S11 money-action gate (src/money-gated-routes.ts).
 
 import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
@@ -14,6 +15,7 @@ import { errorResponse, extractToken, rolesForRequest, unauthorizedResponse, ver
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, rollbackTransaction } from "../db";
 import { LedgerValidationError } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { requireMoneyContext } from "../moneyGate";
 import { isMyobController } from "../myob-controls-admin";
 import { ProposalError } from "./proposalErrors";
 import type { Person } from "./propose";
@@ -30,12 +32,19 @@ export interface Caller {
   token: string;
 }
 
+/** A money endpoint's role check, run with the money-action gate before any connection or body read. */
+export interface CallerGuard {
+  allowed: (roles: readonly string[]) => boolean;
+  forbidden: string;
+}
+
 /** Runs `work` for a verified caller on the request's connection. Refusals become their status. */
 export async function withCaller(
   request: HttpRequest,
   context: InvocationContext,
   name: string,
   work: (caller: Caller) => Promise<HttpResponseInit>,
+  guard?: CallerGuard,
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
@@ -44,6 +53,11 @@ export async function withCaller(
   let connection: Connection | undefined;
   try {
     const roles = await rolesForRequest(request);
+    if (guard) {
+      if (!guard.allowed(roles)) return forbidden(guard.forbidden);
+      const gate = await requireMoneyContext(request, { oid: identity.oid });
+      if (gate) return gate;
+    }
     connection = await createRequestConnection(token);
     const ledger = await resolveLedgerActor(request, connection);
     if (!ledger) return unauthorizedResponse();

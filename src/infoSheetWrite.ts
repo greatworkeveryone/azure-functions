@@ -7,7 +7,7 @@ import { editInfoSheet, type InfoSheetOp } from "./infoSheetEdit";
 import { recordInfoSheetChange } from "./infoSheetLedger";
 import type { LedgerActor } from "./ledger/types";
 import type { InfoSheetSection } from "./infoSheetLogic";
-import { conflictResponse, isoTimestamp } from "./tenancyScheduleWrite";
+import { conflictResponse, isoTimestamp, rowVersionHex } from "./tenancyScheduleWrite";
 
 export * from "./infoSheetEdit";
 export { jsonArrayElements } from "./jsonArrayElements";
@@ -63,7 +63,7 @@ const WRITE_SHEET = `UPDATE dbo.Tenants SET
        UpdatedAt = SYSUTCDATETIME(),
        UpdatedById = @UpdatedById,
        UpdatedByName = @UpdatedByName
- OUTPUT INSERTED.InfoSheetVersion
+ OUTPUT INSERTED.InfoSheetVersion, INSERTED.RowVersion
  WHERE TenantId = @TenantId AND BuildingId = @BuildingId`;
 
 /** The small part of a ledger row that names what changed; a delete's Before and a bulk add's After hold the content. */
@@ -99,7 +99,7 @@ export interface InfoSheetWrite {
   tenantId: number;
 }
 
-export type InfoSheetWriteOutcome = { ok: true; sections: InfoSheetSection[]; version: number } | { ok: false; response: HttpResponseInit };
+export type InfoSheetWriteOutcome = { ok: true; rowVersion: string; sections: InfoSheetSection[]; version: number } | { ok: false; response: HttpResponseInit };
 
 /** One info sheet change, in its own transaction under the tenancy's row lock. */
 export async function writeInfoSheet(connection: Connection, write: InfoSheetWrite): Promise<InfoSheetWriteOutcome> {
@@ -146,7 +146,8 @@ export async function writeInfoSheet(connection: Connection, write: InfoSheetWri
       });
     }
     await commitTransaction(connection);
-    return { ok: true, sections: edit.sections, version: Number(written?.InfoSheetVersion ?? current + 1) };
+    // The write moved the tenant's RowVersion; handing it back keeps the user's next tenancy edit from 409ing on their own change.
+    return { ok: true, rowVersion: rowVersionHex(written?.RowVersion), sections: edit.sections, version: Number(written?.InfoSheetVersion ?? current + 1) };
   } catch (error) {
     await rollbackTransaction(connection).catch(() => {});
     throw error;

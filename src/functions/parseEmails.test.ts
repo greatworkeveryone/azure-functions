@@ -630,6 +630,20 @@ describe("parseEmailsTimer", () => {
     ]);
   });
 
+  it("reads the queue over the service connection, never a user-token one", async () => {
+    mockFetchRoutes({});
+    stubQueue(false);
+    const connections = require("../db") as { createRequestConnection: jest.Mock; createServiceRequestConnection: jest.Mock };
+    connections.createRequestConnection.mockClear();
+    connections.createServiceRequestConnection.mockClear();
+    const { parseEmailsTimer } = loadParseEmails({ ...ENV, MYBUILDINGS_BEARER_TOKEN: undefined });
+
+    await parseEmailsTimer(null, context);
+
+    expect(connections.createServiceRequestConnection).toHaveBeenCalled();
+    expect(connections.createRequestConnection).not.toHaveBeenCalled();
+  });
+
   it("flags an exhausted row on an idle tick without calling toddler", async () => {
     const fetchMock = mockFetchRoutes({ "/parse-incoming": { body: toddlerOk }, "/warmup": { body: warmupOk } });
     stubQueue(false);
@@ -1283,5 +1297,27 @@ describe("runParseBatch → suspicious emails", () => {
     } finally {
       infoSpy.mockRestore();
     }
+  });
+});
+
+describe("assertSafeToddlerUrl", () => {
+  const { assertSafeToddlerUrl } = require("./parseEmails") as typeof import("./parseEmails");
+
+  it("accepts https", () => {
+    expect(() => assertSafeToddlerUrl("https://toddler.example.com", false)).not.toThrow();
+  });
+
+  it("rejects plain http with a clear config error", () => {
+    expect(() => assertSafeToddlerUrl("http://toddler.example.com", false)).toThrow(/TODDLER_URL must use https/);
+  });
+
+  it("allows http for loopback hosts and for the dev override", () => {
+    expect(() => assertSafeToddlerUrl("http://localhost:8000", false)).not.toThrow();
+    expect(() => assertSafeToddlerUrl("http://127.0.0.1:8000", false)).not.toThrow();
+    expect(() => assertSafeToddlerUrl("http://toddler.internal", true)).not.toThrow();
+  });
+
+  it("rejects an unparseable value", () => {
+    expect(() => assertSafeToddlerUrl("not a url", false)).toThrow(/not a valid URL/);
   });
 });

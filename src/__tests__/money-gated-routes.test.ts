@@ -78,7 +78,7 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe("money-gated routes", () => {
-  it("lists the eighteen money endpoints that exist today, WP26's four rent review decisions, WP26c's two schedule change decisions, R13's variance margin, J6b's director quote approval, WP32's option exercise and WP33's renewal decision included", () => {
+  it("lists the twenty-eight money endpoints that exist today: the sixteen that existed before MYOB was gated, WP26's four rent review decisions, WP26c's two schedule change decisions, R13's variance margin, J6b's director quote approval, the emailed quote decision, the seven MYOB routes, WP32's option exercise and WP33's renewal decision", () => {
     expect(MONEY_GATED_ROUTES.map((r) => r.route)).toEqual([
       "setApprovalLimit",
       "setApprovalFact",
@@ -90,22 +90,60 @@ describe("money-gated routes", () => {
       "unmarkJobInvoiceMyobCreated",
       "markPurchaseOrderMyobCreated",
       "unmarkPurchaseOrderMyobCreated",
+      "sendPurchaseOrder",
+      "undoDirectorApproveJobInvoice",
       "submitRentReview",
       "approveRentReview",
       "waiveRentReview",
       "revertRentReview",
       "ratifyScheduleChange",
       "rejectScheduleChange",
+      "recordEmailQuoteDecision",
+      "approveAndSendToMyob",
+      "proposeToMyob",
+      "setMyobControl",
+      "setMyobFileMode",
+      "registerMyobCompanyFile",
+      "importMyobMappings",
+      "acceptMyobBaseline",
       "approveOptionExercise",
       "recordRenewalOutcome",
     ]);
   });
 
-  it.each(MONEY_GATED_ROUTES.map((r) => [r.route, r.file]))("%s calls requireMoneyContext right after its role check", (route, file) => {
+  it.each(MONEY_GATED_ROUTES.filter((r) => !r.via).map((r) => [r.route, r.file]))("%s calls requireMoneyContext right after its role check", (route, file) => {
     const source = read(file);
     const handler = handlerFor(source, route);
     expect(handler).not.toBeNull();
     expect(gatePlacementProblems(body(source, handler as string))).toEqual([]);
+  });
+
+  // Routes that reach the gate through a shared wrapper: the wrapper's gate is
+  // placed right, and the handler opts in without reading its body first.
+  const wrapped = MONEY_GATED_ROUTES.filter((r) => r.via);
+  const wrapperBody = (via: string): string => {
+    const source = read(via);
+    const name = via.endsWith("proposalHttp.ts") ? "withCaller" : "runControllerAction";
+    const start = source.search(new RegExp(`async function ${name}\\b`));
+    return source.slice(start, source.indexOf("\n}\n", start) + 3);
+  };
+
+  it.each([...new Set(wrapped.map((r) => r.via as string))])("%s places the gate after the role check and before any connection or body read", (via) => {
+    expect(gatePlacementProblems(wrapperBody(via))).toEqual([]);
+  });
+
+  it.each(wrapped.map((r) => [r.route, r.file, r.via as string]))("%s opts in to its wrapper's gate", (route, file, via) => {
+    const source = stripComments(read(file));
+    const handler = handlerFor(source, route) as string;
+    expect(handler).not.toBeNull();
+    const at = source.search(new RegExp(`function ${handler}\\(`));
+    const text = source.slice(at, source.indexOf("app.http(", at));
+    if (via.endsWith("proposalHttp.ts")) {
+      expect(text).toMatch(/withCaller\([\s\S]*\},\s*\{\s*allowed:/);
+      expect(text.indexOf("withCaller(")).toBeLessThan(text.indexOf("request.json()"));
+    } else {
+      expect(text).toMatch(/runControllerAction\([^)]*,\s*\{[\s\S]*?\bmoneyGate: true,/);
+    }
   });
 
   it("has no gated handler missing from the list", () => {

@@ -78,6 +78,10 @@ export const LEDGER_ACTIONS = {
   // invoice. The subject is the record; `before` names the file. An exception,
   // like the other removals from a money record.
   "attachment.detach": { exception: true, reasonRequired: false, subjects: ["invoice", "purchase_order", "quote"] },
+  // A job file deleted outright (audit 2026-10-23): the row and, when the row
+  // owns it, the blob are gone, so the ledger keeps the name. Files with no job
+  // (legacy work-request intake) have no subject here and are not ledgered.
+  "attachment.delete": { exception: true, reasonRequired: false, subjects: ["job"] },
 
   // Role, limit and attribution decisions (WP19b)
   "approval_limit.change": { exception: true, reasonRequired: false, subjects: ["approval_limit"] },
@@ -304,6 +308,9 @@ export const LEDGER_ACTIONS = {
   // person (UserID, or Entra oid when they have no AppUsers row); the actor of an
   // anomaly is the monitor. A profile change loosens or tightens what counts as
   // unusual, so it is an exception too.
+  // Contractor details pushed to myBuildings (updateContractors): a changed
+  // email redirects purchase orders, so the write is always an exception.
+  "contractor.update": { exception: true, reasonRequired: false, subjects: ["contractor"] },
   "access.anomaly": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   "access.profile_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   // MYOB link (sprint M0). Link, re-link and unlink share one code; RuleApplied

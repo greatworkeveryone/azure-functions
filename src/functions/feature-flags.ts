@@ -30,7 +30,7 @@ const FEATURE_KEYS = [
   "contractorSuggestions", "decisionJobs", "documentation", "emailBroadcast", "emailSending", "escalations",
   "finance", "guidedHelp", "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
   "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
-  "quotes", "recurringFaults", "rentReviews", "tenancySchedule",
+  "quotes", "recurringFaults", "rentReviews", "teamsAlerts", "tenancySchedule",
   "tenancyScheduleReport", "tenancyVacancies", "timesheets", "usageAnalytics",
 ] as const;
 

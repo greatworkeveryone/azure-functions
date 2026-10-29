@@ -656,6 +656,67 @@ describe("upsertRegisterTenant — write integrity", () => {
   });
 });
 
+// ── upsertRegisterTenant: numeric validation ────────────────────────────────
+
+describe("upsertRegisterTenant — numeric validation", () => {
+  const createBody = (over: Record<string, unknown>) => ({ BuildingId: 5, LegalName: "Acme", ...over });
+  const stored = [{ TenantId: 42, BuildingId: 5, LegalName: "Acme", Status: "current" }];
+  const insertParams = (): Array<{ name: string; value: unknown }> =>
+    (db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("INSERT INTO dbo.Tenants")) as [unknown, string, Array<{ name: string; value: unknown }>])[2];
+
+  it.each([
+    ["RentPerAnnum", -1],
+    ["RentPerAnnum", "abc"],
+    ["RentPerAnnum", 10.123],
+    ["SecurityDepositHeld", -5],
+    ["FixedReviewPercent", -1],
+    ["FixedReviewPercent", 1000],
+    ["EscalationPercent", "x"],
+    ["LastReviewIncreasePercent", -101],
+    ["ReviewIntervalMonths", 1.5],
+    ["ReviewIntervalMonths", -12],
+    ["OptionNoticeMonths", "six"],
+    ["TermMonths", 99999],
+  ])("refuses %s = %p with 400 naming the field, before touching the database", async (field, value) => {
+    for (const body of [createBody({ [field]: value }), { TenantId: 7, [field]: value }]) {
+      const res = await handlers.upsertRegisterTenant(makeRequest(body), ctx);
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { error: string }).error).toContain(field);
+    }
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it('stores "1,500" as 1500, not 1', async () => {
+    db.executeQuery.mockResolvedValueOnce([{ TenantId: 42 }]).mockResolvedValueOnce(stored);
+    const res = await handlers.upsertRegisterTenant(makeRequest(createBody({ RentPerAnnum: "1,500", FixedReviewPercent: "3.5", ReviewIntervalMonths: "12" })), ctx);
+    expect(res.status).toBe(200);
+    expect(insertParams()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "RentPerAnnum", value: 1500 }),
+      expect.objectContaining({ name: "FixedReviewPercent", value: 3.5 }),
+      expect.objectContaining({ name: "ReviewIntervalMonths", value: 12 }),
+    ]));
+  });
+
+  it("still lets a blank clear an optional figure", async () => {
+    db.executeQuery.mockResolvedValueOnce([{ TenantId: 42 }]).mockResolvedValueOnce(stored);
+    const res = await handlers.upsertRegisterTenant(makeRequest(createBody({ SecurityDepositHeld: "", EscalationPercent: null })), ctx);
+    expect(res.status).toBe(200);
+    expect(insertParams()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "SecurityDepositHeld", value: null })]));
+  });
+
+  it('maps a blank ReviewType to the "none" default on create and update instead of NULL', async () => {
+    db.executeQuery.mockResolvedValueOnce([{ TenantId: 42 }]).mockResolvedValueOnce(stored);
+    await handlers.upsertRegisterTenant(makeRequest(createBody({ ReviewType: "" })), ctx);
+    expect(insertParams()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "ReviewType", value: "none" })]));
+
+    db.executeQuery.mockReset();
+    db.executeQuery.mockResolvedValueOnce([lockedRow({ ReviewType: "cpi" })]).mockResolvedValueOnce([]).mockResolvedValueOnce(stored);
+    await handlers.upsertRegisterTenant(makeRequest({ TenantId: 7, ReviewType: "" }), ctx);
+    const update = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("UPDATE dbo.Tenants"));
+    expect(update?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "ReviewType", value: "none" })]));
+  });
+});
+
 // ── upsertRegisterTenant: lease type (Tenancy Schedule TS3, m159) ───────────
 
 describe("upsertRegisterTenant — lease type", () => {

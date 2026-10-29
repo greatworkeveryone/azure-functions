@@ -47,6 +47,11 @@ describe("assertMayLeave (D9: a test record never leaves Floorplan)", () => {
     expect(() => assertMayLeave("email", NOT_A_RECORD)).not.toThrow();
   });
 
+  it("guards Teams alerts like email", () => {
+    expect(() => assertMayLeave("teams", { isTest: true })).toThrow(TestDataEgressError);
+    expect(() => assertMayLeave("teams", NOT_A_RECORD)).not.toThrow();
+  });
+
   it("maps to a 409 the caller shows as 'Not sent: test record'", () => {
     expect(testRecordResponse()).toEqual({ jsonBody: { code: "TEST_RECORD", error: TEST_RECORD_MESSAGE }, status: 409 });
   });

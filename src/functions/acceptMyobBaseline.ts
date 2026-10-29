@@ -32,6 +32,7 @@ export async function acceptMyobBaseline(request: HttpRequest, context: Invocati
   return runControllerAction(request, context, {
     failure: "Failed to accept MYOB's record",
     forbidden: "Only the CFO can accept MYOB's record as the baseline",
+    moneyGate: true,
     name: "acceptMyobBaseline",
     parse,
     // MYOB is read before the transaction opens, so no lock waits on the network.

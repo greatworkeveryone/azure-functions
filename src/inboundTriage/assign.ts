@@ -11,9 +11,10 @@ import type { LedgerActor } from "../ledger/types";
 import { buildVectors, FEATURE_SCHEMA_VERSION, JOB_WINDOW_DAYS } from "./features";
 import { insertOutcome, insertSet, readLatestSet, type StoredSet } from "./eventLog";
 import { loadAssignedJobs, loadJob, loadOnLeave, STAFF_ROLES } from "./load";
+import { lanesFor } from "./routingView";
 import { todayInDarwin } from "../darwinDate";
 import { withTransaction } from "./tx";
-import type { FeatureVector, OutcomeKind, TriageContext } from "./types";
+import type { FeatureVector, Lane, OutcomeKind, TriageContext } from "./types";
 
 export interface AssignInput {
   assigneeUserId: number;
@@ -27,11 +28,13 @@ export interface AssignActor {
   ledger: LedgerActor;
   name: string;
   oid: string;
+  /** The caller's roles: an email is only given out by a manager of its lane (lanesFor), as the queue shows it. */
+  roles: readonly string[];
 }
 
 export type AssignResult =
   | { ok: true; value: { assigneeName: string; assigneeUserId: number; emailId: number; outcome: OutcomeKind | "unchanged"; previousUserId: number | null } }
-  | { error: string; ok: false; status: 400 | 404 | 409 };
+  | { error: string; ok: false; status: 400 | 403 | 404 | 409 };
 
 const EMAIL_SQL = `SELECT EmailID, AssignedToUserId, Mailbox, IsTest, Status, MatchedJobID FROM dbo.Emails WHERE EmailID = @Id`;
 const USER_SQL = `SELECT UserID, DisplayName, Role FROM dbo.AppUsers WHERE UserID = @Id AND IsActive = 1`;
@@ -41,7 +44,7 @@ const ASSIGN_SQL = `UPDATE dbo.Emails
    WHERE EmailID = @EmailId AND (AssignedToUserId = @Expected OR (AssignedToUserId IS NULL AND @Expected IS NULL))`;
 
 const CLOSED = new Set(["archived", "promoted", "ignored"]);
-const fail = (status: 400 | 404 | 409, error: string): AssignResult => ({ error, ok: false, status });
+const fail = (status: 400 | 403 | 404 | 409, error: string): AssignResult => ({ error, ok: false, status });
 
 /** A set for an email triage never saw, so the choice still has something to be logged against. */
 function manualContext(emailId: number, mailbox: string | null, today: string): TriageContext {
@@ -68,6 +71,13 @@ export async function assignEmail(connection: Connection, input: AssignInput, ac
   if (!email) return fail(404, "Email not found");
   if (CLOSED.has(String(email.Status))) return fail(409, "This email has already been dealt with.");
 
+  // The same lane rule as the queue: a facilities manager hands out facilities and either-team mail, not accounts' mail.
+  const today = todayInDarwin(now);
+  const mailbox = (email.Mailbox as string | null) ?? null;
+  const latest = await readLatestSet(connection, input.emailId);
+  const lane: Lane = latest?.context?.lane ?? "both";
+  if (!lanesFor(actor.roles).includes(lane)) return fail(403, "This email is another team's to give out. Ask its manager.");
+
   const [person] = await executeQuery(connection, USER_SQL, [{ name: "Id", type: TYPES.Int, value: input.assigneeUserId }]);
   if (!person || !(STAFF_ROLES as readonly string[]).includes(String(person.Role))) return fail(400, "That person cannot be given Incoming email.");
 
@@ -78,11 +88,8 @@ export async function assignEmail(connection: Connection, input: AssignInput, ac
   if (previous === assignee.userId) {
     return { ok: true, value: { assigneeName: assignee.name, assigneeUserId: assignee.userId, emailId: input.emailId, outcome: "unchanged", previousUserId: previous } };
   }
-  const today = todayInDarwin(now);
   if ((await loadOnLeave(connection, today)).has(assignee.userId)) return fail(409, `${assignee.name} is on leave today. Choose someone else.`);
 
-  const mailbox = (email.Mailbox as string | null) ?? null;
-  const latest = await readLatestSet(connection, input.emailId);
   const set = latest ?? { context: manualContext(input.emailId, mailbox, today), decision: "manual" as const, featureSchemaVersion: FEATURE_SCHEMA_VERSION, isTest: email.IsTest === true || email.IsTest === 1, items: [], setId: 0 };
   const item = set.items.find((candidate) => candidate.userId === assignee.userId);
   const outcome: OutcomeKind = previous !== null ? "reassigned" : item ? "accepted" : "chose_other";

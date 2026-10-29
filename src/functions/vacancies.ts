@@ -103,6 +103,19 @@ function isAzuriteUrl(url: URL): boolean {
   return url.port === "10000";
 }
 
+// Bare stored form of an image URL: no query (SAS token) or fragment. Null if unparseable.
+export function bareVacancyImageUrl(raw: string): string | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const url = new URL(raw);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function isAllowedVacancyImageUrl(raw: string): boolean {
   if (typeof raw !== "string" || raw.length === 0) return false;
   let url: URL;
@@ -514,7 +527,7 @@ async function handleDeleteVacancy(
     // Fetch images before deleting so we can clean up Blob Storage
     const rows = await executeQuery(
       connection,
-      `SELECT Images, WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,
+      `SELECT Images, SlotImages, WordPressPostId FROM dbo.Vacancies WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
@@ -522,22 +535,32 @@ async function handleDeleteVacancy(
     const images: string[] = JSON.parse((rows[0].Images as string) ?? "[]");
     const wpPostId = rows[0].WordPressPostId as number | null;
 
-    // Unpublish from WordPress if published
+    // A live WordPress post must come down first; if it can't, keep the record so the user can retry.
     if (wpPostId) {
-      await unpublishFromWordPress(wpPostId);
+      try {
+        await unpublishFromWordPress(wpPostId);
+      } catch (err) {
+        console.error(`deleteVacancy: WordPress unpublish failed for vacancy ${body.id}:`, err);
+        return {
+          status: 502,
+          jsonBody: { error: "Could not unpublish this vacancy from WordPress. Nothing was deleted; try again." },
+        };
+      }
     }
 
-    // Delete all blobs
-    for (const url of images) {
-      const blobName = extractBlobName(url);
-      if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
-    }
-
+    // Row first (single atomic statement, no dependent rows), then blobs best-effort:
+    // a failed blob delete leaves an orphan, never a row pointing at missing files.
     await executeQuery(
       connection,
       `DELETE FROM dbo.Vacancies WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: body.id }],
     );
+
+    const slotImages: string[] = Object.values(JSON.parse((rows[0].SlotImages as string) ?? "{}") as Record<string, string>);
+    for (const url of [...images, ...slotImages]) {
+      const blobName = extractBlobName(url);
+      if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
+    }
 
     return { status: 200, jsonBody: { deleted: body.id } };
   } catch (error: any) {
@@ -669,13 +692,17 @@ async function handleDeleteVacancyImage(
     );
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
-    const current: string[] = JSON.parse((rows[0].Images as string) ?? "[]");
+    // Compare on the bare form: clients echo back SAS-signed URLs (and older reorders stored them).
+    const current: string[] = (JSON.parse((rows[0].Images as string) ?? "[]") as string[]).map(
+      (u) => bareVacancyImageUrl(u) ?? u,
+    );
+    const target = bareVacancyImageUrl(body.imageUrl);
     // Only an image this vacancy actually holds may be removed — the URL is the
     // caller's, and its blob name is what gets deleted (SEC-01 path B).
-    if (!current.includes(body.imageUrl)) {
+    if (!target || !current.includes(target)) {
       return { status: 404, jsonBody: { error: "Image not found on this vacancy" } };
     }
-    const filtered = current.filter((u) => u !== body.imageUrl);
+    const filtered = current.filter((u) => u !== target);
 
     const updated = await executeQuery(
       connection,
@@ -692,7 +719,7 @@ async function handleDeleteVacancyImage(
 
     if (!updated[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
-    const blobName = extractBlobName(body.imageUrl);
+    const blobName = extractBlobName(target);
     if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
 
     const row = await fetchVacancyRow(connection, body.id);
@@ -739,16 +766,35 @@ async function handleReorderVacancyImages(
     // SSRF gate — every image URL must pass the host allowlist BEFORE we
     // persist it. Otherwise an attacker who can call this endpoint can store
     // an internal URL that later gets fetched server-side from publishVacancy.
+    // Clients echo the SAS-signed URLs they were served; persist only the bare form.
+    const bareImages: string[] = [];
     for (const url of body.images) {
-      if (!isAllowedVacancyImageUrl(url)) {
+      const bare = bareVacancyImageUrl(url);
+      if (!bare || !isAllowedVacancyImageUrl(bare)) {
         return {
           status: 400,
           jsonBody: { error: "One or more image URLs are not in the allowed host list" },
         };
       }
+      bareImages.push(bare);
     }
 
     connection = await createRequestConnection(token);
+    const stored = await executeQuery(
+      connection,
+      `SELECT Images FROM dbo.Vacancies WHERE Id = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: body.id }],
+    );
+    if (!stored[0]) return { status: 404, jsonBody: { error: "Not found" } };
+    // Reorder only: the incoming set must be a permutation of the stored set.
+    const storedBare = (JSON.parse((stored[0].Images as string) ?? "[]") as string[])
+      .map((u) => bareVacancyImageUrl(u) ?? u)
+      .sort();
+    const incomingSorted = [...bareImages].sort();
+    if (storedBare.length !== incomingSorted.length || storedBare.some((u, i) => u !== incomingSorted[i])) {
+      return { status: 400, jsonBody: { error: "Reorder must contain exactly the vacancy's current images" } };
+    }
+
     const updated = await executeQuery(
       connection,
       `UPDATE dbo.Vacancies
@@ -757,7 +803,7 @@ async function handleReorderVacancyImages(
        OUTPUT INSERTED.*
        WHERE Id = @Id`,
       [
-        { name: "Images", type: TYPES.NVarChar, value: JSON.stringify(body.images) },
+        { name: "Images", type: TYPES.NVarChar, value: JSON.stringify(bareImages) },
         { name: "Id", type: TYPES.Int, value: body.id },
       ],
     );
@@ -999,14 +1045,18 @@ async function uploadImageToWp(
 
 export async function unpublishFromWordPress(wpPostId: number): Promise<void> {
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
-  await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
+  const resp = await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
     method: "POST",
     headers: {
       Authorization: wpAuthHeader(),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ status: "draft" }),
-  }).catch(() => undefined);
+  });
+  // A post already gone (404/410) is as unpublished as it gets; anything else must surface.
+  if (!resp.ok && resp.status !== 404 && resp.status !== 410) {
+    throw new Error(`WordPress unpublish failed: ${resp.status}`);
+  }
 }
 
 // ── POST /api/publishVacancy ─────────────────────────────────────────────────
@@ -1181,7 +1231,14 @@ async function handleUnpublishVacancy(
     if (!rows[0]) return { status: 404, jsonBody: { error: "Not found" } };
 
     const existingWpPostId = rows[0].WordPressPostId as number | null;
-    if (existingWpPostId) await unpublishFromWordPress(existingWpPostId);
+    if (existingWpPostId) {
+      try {
+        await unpublishFromWordPress(existingWpPostId);
+      } catch (err) {
+        console.error(`unpublishVacancy: WordPress unpublish failed for vacancy ${body.id}:`, err);
+        return { status: 502, jsonBody: { error: "Could not unpublish this vacancy from WordPress. Try again." } };
+      }
+    }
 
     const updated = await executeQuery(
       connection,
@@ -1215,5 +1272,7 @@ export function extractBlobName(publicUrl: string): string | null {
   const marker = "/vacancies/";
   const idx = publicUrl.indexOf(marker);
   if (idx === -1) return null;
-  return publicUrl.slice(idx + marker.length);
+  const after = publicUrl.slice(idx + marker.length);
+  const cut = after.search(/[?#]/); // a SAS query is never part of the blob name
+  return cut === -1 ? after : after.slice(0, cut);
 }

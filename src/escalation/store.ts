@@ -6,6 +6,7 @@ import { TYPES, type Connection } from "tedious";
 import { buildUpdateSet, executeQuery, type SqlParam, type SqlRow } from "../db";
 import { escapeLike } from "../ledger/filters";
 import { paginationSqlSuffix, type PaginationParams } from "../pagination";
+import { escalationChannelColumnExists } from "./escalationChannelColumn";
 import { EscalationError } from "./errors";
 import { normaliseRole, seenPolicyPrefixesOfAll, teamRolesOfAll } from "./roles";
 import type { DirectoryUser, EscalationKind, EscalationRow, EscalationStatus, NotificationState, Viewer } from "./types";
@@ -172,10 +173,11 @@ export async function listChain(connection: Connection, escalation: EscalationRo
 export async function listActiveUsers(connection: Connection): Promise<DirectoryUser[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT UserID, DisplayName, Email, Role FROM dbo.AppUsers WHERE IsActive = 1 AND Role IS NOT NULL`,
+    `SELECT UserID, DisplayName, Email, EntraOid, Role FROM dbo.AppUsers WHERE IsActive = 1 AND Role IS NOT NULL`,
   );
   return rows.map((row) => ({
     email: typeof row.Email === "string" && row.Email.trim() ? row.Email.trim() : null,
+    entraOid: typeof row.EntraOid === "string" && row.EntraOid.trim() ? row.EntraOid.trim() : null,
     name: String(row.DisplayName ?? row.Email ?? `User ${row.UserID}`),
     role: normaliseRole(row.Role),
     userId: Number(row.UserID),
@@ -324,6 +326,8 @@ export async function updateEscalation(
 
 export interface NotificationOutcome {
   attemptedAt: Date;
+  /** Route the targets were told by; omitted = leave the column alone. Needs migration 156. */
+  channel?: "email" | "teams";
   error: string | null;
   notifiedAt: Date | null;
   state: NotificationState;
@@ -337,10 +341,12 @@ export async function recordNotification(
   outcome: NotificationOutcome,
   attemptsMade: number,
 ): Promise<void> {
+  const withChannel = outcome.channel !== undefined && (await escalationChannelColumnExists(connection));
+  const CHANNEL_SET = withChannel ? "\n         NotificationChannel = @Channel," : "";
   await executeQuery(
     connection,
     `UPDATE dbo.Escalations
-     SET NotificationState = @State,
+     SET NotificationState = @State,${CHANNEL_SET}
          NotificationAttempts = NotificationAttempts + @Increment,
          LastNotificationError = @Error,
          LastNotificationAttemptAt = @AttemptedAt,
@@ -354,6 +360,7 @@ export async function recordNotification(
       { name: "Error", type: TYPES.NVarChar, value: outcome.error ? outcome.error.slice(0, 500) : null },
       { name: "AttemptedAt", type: TYPES.DateTime2, value: outcome.attemptedAt, options: { scale: 3 } },
       { name: "NotifiedAt", type: TYPES.DateTime2, value: outcome.notifiedAt, options: { scale: 3 } },
+      ...(withChannel ? [{ name: "Channel", type: TYPES.NVarChar, value: outcome.channel }] : []),
     ],
   );
 }

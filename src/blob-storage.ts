@@ -12,6 +12,7 @@ import {
   StorageSharedKeyCredential,
 } from "@azure/storage-blob";
 import { randomUUID } from "crypto";
+import { isAllowedContentType, isInlineSafeType, normaliseMediaType } from "./upload-constants";
 import {
   assertBlobName,
   BlobNameShape,
@@ -98,6 +99,12 @@ export function sanitizeBlobExtension(originalName: string): string {
   return rawExt.replace(/[^A-Za-z0-9]/g, "").slice(0, 10);
 }
 
+// RFC 5987 value: encodeURIComponent plus the characters it leaves bare.
+function contentDispositionFor(originalName: string, inline: boolean): string {
+  const encoded = encodeURIComponent(originalName).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encoded}`;
+}
+
 export async function uploadBlob(
   buffer: Buffer,
   originalName: string,
@@ -108,10 +115,13 @@ export async function uploadBlob(
   const ext = sanitizeBlobExtension(originalName);
   const blobName = assertBlobName(`${keyPrefix}/${randomUUID()}${ext ? "." + ext : ""}`, WR_ATTACHMENTS_SHAPES);
   const blockBlob = container.getBlockBlobClient(blobName);
+  // Only allowlisted types keep their type; only images/PDF render inline.
+  const storedType = isAllowedContentType(contentType) ? normaliseMediaType(contentType) : "application/octet-stream";
+  const inline = isInlineSafeType(storedType);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
-      blobContentType: contentType,
-      blobContentDisposition: `inline; filename="${encodeURIComponent(originalName)}"`,
+      blobContentType: storedType,
+      blobContentDisposition: contentDispositionFor(originalName, inline),
     },
   });
   return { blobName, url: blockBlob.url };
@@ -192,10 +202,13 @@ export async function uploadKeyPhotoBlob(
   const ext = sanitizeBlobExtension(originalName);
   const blobName = assertBlobName(`keys/${randomUUID()}${ext ? "." + ext : ""}`, KEY_PHOTO_SHAPE);
   const blockBlob = container.getBlockBlobClient(blobName);
+  // Only allowlisted types keep their type; only images/PDF render inline.
+  const storedType = isAllowedContentType(contentType) ? normaliseMediaType(contentType) : "application/octet-stream";
+  const inline = isInlineSafeType(storedType);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
-      blobContentType: contentType,
-      blobContentDisposition: `inline; filename="${encodeURIComponent(originalName)}"`,
+      blobContentType: storedType,
+      blobContentDisposition: contentDispositionFor(originalName, inline),
     },
   });
   return { blobName, url: blockBlob.url };

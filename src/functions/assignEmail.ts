@@ -11,7 +11,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import type { Connection } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
 import { authorizeWrite, badRequest, conflict, notFound, readJsonBody } from "../assetRegisterSupport";
-import { errorResponse, unauthorizedResponse } from "../auth";
+import { errorResponse, forbiddenResponse, rolesForRequest, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
 import { assignEmail as assign } from "../inboundTriage/assign";
 import { parseAssignBody } from "../inboundTriage/input";
@@ -35,9 +35,11 @@ export async function assignEmail(request: HttpRequest, context: InvocationConte
     connection = await createRequestConnection(auth.token);
     const ledger = await resolveLedgerActor(request, connection);
     if (!ledger) return unauthorizedResponse();
-    const result = await assign(connection, input.value, { ledger, name: auth.caller.name, oid: auth.caller.oid });
+    const roles = await rolesForRequest(request);
+    const result = await assign(connection, input.value, { ledger, name: auth.caller.name, oid: auth.caller.oid, roles });
     if (!result.ok) {
       if (result.status === 404) return notFound(result.error);
+      if (result.status === 403) return forbiddenResponse(result.error);
       return result.status === 409 ? conflict(result.error) : badRequest(result.error);
     }
     const routing = (await loadRouting(connection, [result.value.emailId])).get(result.value.emailId) ?? null;

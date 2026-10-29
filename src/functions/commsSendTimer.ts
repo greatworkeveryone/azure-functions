@@ -1,5 +1,5 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
-import { commsMode, maxPerMinute } from "../comms/config";
+import { commsMode, fromAddress, maxPerMinute } from "../comms/config";
 import { createGraphSender } from "../comms/graphSend";
 import { sqlQueueStore } from "../comms/queueStore";
 import { runCommsQueue } from "../comms/worker";
@@ -29,6 +29,7 @@ export async function commsSendTimer(_timer: Timer, context: InvocationContext):
   try {
     connection = await createServiceRequestConnection();
     const report = await runCommsQueue({
+      fromAddress: fromAddress(),
       log: (message) => context.log(message),
       maxPerMinute: maxPerMinute(),
       mode,

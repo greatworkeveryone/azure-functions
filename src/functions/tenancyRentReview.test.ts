@@ -28,6 +28,7 @@ jest.mock("../auth", () => {
     ...actual,
     extractToken:         jest.fn().mockReturnValue("mock-token"),
     requireRole:          jest.fn().mockResolvedValue(null),
+    rolesForRequest:      jest.fn().mockResolvedValue(["accounts"]),
     oidFromToken:         jest.fn().mockReturnValue("caller-oid-123"),
     unauthorizedResponse: jest.fn().mockReturnValue({ status: 401, jsonBody: { error: "Unauthorized" } }),
     errorResponse:        jest.fn().mockImplementation((msg: string, detail: string) => ({
@@ -291,6 +292,27 @@ describe("getPortfolioOccupancy", () => {
     auth.requireRole.mockResolvedValue({ status: 403, jsonBody: { error: "Forbidden" } });
     const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
     expect(res.status).toBe(403);
+  });
+
+  it.each([["facilities"], ["facilities_manager"]])("withholds annualRent from %s but keeps the rest", async (role) => {
+    (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
+    db.executeQuery.mockResolvedValueOnce([
+      { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
+    const { buildings } = res.jsonBody as { buildings: Array<Record<string, unknown>> };
+    expect(buildings[0].annualRent).toBeNull();
+    expect(buildings[0].activeSqm).toBe(800);
+    expect(JSON.stringify(res.jsonBody)).not.toContain("250000");
+  });
+
+  it.each([["accounts_manager"], ["director"], ["admin"]])("returns annualRent to %s", async (role) => {
+    (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
+    db.executeQuery.mockResolvedValueOnce([
+      { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },
+    ]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const res = await handlers.getPortfolioOccupancy(makeRequest(null), ctx);
+    expect((res.jsonBody as { buildings: Array<{ annualRent: number }> }).buildings[0].annualRent).toBe(250000);
   });
 
   it("returns a building summary on the happy path", async () => {

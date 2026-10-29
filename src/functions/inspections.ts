@@ -53,6 +53,8 @@ import {
 } from "../inspectionRaiseGroups";
 
 const INSPECTION_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
+// Packet PDFs download every photo; keep one caller from saturating the worker.
+const PACKET_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
 
 // What a job's LevelName and ExactLocation hold when it is edited (jobs.ts MAX_LEN): a job
 // raised from findings in several rooms lists them all, cut to the same width.
@@ -2289,6 +2291,11 @@ async function getInspectionPacketPdf(
 
   const denied = await requireRole(request, [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (denied) return denied;
+
+  const identity = await verifiedIdentityFromRequest(request);
+  if (!identity) return unauthorizedResponse();
+  const rl = checkRateLimit(`inspectionPacketPdf:${identity.oid}`, PACKET_PDF_LIMIT);
+  if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
   const inspectionId = Number(request.params.inspectionId);
   if (!Number.isFinite(inspectionId) || inspectionId <= 0) {

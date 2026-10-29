@@ -171,7 +171,7 @@ describe("what it asks the ledger", () => {
     await ask({ subjectId: "42", subjectType: "tenancy" });
 
     const [, sql, params] = lastQuery();
-    expect(sql).toMatch(/WHERE \(SubjectType = @SubjectType AND SubjectId = @SubjectId\) OR TenantId = @ScopeId/);
+    expect(sql).toMatch(/WHERE \(SubjectType = @SubjectType AND SubjectId = @SubjectId\) OR \(TenantId = @ScopeId\)/);
     expect(params).toEqual([
       { name: "SubjectType", type: TYPES.NVarChar, value: "tenancy" },
       { name: "SubjectId", type: TYPES.NVarChar, value: "42" },
@@ -183,8 +183,30 @@ describe("what it asks the ledger", () => {
     await ask({ subjectId: "99", subjectType: "job" });
 
     const [, sql, params] = lastQuery();
-    expect(sql).toMatch(/WHERE \(SubjectType = @SubjectType AND SubjectId = @SubjectId\) OR JobId = @ScopeId/);
+    expect(sql).toMatch(/WHERE \(SubjectType = @SubjectType AND SubjectId = @SubjectId\) OR \(JobId = @ScopeId\)/);
     expect(params.find((p) => p.name === "ScopeId")).toEqual({ name: "ScopeId", type: TYPES.Int, value: 99 });
+  });
+
+  it("job: facilities callers get the scoped branch limited to readable subject types (no payments)", async () => {
+    await ask({ subjectId: "99", subjectType: "job" }, "facilities");
+
+    const [, sql, params] = lastQuery();
+    expect(sql).toMatch(/OR \(JobId = @ScopeId AND SubjectType IN \(@t0/);
+    const types = params.filter((p) => /^t\d+$/.test(p.name)).map((p) => p.value);
+    expect(types).toEqual(expect.arrayContaining(["job", "quote", "invoice", "purchase_order"]));
+    expect(types).not.toContain("payment");
+    expect(types).not.toContain("myob_control");
+  });
+
+  it("job: accounts callers may see payment rows; directors are unrestricted", async () => {
+    await ask({ subjectId: "99", subjectType: "job" }, "accounts");
+    const accounts = lastQuery();
+    expect(accounts[2].filter((p) => /^t\d+$/.test(p.name)).map((p) => p.value)).toContain("payment");
+
+    await ask({ subjectId: "99", subjectType: "job" }, "director");
+    const [, sql, params] = lastQuery();
+    expect(sql).not.toMatch(/SubjectType IN/);
+    expect(params.some((p) => /^t\d+$/.test(p.name))).toBe(false);
   });
 
   it("anything else: exactly that subject, nothing wider", async () => {

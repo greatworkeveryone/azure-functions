@@ -4,8 +4,11 @@ import { resolveMigrationTarget } from "../migrate-cli";
 import { createServiceRequestConnection } from "../db";
 import { corsHeaders } from "../cors";
 import { initSentry, Sentry } from "../sentry";
-import { extractToken, oidFromToken, userInfoFromToken } from "../auth";
+import { extractToken, oidFromToken } from "../auth";
+import { audienceConfigProblem } from "../apiAudience";
 import { devOverrideMisconfigured } from "../jwt";
+import { forbiddenSettingsSet } from "../config/envContract";
+import { sentryRequestContext } from "./sentryRequestContext";
 
 initSentry();
 
@@ -18,6 +21,11 @@ if (devOverrideMisconfigured()) {
   );
 }
 
+// api-only bearers cannot be used to open a per-caller SQL connection, so the
+// SQL_USER_CONNECTION rollback lever would silently break.
+const audienceProblem = audienceConfigProblem();
+if (audienceProblem) throw new Error(`Refusing to start: ${audienceProblem}`);
+
 // Capture any error thrown from a handler. Azure Functions are short-lived,
 // so we must await Sentry.flush() — without it the worker can be torn down
 // before the event leaves the process.
@@ -27,40 +35,9 @@ app.hook.postInvocation(async (hookContext) => {
   Sentry.withScope((scope) => {
     scope.setTag("function", hookContext.invocationContext.functionName);
     if (request) {
-      // Strip credential-bearing headers before handing them to Sentry —
-      // otherwise the bearer token (and our X-App-Token) ship out with every
-      // captured exception. Match case-insensitively because Functions' header
-      // iterator may surface either casing depending on the runtime.
-      const REDACTED_HEADERS = new Set([
-        "authorization",
-        "x-app-token",
-        "cookie",
-        "proxy-authorization",
-      ]);
-      const headers: Record<string, string> = {};
-      request.headers.forEach((value, key) => {
-        headers[key] = REDACTED_HEADERS.has(key.toLowerCase()) ? "[redacted]" : value;
-      });
-      scope.setSDKProcessingMetadata({
-        normalizedRequest: {
-          method: request.method,
-          url: request.url,
-          headers,
-        },
-      });
-
-      const token = extractToken(request);
-      if (token) {
-        const oid = oidFromToken(token);
-        const userInfo = userInfoFromToken(token);
-        if (oid || userInfo) {
-          scope.setUser({
-            id: oid ?? undefined,
-            email: userInfo?.email,
-            username: userInfo?.name,
-          });
-        }
-      }
+      const { normalizedRequest, user } = sentryRequestContext(request, extractToken(request), oidFromToken);
+      scope.setSDKProcessingMetadata({ normalizedRequest });
+      if (user) scope.setUser(user);
     }
     Sentry.captureException(hookContext.error);
   });
@@ -91,6 +68,12 @@ app.hook.postInvocation((hookContext) => {
 // failure refuses to start rather than serve a half-migrated schema.
 /* eslint-disable no-console -- startup migration diagnostics; the Functions request logger isn't available in the appStart hook, and no request data is logged */
 app.hook.appStart(async (_context) => {
+  const forbidden = forbiddenSettingsSet(process.env);
+  if (forbidden.length > 0) {
+    const names = forbidden.map((f) => f.name).join(", ");
+    console.warn(`startup: settings that must be unset in Production: ${names}`);
+    Sentry.captureMessage(`Settings that must be unset in Production: ${names}`, "warning");
+  }
   const mode = startupMigrationMode(process.env);
   const log = (msg: string) => console.log(msg);
   if (mode === "skip") {

@@ -229,6 +229,23 @@ describe("applyInspectionOps batching (F13)", () => {
   });
 });
 
+// ── removeAttachment keeps the file ──────────────────────────────────────────
+
+describe("applyInspectionOps removeAttachment", () => {
+  const body = { inspectionId: 7, ops: [{ id: "op-1", inspectionId: 7, createdAt: "", op: { type: "removeAttachment", attachmentId: "att-1" } }] };
+
+  it("removes the record and leaves the file in storage (a photo can be copied onto a job)", async () => {
+    mockDb([
+      { match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id", rows: [{ Revision: 1, Status: "draft" }] },
+      { match: "OUTPUT INSERTED.Revision", rows: [{ Revision: 2 }] },
+    ]);
+    const res = await applyInspectionOps(makeRequest({ headers: authHeaders("facilities"), body }), makeContext());
+    expect(res.status).toBe(200);
+    expect(db.executeQuery.mock.calls.some(([, sql]: [unknown, string]) => sql.includes("DELETE a") && sql.includes("dbo.InspectionAttachments"))).toBe(true);
+    expect(blob.deleteBlob).not.toHaveBeenCalled();
+  });
+});
+
 // ── F14: updateInspection op (title) ─────────────────────────────────────────
 
 describe("applyInspectionOps updateInspection op (F14)", () => {

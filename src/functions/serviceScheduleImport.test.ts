@@ -70,6 +70,7 @@ beforeEach(() => {
     { match: /SELECT BuildingID, BuildingName, BuildingCode FROM dbo\.Buildings/, rows: [{ BuildingCode: "TWA", BuildingID: 1, BuildingName: "Tower A" }] },
     { match: /FROM dbo\.Assets WHERE ArchivedAt IS NULL AND AssetTag IS NOT NULL/, rows: [{ AssetId: 12, AssetTag: "CH-01", BuildingId: 1 }] },
     { match: /SELECT ContractorID, ContractorName FROM dbo\.Contractors/, rows: [{ ContractorID: 5, ContractorName: "Cool Air" }] },
+    { match: /sp_getapplock/, rows: [{ LockResult: 0 }] },
     { match: INSERT, rows: () => [{ ServiceScheduleId: (id += 1) }] },
     { match: /WHERE s\.ServiceScheduleId = @Id/, rows: (params) => [scheduleRow({ ServiceScheduleId: params.Id })] },
     { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ UserID: 9 }] },
@@ -93,6 +94,41 @@ describe("importServiceSchedules", () => {
     expect((history.CompletedAt as Date).toISOString()).toBe("2026-04-30T00:00:00.000Z");
     expect(callsMatching(db.executeQuery, /INSERT INTO dbo\.ServiceScheduleRuns/)).toHaveLength(1);
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  const EXISTING_CHILLER = { AnchorDate: new Date("2026-04-28T00:00:00Z"), AssetId: 12, BuildingId: 1, ContractorId: 5, IntervalCount: 6, IntervalUnit: "months", LocationId: null, Name: "Six-monthly chiller service", Scope: null };
+  const withExisting = (rows: unknown[]): void => {
+    const original = db.executeQuery.getMockImplementation() as (...args: unknown[]) => Promise<unknown>;
+    db.executeQuery.mockImplementation(async (conn: unknown, sql: string, params?: unknown) =>
+      /FROM dbo\.ServiceSchedules WHERE ArchivedAt IS NULL/.test(sql) ? rows : original(conn, sql, params));
+  };
+
+  it("skips rows that already exist, so a retried import adds nothing (idempotent)", async () => {
+    withExisting([EXISTING_CHILLER]);
+    const response = await importServiceSchedules(upload(await workbook([ROW_CHILLER, ROW_LIGHTS])), context);
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ created: 1, duplicatesSkipped: 1 });
+    expect(callsMatching(db.executeQuery, INSERT)).toHaveLength(1);
+    expect(callsMatching(db.executeQuery, /sp_getapplock/)).toHaveLength(1);
+  });
+
+  it("imports nothing the second time round", async () => {
+    withExisting([EXISTING_CHILLER]);
+    const response = await importServiceSchedules(upload(await workbook([ROW_CHILLER])), context);
+    expect(response.jsonBody).toEqual({ created: 0, duplicatesSkipped: 1 });
+    expect(callsMatching(db.executeQuery, INSERT)).toHaveLength(0);
+    expect(callsMatching(db.executeQuery, /INSERT INTO dbo\.ServiceScheduleRuns/)).toHaveLength(0);
+  });
+
+  it("skips a repeat of the same row inside one file", async () => {
+    const response = await importServiceSchedules(upload(await workbook([ROW_CHILLER, ROW_CHILLER])), context);
+    expect(response.jsonBody).toEqual({ created: 1, duplicatesSkipped: 1 });
+  });
+
+  it("dry run reports duplicates and leaves them out of the preview", async () => {
+    withExisting([EXISTING_CHILLER]);
+    const response = await importServiceSchedules(upload(await workbook([ROW_CHILLER, ROW_LIGHTS]), { dryRun: "true" }), context);
+    expect(response.jsonBody).toMatchObject({ created: 0, duplicatesSkipped: 1, preview: [{ name: "Monthly exit light test" }] });
   });
 
   it("writes nothing when any row is wrong, and says which row and why", async () => {

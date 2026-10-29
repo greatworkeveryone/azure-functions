@@ -108,6 +108,27 @@ describe("setApprovalFact", () => {
   });
 });
 
+describe("director_approval_threshold", () => {
+  it("is refused for the CFO alone and writes nothing", async () => {
+    auth.rolesForRequest.mockResolvedValue(["cfo"]);
+    const res = await setApprovalFact(post({ factKey: "director_approval_threshold", value: 1_000_000_000 }), ctx);
+    expect(res.status).toBe(403);
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+  });
+
+  it("is accepted for a director", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    mockSql([APP_USER, { match: /FROM dbo\.ApprovalFacts WITH/, rows: [{ FactValue: 5000 }] }]);
+    const res = await setApprovalFact(post({ factKey: "director_approval_threshold", value: 8000 }), ctx);
+    expect(res.status).toBe(200);
+  });
+
+  it("a director still cannot set the CFO's margin", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    expect((await setApprovalFact(post({ factKey: "po_variance_margin_percent", value: 5 }), ctx)).status).toBe(403);
+  });
+});
+
 describe("getApprovalCandidates", () => {
   const USERS: Route = {
     match: /FROM dbo\.AppUsers WHERE IsActive = 1 AND Role IS NOT NULL/,
