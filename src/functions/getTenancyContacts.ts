@@ -4,11 +4,14 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { loadTenancyContacts } from "../tenantLinks/read";
+import { authorize } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { VIEW_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
 
 export async function getTenancyContacts(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runStaff(request, context, "getTenancyContacts", VIEW_TENANT_LINKS_ROLES, false, async ({ actor, connection }) => {
+  const auth = await authorize(request, VIEW_TENANT_LINKS_ROLES);
+  if (!auth.ok) return auth.response;
+  return runStaff(request, context, "getTenancyContacts", auth.token, false, async ({ actor, connection }) => {
     const tenantId = Number(request.query.get("tenantId"));
     if (!Number.isInteger(tenantId) || tenantId <= 0) return refusal(400, "tenantId must be a whole number");
     const result = await loadTenancyContacts(connection, tenantId, actor.name);

@@ -7,12 +7,15 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { inTransaction, txFail, txOk } from "../assetRegisterSupport";
 import { record } from "../ledger";
 import { contactSnapshot, positiveId } from "../tenantLinks/contacts";
+import { authorizeWrite } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { MANAGE_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
 import { liveLinkIds, readContact, readTenancy, revokeLink, setContactArchived, versionBuffer } from "../tenantLinks/store";
 
 export async function archiveTenancyContact(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runStaff(request, context, "archiveTenancyContact", MANAGE_TENANT_LINKS_ROLES, true, async ({ actor, body, connection }) => {
+  const auth = await authorizeWrite(request, MANAGE_TENANT_LINKS_ROLES);
+  if (!auth.ok) return auth.response;
+  return runStaff(request, context, "archiveTenancyContact", auth.token, true, async ({ actor, body, connection }) => {
     const tenantId = positiveId(body.tenantId);
     const contactId = positiveId(body.contactId);
     if (tenantId === null || contactId === null) return refusal(400, "tenantId and contactId are required");

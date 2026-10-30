@@ -7,12 +7,15 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { inTransaction, txFail, txOk } from "../assetRegisterSupport";
 import { record } from "../ledger";
 import { contactSnapshot, parseContactFields, positiveId } from "../tenantLinks/contacts";
+import { authorizeWrite } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { MANAGE_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
 import { insertContact, readContact, readTenancy, updateContact, versionBuffer } from "../tenantLinks/store";
 
 export async function saveTenancyContact(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runStaff(request, context, "saveTenancyContact", MANAGE_TENANT_LINKS_ROLES, true, async ({ actor, body, connection }) => {
+  const auth = await authorizeWrite(request, MANAGE_TENANT_LINKS_ROLES);
+  if (!auth.ok) return auth.response;
+  return runStaff(request, context, "saveTenancyContact", auth.token, true, async ({ actor, body, connection }) => {
     const tenantId = positiveId(body.tenantId);
     if (tenantId === null) return refusal(400, "tenantId is required");
     const fields = parseContactFields(body);

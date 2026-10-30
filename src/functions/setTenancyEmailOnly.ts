@@ -5,13 +5,16 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { positiveId } from "../tenantLinks/contacts";
+import { authorizeWrite } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { loadTenancyContacts } from "../tenantLinks/read";
 import { setEmailOnly } from "../tenantLinks/revoke";
 import { MANAGE_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
 
 export async function setTenancyEmailOnly(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runStaff(request, context, "setTenancyEmailOnly", MANAGE_TENANT_LINKS_ROLES, true, async ({ actor, body, connection }) => {
+  const auth = await authorizeWrite(request, MANAGE_TENANT_LINKS_ROLES);
+  if (!auth.ok) return auth.response;
+  return runStaff(request, context, "setTenancyEmailOnly", auth.token, true, async ({ actor, body, connection }) => {
     const tenantId = positiveId(body.tenantId);
     if (tenantId === null) return refusal(400, "tenantId is required");
     if (typeof body.emailOnly !== "boolean") return refusal(400, "emailOnly must be true or false");

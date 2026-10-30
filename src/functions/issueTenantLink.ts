@@ -8,13 +8,16 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { checkRateLimit } from "../rateLimit";
 import { positiveId } from "../tenantLinks/contacts";
+import { authorizeWrite } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { issueLink } from "../tenantLinks/issue";
 import { MANAGE_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
 import { expiryMonths } from "../tenantLinks/token";
 
 export async function issueTenantLink(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runStaff(request, context, "issueTenantLink", MANAGE_TENANT_LINKS_ROLES, true, async ({ actor, body, connection }) => {
+  const auth = await authorizeWrite(request, MANAGE_TENANT_LINKS_ROLES);
+  if (!auth.ok) return auth.response;
+  return runStaff(request, context, "issueTenantLink", auth.token, true, async ({ actor, body, connection }) => {
     const tenantId = positiveId(body.tenantId);
     const contactId = positiveId(body.contactId);
     if (tenantId === null || contactId === null) return refusal(400, "tenantId and contactId are required");
