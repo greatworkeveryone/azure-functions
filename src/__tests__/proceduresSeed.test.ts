@@ -43,7 +43,7 @@ import { loadSeedEntries, planSeed, runSeed, SEED_FILE, type LibraryState, type 
 // data is the frontend's exports/procedures-seed.json, kept here byte for byte
 // and pinned in both repos. The loader is idempotent by slug and version, and it
 // never touches what is already in the library: a published version is immutable.
-const PINNED_SHA256 = "820402d66eeb48ff0680dea62507309dd30f8f936252f86ba628fb41bd5c843f";
+const PINNED_SHA256 = "4367b6e7532bbf29c29f064d6dd4b6eaa41787d7db60b4b5153d3db8d5630d18";
 
 const db = require("../db") as { executeQuery: jest.Mock };
 const entries = loadSeedEntries();
@@ -68,8 +68,8 @@ describe("the seed file", () => {
     expect(createHash("sha256").update(readFileSync(SEED_FILE)).digest("hex")).toBe(PINNED_SHA256);
   });
 
-  it("holds the seven documents the library ships with (the last is the request_ack letter template, a draft), each at version 1", () => {
-    expect(entries.map((item) => item.slug)).toEqual(["getting-started", "inspections", "key-register", "tenancy-schedule", "jobs", "from-mybuildings", "request-ack"]);
+  it("holds the six documents the library ships with, each at version 1", () => {
+    expect(entries.map((item) => item.slug)).toEqual(["getting-started", "inspections", "key-register", "tenancy-schedule", "jobs", "from-mybuildings"]);
     expect(entries.every((item) => item.version === 1)).toBe(true);
   });
 
@@ -148,18 +148,18 @@ describe("runSeed", () => {
   it("is idempotent: a second run inserts nothing", async () => {
     const { library, writes } = fakeLibrary();
     const first = await runSeed(connection, entries, { apply: true, log: jest.fn() });
-    expect(first).toMatchObject({ inserted: 7, skipped: 0 });
+    expect(first).toMatchObject({ inserted: 6, skipped: 0 });
     expect(Object.keys(library).sort()).toEqual(entries.map((item) => item.slug).sort());
     const writesAfterFirst = writes.length;
     const second = await runSeed(connection, entries, { apply: true, log: jest.fn() });
-    expect(second).toMatchObject({ inserted: 0, skipped: 7 });
+    expect(second).toMatchObject({ inserted: 0, skipped: 6 });
     expect(writes).toHaveLength(writesAfterFirst);
   });
 
   it("only ever adds: every statement it sends is a guarded INSERT inside one transaction", async () => {
     const { writes } = fakeLibrary();
     await runSeed(connection, entries, { apply: true, log: jest.fn() });
-    expect(writes).toHaveLength(7);
+    expect(writes).toHaveLength(6);
     for (const { sql } of writes) {
       expect(sql).toContain("BEGIN TRY");
       expect(sql).toContain("BEGIN TRANSACTION");

@@ -23,6 +23,8 @@
 --                         acknowledgement is chased up. The sweep raises it only for a priority
 --                         with a target; with none set it raises nothing.
 --
+--   dbo.Procedures / dbo.ProcedureVersions  the request_ack email template, seeded once as a draft (insert only).
+--
 -- Additive and re-runnable: every object behind an existence check, each ADD in its own batch.
 
 IF COL_LENGTH(N'dbo.WorkRequests', N'IntakeState') IS NULL
@@ -99,4 +101,21 @@ USING Seed AS source
 WHEN NOT MATCHED BY TARGET THEN
   INSERT (PolicyKey, Kind, Urgent, Clock, AutoReescalate, Ladder, Active, UpdatedBy)
   VALUES (source.PolicyKey, source.Kind, source.Urgent, source.Clock, source.AutoReescalate, source.Ladder, source.Active, N'migration:182_tenant_request_intake');
+GO
+
+-- The request_ack email (a correspondence template): seeded as a DRAFT, once. Insert only: a template that is
+-- already in the library, in any state, is left alone, because once it has been edited in the app its versions are
+-- the source of truth and a published version is immutable. A draft is never sent for real: acknowledgeWorkRequest
+-- refuses it while sends are live (COMMS_SEND_ENABLED) until Facilities has approved it in Procedures.
+IF NOT EXISTS (SELECT 1 FROM dbo.Procedures WHERE Slug = N'request-ack')
+  INSERT INTO dbo.Procedures (Slug, Category, Audience, SortOrder, Owner)
+  VALUES (N'request-ack', N'Correspondence templates', N'facilities', 20, N'Facilities');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ProcedureVersions WHERE Slug = N'request-ack')
+  INSERT INTO dbo.ProcedureVersions (Slug, VersionNo, Title, Summary, BlocksJson, Status, CreatedBy)
+  VALUES (N'request-ack', 1, N'We have your request {{request.reference}}',
+    N'Sent when a person on the facilities team acknowledges a tenant''s maintenance request. Facilities approves the wording before it goes out.',
+    N'[{"id": "request-ack-0", "kind": "paragraph", "text": "Dear {{tenant.addressee}},"}, {"id": "request-ack-1", "kind": "paragraph", "text": "Thank you for letting us know about {{request.summary}} at {{building.name}}."}, {"id": "request-ack-2", "kind": "paragraph", "text": "We have received your request, reference {{request.reference}}, and a member of our team is looking at it now. We will be in touch about what happens next."}, {"id": "request-ack-3", "kind": "paragraph", "text": "If anything changes, or the matter becomes urgent, please reply to this email."}]',
+    N'draft', N'migration:182_tenant_request_intake');
 GO

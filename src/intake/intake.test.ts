@@ -76,6 +76,14 @@ describe("migration 182", () => {
     expect((code.match(/COL_LENGTH/g) ?? []).length).toBe(7);
   });
 
+  it("seeds request_ack as a draft, insert only, and valid blocks the send core can render", () => {
+    expect(code).toMatch(/INSERT INTO dbo\.ProcedureVersions[\s\S]*N'draft'/);
+    expect(code).not.toMatch(/\bPublished\b|N'published'/i);
+    const json = /N'(\[\{[^\n]*request-ack-0[^\n]*\])'/.exec(code)?.[1]?.replace(/''/g, "'");
+    const markdown = blocksToMarkdown(JSON.parse(json ?? "[]"));
+    for (const field of ["tenant.addressee", "request.summary", "building.name", "request.reference"]) expect(markdown).toContain(`{{${field}}}`);
+  });
+
   it("seeds every target unset, so no clock runs until Facilities sets one", () => {
     expect(code).toMatch(/INSERT \(Priority, AckWithinBusinessHours\) VALUES \(source\.Priority, NULL\)/);
   });
