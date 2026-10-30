@@ -133,6 +133,7 @@ export const TENANCY_CHILD_TABLES = [
   "ScheduleChangeRequests",
   "TenancyAttachments",
   "TenancyContacts",
+  "TenancyResponsibilities",
   "TenantLinks",
   "TenantNotes",
   "TenantNotices",

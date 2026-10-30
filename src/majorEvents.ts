@@ -40,6 +40,9 @@ export const EVENT_KINDS = [
   "data_breach",
   "development",
   "refurbishment",
+  // Projects only (TR7): a tenant fit-out, and setting up a tenancy's on-charge rules. Both may name a tenancy (plan.tenantId).
+  "fitout",
+  "onchargeSetup",
 ] as const;
 export function canReadEvent(
   roles: readonly string[],
@@ -58,6 +61,8 @@ export function canReadEvent(
   return roles.some((role) => allowed.includes(role));
 }
 export interface EventPlan {
+  /** The tenancy a fit-out or on-charge set-up project is for (TR7). Optional; kept in the plan so no column is needed. */
+  tenantId?: number;
   timing?: "incident" | "planned";
   buildingIds: number[];
   areas?: { key: string; buildingIds: number[] }[];
@@ -151,6 +156,12 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
       throw new Error("Event areas must not overlap or repeat");
   }
   const jobIds = ids(plan.jobIds, "Jobs", 100);
+  let tenantId: number | undefined;
+  if (plan.tenantId !== undefined && plan.tenantId !== null) {
+    if (eventClass !== "project" || !["fitout", "onchargeSetup"].includes(eventType))
+      throw new Error("Only a fit-out or on-charge set-up project can be linked to a tenancy");
+    tenantId = ids([plan.tenantId], "Tenancy", 1)[0];
+  }
   if (!Array.isArray(plan.actions) || plan.actions.length > 100) throw new Error("Use up to 100 actions");
   const actions = plan.actions.map((action: unknown) => {
     if (!action || typeof action !== "object") throw new Error("Invalid action");
@@ -182,6 +193,7 @@ export function parseEventInput(body: Record<string, unknown>): EventInput {
       jobIds,
       actions,
       ...(areas?.length ? { areas } : {}),
+      ...(tenantId !== undefined ? { tenantId } : {}),
       ...(plan.timing ? { timing: plan.timing } : {}),
     },
   };
