@@ -14,6 +14,8 @@ import { errorResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { parseEmailIds } from "../inboundTriage/input";
 import { READ_LIMIT, tooManyRequests } from "../inboundTriage/limits";
+import { commsMode } from "../comms/config";
+import { ackDelivery } from "../intake/delivery";
 import { dueAtFor } from "../intake/overdue";
 import { intakePriority, viewState } from "../intake/state";
 import { checkRateLimit } from "../rateLimit";
@@ -36,6 +38,8 @@ export async function getRequestIntake(request: HttpRequest, context: Invocation
     const rows = await executeQuery(
       connection,
       `SELECT wr.WorkRequestID, wr.IntakeState, wr.AcknowledgedAt, wr.AcknowledgedBy, wr.AcknowledgedVia, wr.IntakeClosedReason, wr.CreatedAt,
+              (SELECT TOP 1 r.Status FROM dbo.CorrespondenceRecipients r WHERE r.CorrespondenceId = wr.AcknowledgementJobId ORDER BY r.RecipientId) AS AckRecipientStatus,
+              (SELECT c.Status FROM dbo.Correspondence c WHERE c.CorrespondenceId = wr.AcknowledgementJobId) AS AckJobStatus,
               COALESCE(o.Priority, wr.Priority) AS Priority,
               CASE WHEN EXISTS (SELECT 1 FROM dbo.Jobs j WHERE j.WorkRequestID = wr.WorkRequestID) THEN 1 ELSE 0 END AS HasJob
          FROM dbo.WorkRequests wr
@@ -54,6 +58,7 @@ export async function getRequestIntake(request: HttpRequest, context: Invocation
         acknowledgedAt: iso(row.AcknowledgedAt),
         acknowledgedBy: str(row.AcknowledgedBy),
         acknowledgedVia: str(row.AcknowledgedVia),
+        ackDelivery: ackDelivery(row.AcknowledgedVia, row.AckRecipientStatus, row.AckJobStatus, commsMode()),
         closedReason: str(row.IntakeClosedReason),
         dueAt: iso(due),
         state,

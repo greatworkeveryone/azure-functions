@@ -23,6 +23,7 @@ import type { NewJob } from "../comms/types";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { isFeatureEnabledForRoles } from "../features/flags";
+import { ackDelivery } from "../intake/delivery";
 import { ACK_TEMPLATE_ID, loadAckTemplate } from "../intake/template";
 import { storedState, viewState } from "../intake/state";
 import { record } from "../ledger";
@@ -70,6 +71,7 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
     }
 
     let jobId: number | null = null;
+    let queuedJobStatus: string | null = null;
     if (!withoutEmail) {
       const address = text(row.ContactEmail).toLowerCase();
       if (address === "") return badRequest("This request has no contact email. If you have already told them another way, acknowledge without an email.");
@@ -119,6 +121,7 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
       // One key per request: a retry after a failure part-way finds the email already queued and doesn't queue a second.
       const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold(), `request-ack-wr-${id}`);
       jobId = queued.correspondenceId;
+      queuedJobStatus = queued.status;
     }
 
     const user = await findUserByOid(connection, actor.oid);
@@ -150,7 +153,7 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
       return txOk(true);
     });
     if (!moved.ok || !moved.value) return conflict("Someone else acknowledged this request just now");
-    return { headers: noStore, jsonBody: { acknowledgedVia: via, correspondenceId: jobId, workRequestId: id }, status: 200 };
+    return { headers: noStore, jsonBody: { acknowledgedVia: via, correspondenceId: jobId, delivery: ackDelivery(via, "queued", queuedJobStatus, commsMode()), workRequestId: id }, status: 200 };
   } catch (error) {
     context.error("acknowledgeWorkRequest failed:", error instanceof Error ? error.message : error);
     return errorResponse("Could not acknowledge the request", error);
