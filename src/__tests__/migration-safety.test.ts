@@ -38,6 +38,7 @@ const MIGRATIONS = [
   "160_tenancy_gst_basis.sql",
   "171_contractor_suggestion_events.sql",
   "176_inbound_triage.sql",
+  "189_certificate_intake.sql",
 ];
 
 // Destructive-looking phrases that change no data themselves: the trigger that

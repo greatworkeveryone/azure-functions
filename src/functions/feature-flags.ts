@@ -29,7 +29,7 @@ const VISIBILITIES = ["enabled", "preview", "hidden"] as const;
 // switching a staff role on never switches the page on for every link holder.
 const ROLE_NAMES: readonly string[] = [...Object.values(AppRole), "tenant"];
 const FEATURE_KEYS = [
-  "absenceCover", "activity", "aiAssist", "aiDocumentExtraction", "assets", "comms", "complianceReport",
+  "absenceCover", "activity", "aiAssist", "aiDocumentExtraction", "assets", "certificateIntake", "comms", "complianceReport",
   "contractorSuggestions", "decisionJobs", "documentation", "emailBroadcast", "emailSending", "escalations",
   "finance", "guidedHelp", "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
   "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
