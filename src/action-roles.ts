@@ -389,8 +389,8 @@ export const ACTION_ROLES = {
   // from notices@ (admin is refused, as for sendEmail); moving a request on and setting the promise do not.
   viewRequestIntake: {
     gate: [A.FACILITIES, A.ACCOUNTS],
-    routes: ["getRequestIntake", "getIntakeTargets"],
-    why: "See, on each incoming request, where it is in intake (received, acknowledged, assessing, job raised, closed), who acknowledged it and when, and the response target if Facilities has set one. Same people as read work requests.",
+    routes: ["getRequestIntake", "getIntakeTargets", "getRequestNotices"],
+    why: "See, on each incoming request, where it is in intake (received, acknowledged, assessing, job raised, closed), who acknowledged it and when, the response target if Facilities has set one, and the status notices (booked, complete) sent to the tenant. Same people as read work requests.",
   },
   acknowledgeRequest: {
     gate: [A.FACILITIES, A.ACCOUNTS],

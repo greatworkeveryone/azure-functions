@@ -14,6 +14,7 @@ import {
   type JobState,
   nextState,
 } from "./jobStatusMachine";
+import { enqueueTenantNotice } from "./tenantNotices/enqueue";
 
 export interface AdvanceJobStatusOptions {
   actor: string | null;
@@ -133,6 +134,10 @@ export async function advanceJobStatus(
       { name: "InvoiceID", type: TYPES.Int, value: opts.invoiceId ?? null },
     ],
   );
+
+  // TR4: a tenant-linked job that is now booked or complete owes its tenant a notice. Recorded in the caller's
+  // transaction (so a rollback drops it), once per job and event, and never throws.
+  await enqueueTenantNotice(connection, jobId, current, target);
 
   return { advanced: true, from: current, to: target };
 }

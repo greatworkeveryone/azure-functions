@@ -29,6 +29,7 @@ export const TIMER_NAMES = [
   "syncAllWorkRequestsTimer",
   "tenancyCpiSyncTimer",
   "tenancyReviewScheduleTimer",
+  "tenantNoticesTimer",
   "timesheetSyncTimer",
   "usagePurgeTimer",
   "usageRollupTimer",
