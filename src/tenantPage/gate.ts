@@ -1,0 +1,113 @@
+// The one door for the anonymous tenant endpoints (TR3). Every tenant function runs inside runTenant;
+// nothing here reads a Floorplan sign-in. In order, stopping at the first refusal:
+//
+//   1. per-client limit (keyed hash of the address, ../access/clientIp.ts) before any work
+//   2. a client that has already failed to present a working link too often is turned away (429)
+//      without touching the database
+//   3. the link comes from the X-Tenant-Link header ONLY (never the URL, query or body); a header
+//      that is not token-shaped counts as a failed attempt and answers the uniform 404
+//   4. per-link limit, keyed on a hash of the token
+//   5. the tenantPage flag, read before the link is resolved so an off page records no use; off,
+//      unreadable or missing all answer the same 404 as a bad link
+//   6. resolveTenantLink: null for every kind of unusable link (unknown, revoked, expired, archived,
+//      email-only) answers one identical 404, and counts as a failed attempt
+//   7. the work, which receives ONLY the resolved identity; no client value can widen it
+//
+// A failure in the work is a generic 500: no SQL text, no token, no identity in the reply or the log.
+
+import { createHash } from "node:crypto";
+import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import type { Connection } from "tedious";
+import { clientAddress, hashValue } from "../access/clientIp";
+import { AppRole } from "../auth";
+import { closeConnection, createServiceRequestConnection } from "../db";
+import { isFeatureEnabledForRoles } from "../features/flags";
+import { resolveTenantLink } from "../tenantLinks/resolve";
+import { isTokenShaped } from "../tenantLinks/token";
+import type { TenantLinkIdentity } from "../tenantLinks/types";
+import { TENANT_PAGE_FLAG } from "./constants";
+import { hit, isFull } from "./limiter";
+
+export const TENANT_LINK_HEADER = "x-tenant-link";
+
+const NO_STORE = { "Cache-Control": "no-store" };
+const MINUTE = 60_000;
+/** Per client: all tenant endpoints together. */
+const CLIENT_LIMIT = { limit: 90, windowMs: MINUTE };
+/** Per client when the address is unreadable (shared bucket, so a little more generous). */
+const UNKNOWN_CLIENT_LIMIT = { limit: 240, windowMs: MINUTE };
+/** Failed link presentations per client before it is turned away for the window. */
+const FAILED_LINK_LIMIT = { limit: 10, windowMs: 10 * MINUTE };
+
+export interface TenantWork {
+  connection: Connection;
+  context: InvocationContext;
+  identity: TenantLinkIdentity;
+  request: HttpRequest;
+}
+
+export interface TenantOptions {
+  /** Hits allowed per link per window, for this endpoint. */
+  perLink: { limit: number; windowMs: number };
+  /** Count a link use on the ledger (the page opening). Other calls only check the link. */
+  recordUse: boolean;
+}
+
+export const linkNotValid = (): HttpResponseInit => ({ headers: NO_STORE, jsonBody: { error: "link_not_valid" }, status: 404 });
+
+const tooMany = (retryAfterMs: number): HttpResponseInit => ({
+  headers: { ...NO_STORE, "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+  jsonBody: { error: "rate_limited" },
+  status: 429,
+});
+
+export const tenantJson = (status: number, body: unknown): HttpResponseInit => ({ headers: NO_STORE, jsonBody: body, status });
+
+const ALL_ROLES: readonly string[] = Object.values(AppRole);
+
+export async function isTenantPageOn(connection: Connection): Promise<boolean> {
+  return isFeatureEnabledForRoles(TENANT_PAGE_FLAG, ALL_ROLES, { connection });
+}
+
+export async function runTenant(
+  request: HttpRequest,
+  context: InvocationContext,
+  name: string,
+  options: TenantOptions,
+  work: (ctx: TenantWork) => Promise<HttpResponseInit>,
+): Promise<HttpResponseInit> {
+  const address = clientAddress(request);
+  const clientKey = address ? hashValue("ip", address) : "unknown";
+  const clientLimit = address ? CLIENT_LIMIT : UNKNOWN_CLIENT_LIMIT;
+  const byClient = hit(`tenant:client:${clientKey}`, clientLimit.limit, clientLimit.windowMs);
+  if (!byClient.allowed) return tooMany(byClient.retryAfterMs);
+
+  const failedKey = `tenant:failed:${clientKey}`;
+  const alreadyFailing = isFull(failedKey, FAILED_LINK_LIMIT.limit, FAILED_LINK_LIMIT.windowMs);
+  if (!alreadyFailing.allowed) return tooMany(alreadyFailing.retryAfterMs);
+  const failed = (): HttpResponseInit => {
+    hit(failedKey, FAILED_LINK_LIMIT.limit, FAILED_LINK_LIMIT.windowMs);
+    return linkNotValid();
+  };
+
+  const token = request.headers.get(TENANT_LINK_HEADER);
+  if (!isTokenShaped(token)) return failed();
+
+  const tokenKey = createHash("sha256").update(token).digest("hex").slice(0, 24);
+  const byLink = hit(`tenant:link:${name}:${tokenKey}`, options.perLink.limit, options.perLink.windowMs);
+  if (!byLink.allowed) return tooMany(byLink.retryAfterMs);
+
+  let connection: Connection | undefined;
+  try {
+    connection = await createServiceRequestConnection();
+    if (!(await isTenantPageOn(connection))) return linkNotValid();
+    const identity = await resolveTenantLink(token, { connection, recordUse: options.recordUse });
+    if (!identity) return failed();
+    return await work({ connection, context, identity, request });
+  } catch (error) {
+    context.error(`${name} failed: ${error instanceof Error ? error.name : "error"}`);
+    return tenantJson(500, { error: "Something went wrong" });
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}

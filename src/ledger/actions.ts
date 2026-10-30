@@ -178,6 +178,11 @@ export const LEDGER_ACTIONS = {
   "tenancy.link_revoke": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.link_use": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
+  // Tenant page (TR3). Written by the anonymous tenant endpoints under a system actor named for the page;
+  // after holds the contact id and the request id, never the link token.
+  "tenancy.request_photo": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.request_submit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 

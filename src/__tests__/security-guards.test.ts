@@ -72,6 +72,10 @@ const ANONYMOUS_BY_DESIGN: Record<string, string> = {
   corsOptions: "preflight only; returns CORS headers and no data",
   graphNotification: "Graph webhook; authenticated by the constant-time clientState secret",
   myobAuthCallback: "OAuth redirect; authenticated by the signed, expiring state",
+  tenantContext: "tenant page (TR3): personal link in X-Tenant-Link, resolved by resolveTenantLink; rate limited, flag-gated, scoped to one tenancy",
+  tenantListRequests: "tenant page (TR3): as tenantContext",
+  tenantSubmitRequest: "tenant page (TR3): as tenantContext",
+  tenantUploadPhoto: "tenant page (TR3): as tenantContext",
   registerSelf: "sign-in; verifies the token signature itself and needs no role yet",
 };
 
