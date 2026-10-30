@@ -379,6 +379,29 @@ export const ACTION_ROLES = {
     routes: ["getEmailRouting"],
     why: "See, on each Incoming email, which mailbox it came from, who has it and why, and the send it replies to. Same people as read Incoming itself (getEmails).",
   },
+  // Tenant requests (TR1, PLAN §15). Reading the intake state is reading work requests. Acknowledging sends mail
+  // from notices@ (admin is refused, as for sendEmail); moving a request on and setting the promise do not.
+  viewRequestIntake: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    routes: ["getRequestIntake", "getIntakeTargets"],
+    why: "See, on each incoming request, where it is in intake (received, acknowledged, assessing, job raised, closed), who acknowledged it and when, and the response target if Facilities has set one. Same people as read work requests.",
+  },
+  acknowledgeRequest: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    refused: [A.ADMIN],
+    routes: ["acknowledgeWorkRequest"],
+    why: "Acknowledge an incoming tenant request: one click sends the approved request_ack email from notices@ to the person who reported it, and records who and when. Property and facilities staff and above. Admin is refused: it sends nothing real.",
+  },
+  moveRequestIntake: {
+    gate: [A.FACILITIES, A.ACCOUNTS],
+    routes: ["moveWorkRequestIntake"],
+    why: "Move an acknowledged request to Assessing, or close any open one as a duplicate or not ours (with the reason). Nothing is sent. Same people as read work requests.",
+  },
+  setIntakeTargets: {
+    gate: [A.FACILITIES_APPROVAL],
+    routes: ["setIntakeTargets"],
+    why: "Set, per priority, how many business hours Facilities promises to acknowledge a request within. Unset means no clock and no escalation. The facilities manager's call; directors, the CFO and admin through the hierarchy.",
+  },
   triageIncomingEmail: {
     gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL],
     routes: ["getTriageQueue", "assignEmail"],

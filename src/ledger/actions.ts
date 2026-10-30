@@ -343,6 +343,11 @@ export const LEDGER_ACTIONS = {
   "myob.lab_result": { exception: false, reasonRequired: true, subjects: ["myob_control"] },
   // Native email (EB1, PLAN §13): a send job queued (or put to a manager when it is large),
   // approved, cancelled, and its completion by the queue timer. The subject is the job.
+  // Tenant request intake (TR1). Acknowledging, assessing and closing a request, and the promise Facilities sets.
+  "work_request.acknowledge": { exception: false, reasonRequired: false, subjects: ["work_request"] },
+  "work_request.assess": { exception: false, reasonRequired: false, subjects: ["work_request"] },
+  "work_request.close": { exception: false, reasonRequired: true, subjects: ["work_request"] },
+  "work_request.set_targets": { exception: false, reasonRequired: false, subjects: ["work_request"] },
   "correspondence.approve": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
   "correspondence.cancel": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
   "correspondence.queue": { exception: false, reasonRequired: false, subjects: ["correspondence"] },

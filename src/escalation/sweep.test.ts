@@ -1586,3 +1586,41 @@ describe("attribution notices (R2, R13)", () => {
     expect(world.calls.raise).toEqual([]);
   });
 });
+
+describe("unacknowledged tenant requests (TR1)", () => {
+  const overdue = { dueAt: new Date("2026-10-27T01:00:00Z"), priority: "High", workRequestId: 31 };
+
+  it("raises request.unacknowledged for a request past its target, once", async () => {
+    const world = makeWorld();
+    world.deps.listOverdueRequests = async () => [overdue];
+
+    await sweep(world);
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([expect.objectContaining({ policyKey: "request.unacknowledged", subjectId: "31", subjectType: "work_request" })]);
+  });
+
+  it("raises nothing when no target is set (the list is empty), or when the step is not wired", async () => {
+    const world = makeWorld();
+    world.deps.listOverdueRequests = async () => [];
+    await sweep(world);
+    delete world.deps.listOverdueRequests;
+    await sweep(world);
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("leaves alone a request that already had one, even if a person closed it", async () => {
+    const world = makeWorld();
+    world.rows.push(esc({ policyKey: "request.unacknowledged", status: "resolved", subjectId: "31", subjectType: "work_request" }));
+    world.deps.listOverdueRequests = async () => [overdue];
+    await sweep(world);
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("only says what it would do on a dry run", async () => {
+    const world = makeWorld();
+    world.deps.listOverdueRequests = async () => [overdue];
+    expect((await sweep(world, { dryRun: true })).raised).toBe(1);
+    expect(world.calls.raise).toEqual([]);
+  });
+});

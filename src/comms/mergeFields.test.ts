@@ -70,7 +70,7 @@ describe("mergeEmail", () => {
 
 describe("the catalogue", () => {
   it("marks the sender, the date and the recipient's name as the server's", () => {
-    expect(MERGE_FIELDS.filter((field) => field.server).map((field) => field.path).sort()).toEqual(["recipient.name", "sender.name", "sender.title", "today", "today.long"]);
+    expect(MERGE_FIELDS.filter((field) => field.server).map((field) => field.path).sort()).toEqual(["recipient.name", "request.reference", "request.summary", "sender.name", "sender.title", "today", "today.long"]);
     expect(isServerField("sender.name")).toBe(true);
     expect(isServerField("tenant.name")).toBe(false);
   });

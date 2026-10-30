@@ -549,5 +549,41 @@
     "title": "What changes from myBuildings",
     "updated": "2026-08-11",
     "version": 1
+  },
+  {
+    "audience": [
+      "facilities"
+    ],
+    "blocks": [
+      {
+        "id": "request-ack-0",
+        "kind": "paragraph",
+        "text": "Dear {{tenant.addressee}},"
+      },
+      {
+        "id": "request-ack-1",
+        "kind": "paragraph",
+        "text": "Thank you for letting us know about {{request.summary}} at {{building.name}}."
+      },
+      {
+        "id": "request-ack-2",
+        "kind": "paragraph",
+        "text": "We have received your request, reference {{request.reference}}, and a member of our team is looking at it now. We will be in touch about what happens next."
+      },
+      {
+        "id": "request-ack-3",
+        "kind": "paragraph",
+        "text": "If anything changes, or the matter becomes urgent, please reply to this email."
+      }
+    ],
+    "category": "Correspondence templates",
+    "order": 20,
+    "owner": "Facilities",
+    "slug": "request-ack",
+    "status": "draft",
+    "summary": "Sent when a person on the facilities team acknowledges a tenant's maintenance request. Facilities approves the wording before it goes out.",
+    "title": "We have your request {{request.reference}}",
+    "updated": "2026-10-30",
+    "version": 1
   }
 ]
