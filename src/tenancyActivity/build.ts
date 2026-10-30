@@ -5,6 +5,7 @@
 
 import { AppRole } from "../auth";
 import { JobStatus } from "../jobStatusMachine";
+import { isClosed, isIntakeState } from "../intake/state";
 
 export const ACTIVITY_CAP = 200;
 
@@ -49,7 +50,7 @@ export function workRequestItem(row: Row): ActivityItem {
   const id = row.WorkRequestID as number;
   const intakeState = text(row.IntakeState);
   const status = text(row.Status) ?? "Unknown";
-  const closed = intakeState ? intakeState === "Closed" || intakeState === "Converted" : WR_CLOSED.test(status);
+  const closed = isIntakeState(intakeState) ? isClosed(intakeState) : WR_CLOSED.test(status);
   return {
     ...(intakeState ? { intakeState } : {}),
     amount: null,

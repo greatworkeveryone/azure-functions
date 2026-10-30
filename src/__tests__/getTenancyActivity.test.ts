@@ -82,4 +82,11 @@ describe("buildTenancyActivity", () => {
     const out = buildTenancyActivity([{ ...WRS[0], Status: "Completed" }], JOBS, true);
     expect(out.items.filter((i) => !i.isOpen).map((i) => i.id).sort()).toEqual(["job-90", "wr-55"]);
   });
+
+  it("treats the real closed intake states as closed, whatever the request status says", () => {
+    for (const IntakeState of ["closed_duplicate", "closed_not_ours"]) {
+      expect(buildTenancyActivity([{ ...WRS[0], IntakeState, Status: "Open" }], [], true).items[0].isOpen).toBe(false);
+    }
+    expect(buildTenancyActivity([{ ...WRS[0], IntakeState: "assessing", Status: "Completed" }], [], true).items[0].isOpen).toBe(true);
+  });
 });

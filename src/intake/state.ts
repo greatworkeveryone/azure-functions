@@ -35,9 +35,13 @@ export function viewState(raw: unknown, hasJob: boolean): IntakeView {
   return hasJob ? "converted" : storedState(raw);
 }
 
-/** A request's priority as the targets table keys it; anything unrecognised counts as Normal. */
+/** What the tenant page's urgency is stored as (tenantPage/constants URGENCY_PRIORITY) and the target it counts against. */
+const TENANT_URGENCY_TARGET: Record<string, IntakePriority> = { emergency: "Critical", routine: "Normal", urgent: "High" };
+
+/** A request's priority as the targets table keys it; a tenant's Emergency/Urgent/Routine map to Critical/High/Normal; anything unrecognised counts as Normal. */
 export function intakePriority(raw: unknown): IntakePriority {
   const text = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (text in TENANT_URGENCY_TARGET) return TENANT_URGENCY_TARGET[text];
   return INTAKE_PRIORITIES.find((priority) => priority.toLowerCase() === text) ?? "Normal";
 }
 
