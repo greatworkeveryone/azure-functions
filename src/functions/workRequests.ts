@@ -2,6 +2,8 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { Connection, TYPES } from "tedious";
 import { createRequestConnection, executeQuery, closeConnection, SqlParam } from "../db";
 import { fetchWorkRequests, fetchWorkRequestById, createWorkRequest, bulkStatusUpdate, MyWorkRequest, BulkStatusUpdatePayload2Item, CreateWorkRequestPayload } from "../mybuildings-client";
+import { mayPullWorkRequests, mayPushWorkRequests } from "../config/mybuildingsSwitches";
+import { insertNativeWorkRequest, isNativeWorkRequestId, updateWorkRequestLocally } from "../workRequestsNative";
 import { ACTION_ROLES } from "../action-roles";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
@@ -158,7 +160,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     // No buildingId — return all WRs from DB. On force=true also sync all
     // buildings using lastmodifieddate so the dashboard data stays current.
     if (!buildingId) {
-      if (force) {
+      if (force && mayPullWorkRequests()) {
         // Use the oldest WRsLastSyncedAt across all buildings as the sync-from
         // date, so any building that has fallen behind gets caught up.
         const globalSyncRows = await executeQuery(
@@ -257,7 +259,7 @@ async function getWorkRequests(request: HttpRequest, context: InvocationContext)
     // Manual buildings (negative IDs, migration 093) don't exist in myBuildings.
     const isManualBuilding = (buildingNumber as number) <= 0;
 
-    if (!isManualBuilding && (force || isStale)) {
+    if (!isManualBuilding && mayPullWorkRequests() && (force || isStale)) {
       // Both force and incremental syncs use lastmodifieddate to avoid pulling
       // the entire WR history. Force sync resets to the 2-year default window;
       // incremental sync uses the last-synced timestamp for minimal fetching.
@@ -375,6 +377,11 @@ async function getWorkRequest(request: HttpRequest, context: InvocationContext):
 
     const dbLastModified = existing[0]?.LastModifiedDate ?? null;
 
+    if (!mayPullWorkRequests() || parseInt(workRequestId) < 0) {
+      if (existing.length === 0) return { status: 404, jsonBody: { error: "Work request not found" } };
+      return { status: 200, jsonBody: { workRequest: existing[0], changed: false } };
+    }
+
     // Live fetch from myBuildings
     const liveWr = await fetchWorkRequestById(parseInt(workRequestId));
     if (!liveWr) {
@@ -459,6 +466,29 @@ async function updateWorkRequest(request: HttpRequest, context: InvocationContex
       };
     }
 
+    // Pushing is off (TR6): change the row in Floorplan. Only a native request, or any request once
+    // the pull is also off, can be edited here; a myBuildings-origin row would be overwritten by the
+    // next pull, so its status stays a myBuildings change until the sync is stopped.
+    if (!mayPushWorkRequests()) {
+      if (!isNativeWorkRequestId(WorkRequestID) && mayPullWorkRequests()) {
+        return { status: 409, jsonBody: { error: "Pushing to myBuildings is switched off and the sync is still reading from it, so this change would be overwritten. Change this request in myBuildings until the sync is stopped." } };
+      }
+      const identity = await verifiedIdentityFromRequest(request);
+      if (!identity) return unauthorizedResponse();
+      await updateWorkRequestLocally(connection, {
+        note: body.WorkNotes?.trim() || null,
+        statusId: body.StatusID ?? null,
+        totalCost: body.TotalCost ?? null,
+        workRequestId: WorkRequestID,
+      }, identity.name);
+      const stored = await executeQuery(
+        connection,
+        `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
+        [{ name: "WorkRequestID", type: TYPES.Int, value: WorkRequestID }]
+      );
+      return { status: 200, jsonBody: { message: "Work request updated", workRequest: stored[0] ?? existing[0] } };
+    }
+
     // Write to myBuildings via bulkStatusUpdate (the only supported write endpoint).
     // Only include fields that are actually being changed. myBuildings rejects
     // the payload with "unable to deserialise" if we send TotalCost: null for a
@@ -511,6 +541,19 @@ async function handleCreateWorkRequest(request: HttpRequest, context: Invocation
   let connection;
   try {
     const body = await request.json() as CreateWorkRequestPayload;
+
+    if (!mayPushWorkRequests()) {
+      // TR6: the request lives in Floorplan only, with a negative id of its own.
+      connection = await createRequestConnection(token);
+      const nativeId = await insertNativeWorkRequest(connection, body);
+      const stored = await executeQuery(
+        connection,
+        `SELECT ${workRequestSelectColumns()} FROM WorkRequests wr ${WR_OVERLAY_JOIN} WHERE wr.WorkRequestID = @WorkRequestID`,
+        [{ name: "WorkRequestID", type: TYPES.Int, value: nativeId }]
+      );
+      return { status: 200, jsonBody: { message: "Work request created in Floorplan", workRequest: stored[0], native: true } };
+    }
+
     context.log("Creating work request via myBuildings API...");
     const result = await createWorkRequest(body);
 
