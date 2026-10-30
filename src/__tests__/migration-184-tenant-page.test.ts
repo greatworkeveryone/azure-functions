@@ -19,7 +19,7 @@ describe("migration 184", () => {
     }
     expect(code).toMatch(/IF COL_LENGTH\('dbo\.Buildings', 'EmergencyPhone'\) IS NULL ALTER TABLE dbo\.Buildings ADD EmergencyPhone NVARCHAR\(50\) NULL/);
     expect(code).toMatch(/IF OBJECT_ID\('dbo\.TenantRequestPhotos', 'U'\) IS NULL\s+BEGIN\s+CREATE TABLE/);
-    for (const m of code.matchAll(/CREATE (?:UNIQUE )?INDEX (\w+)/g)) expect(code).toContain(`WHERE name = '${m[1]}'`);
+    for (const m of code.matchAll(/CREATE (?:UNIQUE )?INDEX (\w+)/g)) expect(code).toContain(["WHERE name = '", m[1], "'"].join(""));
   });
   it("keeps photos marked unprocessed by default", () => {
     expect(code).toMatch(/Processed\s+BIT\s+NOT NULL CONSTRAINT \w+ DEFAULT 0/);
