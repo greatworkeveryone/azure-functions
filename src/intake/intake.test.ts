@@ -27,6 +27,9 @@ describe("intake state", () => {
   it("treats an unknown priority as Normal", () => {
     expect(intakePriority("critical")).toBe("Critical");
     expect(intakePriority("Urgent!")).toBe("Normal");
+    expect(intakePriority("Emergency")).toBe("Critical");
+    expect(intakePriority("Urgent")).toBe("High");
+    expect(intakePriority("Routine")).toBe("Normal");
     expect(intakePriority(null)).toBe("Normal");
   });
 });
