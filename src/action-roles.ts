@@ -34,6 +34,7 @@ import { MANAGE_DEFECTS_PERIODS_ROLES, MANAGE_SERVICE_SCHEDULES_ROLES, VIEW_FACI
 import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
+import { EDIT_RESPONSIBILITIES_ROLES, VIEW_RESPONSIBILITIES_ROLES } from "./tenancyResponsibilities/roles";
 import { MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
 import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
@@ -294,6 +295,11 @@ export const ACTION_ROLES = {
       "unarchiveTenantNote",
     ],
     why: "Edit the tenancy register and a tenant's detail, and archive or restore its notes with a reason (D11).",
+  },
+  editTenancyResponsibilities: {
+    gate: EDIT_RESPONSIBILITIES_ROLES,
+    routes: ["saveTenancyResponsibility", "archiveTenancyResponsibility"],
+    why: "Add, edit, archive and restore the items on a tenancy's \"who maintains what\" list (TR7): the people who edit the tenancy.",
   },
   manageAccessProfiles: {
     gate: [A.ADMIN],
@@ -704,6 +710,11 @@ export const ACTION_ROLES = {
     gate: JOB_READ,
     routes: ["getJobs", "getJob", "getCoverNotes"],
     why: "Read jobs, their history and their packet, and who is covering a job while its owner is away.",
+  },
+  viewTenancyResponsibilities: {
+    gate: VIEW_RESPONSIBILITIES_ROLES,
+    routes: ["getTenancyResponsibilities", "getRequestResponsibilities"],
+    why: "Read a tenancy's \"who maintains what\" list, and the matching items beside an incoming request (TR7). Facilities reads it to triage.",
   },
   viewTenantLinks: {
     gate: VIEW_TENANT_LINKS_ROLES,

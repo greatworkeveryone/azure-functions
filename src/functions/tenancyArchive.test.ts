@@ -125,7 +125,7 @@ beforeEach(() => {
     Vacancies: 0,
   };
   tenantRow = blankRow();
-  optional = { ChangeRequests: 0, DefectsPeriods: 0, LeaseEvents: 0, RegisterDocuments: 0, SignedOff: 0, Contacts: 0, Links: 0, Notices: 0, Photos: 0 };
+  optional = { ChangeRequests: 0, DefectsPeriods: 0, LeaseEvents: 0, RegisterDocuments: 0, SignedOff: 0, Contacts: 0, Links: 0, Notices: 0, Photos: 0, Responsibilities: 0 };
   documentRow = { ArchivedAt: null, OriginalName: "lease.pdf" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/SELECT \* FROM dbo\.Tenants WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return tenantRow ? [tenantRow] : [];
@@ -217,6 +217,7 @@ const DRAFT_HOLDINGS: [string, Record<string, unknown>, string][] = [
   ["documentation register entries", { RegisterDocuments: 2 }, "2 documentation register entries"],
   ["option or renewal records", { LeaseEvents: 2 }, "2 option or renewal records"],
   ["tenant notices", { Notices: 2 }, "2 tenant notices"],
+  ["maintenance responsibilities", { Responsibilities: 2 }, "2 maintenance responsibilities"],
   ["tenant request photos", { Photos: 3 }, "3 tenant request photos"],
   ["contact or personal link records", { Contacts: 1, Links: 1 }, "2 contact and personal link records"],
 ];

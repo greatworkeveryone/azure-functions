@@ -277,6 +277,13 @@
     "cfo",
     "director"
   ],
+  "editTenancyResponsibilities": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director"
+  ],
   "manageAbsenceCover": [
     "accounts_manager",
     "cfo",
@@ -860,6 +867,15 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "viewTenancyResponsibilities": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
   ],
   "viewTenancySchedule": [
     "admin",

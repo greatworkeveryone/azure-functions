@@ -114,6 +114,14 @@ async function validateLinks(c: Connection, input: EventInput, roles: string[]):
     )
       return "An affected building is missing or inactive";
   }
+  if (input.plan.tenantId !== undefined) {
+    const tenant = (
+      await executeQuery(c, "SELECT TenantId, ArchivedAt FROM dbo.Tenants WHERE TenantId=@Id", [
+        int("Id", input.plan.tenantId),
+      ])
+    )[0];
+    if (!tenant || tenant.ArchivedAt) return "The linked tenancy is missing or archived";
+  }
   for (const id of input.plan.jobIds) {
     const row = (
       await executeQuery(c, "SELECT JobID, BuildingID, IsTest FROM dbo.Jobs WHERE JobID=@Id", [int("Id", id)])

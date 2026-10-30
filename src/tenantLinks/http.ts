@@ -30,6 +30,7 @@ export async function runStaff(
   token: string,
   write: boolean,
   work: (ctx: StaffContext) => Promise<HttpResponseInit>,
+  flag: string = TENANT_LINKS_FLAG,
 ): Promise<HttpResponseInit> {
   let body: Record<string, unknown> = {};
   if (write) {
@@ -41,7 +42,7 @@ export async function runStaff(
   try {
     connection = await createRequestConnection(token);
     const callerRoles = await rolesForRequest(request);
-    if (!(await isFeatureEnabledForRoles(TENANT_LINKS_FLAG, callerRoles, { connection }))) return notAvailable();
+    if (!(await isFeatureEnabledForRoles(flag, callerRoles, { connection }))) return notAvailable();
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return unauthorizedResponse();
     return await work({ actor, body, connection });

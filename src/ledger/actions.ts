@@ -172,6 +172,11 @@ export const LEDGER_ACTIONS = {
   "tenancy.contact_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.contact_restore": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.contact_update": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  // The "who maintains what" list on a tenancy (TR7). The subject is the tenancy; after holds the item and who maintains it.
+  "tenancy.responsibility_add": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.responsibility_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.responsibility_restore": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.responsibility_update": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.email_only_set": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.link_issue": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.link_reissue": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
