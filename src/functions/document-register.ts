@@ -39,7 +39,7 @@ const idOf = (value: unknown) =>
     : null;
 const COLS =
   "d.ContractorId,d.InsuranceType,d.DocumentId,d.Title,d.Kind,d.ServiceCategory,d.BuildingId,d.TenantId,d.IssuedOn,d.ExpiresOn,d.ReviewDue,d.OwnerName,d.Notes,d.FileName,d.BlobName,d.ContentType,d.SizeBytes,d.Revision,d.CreatedAt,d.CreatedBy,d.CreatedByOid,d.UpdatedAt,d.ArchivedAt";
-interface State {
+export interface State {
   connection: Connection;
   roles: string[];
   caller: Caller;
@@ -383,63 +383,85 @@ export async function uploadRegisterDocument(
       return { status: 413, jsonBody: { error: "Use a file up to 10 MB" } };
     const invalid = await validateScope(s, input);
     if (invalid) return badRequest(invalid);
-    const bytes = Buffer.from(await file.arrayBuffer());
-    const matches =
-      file.type === "application/pdf"
-        ? bytes.subarray(0, 5).toString() === "%PDF-"
-        : file.type === "image/jpeg"
-          ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
-          : file.type === "image/png"
-            ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-            : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP";
-    if (!matches) return badRequest("File contents do not match the selected type");
-    const fileName = file.name.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 200) || "document";
-    let blob: string | undefined;
-    let committed = false;
-    try {
-      const uploaded = await uploadBlob(bytes, fileName, file.type, "documentation");
-      blob = uploaded.blobName;
-      const result = await inTransaction(s.connection, async () => {
-        const invalid = await validateScope(s, input);
-        if (invalid) return txFail(badRequest(invalid));
-        const rows = await executeQuery(
-          s.connection,
-          `INSERT dbo.RegisterDocuments (ContractorId,InsuranceType,Title,Kind,ServiceCategory,BuildingId,TenantId,IssuedOn,ExpiresOn,ReviewDue,OwnerName,Notes,FileName,BlobName,ContentType,SizeBytes,CreatedBy,CreatedByOid) OUTPUT INSERTED.DocumentId VALUES (@Contractor,@Insurance,@Title,@Kind,@Category,@Building,@Tenant,@Issue,@Expiry,@Review,@Owner,@Notes,@File,@Blob,@Type,@Size,@Name,@Oid)`,
-          [
-            ...params(input),
-            str("File", fileName),
-            str("Blob", uploaded.blobName),
-            str("Type", file.type),
-            int("Size", bytes.length),
-            str("Name", s.caller.name),
-            str("Oid", s.caller.oid),
-          ],
-        );
-        const id = Number(rows[0].DocumentId);
-        await audit(s, id, "created", input);
-        return txOk({ documentId: id });
-      });
-      committed = result.ok;
-      return result.ok ? { status: 201, jsonBody: result.value } : result.response;
-    } finally {
-      if (blob && !committed) {
-        // COMMIT may have succeeded with its acknowledgement lost: delete only when a fresh read proves no row references the file (an orphan is harmless, a deleted referenced file is data loss).
-        const referenced = await executeQuery(
-          s.connection,
-          "SELECT DocumentId FROM dbo.RegisterDocuments WHERE BlobName=@Blob",
-          [str("Blob", blob)],
-        ).then(
-          (r) => r.length > 0,
-          () => null,
-        );
-        if (referenced === false) await deleteBlob(blob).catch(() => undefined);
-        else
-          ctx.warn(
-            `uploadRegisterDocument kept ${blob}: ${referenced ? "a document row references it" : "reference check failed"}`,
-          );
-      }
-    }
+    return storeRegisterDocument(s, ctx, input, {
+      bytes: Buffer.from(await file.arrayBuffer()),
+      contentType: file.type,
+      fileName: file.name,
+    });
   });
+}
+/**
+ * Stores one original file as a register document: checks the file's own bytes match its type, uploads it to
+ * `documentation/`, and inserts the row and its "created" audit in one transaction. `inside` runs in that same
+ * transaction with the new document id (a certificate filed from an email records its link there); returning a
+ * response rolls everything back. Shared by the upload route and the email certificate filing (TR8), so a
+ * certificate has one storage path.
+ */
+export async function storeRegisterDocument(
+  s: State,
+  ctx: InvocationContext,
+  input: RegisteredDocumentInput,
+  file: { bytes: Buffer; contentType: string; fileName: string },
+  inside?: (documentId: number) => Promise<HttpResponseInit | null>,
+): Promise<HttpResponseInit> {
+  const bytes = file.bytes;
+  const matches =
+    file.contentType === "application/pdf"
+      ? bytes.subarray(0, 5).toString() === "%PDF-"
+      : file.contentType === "image/jpeg"
+        ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+        : file.contentType === "image/png"
+          ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+          : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP";
+  if (!matches) return badRequest("File contents do not match the selected type");
+  const fileName = file.fileName.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 200) || "document";
+  let blob: string | undefined;
+  let committed = false;
+  try {
+    const uploaded = await uploadBlob(bytes, fileName, file.contentType, "documentation");
+    blob = uploaded.blobName;
+    const result = await inTransaction(s.connection, async () => {
+      const invalid = await validateScope(s, input);
+      if (invalid) return txFail(badRequest(invalid));
+      const rows = await executeQuery(
+        s.connection,
+        `INSERT dbo.RegisterDocuments (ContractorId,InsuranceType,Title,Kind,ServiceCategory,BuildingId,TenantId,IssuedOn,ExpiresOn,ReviewDue,OwnerName,Notes,FileName,BlobName,ContentType,SizeBytes,CreatedBy,CreatedByOid) OUTPUT INSERTED.DocumentId VALUES (@Contractor,@Insurance,@Title,@Kind,@Category,@Building,@Tenant,@Issue,@Expiry,@Review,@Owner,@Notes,@File,@Blob,@Type,@Size,@Name,@Oid)`,
+        [
+          ...params(input),
+          str("File", fileName),
+          str("Blob", uploaded.blobName),
+          str("Type", file.contentType),
+          int("Size", bytes.length),
+          str("Name", s.caller.name),
+          str("Oid", s.caller.oid),
+        ],
+      );
+      const id = Number(rows[0].DocumentId);
+      await audit(s, id, "created", input);
+      const refusal = inside ? await inside(id) : null;
+      if (refusal) return txFail(refusal);
+      return txOk({ documentId: id });
+    });
+    committed = result.ok;
+    return result.ok ? { status: 201, jsonBody: result.value } : result.response;
+  } finally {
+    if (blob && !committed) {
+      // COMMIT may have succeeded with its acknowledgement lost: delete only when a fresh read proves no row references the file (an orphan is harmless, a deleted referenced file is data loss).
+      const referenced = await executeQuery(
+        s.connection,
+        "SELECT DocumentId FROM dbo.RegisterDocuments WHERE BlobName=@Blob",
+        [str("Blob", blob)],
+      ).then(
+        (r) => r.length > 0,
+        () => null,
+      );
+      if (referenced === false) await deleteBlob(blob).catch(() => undefined);
+      else
+        ctx.warn(
+          `uploadRegisterDocument kept ${blob}: ${referenced ? "a document row references it" : "reference check failed"}`,
+        );
+    }
+  }
 }
 export async function updateRegisterDocument(
   req: HttpRequest,

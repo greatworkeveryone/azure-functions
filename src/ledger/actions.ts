@@ -343,6 +343,9 @@ export const LEDGER_ACTIONS = {
   // (system actor; RuleApplied says which rule), a manager assigns one from the Needs triage queue,
   // and a manager moving an assigned email to someone else is a reassignment, with an optional note.
   "email.assign": { exception: false, reasonRequired: false, subjects: ["email"] },
+  // A contractor's emailed certificate of currency filed in the register from Incoming (TR8). The subject is the email;
+  // the register document it became is in the facts.
+  "email.file_certificate": { exception: false, reasonRequired: false, subjects: ["email"] },
   "email.auto_assign": { exception: false, reasonRequired: false, subjects: ["email"] },
   "email.reassign": { exception: false, reasonRequired: false, subjects: ["email"] },
   // The proposal pipeline (sprint M3, decision 12): one row per step. An

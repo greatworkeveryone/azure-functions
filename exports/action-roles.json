@@ -277,6 +277,15 @@
     "cfo",
     "director"
   ],
+  "fileEmailCertificate": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "manageAbsenceCover": [
     "accounts_manager",
     "cfo",
@@ -662,6 +671,15 @@
     "facilities",
     "facilities_manager",
     "user"
+  ],
+  "viewEmailCertificate": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
   ],
   "viewEmailRouting": [
     "accounts",

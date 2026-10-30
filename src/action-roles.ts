@@ -385,6 +385,20 @@ export const ACTION_ROLES = {
     routes: ["getEmailRouting"],
     why: "See, on each Incoming email, which mailbox it came from, who has it and why, and the send it replies to. Same people as read Incoming itself (getEmails).",
   },
+  // Certificate intake (TR8, PLAN §15). Contractors email their own certificates of currency; staff file them from
+  // Incoming. Seeing the hint is reading Incoming. Filing and reading the certificate text write to the contractor
+  // register, so they are the people who may add register documents (editRegisterDocuments). Admin may file but is
+  // refused the optional "received, thanks" email, which sends real mail (checked in the route, as acknowledgeRequest).
+  viewEmailCertificate: {
+    gate: [A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL],
+    routes: ["getEmailCertificateSignals"],
+    why: "See, on each Incoming email from a contractor, whether it looks like a certificate of currency and whether it has been filed. Same people as read Incoming itself (getEmails).",
+  },
+  fileEmailCertificate: {
+    gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL],
+    routes: ["fileEmailCertificate", "extractCertificateFields"],
+    why: "File a contractor's emailed certificate of currency in the register in one click, keeping the original attachment as the evidence, and read its text to prefill the form. The same people who may add register documents (editRegisterDocuments). Sending the contractor a thank-you email additionally needs a staff role that may send (admin is refused).",
+  },
   // Tenant requests (TR1, PLAN §15). Reading the intake state is reading work requests. Acknowledging sends mail
   // from notices@ (admin is refused, as for sendEmail); moving a request on and setting the promise do not.
   viewRequestIntake: {
