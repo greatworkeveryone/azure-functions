@@ -739,7 +739,7 @@ export const ACTION_ROLES = {
   },
   viewTenancy: {
     gate: TENANCY_DESK,
-    routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges", "getReviewsDue"],
+    routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges", "getReviewsDue", "getTenancyActivity"],
     why: "The tenancy register, a tenant's detail and its schedule changes (TENANCY_VIEW_ROLES, CHANGE_VIEW_ROLES).",
   },
   viewTenancyDecisionHistory: {
