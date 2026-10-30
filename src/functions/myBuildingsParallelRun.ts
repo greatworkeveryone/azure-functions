@@ -1,5 +1,5 @@
 // GET /api/getMyBuildingsParallelRun?since=YYYY-MM-DD — the TR6 side-by-side
-// report (plan gate T3). Read-only. Admin only. Lists requests seen in
+// report (plan gate T3). Read-only. Admin and directors (the viewAdmin roles). Lists requests seen in
 // myBuildings but not in Floorplan and the Floorplan-native ones myBuildings
 // does not hold, with the current switch values.
 
@@ -18,7 +18,7 @@ const DEFAULT_DAYS = 14;
 export async function handleParallelRun(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, [AppRole.ADMIN]);
+  const denied = await requireRole(request, [AppRole.ADMIN, AppRole.DIRECTOR]);
   if (denied) return denied;
 
   const sinceRaw = request.query.get("since");
