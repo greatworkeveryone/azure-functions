@@ -24,6 +24,12 @@ export interface Draft {
 export interface MailSender {
   createDraft(input: DraftInput): Promise<Draft>;
   sendDraft(from: string, graphMessageId: string): Promise<void>;
+  /**
+   * Sends in one call and keeps NO copy in the sender's Sent Items. For a message whose body is a
+   * credential (a tenant's personal link): a copy there would leave the live link readable by anyone
+   * with access to the mailbox. Nothing else should use it: a draft is what lets a failed send be retried.
+   */
+  sendWithoutCopy(input: DraftInput): Promise<void>;
 }
 
 export type SendErrorCode =
@@ -96,17 +102,22 @@ export function createGraphSender(fetchImpl: typeof fetch = fetch, tokenSource: 
     return response;
   }
 
+  const messageOf = (input: DraftInput) => ({
+    body: { content: input.html, contentType: "HTML" },
+    from: { emailAddress: { address: input.from.address, name: input.from.name } },
+    isDeliveryReceiptRequested: false,
+    isReadReceiptRequested: false,
+    replyTo: [{ emailAddress: { address: input.replyTo.address, ...(input.replyTo.name ? { name: input.replyTo.name } : {}) } }],
+    subject: input.subject,
+    toRecipients: [{ emailAddress: { address: input.to } }],
+  });
+
   return {
+    async sendWithoutCopy(input) {
+      await post(`${BASE}/${encodeURIComponent(input.from.address)}/sendMail`, "send", { message: messageOf(input), saveToSentItems: false });
+    },
     async createDraft(input) {
-      const message = {
-        body: { content: input.html, contentType: "HTML" },
-        from: { emailAddress: { address: input.from.address, name: input.from.name } },
-        isDeliveryReceiptRequested: false,
-        isReadReceiptRequested: false,
-        replyTo: [{ emailAddress: { address: input.replyTo.address, ...(input.replyTo.name ? { name: input.replyTo.name } : {}) } }],
-        subject: input.subject,
-        toRecipients: [{ emailAddress: { address: input.to } }],
-      };
+      const message = messageOf(input);
       const response = await post(`${BASE}/${encodeURIComponent(input.from.address)}/messages`, "draft", message);
       const created = (await response.json().catch(() => null)) as { id?: unknown; internetMessageId?: unknown } | null;
       if (typeof created?.id !== "string" || created.id === "") throw new MailSendError("graph_rejected", false, response.status);

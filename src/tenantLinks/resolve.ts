@@ -6,7 +6,7 @@
 // that was never delivered, revoked, expired, a contact who is archived, an email-only tenancy,
 // an archived tenancy. A token is hashed (SHA-256) and looked up by hash; the stored hash is then
 // compared again in constant time. A successful resolve counts as a use: it stamps LastUsedAt,
-// bumps UseCount and writes a tenancy.link_use ledger row in one transaction, so a use that
+// bumps UseCount and writes a tenancy.link_use ledger row in one transaction (at most once per ten minutes per link), so a use that
 // cannot be recorded does not succeed (the error propagates; the caller answers 500, not 200).
 // The caller (TR3) owns rate limiting; this module never takes a user token and never trusts
 // anything but the token.
@@ -25,7 +25,7 @@ export interface ResolveOptions {
   recordUse?: boolean;
 }
 
-const LOOKUP_SQL = `SELECT l.LinkId, l.ContactId, l.TenantId, l.TokenHash, l.ExpiresAt, l.ActivatedAt, l.RevokedAt,
+const LOOKUP_SQL = `SELECT l.LinkId, l.ContactId, l.TenantId, l.TokenHash, l.ExpiresAt, l.ActivatedAt, l.RevokedAt, l.LastUsedAt,
        c.ArchivedAt AS ContactArchivedAt, t.BuildingId, t.EmailOnly, t.ArchivedAt AS TenancyArchivedAt
   FROM dbo.TenantLinks l
   JOIN dbo.TenancyContacts c ON c.ContactId = l.ContactId AND c.TenantId = l.TenantId
@@ -35,6 +35,13 @@ const LOOKUP_SQL = `SELECT l.LinkId, l.ContactId, l.TenantId, l.TokenHash, l.Exp
 const USE_SQL = `UPDATE dbo.TenantLinks SET LastUsedAt = SYSUTCDATETIME(), UseCount = UseCount + 1
  OUTPUT INSERTED.UseCount
  WHERE LinkId = @LinkId AND RevokedAt IS NULL`;
+
+/**
+ * A use is counted and ledgered at most once per link in this window. Every call still resolves, so a revoked
+ * link stops working at once; only the bookkeeping is thinned, so a script or a mail scanner cannot bury a
+ * tenancy's history under link_use rows.
+ */
+export const USE_RECORD_WINDOW_MS = 10 * 60_000;
 
 export async function resolveTenantLink(token: string, options: ResolveOptions = {}): Promise<TenantLinkIdentity | null> {
   if (!isTokenShaped(token)) return null;
@@ -56,6 +63,7 @@ async function resolveOn(connection: Connection, token: string, now: Date, recor
   if (row.ContactArchivedAt != null || row.TenancyArchivedAt != null || row.EmailOnly === true || row.BuildingId == null) return null;
   const identity: TenantLinkIdentity = { buildingId: Number(row.BuildingId), contactId: Number(row.ContactId), tenantId: Number(row.TenantId) };
   if (!recordUse) return identity;
+  if (row.LastUsedAt instanceof Date && now.getTime() - row.LastUsedAt.getTime() < USE_RECORD_WINDOW_MS && now.getTime() >= row.LastUsedAt.getTime()) return identity;
 
   await beginTransaction(connection);
   try {

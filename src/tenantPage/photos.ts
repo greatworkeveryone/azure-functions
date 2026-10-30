@@ -3,11 +3,15 @@
 // resolved tenancy (SourceTenantId) and was submitted within the last two hours; the request id comes
 // from the client but is only ever a lookup key INSIDE the tenancy's own requests.
 //
+// Order: the photo's row is reserved under the lock first (state 'reserved'), then the bytes are uploaded,
+// then the row is marked 'stored' with the real blob name. An upload that fails marks the row 'failed' and
+// frees the slot; one that dies mid-way leaves a 'reserved' row that orphanReport.ts lists (never deleted).
+//
 // Storage: the bytes pass magic-byte and structure checks (imageSniff.ts), then go UNCHANGED to the
 // private tenant-quarantine container marked processed=false. They are not decoded or re-encoded: no
 // image library exists in this backend and none may be added without review. Nothing serves them.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { TYPES, type Connection } from "tedious";
 import { uploadTenantQuarantineBlob } from "../blob-storage";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "../db";
@@ -30,8 +34,11 @@ export function parseRequestId(header: string | null): number | null {
   return Number.isSafeInteger(id) && id >= -2_147_483_648 ? id : null;
 }
 
-const COUNT_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WHERE WorkRequestID = @Id AND TenantId = @TenantId`;
-const COUNT_LOCKED_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WITH (UPDLOCK, HOLDLOCK) WHERE WorkRequestID = @Id AND TenantId = @TenantId`;
+/** A reserved row older than this has probably lost its upload; it stops counting toward the caps. */
+export const RESERVATION_MINUTES = 15;
+const COUNTING = `(UploadState = N'stored' OR (UploadState = N'reserved' AND UploadedAt > DATEADD(MINUTE, -${RESERVATION_MINUTES}, SYSUTCDATETIME())))`;
+const COUNT_LOCKED_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WITH (UPDLOCK, HOLDLOCK) WHERE WorkRequestID = @Id AND TenantId = @TenantId AND ${COUNTING}`;
+const TODAY_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WHERE TenantId = @TenantId AND ${COUNTING} AND UploadedAt > DATEADD(HOUR, -24, SYSUTCDATETIME())`;
 
 export async function storePhoto(
   connection: Connection,
@@ -56,16 +63,11 @@ export async function storePhoto(
     [...params, { name: "Hours", type: TYPES.Int, value: LIMITS.photoWindowHours }],
   );
   if (!owned) return { error: "request_not_found", ok: false, status: 404 };
-  const [existing] = await executeQuery(connection, COUNT_SQL, params);
-  if (Number(existing?.N ?? 0) >= LIMITS.maxPhotosPerRequest) return { error: "A request can have up to five photos", ok: false, status: 409 };
-  const [today] = await executeQuery(
-    connection,
-    `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WHERE TenantId = @TenantId AND UploadedAt > DATEADD(HOUR, -24, SYSUTCDATETIME())`,
-    [params[1]],
-  );
-  if (Number(today?.N ?? 0) >= LIMITS.photosPerTenancyPerDay) return { error: "rate_limited", ok: false, status: 429 };
 
-  const blob = await uploadTenantQuarantineBlob(bytes, sniffed, requestId);
+  // Reserve the slot under the lock BEFORE any bytes are uploaded, so parallel uploads cannot each pass an
+  // unlocked count and leave blobs that count toward no cap. The row is the claim; the blob follows.
+  let photoId: number;
+  let slotsUsed: number;
   await beginTransaction(connection);
   try {
     const [again] = await executeQuery(connection, COUNT_LOCKED_SQL, params);
@@ -73,19 +75,48 @@ export async function storePhoto(
       await rollbackTransaction(connection);
       return { error: "A request can have up to five photos", ok: false, status: 409 };
     }
-    await executeQuery(
+    const [today] = await executeQuery(connection, TODAY_SQL, [params[1]]);
+    if (Number(today?.N ?? 0) >= LIMITS.photosPerTenancyPerDay) {
+      await rollbackTransaction(connection);
+      return { error: "rate_limited", ok: false, status: 429 };
+    }
+    const [reserved] = await executeQuery(
       connection,
-      `INSERT INTO dbo.TenantRequestPhotos (WorkRequestID, TenantId, ContactId, BlobName, ContentType, SizeBytes, Sha256, Processed)
-       VALUES (@Id, @TenantId, @ContactId, @BlobName, @ContentType, @Size, @Sha, 0)`,
+      `INSERT INTO dbo.TenantRequestPhotos (WorkRequestID, TenantId, ContactId, BlobName, ContentType, SizeBytes, Sha256, Processed, UploadState)
+       OUTPUT INSERTED.PhotoId
+       VALUES (@Id, @TenantId, @ContactId, @BlobName, @ContentType, @Size, @Sha, 0, N'reserved')`,
       [
         ...params,
         { name: "ContactId", type: TYPES.Int, value: identity.contactId },
-        { name: "BlobName", type: TYPES.NVarChar, value: blob.blobName },
+        { name: "BlobName", type: TYPES.NVarChar, value: `pending:${randomUUID()}` },
         { name: "ContentType", type: TYPES.NVarChar, value: sniffed },
         { name: "Size", type: TYPES.BigInt, value: bytes.length },
         { name: "Sha", type: TYPES.Binary, value: createHash("sha256").update(bytes).digest() },
       ],
     );
+    photoId = Number(reserved?.PhotoId);
+    slotsUsed = Number(again?.N ?? 0) + 1;
+    await commitTransaction(connection);
+  } catch (error) {
+    await rollbackTransaction(connection).catch(() => undefined);
+    throw error;
+  }
+
+  let blobName: string;
+  try {
+    blobName = (await uploadTenantQuarantineBlob(bytes, sniffed, requestId)).blobName;
+  } catch (error) {
+    await executeQuery(connection, `UPDATE dbo.TenantRequestPhotos SET UploadState = N'failed' WHERE PhotoId = @PhotoId`, [
+      { name: "PhotoId", type: TYPES.Int, value: photoId },
+    ]).catch(() => undefined);
+    throw error;
+  }
+  await beginTransaction(connection);
+  try {
+    await executeQuery(connection, `UPDATE dbo.TenantRequestPhotos SET UploadState = N'stored', BlobName = @BlobName WHERE PhotoId = @PhotoId`, [
+      { name: "PhotoId", type: TYPES.Int, value: photoId },
+      { name: "BlobName", type: TYPES.NVarChar, value: blobName },
+    ]);
     await record(connection, {
       action: "tenancy.request_photo",
       actor: { kind: "system", name: "tenantPage" },
@@ -95,7 +126,7 @@ export async function storePhoto(
       tenantId: identity.tenantId,
     });
     await commitTransaction(connection);
-    return { ok: true, photoCount: Number(again?.N ?? 0) + 1, reference: referenceFor(requestId) };
+    return { ok: true, photoCount: slotsUsed, reference: referenceFor(requestId) };
   } catch (error) {
     await rollbackTransaction(connection).catch(() => undefined);
     throw error;

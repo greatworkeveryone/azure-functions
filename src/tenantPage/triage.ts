@@ -70,7 +70,12 @@ export async function suggestTriage(description: string, chosen: { category: str
       purpose: TRIAGE_PURPOSE,
       recordType: "tenant_request",
     });
-    return result.ok ? { ...result.output, source: "ai" } : fallback;
+    if (!result.ok) return fallback;
+    // The model may raise the urgency, never lower it: the floor is the stronger of what the tenant chose
+    // and what the rules read in their words (the rules' result already includes both).
+    const rank = (u: Urgency) => URGENCIES.indexOf(u);
+    const urgency = rank(result.output.urgency) < rank(fallback.urgency) ? result.output.urgency : fallback.urgency;
+    return { ...result.output, source: "ai", urgency };
   } catch {
     return fallback;
   }

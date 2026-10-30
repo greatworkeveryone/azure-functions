@@ -11,7 +11,8 @@
 //      unreadable or missing all answer the same 404 as a bad link
 //   6. resolveTenantLink: null for every kind of unusable link (unknown, revoked, expired, archived,
 //      email-only) answers one identical 404, and counts as a failed attempt
-//   7. the work, which receives ONLY the resolved identity; no client value can widen it
+//   7. a building with no emergency phone number answers 503 page_unavailable (fail closed)
+//   8. the work, which receives ONLY the resolved identity; no client value can widen it
 //
 // A failure in the work is a generic 500: no SQL text, no token, no identity in the reply or the log.
 
@@ -19,13 +20,13 @@ import { createHash } from "node:crypto";
 import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
 import { clientAddress, hashValue } from "../access/clientIp";
-import { AppRole } from "../auth";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { isFeatureEnabledForRoles } from "../features/flags";
 import { resolveTenantLink } from "../tenantLinks/resolve";
 import { isTokenShaped } from "../tenantLinks/token";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { TENANT_PAGE_FLAG } from "./constants";
+import { emergencyPhoneFor } from "./emergency";
 import { hit, isFull } from "./limiter";
 
 export const TENANT_LINK_HEADER = "x-tenant-link";
@@ -63,11 +64,17 @@ const tooMany = (retryAfterMs: number): HttpResponseInit => ({
 
 export const tenantJson = (status: number, body: unknown): HttpResponseInit => ({ headers: NO_STORE, jsonBody: body, status });
 
-const ALL_ROLES: readonly string[] = Object.values(AppRole);
+/**
+ * The tenantPage flag is read from its OWN audience row (RoleName "tenant"), never from the staff roles:
+ * switching the page on "for admin" to look at it must not switch it on for every link holder.
+ */
+export const TENANT_AUDIENCE = "tenant";
 
 export async function isTenantPageOn(connection: Connection): Promise<boolean> {
-  return isFeatureEnabledForRoles(TENANT_PAGE_FLAG, ALL_ROLES, { connection });
+  return isFeatureEnabledForRoles(TENANT_PAGE_FLAG, [TENANT_AUDIENCE], { connection });
 }
+
+const unavailable = (): HttpResponseInit => ({ headers: NO_STORE, jsonBody: { error: "page_unavailable" }, status: 503 });
 
 export async function runTenant(
   request: HttpRequest,
@@ -103,6 +110,8 @@ export async function runTenant(
     if (!(await isTenantPageOn(connection))) return linkNotValid();
     const identity = await resolveTenantLink(token, { connection, recordUse: options.recordUse });
     if (!identity) return failed();
+    // Fail closed: no emergency number for this building means no page (only a real link holder sees this).
+    if ((await emergencyPhoneFor(connection, identity.buildingId)) === null) return unavailable();
     return await work({ connection, context, identity, request });
   } catch (error) {
     context.error(`${name} failed: ${error instanceof Error ? error.name : "error"}`);

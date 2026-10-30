@@ -8,7 +8,11 @@
 export type ImageType = "image/jpeg" | "image/png" | "image/webp";
 
 const MAX_SIDE = 16_000;
-const MAX_PIXELS = 80_000_000;
+// 40 MP is about 160 MB decoded at four bytes a pixel: above any phone camera's normal output and below a
+// decompression bomb.
+const MAX_PIXELS = 40_000_000;
+/** Markup that has no business inside a photograph; a file carrying it is an HTML/JS polyglot. */
+const MARKUP = /<\s*(script|html|svg|iframe|body|object)\b/i;
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -50,6 +54,24 @@ function checkPng(b: Buffer): boolean {
   return false;
 }
 
+/**
+ * Walks the entropy-coded data after a scan header. Stuffed zeros, fill bytes and restart markers are part
+ * of it; the first other marker ends it. Returns the offset of that marker, b.length when it is the end
+ * marker at the very end of the file, or -1 when the end marker has anything after it.
+ */
+function skipEntropyData(b: Buffer, start: number): number {
+  let i = start;
+  while (i + 1 < b.length) {
+    if (b[i] !== 0xff) { i += 1; continue; }
+    const m = b[i + 1];
+    if (m === 0x00 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue; }
+    if (m === 0xff) { i += 1; continue; }
+    if (m === 0xd9) return i + 2 === b.length ? b.length : -1;
+    return i;
+  }
+  return -1;
+}
+
 function checkJpeg(b: Buffer): boolean {
   if (b.length < 125 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) return false;
   if (b[b.length - 2] !== 0xff || b[b.length - 1] !== 0xd9) return false;
@@ -59,7 +81,16 @@ function checkJpeg(b: Buffer): boolean {
     if (b[offset] !== 0xff) return false;
     const marker = b[offset + 1];
     if (marker === 0xff) { offset += 1; continue; }
-    if (marker === 0xda) return sized; // start of scan: the entropy-coded data that follows is not parsed
+    if (marker === 0xda) {
+      if (!sized) return false;
+      const scanLength = b.readUInt16BE(offset + 2);
+      if (scanLength < 2 || offset + 2 + scanLength > b.length) return false;
+      const next = skipEntropyData(b, offset + 2 + scanLength);
+      if (next === -1) return false;
+      if (next === b.length) return true; // reached the end marker exactly at the end of the file
+      offset = next;
+      continue;
+    }
     if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { offset += 2; continue; }
     const length = b.readUInt16BE(offset + 2);
     if (length < 2 || offset + 2 + length > b.length) return false;
@@ -74,11 +105,23 @@ function checkJpeg(b: Buffer): boolean {
   return false;
 }
 
+function webpSizeOk(b: Buffer, kind: string): boolean {
+  if (kind === "VP8X") return sizeOk(b.readUIntLE(24, 3) + 1, b.readUIntLE(27, 3) + 1);
+  if (kind === "VP8L") {
+    if (b[20] !== 0x2f) return false;
+    const bits = b.readUInt32LE(21);
+    return sizeOk((bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
+  }
+  if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return false;
+  return sizeOk(b.readUInt16LE(26) & 0x3fff, b.readUInt16LE(28) & 0x3fff);
+}
+
 function checkWebp(b: Buffer): boolean {
   if (b.length < 30 || b.toString("latin1", 0, 4) !== "RIFF" || b.toString("latin1", 8, 12) !== "WEBP") return false;
   if (b.readUInt32LE(4) + 8 !== b.length) return false;
   const first = b.toString("latin1", 12, 16);
   if (!["VP8 ", "VP8L", "VP8X"].includes(first)) return false;
+  if (!webpSizeOk(b, first)) return false;
   let offset = 12;
   while (offset + 8 <= b.length) {
     const size = b.readUInt32LE(offset + 4);
@@ -89,6 +132,7 @@ function checkWebp(b: Buffer): boolean {
 
 /** The image type the bytes really are, or null when they are not a well-formed JPEG, PNG or WebP. */
 export function sniffImage(bytes: Buffer): ImageType | null {
+  if (MARKUP.test(bytes.toString("latin1"))) return null;
   if (checkJpeg(bytes)) return "image/jpeg";
   if (checkPng(bytes)) return "image/png";
   if (checkWebp(bytes)) return "image/webp";

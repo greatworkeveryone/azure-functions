@@ -188,13 +188,17 @@ export async function insertPendingLink(connection: Connection, c: { contactId: 
   return Number(row?.LinkId);
 }
 
-/** Live (delivered, unrevoked) link ids of a contact, other than `except`. */
-export async function liveLinkIds(connection: Connection, contactId: number, except = 0): Promise<{ expiresAt: Date; linkId: number }[]> {
+/**
+ * Live (delivered, unrevoked) link ids of a contact, other than `except`. With `includePending`, links whose
+ * email is still being sent are included too: a revoke must catch them, or an issue in flight would switch
+ * its link on after the revoke (activateLink skips a revoked link).
+ */
+export async function liveLinkIds(connection: Connection, contactId: number, except = 0, includePending = false): Promise<{ expiresAt: Date; linkId: number }[]> {
   const rows = await executeQuery(
     connection,
     `SELECT LinkId, ExpiresAt FROM dbo.TenantLinks WITH (UPDLOCK, HOLDLOCK)
-      WHERE ContactId = @ContactId AND ActivatedAt IS NOT NULL AND RevokedAt IS NULL AND LinkId <> @Except`,
-    [p("ContactId", TYPES.Int, contactId), p("Except", TYPES.Int, except)],
+      WHERE ContactId = @ContactId AND (ActivatedAt IS NOT NULL OR @Pending = 1) AND RevokedAt IS NULL AND LinkId <> @Except`,
+    [p("ContactId", TYPES.Int, contactId), p("Except", TYPES.Int, except), p("Pending", TYPES.Bit, includePending)],
   );
   return rows.map((r) => ({ expiresAt: r.ExpiresAt as Date, linkId: Number(r.LinkId) }));
 }
@@ -213,11 +217,11 @@ export async function revokeLink(connection: Connection, linkId: number, by: str
   return rows.length > 0;
 }
 
-/** Every live link of every contact of a tenancy (for email only). */
+/** Every unrevoked link of every contact of a tenancy, pending ones included (for email only). */
 export async function liveLinksOfTenancy(connection: Connection, tenantId: number): Promise<{ contactId: number; linkId: number }[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT LinkId, ContactId FROM dbo.TenantLinks WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @TenantId AND ActivatedAt IS NOT NULL AND RevokedAt IS NULL`,
+    `SELECT LinkId, ContactId FROM dbo.TenantLinks WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @TenantId AND RevokedAt IS NULL`,
     [p("TenantId", TYPES.Int, tenantId)],
   );
   return rows.map((r) => ({ contactId: Number(r.ContactId), linkId: Number(r.LinkId) }));
