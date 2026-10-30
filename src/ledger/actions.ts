@@ -360,6 +360,8 @@ export const LEDGER_ACTIONS = {
   "work_request.acknowledge": { exception: false, reasonRequired: false, subjects: ["work_request"] },
   "work_request.assess": { exception: false, reasonRequired: false, subjects: ["work_request"] },
   "work_request.close": { exception: false, reasonRequired: true, subjects: ["work_request"] },
+  // A status notice (attendance booked, work complete) queued to the tenant for a job raised from their request (TR4).
+  "work_request.notice_sent": { exception: false, reasonRequired: false, subjects: ["work_request"] },
   "work_request.set_targets": { exception: false, reasonRequired: false, subjects: ["work_request"] },
   "correspondence.approve": { exception: false, reasonRequired: false, subjects: ["correspondence"] },
   "correspondence.cancel": { exception: false, reasonRequired: false, subjects: ["correspondence"] },

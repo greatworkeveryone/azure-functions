@@ -47,6 +47,7 @@ import {
 } from "../jobStatusMachine";
 import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
+import { enqueueTenantNotice } from "../tenantNotices/enqueue";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
@@ -1397,6 +1398,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
     // accountability clock: StatusSince=now, prior acknowledgement and
     // escalation cleared.
     let isRealTransition = false;
+    let priorState: JobState | null = null;
     let insertedEventId: number;
     await beginTransaction(connection);
     try {
@@ -1449,6 +1451,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
           resolvedNewAwaitingRole = target.awaitingRole;
           expectedState = currentState;
           isRealTransition = target.status !== currentState.status || target.awaitingRole !== currentState.awaitingRole;
+          priorState = currentState;
           if (target.status === JobStatus.TENANT) {
             preBlockToCapture = currentState;
           } else if (currentState.status === JobStatus.TENANT) {
@@ -1607,6 +1610,11 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       // moves its schedule on to the next due date of the anchor series.
       if (isRealTransition && isWorkCompletion(resolvedNewStatus, resolvedNewAwaitingRole)) {
         await markServiceJobCompleted(connection, JobID, identity.name);
+      }
+
+      // TR4: booked / complete on a tenant-linked job queues the tenant's notice (once per job and event; never throws).
+      if (isRealTransition && priorState && resolvedNewStatus != null) {
+        await enqueueTenantNotice(connection, JobID, priorState, { awaitingRole: resolvedNewAwaitingRole ?? null, status: resolvedNewStatus });
       }
 
       await commitTransaction(connection);
