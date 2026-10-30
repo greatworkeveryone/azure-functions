@@ -20,7 +20,7 @@ describe("migration 183", () => {
     expect(code).toMatch(/IF OBJECT_ID\('dbo\.TenancyContacts', 'U'\) IS NULL\s+BEGIN\s+CREATE TABLE dbo\.TenancyContacts/);
     expect(code).toMatch(/IF OBJECT_ID\('dbo\.TenantLinks', 'U'\) IS NULL\s+BEGIN\s+CREATE TABLE dbo\.TenantLinks/);
     const creates = [...code.matchAll(/CREATE (?:UNIQUE )?INDEX (\w+)/g)].map((m) => m[1]);
-    for (const name of creates) expect(code).toContain(`WHERE name = '${name}'`);
+    for (const name of creates) expect(code).toContain("WHERE name = '" + name + "'");
   });
 
   it("stores a hash, never a token, and archives instead of deleting", () => {
