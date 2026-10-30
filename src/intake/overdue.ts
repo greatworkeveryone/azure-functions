@@ -35,7 +35,7 @@ export async function listOverdueRequests(connection: Connection, now: Date = ne
   const rows = await executeQuery(connection, UNACKNOWLEDGED_SQL);
   const holidays = holidaysFromEnv();
   const overdue: OverdueRequest[] = [];
-  for (const row of rows) {
+  for (const row of rows ?? []) {
     if (!(row.CreatedAt instanceof Date)) continue;
     const dueAt = addBusinessHours(row.CreatedAt, Number(row.Hours), holidays);
     if (dueAt.getTime() <= now.getTime()) overdue.push({ dueAt, priority: intakePriority(row.Priority), workRequestId: Number(row.WorkRequestID) });
