@@ -24,7 +24,7 @@ const UNACKNOWLEDGED_SQL = `
     FROM dbo.WorkRequests wr
     LEFT JOIN dbo.WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID
     INNER JOIN dbo.IntakeResponseTargets t
-      ON t.Priority = CASE WHEN COALESCE(o.Priority, wr.Priority) IN (N'Critical', N'High', N'Low') THEN COALESCE(o.Priority, wr.Priority) ELSE N'Normal' END
+      ON t.Priority = CASE COALESCE(o.Priority, wr.Priority) WHEN N'Emergency' THEN N'Critical' WHEN N'Urgent' THEN N'High' WHEN N'Critical' THEN N'Critical' WHEN N'High' THEN N'High' WHEN N'Low' THEN N'Low' ELSE N'Normal' END
    WHERE t.AckWithinBusinessHours IS NOT NULL AND t.SetAt IS NOT NULL
      AND wr.CreatedAt >= t.SetAt
      AND ISNULL(wr.IntakeState, N'received') = N'received'
