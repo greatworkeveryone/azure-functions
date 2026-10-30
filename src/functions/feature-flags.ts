@@ -31,7 +31,8 @@ const FEATURE_KEYS = [
   "finance", "guidedHelp", "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
   "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
   "quotes", "recurringFaults", "rentReviews", "teamsAlerts", "tenancyActivity", "tenancySchedule",
-  "tenancyScheduleReport", "tenancyVacancies", "tenantLinks", "tenantRequests", "timesheets", "usageAnalytics",
+  "tenancyScheduleReport", "tenancyVacancies", "tenantLinks", "tenantPage", "tenantRequests", "timesheets",
+  "usageAnalytics",
 ] as const;
 
 export async function getFeatureFlags(

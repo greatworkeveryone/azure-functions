@@ -55,6 +55,12 @@ export const KEY_PHOTO_SHAPE = uuidLeafUnder("key photo", "keys");
 /** Vacancy images, vacancy slot images and building hero images in the `vacancies` container. */
 export const VACANCY_SHAPE = uuidLeafUnder("vacancy image", "(?:\\d+|\\d+\\/slots|building-hero\\/-?\\d+)");
 
+/** Tenant-page photos waiting to be processed, in the `tenant-quarantine` container (TR3). */
+export const TENANT_QUARANTINE_SHAPE: BlobNameShape = {
+  label: "tenant quarantine photo",
+  pattern: new RegExp(`^tenant-requests\\/[1-9][0-9]{0,9}\\/${UUID}\\.(?:jpg|png|webp)$`),
+};
+
 /** Everything the server mints into the `wr-attachments` container. */
 export const MAJOR_EVENT_DOCUMENT_SHAPE = uuidLeafUnder("major event document", "major-events\\/[1-9][0-9]*");
 

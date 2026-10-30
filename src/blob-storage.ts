@@ -19,6 +19,7 @@ import {
   isBlobName,
   KEY_PHOTO_SHAPE,
   PO_PDF_SHAPE,
+  TENANT_QUARANTINE_SHAPE,
   VACANCY_SHAPE,
   WR_ATTACHMENTS_SHAPES,
 } from "./blob-names";
@@ -210,6 +211,33 @@ export async function uploadKeyPhotoBlob(
       blobContentType: storedType,
       blobContentDisposition: contentDispositionFor(originalName, inline),
     },
+  });
+  return { blobName, url: blockBlob.url };
+}
+
+const TENANT_QUARANTINE_CONTAINER = "tenant-quarantine";
+const QUARANTINE_EXTENSION: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+
+/**
+ * Stores a tenant-page photo, untouched, in the private `tenant-quarantine` container (TR3). The bytes
+ * were checked by the caller (magic bytes and structure) but are NOT re-encoded: the blob is typed
+ * application/octet-stream, forced to download, and marked processed=false. Nothing serves it; there is
+ * deliberately no SAS helper for this container until a decoder exists. `sniffedType` is the type
+ * the caller found in the bytes, never the client's header.
+ */
+export async function uploadTenantQuarantineBlob(
+  buffer: Buffer,
+  sniffedType: "image/jpeg" | "image/png" | "image/webp",
+  workRequestId: number,
+): Promise<UploadBlobResult> {
+  const ext = QUARANTINE_EXTENSION[sniffedType];
+  const blobName = assertBlobName(`tenant-requests/${Math.abs(workRequestId)}/${randomUUID()}.${ext}`, TENANT_QUARANTINE_SHAPE);
+  const container = getServiceClient().getContainerClient(TENANT_QUARANTINE_CONTAINER);
+  await container.createIfNotExists(); // private by default
+  const blockBlob = container.getBlockBlobClient(blobName);
+  await blockBlob.uploadData(buffer, {
+    blobHTTPHeaders: { blobContentDisposition: "attachment", blobContentType: "application/octet-stream" },
+    metadata: { processed: "false", sniffedtype: sniffedType.replace("/", "_") },
   });
   return { blobName, url: blockBlob.url };
 }

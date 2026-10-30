@@ -28,6 +28,10 @@ const PUBLIC_ROUTES = {
   graphNotification: "Microsoft Graph webhook; callers must present the shared clientState secret (timing-safe compare)",
   health: "shallow probe returns {ok:true}; ?deep=true requires the admin role inside the handler",
   myobAuthCallback: "OAuth redirect driven by MYOB; the signed state parameter (10 min TTL) is verified before anything is stored",
+  tenantContext: "tenant page (TR3): personal link in the X-Tenant-Link header resolved by resolveTenantLink (hashed, expiring, revocable); rate limited per link and per client, flag-gated, scoped to the link's one tenancy",
+  tenantListRequests: "tenant page (TR3): as tenantContext",
+  tenantSubmitRequest: "tenant page (TR3): as tenantContext",
+  tenantUploadPhoto: "tenant page (TR3): as tenantContext",
   registerSelf: "verified Entra token (signature checked) and rate limited; links or creates only the caller's own AppUsers row, which is how a user obtains a role at all",
 };
 

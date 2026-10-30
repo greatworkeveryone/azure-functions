@@ -19,7 +19,7 @@ export interface SentryRequestContext {
   user: { id: string } | null;
 }
 
-const REDACTED_HEADERS = new Set(["authorization", "x-app-token", "cookie", "proxy-authorization"]);
+const REDACTED_HEADERS = new Set(["authorization", "x-app-token", "x-tenant-link", "cookie", "proxy-authorization"]);
 
 /** The URL without query string or fragment; unparseable input is cut at "?" / "#". */
 export function stripQuery(url: string): string {
