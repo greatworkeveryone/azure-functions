@@ -89,6 +89,7 @@ const blankRow = (): Record<string, unknown> => ({
   CreatedAt: new Date("2026-10-01T00:00:00Z"),
   CreatedById: "ann-oid",
   CreatedByName: "Ann Accounts",
+  EmailOnly: false,
   InfoSheetVersion: 0,
   IsTest: false,
   LegalName: "Acme Pty Ltd",
@@ -124,7 +125,7 @@ beforeEach(() => {
     Vacancies: 0,
   };
   tenantRow = blankRow();
-  optional = { ChangeRequests: 0, DefectsPeriods: 0, LeaseEvents: 0, RegisterDocuments: 0, SignedOff: 0 };
+  optional = { ChangeRequests: 0, DefectsPeriods: 0, LeaseEvents: 0, RegisterDocuments: 0, SignedOff: 0, Contacts: 0, Links: 0, Notices: 0 };
   documentRow = { ArchivedAt: null, OriginalName: "lease.pdf" };
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/SELECT \* FROM dbo\.Tenants WITH \(UPDLOCK, HOLDLOCK\)/.test(sql)) return tenantRow ? [tenantRow] : [];
@@ -215,6 +216,8 @@ const DRAFT_HOLDINGS: [string, Record<string, unknown>, string][] = [
   ["schedule change requests", { ChangeRequests: 1 }, "1 schedule change request"],
   ["documentation register entries", { RegisterDocuments: 2 }, "2 documentation register entries"],
   ["option or renewal records", { LeaseEvents: 2 }, "2 option or renewal records"],
+  ["tenant notices", { Notices: 2 }, "2 tenant notices"],
+  ["contact or personal link records", { Contacts: 1, Links: 1 }, "2 contact and personal link records"],
 ];
 
 // S1-2 (D11 re-check): every column a person can fill in on the tenancy itself is
@@ -268,6 +271,7 @@ const CONTENT_HOLDINGS: [string, unknown, string][] = [
   ["CpiFloorPercent", 0, "rent review settings"],
   ["CpiReferenceQuarterRule", "quarter_before_review_date", "rent review settings"],
   ["ReviewRatchet", true, "rent review settings"],
+  ["EmailOnly", true, "an email-only setting"],
   ["SecurityDepositRequired", "3 months rent", "security deposit details"],
   ["SecurityDepositMethod", "Bank guarantee", "security deposit details"],
   ["SecurityDepositHeld", 0, "security deposit details"],

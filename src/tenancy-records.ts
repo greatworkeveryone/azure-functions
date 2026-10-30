@@ -61,6 +61,7 @@ export interface DraftFacts extends TenancyState {
   contacts: number;
   jobs: number;
   keys: number;
+  notices: number;
   leaseEvents: number;
   notes: number;
   occupancies: number;
@@ -93,10 +94,10 @@ const DRAFT_FACTS_SQL = `SELECT t.LegalName, t.BuildingId, t.ArchivedAt,
   FROM dbo.Tenants t WITH (UPDLOCK, HOLDLOCK)
  WHERE t.TenantId = @Id`;
 
-// Sign-off (migration 097), tenancy contacts and links (183), defects periods (119), schedule change requests (099)
+// Sign-off (migration 097), tenancy contacts and links (183), tenant notices (186), defects periods (119), schedule change requests (099)
 // the documentation register (154) and lease events (106) may not exist yet where this runs; each is
 // read only when its column or table does.
-const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0, @Requests INT = 0, @RegisterDocs INT = 0, @LeaseEvents INT = 0, @Contacts INT = 0, @Links INT = 0;
+const OPTIONAL_DRAFT_FACTS_SQL = `DECLARE @SignedOff INT = 0, @Defects INT = 0, @Requests INT = 0, @RegisterDocs INT = 0, @LeaseEvents INT = 0, @Contacts INT = 0, @Links INT = 0, @Notices INT = 0;
 IF COL_LENGTH(N'dbo.Tenants', N'ScheduleSignedOffAt') IS NOT NULL
   EXEC sp_executesql
     N'SELECT @n = COUNT(*) FROM dbo.Tenants WITH (UPDLOCK, HOLDLOCK) WHERE TenantId = @Id AND ScheduleSignedOffAt IS NOT NULL',
@@ -113,7 +114,9 @@ IF OBJECT_ID(N'dbo.TenancyContacts', N'U') IS NOT NULL
   SELECT @Contacts = COUNT(*) FROM dbo.TenancyContacts WITH (HOLDLOCK) WHERE TenantId = @Id;
 IF OBJECT_ID(N'dbo.TenantLinks', N'U') IS NOT NULL
   SELECT @Links = COUNT(*) FROM dbo.TenantLinks WITH (HOLDLOCK) WHERE TenantId = @Id;
-SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods, @Requests AS ChangeRequests, @RegisterDocs AS RegisterDocuments, @LeaseEvents AS LeaseEvents, @Contacts AS Contacts, @Links AS Links;`;
+IF OBJECT_ID(N'dbo.TenantNotices', N'U') IS NOT NULL
+  SELECT @Notices = COUNT(*) FROM dbo.TenantNotices WITH (HOLDLOCK) WHERE TenantId = @Id;
+SELECT @SignedOff AS SignedOff, @Defects AS DefectsPeriods, @Requests AS ChangeRequests, @RegisterDocs AS RegisterDocuments, @LeaseEvents AS LeaseEvents, @Contacts AS Contacts, @Links AS Links, @Notices AS Notices;`;
 
 const DELETE_DRAFT_SQL = `DELETE FROM dbo.Tenants WHERE TenantId = @Id`;
 
@@ -142,6 +145,7 @@ export async function readDraftFacts(connection: Connection, tenantId: number): 
     leaseEvents: num(optional?.LeaseEvents),
     legalName: String(row.LegalName ?? `Tenancy #${tenantId}`),
     notes: num(row.Notes),
+    notices: num(optional?.Notices),
     occupancies: num(row.Occupancies),
     occupancyHistory: num(row.OccupancyHistory),
     registerDocuments: num(optional?.RegisterDocuments),
@@ -188,6 +192,7 @@ export function draftDeletionRefusal(facts: DraftFacts): { contains?: string[]; 
     ...(facts.changeRequests > 0 ? [counted(facts.changeRequests, "schedule change request", "schedule change requests")] : []),
     ...(facts.registerDocuments > 0 ? [counted(facts.registerDocuments, "documentation register entry", "documentation register entries")] : []),
     ...(facts.contacts > 0 ? [counted(facts.contacts, "contact or personal link record", "contact and personal link records")] : []),
+    ...(facts.notices > 0 ? [counted(facts.notices, "tenant notice", "tenant notices")] : []),
     ...(facts.signedOff ? ["a schedule sign-off"] : []),
     ...(facts.decisions > 0 ? ["decision history"] : []),
   ];
