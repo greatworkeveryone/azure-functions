@@ -17,12 +17,17 @@ import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse
 import { toMyBuildingsDate, TWO_YEARS_MS } from "../mybuildings-dates";
 import { upsertWorkRequest } from "./workRequests";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
+import { mayPullWorkRequests, syncMode } from "../config/mybuildingsSwitches";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
-async function runSync(token: string, force: boolean, context: InvocationContext): Promise<{ total: number; syncFrom: string }> {
+async function runSync(token: string, force: boolean, context: InvocationContext): Promise<{ total: number; syncFrom: string; skipped?: boolean }> {
+  if (!mayPullWorkRequests()) {
+    context.log(`syncAllWorkRequests: skipped, MYBUILDINGS_SYNC_MODE=${syncMode()}`);
+    return { total: 0, syncFrom: "", skipped: true };
+  }
   const connection = await createRequestConnection(token);
   try {
     // Use the oldest WRsLastSyncedAt across all buildings as the incremental
@@ -87,7 +92,8 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
   }
   try {
     const token = process.env.MYBUILDINGS_BEARER_TOKEN!;
-    const { total, syncFrom } = await runSync(token, false, context);
+    const { total, syncFrom, skipped } = await runSync(token, false, context);
+    if (skipped) return;
     context.log(`syncAllWorkRequests timer complete: ${total} WRs upserted since ${syncFrom}`);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -110,10 +116,10 @@ async function syncAllWorkRequestsHttp(request: HttpRequest, context: Invocation
   const force = request.query.get("force") === "true";
 
   try {
-    const { total, syncFrom } = await runSync(token, force, context);
+    const { total, syncFrom, skipped } = await runSync(token, force, context);
     return {
       status: 200,
-      jsonBody: { message: "Sync complete", total, syncFrom, force },
+      jsonBody: { message: skipped ? "Sync skipped: MYBUILDINGS_SYNC_MODE is off" : "Sync complete", total, syncFrom, force, ...(skipped ? { skipped } : {}) },
     };
   } catch (error: any) {
     context.error("syncAllWorkRequests failed:", error.message);

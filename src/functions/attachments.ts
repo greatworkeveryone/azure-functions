@@ -14,6 +14,7 @@ import { beginTransaction, closeConnection, commitTransaction, createRequestConn
 import { AppRole, extractToken, oidFromToken, requireRole, rolesForRequest, verifiedIdentityFromRequest, errorResponse, unauthorizedResponse, forbiddenResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
+import { mayPushWorkRequests } from "../config/mybuildingsSwitches";
 import { uploadAttachment } from "../mybuildings-client";
 import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
@@ -142,7 +143,9 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
     // uploads with no WR stay local.
     const extension = originalName.includes(".") ? originalName.split(".").pop() ?? "" : "";
     let myBuildings: string | null = null;
-    if (workRequestId !== null) {
+    if (workRequestId !== null && !mayPushWorkRequests()) {
+      myBuildings = "Pushing to myBuildings is switched off: file kept in Floorplan only";
+    } else if (workRequestId !== null) {
       try {
         assertMayLeave("mybuildings", egress);
         await uploadAttachment(egress, {

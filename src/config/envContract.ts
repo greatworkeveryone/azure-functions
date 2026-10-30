@@ -61,6 +61,8 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   optional("TEAMS_WORKFLOW_KEY", "The Workflows flow would refuse our posts, so urgent alerts go by email only."),
   optional("TEAMS_ALERTS_ROUTE", "Defaults to \"workflows\"; set \"app\" once the Floorplan Teams app is installed."),
   optional("API_TOKEN_AUDIENCE", "Bearer audience mode: sql (default), both or api. Unset keeps the legacy SQL-scoped token."),
+  optional("MYBUILDINGS_PUSH_ENABLED", "Unset or anything but \"false\": new requests, updates and attachments are still pushed to myBuildings."),
+  optional("MYBUILDINGS_SYNC_MODE", "Unset means normal (pull and push). read_only never writes upstream; off makes no work-request call to myBuildings."),
   optional("BUILD_SHA", "Health cannot say which commit is deployed."),
 ];
 

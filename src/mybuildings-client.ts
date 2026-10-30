@@ -2,6 +2,7 @@
 // Covers: Buildings, Work Requests, Invoices, Contractors, Attachments, Bulk Status Update
 
 import { assertMayLeave, type EgressSubject } from "./test-data";
+import { MyBuildingsSwitchedOffError, mayPullWorkRequests, mayPushWorkRequests } from "./config/mybuildingsSwitches";
 
 const API_URL = process.env.MYBUILDINGS_API_URL!;
 const BEARER_TOKEN = process.env.MYBUILDINGS_BEARER_TOKEN!;
@@ -14,6 +15,12 @@ async function apiFetch(
   method: "GET" | "POST" | "PUT" = "GET",
   body?: unknown,
 ): Promise<any> {
+  // TR6 backstop: whatever a handler forgets to check, the work-request API is
+  // never called while the switches say it must not be (config/mybuildingsSwitches.ts).
+  if (/\/workrequests?\//i.test(path)) {
+    if (!mayPullWorkRequests()) throw new MyBuildingsSwitchedOffError("pull");
+    if (method !== "GET" && !mayPushWorkRequests()) throw new MyBuildingsSwitchedOffError("push");
+  }
   const url = `${API_URL}${path}`;
   const options: RequestInit = {
     method,
@@ -173,6 +180,38 @@ export async function createWorkRequest(
   payload: CreateWorkRequestPayload,
 ): Promise<unknown> {
   return apiFetch("/core/api/workrequest/v1/create", "POST", payload);
+}
+
+// ── Work Request Attachments: read side (TR6 import) ──────────────────────────
+// The upload endpoint below is documented; the list/download side is not in
+// the contract we hold. The path is isolated here so the first real read-only
+// run against the API can correct it in one place. The import treats a failure
+// as "attachments unavailable" and flags the request, it never guesses.
+
+export interface MyAttachmentRef {
+  AttachmentID?: number | string;
+  Attachment_Name?: string;
+  Attachment_URL?: string;
+  Attachment_Extension?: string;
+  ContentType?: string;
+}
+
+export async function fetchWorkRequestAttachments(workRequestId: number): Promise<MyAttachmentRef[]> {
+  const data = await apiFetch(`/core/api/workrequest/v1/attachments?workRequestID=${encodeURIComponent(String(workRequestId))}`);
+  return data.Data?.Attachments ?? data.Attachments ?? [];
+}
+
+/** Downloads a file the API named. Only https URLs on the configured API host. */
+export async function downloadAttachmentBytes(url: string): Promise<{ bytes: Buffer; contentType: string | null }> {
+  if (!mayPullWorkRequests()) throw new MyBuildingsSwitchedOffError("pull");
+  const target = new URL(url);
+  const api = new URL(API_URL);
+  if (target.protocol !== "https:" || target.host !== api.host) {
+    throw new Error(`Refusing to download from ${target.host}: not the myBuildings API host`);
+  }
+  const response = await fetch(target.toString(), { headers: { Authorization: `Bearer ${BEARER_TOKEN}` } });
+  if (!response.ok) throw new Error(`myBuildings attachment download failed: ${response.status}`);
+  return { bytes: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") };
 }
 
 // ── Bulk Status Update ────────────────────────────────────────────────────────
