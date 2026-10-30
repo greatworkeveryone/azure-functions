@@ -19,8 +19,20 @@ describe("a tenancy recipient is resolved from the tenancy, not from the request
   });
 
   it("refuses an address that isn't the tenancy's contact, naming why", async () => {
-    query.mockResolvedValueOnce([{ Archived: 0, IsTest: 0, Matches: 0 }]);
+    query.mockResolvedValueOnce([{ Archived: 0, IsTest: 0, Matches: 0 }]).mockResolvedValueOnce([]);
     expect(await resolveRecipientRecord(conn, claim())).toMatchObject({ code: "address_mismatch", ok: false });
+  });
+
+  it("passes an address that is one of the tenancy's listed contacts (TR2), read only from active ones", async () => {
+    query.mockResolvedValueOnce([{ Archived: 0, IsTest: 0, Matches: 0 }]).mockResolvedValueOnce([{ Hit: 1 }]);
+    expect(await resolveRecipientRecord(conn, claim())).toEqual({ ok: true });
+    expect(query.mock.calls[1][1]).toMatch(/dbo\.TenancyContacts WHERE TenantId = @Id AND ArchivedAt IS NULL/);
+  });
+
+  it("still refuses a test tenancy whose listed contact matches", async () => {
+    query.mockResolvedValueOnce([{ Archived: 0, IsTest: 1, Matches: 0 }]);
+    expect(await resolveRecipientRecord(conn, claim())).toMatchObject({ code: "test_record", ok: false });
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a test tenancy first, even when the address matches", async () => {

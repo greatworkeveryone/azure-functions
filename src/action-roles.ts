@@ -34,6 +34,7 @@ import { MANAGE_DEFECTS_PERIODS_ROLES, MANAGE_SERVICE_SCHEDULES_ROLES, VIEW_FACI
 import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROLES, RESPOND_TO_DECISION_ROLES } from "./jobDecisions/roles";
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
+import { MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
 import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
 export interface ActionRoles {
@@ -308,6 +309,11 @@ export const ACTION_ROLES = {
     gate: MANAGE_DEFECTS_PERIODS_ROLES,
     routes: ["upsertDefectsPeriod", "archiveDefectsPeriod"],
     why: "Add, edit and archive defects periods, and book inside one with a reason.",
+  },
+  manageTenantLinks: {
+    gate: MANAGE_TENANT_LINKS_ROLES,
+    routes: ["saveTenancyContact", "archiveTenancyContact", "setTenancyEmailOnly", "issueTenantLink", "revokeTenantLink"],
+    why: "Add, edit and archive a tenancy's contacts, mark it email only, and issue, reissue and revoke personal links (TR2).",
   },
   manageManualBuildings: {
     gate: [A.ADMIN],
@@ -675,6 +681,11 @@ export const ACTION_ROLES = {
     gate: JOB_READ,
     routes: ["getJobs", "getJob", "getCoverNotes"],
     why: "Read jobs, their history and their packet, and who is covering a job while its owner is away.",
+  },
+  viewTenantLinks: {
+    gate: VIEW_TENANT_LINKS_ROLES,
+    routes: ["getTenancyContacts"],
+    why: "Read a tenancy's contacts and the status of their personal links (TR2).",
   },
   viewKeys: {
     gate: [A.FACILITIES, A.FACILITIES_APPROVAL],
