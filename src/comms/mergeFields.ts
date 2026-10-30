@@ -32,6 +32,8 @@ export const MERGE_FIELDS: readonly MergeFieldDef[] = [
   { label: "Next rent review date", path: "tenant.nextReview" },
   { label: "Building name", path: "building.name" },
   { label: "Building address", path: "building.address" },
+  { label: "Request reference", path: "request.reference", server: true },
+  { label: "What the request is about", path: "request.summary", server: true },
   { label: "Sender name", path: "sender.name", server: true },
   { label: "Sender title", path: "sender.title", server: true },
   { label: "Today's date", path: "today", server: true },

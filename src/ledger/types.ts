@@ -44,7 +44,8 @@ export type LedgerSubjectType =
   | "service_schedule"
   | "tenancy"
   | "tenancy_note"
-  | "vacancy";
+  | "vacancy"
+  | "work_request";
 
 export type LedgerActor =
   /** A signed-in person; `role` is their AppUsers.Role when they decided. */

@@ -52,6 +52,7 @@ import {
   type JobFacts,
   type SweepJobPolicy,
 } from "./adapters/jobRules";
+import { listOverdueRequests, REQUEST_POLICY, REQUEST_SUBJECT_TYPE, type OverdueRequest } from "../intake/overdue";
 import { countExhaustedNotifications, SYSTEM_SUBJECTS } from "./adapters/system";
 import { DECISION_PENDING_POLICY, isNextStepRow } from "./decisionRows";
 import { dueDeferrals, type DueDeferral } from "../jobDecisions/decisionsStore";
@@ -107,6 +108,8 @@ export interface SweepDeps {
   /** R2/R13: attributions nobody has answered. Optional, so a sweep built without it skips the step. */
   listUnansweredAttributions?(connection: Connection): Promise<{ attributedToUserId: number; ref: AttributionRef }[]>;
   loadLiveJobFacts(connection: Connection): Promise<JobFacts[]>;
+  /** TR1: requests past the acknowledgement target Facilities set. Optional, so a sweep built without it skips the step. */
+  listOverdueRequests?(connection: Connection, now: Date): Promise<OverdueRequest[]>;
   notifyTargets(connection: Connection, row: EscalationRow, event: NotifyEvent, options: NotifyOptions): Promise<NotifyOutcome>;
   raise(connection: Connection, input: RaiseInput): Promise<RaiseResult>;
   reaskDeferral(connection: Connection, deferral: DueDeferral, options: ReaskOptions): Promise<ReaskResult>;
@@ -124,6 +127,7 @@ export const defaultSweepDeps: SweepDeps = {
   listDueDeferrals: dueDeferrals,
   listLiveEscalations,
   listUnansweredAttributions,
+  listOverdueRequests,
   loadLiveJobFacts,
   notifyTargets,
   raise,
@@ -477,6 +481,44 @@ async function raiseAttributionNotices(run: Run): Promise<void> {
   }
 }
 
+// ── 3c. Unacknowledged tenant requests (TR1) ───────────────────────────────
+
+/**
+ * A request still unacknowledged past the response target for its priority gets request.unacknowledged. With no
+ * target set the list is empty, so nothing is raised. A request that has had one before is left alone, so one a
+ * person closed without acknowledging isn't raised again every half hour.
+ */
+async function raiseUnacknowledgedRequests(run: Run): Promise<void> {
+  const list = run.deps.listOverdueRequests;
+  if (!list) return;
+  const overdue = await list(run.connection, run.now);
+  if (overdue.length === 0) return;
+  const latest = await run.deps.latestTimesBySubject(run.connection, REQUEST_SUBJECT_TYPE);
+  for (const request of overdue) {
+    const subjectId = String(request.workRequestId);
+    if (latest.has(latestKey(subjectId, REQUEST_POLICY))) continue;
+    if (!run.take()) return;
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would raise ${REQUEST_POLICY} on request #${subjectId}`);
+      run.report.raised += 1;
+      continue;
+    }
+    await run.attempt(`raising ${REQUEST_POLICY} on request #${subjectId}`, async () => {
+      const result = await run.deps.raise(run.connection, {
+        actor: SWEEP_ACTOR,
+        context: { dueAt: request.dueAt.toISOString(), priority: request.priority },
+        headline: `${request.priority} priority, not acknowledged yet`,
+        notify: run.notifyOptions(),
+        now: run.now,
+        policyKey: REQUEST_POLICY,
+        subjectId,
+        subjectType: REQUEST_SUBJECT_TYPE,
+      });
+      if (result.created) run.report.raised += 1;
+    });
+  }
+}
+
 // ── 4. Follow-up emails ──────────────────────────────────────────────────────
 
 /** The moment from which a new email counts as a follow-up on a row. */
@@ -627,6 +669,7 @@ export async function runSweep(
     ["asking deferred decisions again", reaskDeferred],
     ["raising for jobs", raiseForJobs],
     ["raising attribution notices", raiseAttributionNotices],
+    ["raising unacknowledged requests", raiseUnacknowledgedRequests],
     ["restarting on follow-up emails", restartOnFollowUps],
     ["retrying notifications", retryNotifications],
     ["checking health", checkHealth],

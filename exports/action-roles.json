@@ -1,4 +1,12 @@
 {
+  "acknowledgeRequest": [
+    "accounts",
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "addQuoteContractor": [
     "accounts",
     "accounts_manager",
@@ -377,6 +385,15 @@
     "facilities",
     "facilities_manager"
   ],
+  "moveRequestIntake": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
   "myobController": [
     "cfo"
   ],
@@ -514,6 +531,11 @@
     "accounts_manager",
     "admin",
     "cfo",
+    "director",
+    "facilities_manager"
+  ],
+  "setIntakeTargets": [
+    "admin",
     "director",
     "facilities_manager"
   ],
@@ -805,6 +827,15 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "viewRequestIntake": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
   ],
   "viewTeamEscalations": [
     "accounts_manager",
