@@ -100,6 +100,7 @@ function fakeSender(over: { draft?: () => Promise<{ graphMessageId: string; inte
       sender.sends.push(id);
       if (over.send) await over.send(id);
     },
+    async sendWithoutCopy() {},
   };
   return sender;
 }

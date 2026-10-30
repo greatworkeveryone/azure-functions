@@ -23,8 +23,8 @@ describe("migration 186", () => {
 
   it("seeds both templates once, as drafts, and only when the slug is absent", () => {
     for (const slug of ["request-attendance", "request-completed"]) {
-      expect(code).toContain(`IF NOT EXISTS (SELECT 1 FROM dbo.Procedures WHERE Slug = N'${slug}')`);
-      expect(code).toContain(`IF NOT EXISTS (SELECT 1 FROM dbo.ProcedureVersions WHERE Slug = N'${slug}')`);
+      expect(code).toContain("IF NOT EXISTS (SELECT 1 FROM dbo.Procedures WHERE Slug = N'" + slug + "')");
+      expect(code).toContain("IF NOT EXISTS (SELECT 1 FROM dbo.ProcedureVersions WHERE Slug = N'" + slug + "')");
     }
     expect([...code.matchAll(/N'draft'/g)]).toHaveLength(2);
     expect(code).not.toMatch(/N'published'/);
