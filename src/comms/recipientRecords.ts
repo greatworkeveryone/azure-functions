@@ -30,6 +30,11 @@ const STAFF_IS_ADDRESS = "LOWER(LTRIM(RTRIM(Email))) = @Address";
 const TENANCY_SQL = `SELECT IsTest, CASE WHEN ArchivedAt IS NULL THEN 0 ELSE 1 END AS Archived,
     CASE WHEN ${PRIMARY_IS_ADDRESS} OR ${ACCOUNTS_IS_ADDRESS} THEN 1 ELSE 0 END AS Matches
   FROM dbo.Tenants WHERE TenantId = @Id`;
+// A tenancy's listed contacts (TR2, migration 183) are its contacts too. Read only if the table exists, so
+// a database without migration 183 behaves exactly as before.
+const CONTACT_LIST_SQL = `IF OBJECT_ID(N'dbo.TenancyContacts', N'U') IS NOT NULL
+  SELECT TOP (1) 1 AS Hit FROM dbo.TenancyContacts WHERE TenantId = @Id AND ArchivedAt IS NULL AND LOWER(LTRIM(RTRIM(Email))) = @Address
+ELSE SELECT TOP (0) 1 AS Hit`;
 const CONTRACTOR_SQL = `SELECT CASE WHEN ${CONTRACTOR_IS_ADDRESS} THEN 1 ELSE 0 END AS Matches FROM dbo.Contractors WHERE ContractorID = @Id`;
 const STAFF_SQL = `SELECT CASE WHEN ${STAFF_IS_ADDRESS} THEN 1 ELSE 0 END AS Matches FROM dbo.AppUsers WHERE UserID = @Id`;
 const TEST_CONTACT_SQL = `SELECT TOP (1) 1 AS Hit FROM dbo.Tenants WHERE IsTest = 1 AND (${PRIMARY_IS_ADDRESS} OR ${ACCOUNTS_IS_ADDRESS})`;
@@ -50,7 +55,9 @@ export async function resolveRecipientRecord(connection: Connection, claim: Reci
     const [row] = await executeQuery(connection, TENANCY_SQL, [id, address]);
     if (!row || Number(row.Archived) === 1) return refuse("unknown_record", NO_RECORD);
     if (row.IsTest === true || row.IsTest === 1) return refuse("test_record", "That tenancy is a test record");
-    return Number(row.Matches) === 1 ? { ok: true } : refuse("address_mismatch", NOT_THE_CONTACT);
+    if (Number(row.Matches) === 1) return { ok: true };
+    const listed = await executeQuery(connection, CONTACT_LIST_SQL, [id, address]);
+    return listed.length > 0 ? { ok: true } : refuse("address_mismatch", NOT_THE_CONTACT);
   }
   const [row] = await executeQuery(connection, claim.recipientType === "contractor" ? CONTRACTOR_SQL : STAFF_SQL, [id, address]);
   if (!row) return refuse("unknown_record", NO_RECORD);

@@ -346,6 +346,11 @@
     "cfo",
     "director"
   ],
+  "manageTenantLinks": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "manageTestData": [
     "admin"
   ],
@@ -829,6 +834,15 @@
     "admin",
     "cfo",
     "director"
+  ],
+  "viewTenantLinks": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
   ],
   "viewTimesheets": [
     "accounts",

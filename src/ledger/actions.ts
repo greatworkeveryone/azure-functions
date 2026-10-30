@@ -165,6 +165,19 @@ export const LEDGER_ACTIONS = {
   "test_data.flag": { exception: true, reasonRequired: true, subjects: ["inspection", "job", "key", "tenancy", "vacancy"] },
   "tenancy.unarchive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },
 
+  // Tenancy contacts and personal links (TR2, PLAN §15). The subject is the tenancy; after holds the
+  // contact or link ids and dates, never a token or its hash. A link use is written by the resolver
+  // (a system actor) each time a tenant opens their page.
+  "tenancy.contact_add": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.contact_archive": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.contact_restore": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.contact_update": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.email_only_set": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.link_issue": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.link_reissue": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.link_revoke": { exception: true, reasonRequired: false, subjects: ["tenancy"] },
+  "tenancy.link_use": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
+
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
