@@ -43,6 +43,14 @@ describe("createDraft then sendDraft", () => {
     expect(calls[0].body).toBeUndefined();
   });
 
+  it("sends in one call and asks Graph not to keep a copy in Sent Items", async () => {
+    const { calls, impl } = fakeFetch([new Response(null, { status: 202 })]);
+    await createGraphSender(impl, async () => "tok").sendWithoutCopy(draft);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/users/notices%40randazzo.properties/sendMail");
+    expect(calls[0].body).toMatchObject({ saveToSentItems: false, message: { subject: "Hello", toRecipients: [{ emailAddress: { address: "pat@example.com" } }] } });
+  });
+
   it("takes one token for a whole run", async () => {
     const { impl } = fakeFetch([json({ id: "1" }), new Response(null, { status: 202 }), json({ id: "2" }), new Response(null, { status: 202 })]);
     const token = jest.fn(async () => "tok");

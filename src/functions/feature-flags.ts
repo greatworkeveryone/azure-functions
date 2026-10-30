@@ -9,6 +9,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
+import { emergencyPhoneProblem } from "../tenantPage/emergency";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
@@ -24,7 +25,9 @@ const VISIBILITIES = ["enabled", "preview", "hidden"] as const;
 // Mirror of AppRole values + FeatureKey in command-centre src/constants —
 // an allowlist rather than free text, because a typo'd row gates nothing
 // while quietly reading as "configured".
-const ROLE_NAMES: readonly string[] = Object.values(AppRole);
+// "tenant" is not a staff role: it is the audience row of the tenant page (tenantPage/gate.ts), so that
+// switching a staff role on never switches the page on for every link holder.
+const ROLE_NAMES: readonly string[] = [...Object.values(AppRole), "tenant"];
 const FEATURE_KEYS = [
   "absenceCover", "activity", "aiAssist", "aiDocumentExtraction", "assets", "comms", "complianceReport",
   "contractorSuggestions", "decisionJobs", "documentation", "emailBroadcast", "emailSending", "escalations",
@@ -108,6 +111,10 @@ export async function upsertFeatureFlag(
     const editor = userInfoFromToken(token);
 
     connection = await createRequestConnection(token);
+    if (featureKey === "tenantPage" && visibility === "enabled") {
+      const problem = await emergencyPhoneProblem(connection);
+      if (problem) return { status: 409, jsonBody: { error: problem } };
+    }
     await executeQuery(
       connection,
       `MERGE dbo.FeatureFlags AS target

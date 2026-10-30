@@ -138,6 +138,7 @@ export const TENANCY_CHILD_TABLES = [
   "TenantNotices",
   "TenantOccupancies",
   "TenantOccupancyHistory",
+  "TenantRequestPhotos",
   "Vacancies",
 ] as const;
 

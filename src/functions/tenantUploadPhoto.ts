@@ -5,6 +5,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { LIMITS } from "../tenantPage/constants";
+import { readCappedBody } from "../tenantPage/body";
 import { runTenant, tenantJson } from "../tenantPage/gate";
 import { parseRequestId, storePhoto } from "../tenantPage/photos";
 
@@ -12,8 +13,8 @@ export async function tenantUploadPhoto(request: HttpRequest, context: Invocatio
   return runTenant(request, context, "tenantUploadPhoto", { perLink: { limit: 20, windowMs: 10 * 60_000 }, recordUse: false }, async ({ connection, identity }) => {
     const requestId = parseRequestId(request.headers.get("x-tenant-request"));
     if (requestId === null) return tenantJson(400, { error: "Missing request reference" });
-    if (Number(request.headers.get("content-length") ?? 0) > LIMITS.photoBytes) return tenantJson(413, { error: "That photo is too large" });
-    const bytes = Buffer.from(await request.arrayBuffer());
+    const bytes = await readCappedBody(request, LIMITS.photoBytes);
+    if (bytes === "too_large") return tenantJson(413, { error: "That photo is too large" });
     const result = await storePhoto(connection, identity, requestId, bytes, request.headers.get("content-type") ?? "");
     if (!result.ok) return tenantJson(result.status, { error: result.error });
     return tenantJson(201, { photoCount: result.photoCount, reference: result.reference });

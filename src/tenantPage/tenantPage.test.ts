@@ -49,7 +49,7 @@ function req(opts: Opts = {}): HttpRequest {
   const headers = new Headers({ "x-forwarded-for": opts.ip ?? "203.0.113.7", ...(opts.headers ?? {}) });
   if (opts.token !== null) headers.set("x-tenant-link", opts.token ?? TOKEN_A);
   const text = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body ?? {});
-  const bytes = opts.bytes ?? Buffer.alloc(0);
+  const bytes = opts.bytes ?? Buffer.from(text);
   return {
     arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
     headers, query: new URLSearchParams(), text: async () => text, url: opts.url ?? "https://api.test/api/x",
@@ -60,6 +60,7 @@ const WHO = { BuildingName: "Tower One", ContactName: "Pat", Email: "pat@acme.te
 let whoRow: Record<string, unknown> | null = WHO;
 let ownedRows: unknown[] = [{ WorkRequestID: -7 }];
 let photoCount = 0;
+let emergencyRows: unknown[] = [{ EmergencyPhone: "1800 555 000" }];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -69,14 +70,17 @@ beforeEach(() => {
   whoRow = WHO;
   ownedRows = [{ WorkRequestID: -7 }];
   photoCount = 0;
+  emergencyRows = [{ EmergencyPhone: "1800 555 000" }];
   resolver.resolveTenantLink.mockImplementation(async (token: string) => (token === TOKEN_A ? A : token === TOKEN_B ? B : null));
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-    if (sql.includes("FROM dbo.FeatureFlags")) return flagOn ? [{ FeatureKey: "tenantPage", RoleName: "admin", Visibility: "enabled" }] : [];
+    if (sql.includes("FROM dbo.FeatureFlags")) return flagOn ? [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }] : [];
+    if (sql.includes("SELECT EmergencyPhone FROM dbo.Buildings")) return emergencyRows;
     if (sql.includes("JOIN dbo.TenancyContacts c")) return whoRow ? [whoRow] : [];
     if (sql.includes("COL_LENGTH")) return [{ Len: null }];
     if (sql.includes("INSERT INTO WorkRequests")) return [{ WorkRequestID: -7 }];
     if (sql.includes("COUNT(*) AS N FROM dbo.WorkRequests")) return [{ N: 0 }];
     if (sql.includes("FROM dbo.TenantRequestPhotos")) return [{ N: photoCount }];
+    if (sql.includes("ClientRequestId = @Key")) return [];
     if (sql.includes("SELECT WorkRequestID FROM dbo.WorkRequests")) return ownedRows;
     return [];
   });
@@ -127,7 +131,7 @@ describe("the link gate", () => {
 
   it("answers a generic 500 that carries neither the token nor the error text", async () => {
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
-      if (sql.includes("FROM dbo.FeatureFlags")) return [{ FeatureKey: "tenantPage", RoleName: "admin", Visibility: "enabled" }];
+      if (sql.includes("FROM dbo.FeatureFlags")) return [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }];
       throw new Error(`secret sql failure ${TOKEN_A}`);
     });
     const r = await tenantContext(req({ ip: "198.51.100.11" }), context);
@@ -240,10 +244,10 @@ function chunk(type: string, data: Buffer): Buffer {
   crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
   return Buffer.concat([head, data, crc]);
 }
-function pngBytes(extra: Buffer = Buffer.alloc(0), width = 2): Buffer {
+function pngBytes(extra: Buffer = Buffer.alloc(0), width = 2, height = 2): Buffer {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(2, 4);
+  ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8; ihdr[9] = 2;
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", Buffer.from("x\u0001idatbytes")), chunk("IEND", Buffer.alloc(0)), extra]);
 }
@@ -253,8 +257,12 @@ function jpegBytes(trailing = Buffer.from([0xff, 0xd9])): Buffer {
   const sos = Buffer.from([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x12, 0x34]);
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app, sof, sos, trailing]);
 }
-const webpBytes = (): Buffer => {
-  const body = Buffer.concat([Buffer.from("WEBPVP8 ", "latin1"), Buffer.from([20, 0, 0, 0]), Buffer.alloc(20, 1)]);
+const webpBytes = (width = 2, height = 2): Buffer => {
+  const frame = Buffer.alloc(20, 1);
+  frame.set([0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a], 0);
+  frame.writeUInt16LE(width, 6);
+  frame.writeUInt16LE(height, 8);
+  const body = Buffer.concat([Buffer.from("WEBPVP8 ", "latin1"), Buffer.from([20, 0, 0, 0]), frame]);
   const size = Buffer.alloc(4);
   size.writeUInt32LE(body.length, 0);
   return Buffer.concat([Buffer.from("RIFF", "latin1"), size, body]);
@@ -277,6 +285,11 @@ describe("image checks look at the bytes, not the label", () => {
     ["PNG claiming a huge size", pngBytes(Buffer.alloc(0), 60000)],
     ["truncated JPEG", jpegBytes().subarray(0, 100)],
     ["empty", Buffer.alloc(0)],
+    ["WebP claiming a huge canvas", webpBytes(16383, 16383)],
+    ["PNG over the decoded-size cap (8000 x 8000)", pngBytes(Buffer.alloc(0), 8000, 8000)],
+    ["PNG carrying markup in a text chunk", (() => { const b = pngBytes(); const text = chunk("tEXt", Buffer.from("k\0<script>alert(1)</script>")); const iend = b.length - 12; return Buffer.concat([b.subarray(0, iend), text, b.subarray(iend)]); })()],
+    ["JPEG with a second image after the end marker", jpegBytes(Buffer.concat([Buffer.from([0xff, 0xd9]), jpegBytes()]))],
+    ["JPEG whose comment holds markup", (() => { const b = jpegBytes(); const com = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x16]), Buffer.from("<script>x</script>....")]); return Buffer.concat([b.subarray(0, 2), com, b.subarray(2)]); })()],
   ])("refuses %s", (_name, bytes) => {
     expect(sniffImage(bytes)).toBeNull();
   });
@@ -301,6 +314,29 @@ describe("photo upload", () => {
     expect((await send(jpegBytes(), { "content-type": "image/png" })).status).toBe(415);
     expect((await send(Buffer.from("<svg/>".padEnd(300)), { "content-type": "image/jpeg" }, "192.0.2.71")).status).toBe(415);
     expect(blobs.uploadTenantQuarantineBlob).not.toHaveBeenCalled();
+  });
+  it("reserves the slot under the lock before any bytes are uploaded, and frees it if the upload fails", async () => {
+    const order: string[] = [];
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (sql.includes("FROM dbo.FeatureFlags")) return [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }];
+      if (sql.includes("SELECT EmergencyPhone")) return [{ EmergencyPhone: "1800 555 000" }];
+      if (sql.includes("SELECT WorkRequestID FROM dbo.WorkRequests")) return ownedRows;
+      if (sql.includes("INSERT INTO dbo.TenantRequestPhotos")) { order.push("reserve"); return [{ PhotoId: 9 }]; }
+      if (sql.includes("FROM dbo.TenantRequestPhotos")) return [{ N: 0 }];
+      if (sql.includes("SET UploadState = N'failed'")) order.push("failed");
+      return [];
+    });
+    blobs.uploadTenantQuarantineBlob.mockImplementationOnce(async () => { order.push("upload"); throw new Error("blob down"); });
+    expect((await send(pngBytes(), {}, "192.0.2.90")).status).toBe(500);
+    expect(order).toEqual(["reserve", "upload", "failed"]);
+    expect(call("COUNT(*) AS N FROM dbo.TenantRequestPhotos WITH (UPDLOCK, HOLDLOCK)").length).toBeGreaterThan(0);
+  });
+  it("stops reading a body that runs past the cap, whatever Content-Length says", async () => {
+    let pulled = 0;
+    const body = new ReadableStream({ pull(c) { pulled += 1; c.enqueue(new Uint8Array(1024 * 1024)); if (pulled > 50) c.close(); } });
+    const r = await tenantUploadPhoto({ ...req({ headers: { "content-type": "image/png", "x-tenant-request": "-7" }, ip: "192.0.2.91" }), body } as unknown as HttpRequest, context);
+    expect(r.status).toBe(413);
+    expect(pulled).toBeLessThan(15);
   });
   it("refuses a sixth photo and anything over 8 MB", async () => {
     photoCount = 5;
@@ -327,5 +363,47 @@ describe("status timeline", () => {
     const closed = timelineFor({ completedAt: null, intakeState: "closed_duplicate", status: "New", submittedAt: at });
     expect(closed.closed).toBe(true);
     expect(JSON.stringify(closed)).not.toMatch(/duplicate/i);
+  });
+});
+
+describe("hardening (review S2/S3)", () => {
+  it("reads the tenantPage flag from the tenant audience only: enabling a staff role does not open the page", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("FROM dbo.FeatureFlags") ? [{ FeatureKey: "tenantPage", RoleName: "admin", Visibility: "enabled" }] : []));
+    expect((await tenantContext(req({ ip: "198.51.100.40" }), context)).status).toBe(404);
+    expect(resolver.resolveTenantLink).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 page_unavailable when the building has no emergency number (fail closed)", async () => {
+    const saved = process.env.TENANT_EMERGENCY_PHONE;
+    delete process.env.TENANT_EMERGENCY_PHONE;
+    emergencyRows = [{ EmergencyPhone: null }];
+    const r = await tenantContext(req({ ip: "198.51.100.41" }), context);
+    if (saved !== undefined) process.env.TENANT_EMERGENCY_PHONE = saved;
+    expect(r.status).toBe(503);
+    expect(bodyOf(r)).toContain("page_unavailable");
+  });
+
+  it("returns the original request for a retry with the same key, and creates nothing", async () => {
+    const key = "retry-key-0123456789ab";
+    const base = db.executeQuery.getMockImplementation() as (c: unknown, sql: string, p?: unknown) => Promise<unknown[]>;
+    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("ClientRequestId = @Key") ? [{ WorkRequestID: -7 }] : base(c, sql, p)));
+    const r = await tenantSubmitRequest(req({ body: { ...GOOD, requestKey: key }, ip: "192.0.2.100" }), context);
+    expect(r.status).toBe(200);
+    expect(r.jsonBody).toMatchObject({ requestId: -7 });
+    expect(call("INSERT INTO WorkRequests")).toHaveLength(0);
+  });
+
+  it("stores the key on a first submission, and refuses a malformed key", async () => {
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, requestKey: "retry-key-0123456789ab" }, ip: "192.0.2.101" }), context)).status).toBe(201);
+    expect(call("UPDATE dbo.WorkRequests")[0].params.find((p) => p.name === "ClientRequestId")?.value).toBe("retry-key-0123456789ab");
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, requestKey: "x" }, ip: "192.0.2.102" }), context)).status).toBe(400);
+  });
+
+  it("lets an emergency through the daily cap and flags it, but stops a routine report", async () => {
+    const base = db.executeQuery.getMockImplementation() as (c: unknown, sql: string, p?: unknown) => Promise<unknown[]>;
+    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("COUNT(*) AS N FROM dbo.WorkRequests") ? [{ N: 20 }] : base(c, sql, p)));
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "routine", description: "Please repaint the wall by the door" }, ip: "192.0.2.103" }), context)).status).toBe(429);
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "emergency" }, ip: "192.0.2.104" }), context)).status).toBe(201);
+    expect(ledgerInserts(db.executeQuery).find((e) => e.action === "tenancy.request_submit")?.after).toMatchObject({ overDailyCap: true });
   });
 });

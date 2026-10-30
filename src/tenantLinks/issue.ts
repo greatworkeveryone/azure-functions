@@ -144,14 +144,14 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
 
   try {
     const sender = deps.sender ?? createGraphSender();
-    const draft = await sender.createDraft({
+    // The body is a live credential, so no copy may stay in notices@ Sent Items (sendWithoutCopy).
+    await sender.sendWithoutCopy({
       from: { address: fromAddress(), name: fromName() },
       html: composed.email.html,
       replyTo: { address: process.env.TENANT_LINK_REPLY_TO?.trim() || REPLY_TO_DEFAULT, name: fromName() },
       subject,
       to: target.address,
     });
-    await sender.sendDraft(fromAddress(), draft.graphMessageId);
   } catch (error) {
     const failure = error instanceof MailSendError ? error : toSendError(error);
     log(`tenantLinks: link ${link.linkId} not sent (${failure.code})`);

@@ -15,7 +15,7 @@ export async function revokeContactLink(connection: Connection, input: { actor: 
     if (!tenancy) return txFail({ jsonBody: { error: "Tenancy not found" }, status: 404 });
     const contact = await readContact(connection, input.tenantId, input.contactId, true);
     if (!contact) return txFail({ jsonBody: { error: "Contact not found" }, status: 404 });
-    const live = await liveLinkIds(connection, input.contactId);
+    const live = await liveLinkIds(connection, input.contactId, 0, true);
     if (live.length === 0) return txFail({ jsonBody: { error: "This contact has no link to revoke" }, status: 409 });
     for (const link of live) await revokeLink(connection, link.linkId, input.actor.name, "revoked");
     await record(connection, {
@@ -58,4 +58,20 @@ export async function setEmailOnly(
     return txOk(live.length);
   });
   return out.ok ? { ok: true, revoked: out.value } : refuse(out.response.status ?? 500, (out.response.jsonBody as { error: string }).error);
+}
+
+/**
+ * A link belongs to the address it was sent to. When a contact's address changes (the person left the tenant
+ * company), every link of that contact, pending ones included, is revoked in the caller's transaction.
+ * Returns the revoked link ids (the caller ledgers them).
+ */
+export async function revokeOnEmailChange(
+  connection: Connection,
+  input: { actor: LedgerActor; after: string | null; before: string | null; contactId: number },
+): Promise<number[]> {
+  const norm = (e: string | null) => (e ?? "").trim().toLowerCase();
+  if (norm(input.before) === norm(input.after)) return [];
+  const live = await liveLinkIds(connection, input.contactId, 0, true);
+  for (const link of live) await revokeLink(connection, link.linkId, input.actor.name, "email_changed");
+  return live.map((l) => l.linkId);
 }

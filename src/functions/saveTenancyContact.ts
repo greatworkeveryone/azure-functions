@@ -10,6 +10,7 @@ import { contactSnapshot, parseContactFields, positiveId } from "../tenantLinks/
 import { authorizeWrite } from "../assetRegisterSupport";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { MANAGE_TENANT_LINKS_ROLES } from "../tenantLinks/roles";
+import { revokeOnEmailChange } from "../tenantLinks/revoke";
 import { insertContact, readContact, readTenancy, updateContact, versionBuffer } from "../tenantLinks/store";
 
 export async function saveTenancyContact(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -32,6 +33,7 @@ export async function saveTenancyContact(request: HttpRequest, context: Invocati
       if (tenancy.archivedAt !== null) return txFail(refusal(409, "This tenancy is archived"));
       let id: number;
       let before = null;
+      let revokedOnEmailChange: number[] = [];
       if (contactId === null) {
         id = await insertContact(connection, tenantId, fields.value, actor.name);
       } else {
@@ -43,6 +45,7 @@ export async function saveTenancyContact(request: HttpRequest, context: Invocati
         }
         id = contactId;
         before = contactSnapshot(current);
+        revokedOnEmailChange = await revokeOnEmailChange(connection, { actor, after: fields.value.email, before: current.email, contactId });
       }
       const saved = await readContact(connection, tenantId, id);
       if (!saved) return txFail(refusal(500, "Could not read the contact back"));
@@ -55,6 +58,16 @@ export async function saveTenancyContact(request: HttpRequest, context: Invocati
         subject: { id: tenantId, type: "tenancy" },
         tenantId,
       });
+      if (revokedOnEmailChange.length > 0) {
+        await record(connection, {
+          action: "tenancy.link_revoke",
+          actor,
+          after: { contactId: id, linkIds: revokedOnEmailChange, reason: "email_changed" },
+          buildingId: tenancy.buildingId,
+          subject: { id: tenantId, type: "tenancy" },
+          tenantId,
+        });
+      }
       return txOk(saved);
     });
     return out.ok ? { jsonBody: { contact: out.value }, status: contactId === null ? 201 : 200 } : out.response;

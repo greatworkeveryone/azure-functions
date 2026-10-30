@@ -12,7 +12,7 @@ jest.mock("../db", () => ({
 
 import { resolveTenantLink } from "./resolve";
 import { issueLink } from "./issue";
-import { setEmailOnly } from "./revoke";
+import { revokeContactLink, revokeOnEmailChange, setEmailOnly } from "./revoke";
 import { addMonths, expiryMonths, hashToken, isTokenShaped, linkUrl, newToken } from "./token";
 import { linkStatus, versionBuffer } from "./store";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
@@ -126,6 +126,16 @@ describe("resolveTenantLink", () => {
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
+  it("counts a use at most once per ten minutes per link, but still resolves every call", async () => {
+    fakeDb(world(good({ LastUsedAt: new Date(NOW.getTime() - 5 * 60_000) })));
+    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toEqual({ buildingId: 5, contactId: 11, tenantId: 9 });
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+    expect(sqlCalls().some((c) => c.sql.includes("UPDATE dbo.TenantLinks SET LastUsedAt"))).toBe(false);
+    fakeDb(world(good({ LastUsedAt: new Date(NOW.getTime() - 11 * 60_000) })));
+    await resolveTenantLink(token, { connection: conn, now: NOW });
+    expect(ledgerInserts(db.executeQuery)).toHaveLength(1);
+  });
+
   it("is null when the link was revoked between the lookup and the use", async () => {
     fakeDb([(sql) => (sql.includes("FROM dbo.TenantLinks l") ? [good()] : undefined), (sql) => (sql.includes("UPDATE dbo.TenantLinks SET LastUsedAt") ? [] : undefined)]);
     await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toBeNull();
@@ -147,8 +157,9 @@ describe("issueLink", () => {
   const okSender = () => {
     const sent: string[] = [];
     const sender: MailSender = {
-      createDraft: jest.fn(async (d) => { sent.push(d.html); return { graphMessageId: "g1", internetMessageId: null }; }),
-      sendDraft: jest.fn().mockResolvedValue(undefined),
+      createDraft: jest.fn(),
+      sendDraft: jest.fn(),
+      sendWithoutCopy: jest.fn(async (d) => { sent.push(d.html); }),
     };
     return { sender, sent };
   };
@@ -165,6 +176,10 @@ describe("issueLink", () => {
     const { sender, sent } = okSender();
     const r = await issueLink(conn, input, { mode: "live", now: () => NOW, sender });
     expect(r).toMatchObject({ delivery: "sent", linkId: 42, ok: true });
+    expect(sender.sendWithoutCopy).toHaveBeenCalledTimes(1);
+    // the credential-bearing email never goes through a draft, so no copy stays in Sent Items
+    expect(sender.createDraft).not.toHaveBeenCalled();
+    expect(sender.sendDraft).not.toHaveBeenCalled();
     const token = /floorplan\.example\.test\/t#([A-Za-z0-9_-]{43})/.exec(sent[0])?.[1];
     expect(token).toBeDefined();
     const insert = sqlCalls().find((c) => c.sql.includes("INSERT INTO dbo.TenantLinks"));
@@ -182,14 +197,14 @@ describe("issueLink", () => {
     const { sender } = okSender();
     const r = await issueLink(conn, input, { mode: "dry-run", now: () => NOW, sender });
     expect(r).toEqual({ delivery: "dry_run", ok: true });
-    expect(sender.createDraft).not.toHaveBeenCalled();
+    expect(sender.sendWithoutCopy).not.toHaveBeenCalled();
     expect(sqlCalls().some((c) => c.sql.includes("SET ActivatedAt"))).toBe(false);
     expect(sqlCalls().some((c) => c.sql.includes("SET RevokedAt") && c.params.some((p) => p.value === "dry_run"))).toBe(true);
   });
 
   it("revokes the new link and keeps the old one when the send fails", async () => {
     fakeDb([(sql) => (sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK") ? [{ ExpiresAt: FUTURE, LinkId: 1 }] : undefined), ...base]);
-    const sender: MailSender = { createDraft: jest.fn().mockRejectedValue(new Error("boom")), sendDraft: jest.fn() };
+    const sender: MailSender = { createDraft: jest.fn(), sendDraft: jest.fn(), sendWithoutCopy: jest.fn().mockRejectedValue(new Error("boom")) };
     const r = await issueLink(conn, { ...input, reissue: true }, { mode: "live", now: () => NOW, sender });
     expect(r).toMatchObject({ ok: false, status: 502 });
     expect(sqlCalls().some((c) => c.sql.includes("SET ActivatedAt"))).toBe(false);
@@ -218,7 +233,7 @@ describe("issueLink", () => {
     fakeDb(base);
     const { sender } = okSender();
     await issueLink(conn, input, { mode: "live", now: () => NOW, sender });
-    expect((sender.createDraft as jest.Mock).mock.calls[0][0]).toMatchObject({ subject: expect.stringContaining("[For pat@acme.test]"), to: "dev@rp.test" });
+    expect((sender.sendWithoutCopy as jest.Mock).mock.calls[0][0]).toMatchObject({ subject: expect.stringContaining("[For pat@acme.test]"), to: "dev@rp.test" });
   });
 });
 
@@ -235,11 +250,36 @@ describe("a stale write is a 409", () => {
     fakeDb([
       (sql) => (sql.includes("FROM dbo.Tenants WITH (UPDLOCK") ? [{ ArchivedAt: null, BuildingId: 5, EmailOnly: false, IsTest: false, LegalName: "Acme", RowVersion: VERSION, TenantId: 9 }] : undefined),
       (sql) => (sql.includes("UPDATE dbo.Tenants SET EmailOnly") ? [{ TenantId: 9 }] : undefined),
-      (sql) => (sql.includes("WHERE TenantId = @TenantId AND ActivatedAt IS NOT NULL") ? [{ ContactId: 11, LinkId: 3 }] : undefined),
+      (sql) => (sql.includes("WHERE TenantId = @TenantId AND RevokedAt IS NULL") ? [{ ContactId: 11, LinkId: 3 }] : undefined),
       (sql) => (sql.includes("SET RevokedAt") ? [{ LinkId: 3 }] : undefined),
     ]);
     const r = await setEmailOnly(conn, { actor: ACTOR, emailOnly: true, rowVersion: VERSION.toString("base64"), tenantId: 9 });
     expect(r).toEqual({ ok: true, revoked: 1 });
     expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "tenancy.email_only_set" });
+  });
+});
+
+describe("revoke catches links still being sent", () => {
+  it("a contact's revoke includes pending links, so an issue in flight cannot switch its link on afterwards", async () => {
+    fakeDb([
+      (sql) => (sql.includes("FROM dbo.Tenants WITH (UPDLOCK") ? [{ ArchivedAt: null, BuildingId: 5, EmailOnly: false, IsTest: false, LegalName: "Acme", RowVersion: VERSION, TenantId: 9 }] : undefined),
+      (sql) => (sql.includes("FROM dbo.TenancyContacts c") ? [{ ArchivedAt: null, ContactId: 11, Email: "pat@acme.test", Name: "Pat", RowVersion: VERSION, TenantId: 9 }] : undefined),
+      (sql) => (sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK") ? [{ ExpiresAt: FUTURE, LinkId: 77 }] : undefined),
+      (sql) => (sql.includes("SET RevokedAt") ? [{ LinkId: 77 }] : undefined),
+    ]);
+    const r = await revokeContactLink(conn, { actor: ACTOR, contactId: 11, tenantId: 9 });
+    expect(r).toEqual({ ok: true, revoked: 1 });
+    const q = sqlCalls().find((c) => c.sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK"));
+    expect(q?.params.find((p) => p.name === "Pending")?.value).toBe(true);
+  });
+
+  it("a changed email revokes the contact's links (pending included); an unchanged one does not", async () => {
+    fakeDb([(sql) => (sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK") ? [{ ExpiresAt: FUTURE, LinkId: 5 }, { ExpiresAt: FUTURE, LinkId: 6 }] : undefined), (sql) => (sql.includes("SET RevokedAt") ? [{ LinkId: 5 }] : undefined)]);
+    expect(await revokeOnEmailChange(conn, { actor: ACTOR, after: "new@acme.test", before: "pat@acme.test", contactId: 11 })).toEqual([5, 6]);
+    expect(sqlCalls().filter((c) => c.sql.includes("SET RevokedAt") && c.params.some((p) => p.value === "email_changed"))).toHaveLength(2);
+    fakeDb([]);
+    db.executeQuery.mockClear();
+    expect(await revokeOnEmailChange(conn, { actor: ACTOR, after: "PAT@acme.test ", before: "pat@acme.test", contactId: 11 })).toEqual([]);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 });
