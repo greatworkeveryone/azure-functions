@@ -38,8 +38,8 @@ const context = new InvocationContext();
 
 const TOKEN_A = newToken();
 const TOKEN_B = newToken();
-const A = { buildingId: 5, contactId: 11, tenantId: 1 };
-const B = { buildingId: 6, contactId: 22, tenantId: 2 };
+const A = { buildingId: 5, contactId: 11, purpose: "requests", tenantId: 1 };
+const B = { buildingId: 6, contactId: 22, purpose: "requests", tenantId: 2 };
 
 let flagOn = true;
 const call = (sql: string) => db.executeQuery.mock.calls.map((c) => ({ params: (c[2] ?? []) as { name: string; value: unknown }[], sql: String(c[1]) })).filter((c) => c.sql.includes(sql));
@@ -61,6 +61,7 @@ let whoRow: Record<string, unknown> | null = WHO;
 let ownedRows: unknown[] = [{ WorkRequestID: -7 }];
 let photoCount = 0;
 let emergencyRows: unknown[] = [{ EmergencyPhone: "1800 555 000" }];
+let companyRows: unknown[] = [];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -71,10 +72,12 @@ beforeEach(() => {
   ownedRows = [{ WorkRequestID: -7 }];
   photoCount = 0;
   emergencyRows = [{ EmergencyPhone: "1800 555 000" }];
+  companyRows = [];
   resolver.resolveTenantLink.mockImplementation(async (token: string) => (token === TOKEN_A ? A : token === TOKEN_B ? B : null));
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (sql.includes("FROM dbo.FeatureFlags")) return flagOn ? [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }] : [];
     if (sql.includes("SELECT EmergencyPhone FROM dbo.Buildings")) return emergencyRows;
+    if (sql.includes("FROM dbo.OrgSettings")) return companyRows;
     if (sql.includes("JOIN dbo.TenancyContacts c")) return whoRow ? [whoRow] : [];
     if (sql.includes("COL_LENGTH")) return [{ Len: null }];
     if (sql.includes("INSERT INTO WorkRequests")) return [{ WorkRequestID: -7 }];
@@ -373,14 +376,31 @@ describe("hardening (review S2/S3)", () => {
     expect(resolver.resolveTenantLink).not.toHaveBeenCalled();
   });
 
-  it("answers 503 page_unavailable when the building has no emergency number (fail closed)", async () => {
-    const saved = process.env.TENANT_EMERGENCY_PHONE;
-    delete process.env.TENANT_EMERGENCY_PHONE;
+  it("answers 503 page_unavailable when there is no after-hours number, building or company (fail closed)", async () => {
+    process.env.TENANT_EMERGENCY_PHONE = "08 8941 1234"; // the old fallback is gone: it must not rescue the page
     emergencyRows = [{ EmergencyPhone: null }];
     const r = await tenantContext(req({ ip: "198.51.100.41" }), context);
-    if (saved !== undefined) process.env.TENANT_EMERGENCY_PHONE = saved;
+    delete process.env.TENANT_EMERGENCY_PHONE;
     expect(r.status).toBe(503);
     expect(bodyOf(r)).toContain("page_unavailable");
+  });
+
+  it("falls back to the company after-hours number, and a building override wins over it", async () => {
+    emergencyRows = [{ EmergencyPhone: null }];
+    companyRows = [{ SettingValue: "08 8941 1234" }];
+    const company = await tenantContext(req({ ip: "198.51.100.42" }), context);
+    expect(company.status).toBe(200);
+    expect(company.jsonBody).toMatchObject({ afterHoursPhone: "08 8941 1234" });
+    emergencyRows = [{ EmergencyPhone: "0412 345 678" }];
+    const own = await tenantContext(req({ ip: "198.51.100.43" }), context);
+    expect(own.jsonBody).toMatchObject({ afterHoursPhone: "0412 345 678" });
+  });
+
+  it("refuses a link whose purpose does not open the section (403), without counting a failed attempt", async () => {
+    resolver.resolveTenantLink.mockResolvedValueOnce({ ...A, purpose: "costs" });
+    const r = await tenantListRequests(req({ ip: "198.51.100.44" }), context);
+    expect(r.status).toBe(403);
+    expect(bodyOf(r)).toContain("link_purpose");
   });
 
   it("returns the original request for a retry with the same key, and creates nothing", async () => {

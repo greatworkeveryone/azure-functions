@@ -22,7 +22,7 @@ export async function readSmallJson(request: HttpRequest): Promise<Record<string
 }
 
 export async function tenantSubmitRequest(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runTenant(request, context, "tenantSubmitRequest", { perLink: { limit: 8, windowMs: 10 * 60_000 }, recordUse: false }, async ({ connection, identity }) => {
+  return runTenant(request, context, "tenantSubmitRequest", { perLink: { limit: 8, windowMs: 10 * 60_000 }, recordUse: false, section: "requests" }, async ({ connection, identity }) => {
     const body = await readSmallJson(request);
     if (body === "too_large") return tenantJson(413, { error: "That is too much text" });
     if (body === null) return tenantJson(400, { error: "Request body must be a JSON object" });

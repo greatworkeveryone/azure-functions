@@ -4,12 +4,13 @@ import type { Connection } from "tedious";
 import { inTransaction, txFail, txOk } from "../assetRegisterSupport";
 import { record } from "../ledger";
 import type { LedgerActor } from "../ledger/types";
+import { mayIssuePurpose } from "./purposes";
 import { liveLinkIds, liveLinksOfTenancy, readContact, readTenancy, revokeLink, setEmailOnlyFlag, versionBuffer } from "./store";
 
 export type Outcome = { ok: true; revoked: number } | { error: string; ok: false; status: number };
 const refuse = (status: number, error: string): { error: string; ok: false; status: number } => ({ error, ok: false, status });
 
-export async function revokeContactLink(connection: Connection, input: { actor: LedgerActor; contactId: number; tenantId: number }): Promise<Outcome> {
+export async function revokeContactLink(connection: Connection, input: { actor: LedgerActor; contactId: number; roles: readonly string[]; tenantId: number }): Promise<Outcome> {
   const out = await inTransaction<number>(connection, async () => {
     const tenancy = await readTenancy(connection, input.tenantId);
     if (!tenancy) return txFail({ jsonBody: { error: "Tenancy not found" }, status: 404 });
@@ -17,11 +18,13 @@ export async function revokeContactLink(connection: Connection, input: { actor: 
     if (!contact) return txFail({ jsonBody: { error: "Contact not found" }, status: 404 });
     const live = await liveLinkIds(connection, input.contactId, 0, true);
     if (live.length === 0) return txFail({ jsonBody: { error: "This contact has no link to revoke" }, status: 409 });
+    // Revoking is gated by the purpose of each link, the same as issuing it.
+    if (live.some((l) => !mayIssuePurpose(l.purpose, input.roles))) return txFail({ jsonBody: { error: "You can't revoke a link of this kind" }, status: 403 });
     for (const link of live) await revokeLink(connection, link.linkId, input.actor.name, "revoked");
     await record(connection, {
       action: "tenancy.link_revoke",
       actor: input.actor,
-      after: { contactId: input.contactId, linkIds: live.map((l) => l.linkId) },
+      after: { contactId: input.contactId, linkIds: live.map((l) => l.linkId), purposes: [...new Set(live.map((l) => l.purpose))] },
       buildingId: tenancy.buildingId,
       subject: { id: input.tenantId, type: "tenancy" },
       tenantId: input.tenantId,

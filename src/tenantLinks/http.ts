@@ -15,6 +15,8 @@ export interface StaffContext {
   actor: LedgerActor;
   body: Record<string, unknown>;
   connection: Connection;
+  /** The caller's Floorplan roles, for per-purpose checks. */
+  roles: string[];
 }
 
 const notAvailable = (): HttpResponseInit => ({ jsonBody: { error: "Not available" }, status: 404 });
@@ -30,7 +32,8 @@ export async function runStaff(
   token: string,
   write: boolean,
   work: (ctx: StaffContext) => Promise<HttpResponseInit>,
-  flag: string = TENANT_LINKS_FLAG,
+  /** The rollout flag that must be on for the caller; null for settings that are not rolled out behind a flag. */
+  flag: string | null = TENANT_LINKS_FLAG,
 ): Promise<HttpResponseInit> {
   let body: Record<string, unknown> = {};
   if (write) {
@@ -42,10 +45,10 @@ export async function runStaff(
   try {
     connection = await createRequestConnection(token);
     const callerRoles = await rolesForRequest(request);
-    if (!(await isFeatureEnabledForRoles(flag, callerRoles, { connection }))) return notAvailable();
+    if (flag !== null && !(await isFeatureEnabledForRoles(flag, callerRoles, { connection }))) return notAvailable();
     const actor = await resolveLedgerActor(request, connection);
     if (!actor) return unauthorizedResponse();
-    return await work({ actor, body, connection });
+    return await work({ actor, body, connection, roles: callerRoles });
   } catch (error) {
     context.error(`${name} failed:`, errorMessage(error));
     return errorResponse("Could not complete that request", error);

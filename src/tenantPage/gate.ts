@@ -11,7 +11,8 @@
 //      unreadable or missing all answer the same 404 as a bad link
 //   6. resolveTenantLink: null for every kind of unusable link (unknown, revoked, expired, archived,
 //      email-only) answers one identical 404, and counts as a failed attempt
-//   7. a building with no emergency phone number answers 503 page_unavailable (fail closed)
+//   6b. a link whose purpose does not open this section answers 403 link_purpose
+//   7. a building with no after-hours number (its own, else the company's) answers 503 page_unavailable (fail closed)
 //   8. the work, which receives ONLY the resolved identity; no client value can widen it
 //
 // A failure in the work is a generic 500: no SQL text, no token, no identity in the reply or the log.
@@ -26,7 +27,8 @@ import { resolveTenantLink } from "../tenantLinks/resolve";
 import { isTokenShaped } from "../tenantLinks/token";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { TENANT_PAGE_FLAG } from "./constants";
-import { emergencyPhoneFor } from "./emergency";
+import { afterHoursFor } from "../orgSettings/afterHours";
+import { purposeOpens, type PageSection } from "../tenantLinks/purposes";
 import { hit, isFull } from "./limiter";
 
 export const TENANT_LINK_HEADER = "x-tenant-link";
@@ -52,6 +54,8 @@ export interface TenantOptions {
   perLink: { limit: number; windowMs: number };
   /** Count a link use on the ledger (the page opening). Other calls only check the link. */
   recordUse: boolean;
+  /** The part of the page this endpoint serves: the link's purpose must open it (tenantLinks/purposes.ts). */
+  section: PageSection;
 }
 
 export const linkNotValid = (): HttpResponseInit => ({ headers: NO_STORE, jsonBody: { error: "link_not_valid" }, status: 404 });
@@ -110,8 +114,11 @@ export async function runTenant(
     if (!(await isTenantPageOn(connection))) return linkNotValid();
     const identity = await resolveTenantLink(token, { connection, recordUse: options.recordUse });
     if (!identity) return failed();
-    // Fail closed: no emergency number for this building means no page (only a real link holder sees this).
-    if ((await emergencyPhoneFor(connection, identity.buildingId)) === null) return unavailable();
+    // A working link only opens what its purpose is for.
+    if (!purposeOpens(identity.purpose, options.section)) return tenantJson(403, { error: "link_purpose" });
+    // Fail closed: no after-hours number for this building (its own, else the company's) means no page
+    // (only a real link holder sees this).
+    if ((await afterHoursFor(connection, identity.buildingId)) === null) return unavailable();
     return await work({ connection, context, identity, request });
   } catch (error) {
     context.error(`${name} failed: ${error instanceof Error ? error.name : "error"}`);

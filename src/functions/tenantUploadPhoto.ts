@@ -10,7 +10,7 @@ import { runTenant, tenantJson } from "../tenantPage/gate";
 import { parseRequestId, storePhoto } from "../tenantPage/photos";
 
 export async function tenantUploadPhoto(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runTenant(request, context, "tenantUploadPhoto", { perLink: { limit: 20, windowMs: 10 * 60_000 }, recordUse: false }, async ({ connection, identity }) => {
+  return runTenant(request, context, "tenantUploadPhoto", { perLink: { limit: 20, windowMs: 10 * 60_000 }, recordUse: false, section: "requests" }, async ({ connection, identity }) => {
     const requestId = parseRequestId(request.headers.get("x-tenant-request"));
     if (requestId === null) return tenantJson(400, { error: "Missing request reference" });
     const bytes = await readCappedBody(request, LIMITS.photoBytes);

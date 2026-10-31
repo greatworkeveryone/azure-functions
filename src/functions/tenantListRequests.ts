@@ -7,7 +7,7 @@ import { runTenant, tenantJson } from "../tenantPage/gate";
 import { listTenantRequests } from "../tenantPage/list";
 
 export async function tenantListRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runTenant(request, context, "tenantListRequests", { perLink: { limit: 30, windowMs: 60_000 }, recordUse: false }, async ({ connection, identity }) =>
+  return runTenant(request, context, "tenantListRequests", { perLink: { limit: 30, windowMs: 60_000 }, recordUse: false, section: "requests" }, async ({ connection, identity }) =>
     tenantJson(200, { requests: await listTenantRequests(connection, identity.tenantId) }),
   );
 }
