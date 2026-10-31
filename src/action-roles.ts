@@ -35,7 +35,8 @@ import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROL
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
 import { EDIT_RESPONSIBILITIES_ROLES, VIEW_RESPONSIBILITIES_ROLES } from "./tenancyResponsibilities/roles";
-import { MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
+import { EDIT_AFTER_HOURS_ROLES } from "./orgSettings/afterHours";
+import { ISSUE_TENANT_LINKS_ROLES, MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
 import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
 export interface ActionRoles {
@@ -318,8 +319,18 @@ export const ACTION_ROLES = {
   },
   manageTenantLinks: {
     gate: MANAGE_TENANT_LINKS_ROLES,
-    routes: ["saveTenancyContact", "archiveTenancyContact", "setTenancyEmailOnly", "issueTenantLink", "revokeTenantLink"],
-    why: "Add, edit and archive a tenancy's contacts, mark it email only, and issue, reissue and revoke personal links (TR2).",
+    routes: ["saveTenancyContact", "archiveTenancyContact", "setTenancyEmailOnly"],
+    why: "Add, edit and archive a tenancy's contacts and mark it email only (TR2).",
+  },
+  issueTenantLinks: {
+    gate: ISSUE_TENANT_LINKS_ROLES,
+    routes: ["issueTenantLink", "revokeTenantLink"],
+    why: "Issue, reissue and revoke personal links. Anyone on staff can; what the link is for decides the exact roles (tenantLinks/purposes.ts), so a later purpose can narrow it.",
+  },
+  editAfterHours: {
+    gate: EDIT_AFTER_HOURS_ROLES,
+    routes: ["getAfterHours", "saveAfterHours"],
+    why: "Read and edit the after-hours phone number tenants are told to ring, company-wide and per building. Facilities manager (the role that approves work), director and admin.",
   },
   manageManualBuildings: {
     gate: [A.ADMIN],

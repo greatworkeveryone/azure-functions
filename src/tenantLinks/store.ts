@@ -2,6 +2,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam, type SqlRow } from "../db";
+import { DEFAULT_PURPOSE, isLinkPurpose, type LinkPurpose } from "./purposes";
 import type { ContactApi, LinkApi, LinkStatus, TenancyState } from "./types";
 
 const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
@@ -22,7 +23,7 @@ export function linkStatus(row: { ExpiresAt?: unknown; RevokedAt?: unknown } | n
 
 const CONTACTS_SQL = `SELECT c.ContactId, c.TenantId, c.Name, c.Email, c.Phone, c.ReportsIssues, c.AuthorisedForCosts, c.IsEscalation,
        c.ArchivedAt, c.ArchivedBy, c.RowVersion,
-       l.LinkId, l.IssuedAt, l.ExpiresAt, l.RevokedAt, l.RevokeReason, l.LastUsedAt, l.UseCount
+       l.LinkId, l.IssuedAt, l.ExpiresAt, l.RevokedAt, l.RevokeReason, l.LastUsedAt, l.UseCount, l.Purpose
   FROM dbo.TenancyContacts c
   OUTER APPLY (SELECT TOP (1) x.* FROM dbo.TenantLinks x WHERE x.ContactId = c.ContactId AND x.ActivatedAt IS NOT NULL ORDER BY x.LinkId DESC) l
  WHERE c.TenantId = @TenantId
@@ -38,6 +39,7 @@ export function contactFromRow(row: SqlRow, now: Date): ContactApi {
           issuedAt: iso(row.IssuedAt) ?? "",
           lastUsedAt: iso(row.LastUsedAt),
           linkId: Number(row.LinkId),
+          purpose: isLinkPurpose(row.Purpose) ? row.Purpose : DEFAULT_PURPOSE,
           revokeReason: row.RevokeReason == null ? null : String(row.RevokeReason),
           revokedAt: iso(row.RevokedAt),
           status,
@@ -178,12 +180,12 @@ export async function setEmailOnlyFlag(connection: Connection, tenantId: number,
 // ── Links ────────────────────────────────────────────────────────────────────
 
 /** A new link, not yet usable: it works only once the email carrying it has been accepted (activateLink). */
-export async function insertPendingLink(connection: Connection, c: { contactId: number; expiresAt: Date; hash: Buffer; issuedBy: string; tenantId: number }): Promise<number> {
+export async function insertPendingLink(connection: Connection, c: { contactId: number; expiresAt: Date; hash: Buffer; issuedBy: string; purpose: LinkPurpose; tenantId: number }): Promise<number> {
   const [row] = await executeQuery(
     connection,
-    `INSERT INTO dbo.TenantLinks (ContactId, TenantId, TokenHash, ExpiresAt, IssuedBy) OUTPUT INSERTED.LinkId
-     VALUES (@ContactId, @TenantId, @Hash, @ExpiresAt, @By)`,
-    [p("ContactId", TYPES.Int, c.contactId), p("TenantId", TYPES.Int, c.tenantId), p("Hash", TYPES.Binary, c.hash), p("ExpiresAt", TYPES.DateTime2, c.expiresAt), p("By", TYPES.NVarChar, c.issuedBy)],
+    `INSERT INTO dbo.TenantLinks (ContactId, TenantId, TokenHash, ExpiresAt, IssuedBy, Purpose) OUTPUT INSERTED.LinkId
+     VALUES (@ContactId, @TenantId, @Hash, @ExpiresAt, @By, @Purpose)`,
+    [p("Purpose", TYPES.NVarChar, c.purpose), p("ContactId", TYPES.Int, c.contactId), p("TenantId", TYPES.Int, c.tenantId), p("Hash", TYPES.Binary, c.hash), p("ExpiresAt", TYPES.DateTime2, c.expiresAt), p("By", TYPES.NVarChar, c.issuedBy)],
   );
   return Number(row?.LinkId);
 }
@@ -193,14 +195,15 @@ export async function insertPendingLink(connection: Connection, c: { contactId: 
  * email is still being sent are included too: a revoke must catch them, or an issue in flight would switch
  * its link on after the revoke (activateLink skips a revoked link).
  */
-export async function liveLinkIds(connection: Connection, contactId: number, except = 0, includePending = false): Promise<{ expiresAt: Date; linkId: number }[]> {
+export async function liveLinkIds(connection: Connection, contactId: number, except = 0, includePending = false, purpose: LinkPurpose | null = null): Promise<{ expiresAt: Date; linkId: number; purpose: LinkPurpose }[]> {
   const rows = await executeQuery(
     connection,
-    `SELECT LinkId, ExpiresAt FROM dbo.TenantLinks WITH (UPDLOCK, HOLDLOCK)
-      WHERE ContactId = @ContactId AND (ActivatedAt IS NOT NULL OR @Pending = 1) AND RevokedAt IS NULL AND LinkId <> @Except`,
-    [p("ContactId", TYPES.Int, contactId), p("Except", TYPES.Int, except), p("Pending", TYPES.Bit, includePending)],
+    `SELECT LinkId, ExpiresAt, Purpose FROM dbo.TenantLinks WITH (UPDLOCK, HOLDLOCK)
+      WHERE ContactId = @ContactId AND (ActivatedAt IS NOT NULL OR @Pending = 1) AND RevokedAt IS NULL AND LinkId <> @Except
+        AND (@Purpose IS NULL OR Purpose = @Purpose)`,
+    [p("ContactId", TYPES.Int, contactId), p("Except", TYPES.Int, except), p("Pending", TYPES.Bit, includePending), p("Purpose", TYPES.NVarChar, purpose)],
   );
-  return rows.map((r) => ({ expiresAt: r.ExpiresAt as Date, linkId: Number(r.LinkId) }));
+  return rows.map((r) => ({ expiresAt: r.ExpiresAt as Date, linkId: Number(r.LinkId), purpose: isLinkPurpose(r.Purpose) ? r.Purpose : DEFAULT_PURPOSE }));
 }
 
 export async function activateLink(connection: Connection, linkId: number): Promise<void> {

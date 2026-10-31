@@ -4,6 +4,8 @@
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../db";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
+import { afterHoursFor } from "../orgSettings/afterHours";
+import { contactMayAct } from "../tenantLinks/purposes";
 import { LIMITS, REQUEST_CATEGORIES, URGENCIES } from "./constants";
 
 export interface TenantContextApi {
@@ -12,17 +14,12 @@ export interface TenantContextApi {
   categories: { key: string; label: string }[];
   companyName: string;
   contactName: string;
-  /** From Buildings.EmergencyPhone, else TENANT_EMERGENCY_PHONE; null when neither is set. */
-  emergencyPhone: string | null;
+  /** The building's own after-hours line, else the company's (Admin setting); null only if neither exists. */
+  afterHoursPhone: string | null;
   limits: { maxPhotos: number; photoBytes: number };
   suite: string;
   urgencies: readonly string[];
 }
-
-const PHONE_SHAPE = /^[0-9+()\-\s]{6,30}$/;
-
-export const cleanPhone = (value: unknown): string | null =>
-  typeof value === "string" && PHONE_SHAPE.test(value.trim()) ? value.trim() : null;
 
 function levelsText(levels: unknown): string {
   if (typeof levels !== "string" || levels.trim() === "") return "";
@@ -38,7 +35,7 @@ function levelsText(levels: unknown): string {
 export async function readTenantContext(connection: Connection, identity: TenantLinkIdentity): Promise<TenantContextApi | null> {
   const [row] = await executeQuery(
     connection,
-    `SELECT t.TenantName, t.Levels, b.BuildingName, b.EmergencyPhone, c.Name AS ContactName, c.ReportsIssues
+    `SELECT t.TenantName, t.Levels, b.BuildingName, c.Name AS ContactName, c.ReportsIssues
        FROM dbo.Tenants t
        JOIN dbo.TenancyContacts c ON c.ContactId = @ContactId AND c.TenantId = t.TenantId
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingID
@@ -51,12 +48,12 @@ export async function readTenantContext(connection: Connection, identity: Tenant
   );
   if (!row) return null;
   return {
+    afterHoursPhone: await afterHoursFor(connection, identity.buildingId),
     buildingName: String(row.BuildingName ?? ""),
-    canReport: row.ReportsIssues === true,
+    canReport: contactMayAct(identity.purpose, { reportsIssues: row.ReportsIssues === true }),
     categories: REQUEST_CATEGORIES.map((c) => ({ key: c.key, label: c.label })),
     companyName: String(row.TenantName ?? ""),
     contactName: String(row.ContactName ?? ""),
-    emergencyPhone: cleanPhone(row.EmergencyPhone) ?? cleanPhone(process.env.TENANT_EMERGENCY_PHONE),
     limits: { maxPhotos: LIMITS.maxPhotosPerRequest, photoBytes: LIMITS.photoBytes },
     suite: levelsText(row.Levels),
     urgencies: URGENCIES,

@@ -1,3 +1,5 @@
+import type { LinkPurpose } from "./purposes";
+
 export type LinkStatus = "active" | "expired" | "none" | "revoked";
 
 export interface LinkApi {
@@ -5,6 +7,7 @@ export interface LinkApi {
   issuedAt: string;
   lastUsedAt: string | null;
   linkId: number;
+  purpose: LinkPurpose;
   revokeReason: string | null;
   revokedAt: string | null;
   status: LinkStatus;
@@ -49,5 +52,7 @@ export interface TenancyState {
 export interface TenantLinkIdentity {
   buildingId: number;
   contactId: number;
+  /** What the link is for: the tenant page opens only the sections this purpose allows. */
+  purpose: LinkPurpose;
   tenantId: number;
 }

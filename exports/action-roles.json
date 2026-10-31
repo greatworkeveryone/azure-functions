@@ -206,6 +206,11 @@
     "cfo",
     "director"
   ],
+  "editAfterHours": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "editAnyRentReview": [
     "accounts_manager",
     "admin",
@@ -285,6 +290,15 @@
     "director"
   ],
   "fileEmailCertificate": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager"
+  ],
+  "issueTenantLinks": [
     "accounts",
     "accounts_manager",
     "admin",

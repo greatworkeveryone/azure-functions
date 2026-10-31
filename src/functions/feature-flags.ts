@@ -9,7 +9,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { ACTION_ROLES } from "../action-roles";
-import { emergencyPhoneProblem } from "../tenantPage/emergency";
+import { afterHoursProblem } from "../orgSettings/afterHours";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import {
   AppRole,
@@ -112,7 +112,7 @@ export async function upsertFeatureFlag(
 
     connection = await createRequestConnection(token);
     if (featureKey === "tenantPage" && visibility === "enabled") {
-      const problem = await emergencyPhoneProblem(connection);
+      const problem = await afterHoursProblem(connection);
       if (problem) return { status: 409, jsonBody: { error: problem } };
     }
     await executeQuery(

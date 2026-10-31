@@ -81,7 +81,7 @@ describe("resolveTenantLink", () => {
   const token = newToken();
   const good = (over: Record<string, unknown> = {}) => ({
     ActivatedAt: new Date("2026-10-30"), BuildingId: 5, ContactArchivedAt: null, ContactId: 11, EmailOnly: false, ExpiresAt: FUTURE,
-    LinkId: 3, RevokedAt: null, TenancyArchivedAt: null, TenantId: 9, TokenHash: hashToken(token), ...over,
+    LinkId: 3, Purpose: "requests", RevokedAt: null, TenancyArchivedAt: null, TenantId: 9, TokenHash: hashToken(token), ...over,
   });
   const world = (row: Record<string, unknown> | null): Handler[] => [
     (sql) => (sql.includes("FROM dbo.TenantLinks l") ? (row ? [row] : []) : undefined),
@@ -90,10 +90,10 @@ describe("resolveTenantLink", () => {
 
   it("returns the tenancy, contact and building, counts the use and ledgers it", async () => {
     fakeDb(world(good()));
-    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toEqual({ buildingId: 5, contactId: 11, tenantId: 9 });
+    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toEqual({ buildingId: 5, contactId: 11, purpose: "requests", tenantId: 9 });
     const [entry] = ledgerInserts(db.executeQuery);
     expect(entry).toMatchObject({ action: "tenancy.link_use", actorKind: "system", subjectId: "9", subjectType: "tenancy" });
-    expect(entry.after).toEqual({ contactId: 11, linkId: 3, useCount: 4 });
+    expect(entry.after).toEqual({ contactId: 11, linkId: 3, purpose: "requests", useCount: 4 });
   });
 
   it("looks the token up by its hash only: the token itself is never sent to the database", async () => {
@@ -128,7 +128,7 @@ describe("resolveTenantLink", () => {
 
   it("counts a use at most once per ten minutes per link, but still resolves every call", async () => {
     fakeDb(world(good({ LastUsedAt: new Date(NOW.getTime() - 5 * 60_000) })));
-    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toEqual({ buildingId: 5, contactId: 11, tenantId: 9 });
+    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toEqual({ buildingId: 5, contactId: 11, purpose: "requests", tenantId: 9 });
     expect(ledgerInserts(db.executeQuery)).toEqual([]);
     expect(sqlCalls().some((c) => c.sql.includes("UPDATE dbo.TenantLinks SET LastUsedAt"))).toBe(false);
     fakeDb(world(good({ LastUsedAt: new Date(NOW.getTime() - 11 * 60_000) })));
@@ -153,7 +153,7 @@ describe("issueLink", () => {
     (sql) => (sql.includes("SELECT IsTest") ? [{ Archived: 0, IsTest: false, Matches: 1 }] : undefined),
     (sql) => (sql.includes("INSERT INTO dbo.TenantLinks") ? [{ LinkId: 42 }] : undefined),
   ];
-  const input = { actor: ACTOR, contactId: 11, months: 12, reissue: false, tenantId: 9 } as const;
+  const input = { actor: ACTOR, contactId: 11, months: 12, purpose: "requests", reissue: false, tenantId: 9 } as const;
   const okSender = () => {
     const sent: string[] = [];
     const sender: MailSender = {
@@ -188,6 +188,8 @@ describe("issueLink", () => {
     expect(sqlCalls().some((c) => c.sql.includes("SET ActivatedAt"))).toBe(true);
     const [entry] = ledgerInserts(db.executeQuery);
     expect(entry).toMatchObject({ action: "tenancy.link_issue", subjectId: "9" });
+    expect(entry.after).toMatchObject({ purpose: "requests", purposeLabel: "Report and track maintenance requests" });
+    expect(insert?.params.find((p) => p.name === "Purpose")?.value).toBe("requests");
     expect(JSON.stringify(entry.after)).not.toContain(token as string);
     expect(JSON.stringify(entry.after)).not.toContain("pat@acme.test");
   });
@@ -259,6 +261,14 @@ describe("a stale write is a 409", () => {
   });
 });
 
+describe("purpose on resolve", () => {
+  it("a link of a purpose this build does not know resolves to nothing", async () => {
+    const token = newToken();
+    fakeDb([(sql) => (sql.includes("FROM dbo.TenantLinks l") ? [{ ActivatedAt: new Date("2026-10-30"), BuildingId: 5, ContactArchivedAt: null, ContactId: 11, EmailOnly: false, ExpiresAt: FUTURE, LinkId: 3, Purpose: "costs", RevokedAt: null, TenancyArchivedAt: null, TenantId: 9, TokenHash: hashToken(token) }] : undefined)]);
+    await expect(resolveTenantLink(token, { connection: conn, now: NOW })).resolves.toBeNull();
+  });
+});
+
 describe("revoke catches links still being sent", () => {
   it("a contact's revoke includes pending links, so an issue in flight cannot switch its link on afterwards", async () => {
     fakeDb([
@@ -267,7 +277,7 @@ describe("revoke catches links still being sent", () => {
       (sql) => (sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK") ? [{ ExpiresAt: FUTURE, LinkId: 77 }] : undefined),
       (sql) => (sql.includes("SET RevokedAt") ? [{ LinkId: 77 }] : undefined),
     ]);
-    const r = await revokeContactLink(conn, { actor: ACTOR, contactId: 11, tenantId: 9 });
+    const r = await revokeContactLink(conn, { actor: ACTOR, contactId: 11, roles: ["facilities"], tenantId: 9 });
     expect(r).toEqual({ ok: true, revoked: 1 });
     const q = sqlCalls().find((c) => c.sql.includes("FROM dbo.TenantLinks WITH (UPDLOCK"));
     expect(q?.params.find((p) => p.name === "Pending")?.value).toBe(true);

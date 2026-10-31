@@ -1,6 +1,6 @@
 // The one door from a personal link to a tenancy (TR2, for TR3's anonymous endpoints).
 //
-//   resolveTenantLink(token) → { contactId, tenantId, buildingId } | null
+//   resolveTenantLink(token) → { contactId, tenantId, buildingId, purpose } | null
 //
 // null for anything that is not a working link, without saying which: an unknown token, a link
 // that was never delivered, revoked, expired, a contact who is archived, an email-only tenancy,
@@ -14,6 +14,7 @@
 import { TYPES, type Connection } from "tedious";
 import { beginTransaction, closeConnection, commitTransaction, createServiceRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { record } from "../ledger";
+import { isLinkPurpose } from "./purposes";
 import { hashesEqual, hashToken, isTokenShaped } from "./token";
 import type { TenantLinkIdentity } from "./types";
 
@@ -26,7 +27,7 @@ export interface ResolveOptions {
 }
 
 const LOOKUP_SQL = `SELECT l.LinkId, l.ContactId, l.TenantId, l.TokenHash, l.ExpiresAt, l.ActivatedAt, l.RevokedAt, l.LastUsedAt,
-       c.ArchivedAt AS ContactArchivedAt, t.BuildingId, t.EmailOnly, t.ArchivedAt AS TenancyArchivedAt
+       l.Purpose, c.ArchivedAt AS ContactArchivedAt, t.BuildingId, t.EmailOnly, t.ArchivedAt AS TenancyArchivedAt
   FROM dbo.TenantLinks l
   JOIN dbo.TenancyContacts c ON c.ContactId = l.ContactId AND c.TenantId = l.TenantId
   JOIN dbo.Tenants t ON t.TenantId = l.TenantId
@@ -61,7 +62,8 @@ async function resolveOn(connection: Connection, token: string, now: Date, recor
   if (!(row.ActivatedAt instanceof Date) || row.RevokedAt != null) return null;
   if (!(row.ExpiresAt instanceof Date) || row.ExpiresAt.getTime() <= now.getTime()) return null;
   if (row.ContactArchivedAt != null || row.TenancyArchivedAt != null || row.EmailOnly === true || row.BuildingId == null) return null;
-  const identity: TenantLinkIdentity = { buildingId: Number(row.BuildingId), contactId: Number(row.ContactId), tenantId: Number(row.TenantId) };
+  if (!isLinkPurpose(row.Purpose)) return null; // a purpose this build does not know opens nothing
+  const identity: TenantLinkIdentity = { buildingId: Number(row.BuildingId), contactId: Number(row.ContactId), purpose: row.Purpose, tenantId: Number(row.TenantId) };
   if (!recordUse) return identity;
   if (row.LastUsedAt instanceof Date && now.getTime() - row.LastUsedAt.getTime() < USE_RECORD_WINDOW_MS && now.getTime() >= row.LastUsedAt.getTime()) return identity;
 
@@ -75,7 +77,7 @@ async function resolveOn(connection: Connection, token: string, now: Date, recor
     await record(connection, {
       action: "tenancy.link_use",
       actor: { kind: "system", name: "tenantLinks.resolve" },
-      after: { contactId: identity.contactId, linkId: Number(row.LinkId), useCount: Number(used.UseCount) },
+      after: { contactId: identity.contactId, linkId: Number(row.LinkId), purpose: identity.purpose, useCount: Number(used.UseCount) },
       buildingId: identity.buildingId,
       subject: { id: identity.tenantId, type: "tenancy" },
       tenantId: identity.tenantId,

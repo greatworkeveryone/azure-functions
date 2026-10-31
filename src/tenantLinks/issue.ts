@@ -24,6 +24,7 @@ import type { LedgerActor } from "../ledger/types";
 import { assertMayLeave, TestDataEgressError } from "../test-data";
 import type { Connection } from "tedious";
 import { contactSnapshot } from "./contacts";
+import { PURPOSE_POLICY, type LinkPurpose } from "./purposes";
 import { activateLink, insertPendingLink, liveLinkIds, readContact, readTenancy, revokeLink } from "./store";
 import { LINK_SUBJECT, LINK_TEMPLATE_ID, LINK_TEMPLATE_VERSION, linkBody } from "./template";
 import { addMonths, hashToken, linkUrl, newToken } from "./token";
@@ -32,6 +33,8 @@ export interface IssueInput {
   actor: LedgerActor;
   contactId: number;
   months: number;
+  /** What the link is for. The caller has already checked the actor may issue this purpose. */
+  purpose: LinkPurpose;
   reissue: boolean;
   tenantId: number;
 }
@@ -90,7 +93,7 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
     if (!contact) return txFail({ jsonBody: { error: "Contact not found" }, status: 404 });
     if (contact.archivedAt !== null) return txFail({ jsonBody: { error: "This contact is archived" }, status: 409 });
     if (contact.email === null) return txFail({ jsonBody: { error: "This contact has no email address to send a link to" }, status: 400 });
-    const live = await liveLinkIds(connection, input.contactId);
+    const live = await liveLinkIds(connection, input.contactId, 0, false, input.purpose);
     const working = live.some((l) => l.expiresAt.getTime() > now.getTime());
     if (!input.reissue && working) return txFail({ jsonBody: { error: "This contact already has a working link: reissue it to replace it" }, status: 409 });
     if (input.reissue && live.length === 0) return txFail({ jsonBody: { error: "This contact has no link to reissue: issue one" }, status: 409 });
@@ -98,7 +101,7 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
     if (!resolution.ok) return txFail({ jsonBody: { error: resolution.detail }, status: 409 });
     const token = newToken();
     const expiresAt = addMonths(now, input.months);
-    const linkId = await insertPendingLink(connection, { contactId: input.contactId, expiresAt, hash: hashToken(token), issuedBy: by, tenantId: input.tenantId });
+    const linkId = await insertPendingLink(connection, { contactId: input.contactId, expiresAt, hash: hashToken(token), issuedBy: by, purpose: input.purpose, tenantId: input.tenantId });
     return txOk({ email: contact.email, expiresAt, linkId, name: contact.name, token });
   });
   if (!stored.ok) return refuse(stored.response.status ?? 500, (stored.response.jsonBody as { error: string }).error);
@@ -162,7 +165,7 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
   await beginTransaction(connection);
   try {
     await activateLink(connection, link.linkId);
-    const replaced = await liveLinkIds(connection, input.contactId, link.linkId);
+    const replaced = await liveLinkIds(connection, input.contactId, link.linkId, false, input.purpose);
     for (const old of replaced) await revokeLink(connection, old.linkId, by, "reissued");
     const tenancy = await readTenancy(connection, input.tenantId);
     const contact = await readContact(connection, input.tenantId, input.contactId);
@@ -173,6 +176,8 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
         contact: contact ? contactSnapshot(contact) : { contactId: input.contactId },
         expiresAt: link.expiresAt.toISOString(),
         linkId: link.linkId,
+        purpose: input.purpose,
+        purposeLabel: PURPOSE_POLICY[input.purpose].label,
         replacedLinkIds: replaced.map((r) => r.linkId),
         template: `${LINK_TEMPLATE_ID} v${LINK_TEMPLATE_VERSION}`,
       },
