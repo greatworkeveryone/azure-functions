@@ -18,7 +18,7 @@ const DAY_MS = 86_400_000;
 
 export const DARWIN_OFFSET_MS = 9.5 * HOUR_MS;
 export const BUSINESS_DAY_START_MINUTES = 8 * 60 + 30;
-export const BUSINESS_DAY_END_MINUTES = 16 * 60 + 30;
+const BUSINESS_DAY_END_MINUTES = 16 * 60 + 30;
 /** PLAN §3.7: policy hours count 8 to a business day. */
 export const BUSINESS_HOURS_PER_DAY = 8;
 

@@ -1,4 +1,5 @@
-// Is this really an image? (TR3) The client's Content-Type is never trusted: the first bytes decide, and
+// Is this really an image? (TR3) Stricter than upload-constants bytesMatchMediaType on purpose: that checks only
+// the first bytes of a staff upload, while this input is anonymous and is checked end to end. The client's Content-Type is never trusted: the first bytes decide, and
 // the file must be well formed from start to end, with no data after the end marker. This is a
 // structural check, NOT a re-encode: the backend has no image decoder and no new package may be added,
 // so the bytes are stored unchanged in the quarantine container (blob-storage.ts) until a decoder

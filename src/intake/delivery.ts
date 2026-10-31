@@ -4,7 +4,7 @@
 
 import type { CommsMode } from "../comms/config";
 
-export const ACK_DELIVERIES = ["none", "waiting_approval", "queued", "sent", "dry_run", "off", "failed"] as const;
+const ACK_DELIVERIES = ["none", "waiting_approval", "queued", "sent", "dry_run", "off", "failed"] as const;
 export type AckDelivery = (typeof ACK_DELIVERIES)[number];
 
 /**

@@ -9,6 +9,7 @@ import { executeQuery } from "../../db";
 import { storedState } from "../../intake/state";
 import { parseWorkRequestId } from "../../workRequestsNative";
 import { normaliseRole } from "../roles";
+import { REQUEST_SUBJECT_TYPE } from "../../intake/overdue";
 import type { EscalationAdapter } from "./registry";
 
 const SQL = `SELECT wr.WorkRequestID, wr.BuildingID, wr.BuildingName, wr.IntakeState, wr.ActualCompletionDate,
@@ -26,7 +27,7 @@ async function load(connection: Parameters<EscalationAdapter["loadSummary"]>[0],
 }
 
 export const workRequestAdapter: EscalationAdapter = {
-  subjectType: "work_request",
+  subjectType: REQUEST_SUBJECT_TYPE,
 
   deepLink: (subjectId) => `/incoming?requestId=${encodeURIComponent(subjectId)}`,
 

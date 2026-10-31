@@ -16,7 +16,7 @@ export function noticesMode(env: NodeJS.ProcessEnv = process.env): NoticeMode {
 export const NOTICE_ACTOR_OID = "system:tenant-notices";
 export const NOTICE_ACTOR_NAME = "Floorplan notices";
 
-export const NOTICE_EVENTS = ["attendance", "completed"] as const;
+const NOTICE_EVENTS = ["attendance", "completed"] as const;
 export type NoticeEvent = (typeof NOTICE_EVENTS)[number];
 
 /** The library template (slug) and the id the correspondence row records, per event. */

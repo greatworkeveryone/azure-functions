@@ -5,7 +5,6 @@ import type { Connection } from "tedious";
 import { fromName } from "../comms/config";
 import { executeQuery } from "../db";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
-import { companyAfterHours } from "../orgSettings/afterHours";
 import { contactMayAct } from "../tenantLinks/purposes";
 import { LIMITS, REQUEST_CATEGORIES, URGENCIES } from "./constants";
 import { identityParams, suiteText, WHO_SQL } from "./who";
@@ -25,11 +24,12 @@ export interface TenantContextApi {
   urgencies: readonly string[];
 }
 
-export async function readTenantContext(connection: Connection, identity: TenantLinkIdentity): Promise<TenantContextApi | null> {
+/** `afterHoursPhone` is the number the gate already read; it is not read twice. */
+export async function readTenantContext(connection: Connection, identity: TenantLinkIdentity, afterHoursPhone: string): Promise<TenantContextApi | null> {
   const [row] = await executeQuery(connection, WHO_SQL, identityParams(identity));
   if (!row) return null;
   return {
-    afterHoursPhone: await companyAfterHours(connection),
+    afterHoursPhone,
     buildingName: String(row.BuildingName ?? ""),
     canReport: contactMayAct(identity.purpose, { reportsIssues: row.ReportsIssues === true }),
     categories: REQUEST_CATEGORIES.map((c) => ({ key: c.key, label: c.label })),

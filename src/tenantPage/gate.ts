@@ -12,7 +12,7 @@
 //   6. resolveTenantLink: null for every kind of unusable link (unknown, revoked, expired, archived,
 //      email-only) answers one identical 404, and counts as a failed attempt
 //   6b. a link whose purpose does not open this section answers 403 link_purpose
-//   7. a building with no after-hours number (its own, else the company's) answers 503 page_unavailable (fail closed)
+//   7. no company after-hours number answers 503 page_unavailable (fail closed)
 //   8. the work, which receives ONLY the resolved identity; no client value can widen it
 //
 // A failure in the work is a generic 500: no SQL text, no token, no identity in the reply or the log.
@@ -35,6 +35,8 @@ export const TENANT_LINK_HEADER = "x-tenant-link";
 const NO_STORE = { "Cache-Control": "no-store" };
 
 export interface TenantWork {
+  /** The company after-hours number the gate already read to fail closed; never null here. */
+  afterHoursPhone: string;
   connection: Connection;
   context: InvocationContext;
   identity: TenantLinkIdentity;
@@ -110,8 +112,9 @@ export async function runTenant(
     if (!purposeOpens(identity.purpose, options.section)) return tenantJson(403, { error: "link_purpose" });
     // Fail closed: no company after-hours number means no page
     // (only a real link holder sees this).
-    if ((await companyAfterHours(connection)) === null) return unavailable();
-    return await work({ connection, context, identity, request });
+    const afterHoursPhone = await companyAfterHours(connection);
+    if (afterHoursPhone === null) return unavailable();
+    return await work({ afterHoursPhone, connection, context, identity, request });
   } catch (error) {
     context.error(`${name} failed: ${error instanceof Error ? error.name : "error"}`);
     return tenantJson(500, { error: "Something went wrong" });

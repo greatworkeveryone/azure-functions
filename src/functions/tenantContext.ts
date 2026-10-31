@@ -9,8 +9,8 @@ import { readTenantContext } from "../tenantPage/context";
 import { linkNotValid, runTenant, tenantJson } from "../tenantPage/gate";
 
 export async function tenantContext(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runTenant(request, context, "tenantContext", { perLink: RATE.context, recordUse: true, section: "requests" }, async ({ connection, identity }) => {
-    const page = await readTenantContext(connection, identity);
+  return runTenant(request, context, "tenantContext", { perLink: RATE.context, recordUse: true, section: "requests" }, async ({ afterHoursPhone, connection, identity }) => {
+    const page = await readTenantContext(connection, identity, afterHoursPhone);
     return page ? tenantJson(200, page) : linkNotValid();
   });
 }

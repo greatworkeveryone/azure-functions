@@ -24,6 +24,8 @@ export interface AdvanceJobStatusOptions {
   purchaseOrderId?: number;
   quoteId?: number;
   invoiceId?: number;
+  /** Where a swallowed tenant-notice failure is reported (the caller's context.warn); defaults to the console. */
+  warn?: (message: string) => void;
 }
 
 export interface AdvanceJobStatusResult {
@@ -137,7 +139,7 @@ export async function advanceJobStatus(
 
   // TR4: a tenant-linked job that is now booked or complete owes its tenant a notice. Recorded in the caller's
   // transaction (so a rollback drops it), once per job and event, and never throws.
-  await enqueueTenantNotice(connection, jobId, current, target);
+  await enqueueTenantNotice(connection, jobId, current, target, opts.warn);
 
   return { advanced: true, from: current, to: target };
 }

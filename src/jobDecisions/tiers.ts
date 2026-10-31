@@ -195,7 +195,7 @@ export function parseTierRequest(raw: { autoEscalate?: unknown; fixedDate?: unkn
   return { tier };
 }
 
-const afterHours = (instant: Date, hours: number): Date => new Date(instant.getTime() + hours * HOUR_MS);
+const hoursAfter = (instant: Date, hours: number): Date => new Date(instant.getTime() + hours * HOUR_MS);
 
 /** A timed schedule: the deadline is close of business on `dueDate`, the reminders
  *  are the given instants (ascending, de-duplicated, none already past) and the
@@ -264,11 +264,11 @@ export function scheduleFor(request: TierRequest, now: Date, holidays: Holidays 
       const dueDate = nextBusinessDay(addCalendarDays(today, 1), holidays);
       const opens = businessDayStart(dueDate);
       const closes = businessDayEnd(dueDate);
-      const mark = afterHours(now, URGENT_REMIND_AFTER_HOURS);
+      const mark = hoursAfter(now, URGENT_REMIND_AFTER_HOURS);
       const remindAt = mark.getTime() >= opens.getTime() && mark.getTime() < closes.getTime() ? mark : opens;
       // Moving up is the raiser's tick, off unless they asked for it (D5): the
       // reminder goes either way.
-      const escalateAt = request.autoEscalate === true ? nextBusinessHoursInstant(afterHours(closes, URGENT_ESCALATE_GRACE_HOURS), holidays) : null;
+      const escalateAt = request.autoEscalate === true ? nextBusinessHoursInstant(hoursAfter(closes, URGENT_ESCALATE_GRACE_HOURS), holidays) : null;
       return timedSchedule(request, now, { dueDate, escalateAt, remindAt: [remindAt], urgent: true });
     }
 

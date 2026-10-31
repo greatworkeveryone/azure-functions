@@ -1,6 +1,6 @@
 import type { Connection } from "tedious";
 import { executeQuery } from "../db";
-import { chooseStatusContacts, resolveStatusContacts, resolveTenantCostApprovers, type NoticeContact } from "./recipients";
+import { chooseStatusContacts, resolveStatusContacts, type NoticeContact } from "./recipients";
 
 jest.mock("../db", () => ({ executeQuery: jest.fn() }));
 const query = jest.mocked(executeQuery);
@@ -34,15 +34,5 @@ describe("loading", () => {
     query.mockResolvedValueOnce([row(c(1, "pat@tenant.example", { reportsIssues: true }))]);
     expect((await resolveStatusContacts(conn, 9, null)).map((x) => x.contactId)).toEqual([1]);
     expect(String(query.mock.calls[0][1])).toMatch(/c\.ArchivedAt IS NULL AND t\.ArchivedAt IS NULL AND NULLIF\(LTRIM\(RTRIM\(c\.Email\)\)/);
-  });
-
-  it("resolveTenantCostApprovers returns the contacts authorised for costs, not the reporter", async () => {
-    query.mockResolvedValueOnce([row(c(1, "pat@tenant.example", { reportsIssues: true })), row(c(3, "cfo@tenant.example", { authorisedForCosts: true }))]);
-    expect((await resolveTenantCostApprovers(conn, 9)).map((x) => x.contactId)).toEqual([3]);
-  });
-
-  it("resolveTenantCostApprovers is empty when nobody is authorised", async () => {
-    query.mockResolvedValueOnce([row(c(1, "pat@tenant.example", { reportsIssues: true }))]);
-    expect(await resolveTenantCostApprovers(conn, 9)).toEqual([]);
   });
 });

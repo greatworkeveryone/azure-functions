@@ -5,7 +5,6 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   currentSwitches,
-  mayDeleteLocalFileForUpstreamCopy,
   mayPullWorkRequests,
   mayPushWorkRequests,
   pushEnabled,
@@ -38,16 +37,7 @@ describe("switch values", () => {
   });
 });
 
-describe("local file deletion on the strength of an upstream copy", () => {
-  const confirmed = { MyBuildingsConfirmedAt: new Date() };
-  it("needs a recorded copy AND push enabled", () => {
-    expect(mayDeleteLocalFileForUpstreamCopy(confirmed, {})).toBe(true);
-    expect(mayDeleteLocalFileForUpstreamCopy({ MyBuildingsConfirmedAt: null }, {})).toBe(false);
-    expect(mayDeleteLocalFileForUpstreamCopy({}, {})).toBe(false);
-    expect(mayDeleteLocalFileForUpstreamCopy(confirmed, { MYBUILDINGS_PUSH_ENABLED: "false" })).toBe(false);
-    expect(mayDeleteLocalFileForUpstreamCopy(confirmed, { MYBUILDINGS_SYNC_MODE: "read_only" })).toBe(false);
-  });
-
+describe("local file deletion", () => {
   it("no cleanupAttachments function or timer exists on this branch (F25)", () => {
     const hits: string[] = [];
     const walk = (dir: string) => {

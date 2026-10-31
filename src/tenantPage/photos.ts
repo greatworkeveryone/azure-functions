@@ -26,9 +26,6 @@ export type PhotoResult =
   | { ok: true; photoCount: number; reference: string }
   | { error: string; ok: false; status: 404 | 409 | 413 | 415 | 429 };
 
-/** Content-Type values a client may send; the sniffed type is what is stored, and must agree. */
-const DECLARED: Record<ImageType, string> = { "image/jpeg": "image/jpeg", "image/png": "image/png", "image/webp": "image/webp" };
-
 /** A tenant can only name a Floorplan-native (negative) request. */
 export function parseRequestId(header: string | null): number | null {
   const id = parseWorkRequestId(header?.trim());
@@ -50,7 +47,7 @@ export async function storePhoto(
 ): Promise<PhotoResult> {
   if (bytes.length === 0 || bytes.length > LIMITS.photoBytes) return { error: "That photo is too large", ok: false, status: 413 };
   const sniffed = sniffImage(bytes);
-  if (sniffed === null || DECLARED[sniffed] !== declaredType.split(";")[0].trim().toLowerCase()) {
+  if (sniffed === null || sniffed !== declaredType.split(";")[0].trim().toLowerCase()) {
     return { error: "Only JPEG, PNG or WebP photos can be added", ok: false, status: 415 };
   }
   const params = [

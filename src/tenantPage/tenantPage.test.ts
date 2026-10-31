@@ -125,6 +125,13 @@ describe("the link gate", () => {
     expect((await tenantContext(req({ ip: "198.51.100.10", token: TOKEN_A }), context)).status).toBe(200);
   });
 
+  it("reads the company after-hours number once per request: the gate's read is handed to the page", async () => {
+    const r = await tenantContext(req({ ip: "198.51.100.13", token: TOKEN_A }), context);
+    expect(r.status).toBe(200);
+    expect(db.executeQuery.mock.calls.filter((c: unknown[]) => String(c[1]).includes("FROM dbo.OrgSettings"))).toHaveLength(1);
+    expect(r.jsonBody).toMatchObject({ afterHoursPhone: expect.any(String) });
+  });
+
   it("gives the page the landlord name and every input limit it validates against", async () => {
     const r = await tenantContext(req({ ip: "198.51.100.12", token: TOKEN_A }), context);
     expect(r.jsonBody).toMatchObject({

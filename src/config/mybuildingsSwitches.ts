@@ -42,19 +42,6 @@ export function mayPushWorkRequests(env: Env = process.env): boolean {
   return pushEnabled(env) && syncMode(env) === "normal";
 }
 
-/**
- * The only rule under which a local file may be removed because myBuildings
- * holds a copy: the row records a confirmed upstream copy AND pushing is on.
- * No code deletes on this basis today (cleanupAttachments was removed in Oct
- * 2026); any future cleanup must call this and nothing weaker.
- */
-export function mayDeleteLocalFileForUpstreamCopy(
-  row: { MyBuildingsConfirmedAt?: Date | string | null },
-  env: Env = process.env,
-): boolean {
-  return row.MyBuildingsConfirmedAt != null && mayPushWorkRequests(env);
-}
-
 export function currentSwitches(env: Env = process.env): MyBuildingsSwitches {
   return {
     mayPull: mayPullWorkRequests(env),

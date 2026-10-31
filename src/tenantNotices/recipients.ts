@@ -54,12 +54,3 @@ export function chooseStatusContacts(contacts: readonly NoticeContact[], request
 export async function resolveStatusContacts(connection: Connection, tenantId: number, requestEmail: string | null): Promise<NoticeContact[]> {
   return chooseStatusContacts(await loadActiveContacts(connection, tenantId), requestEmail);
 }
-
-/**
- * Who is asked to approve a cost a tenant would bear (a quote on a tenant-cost job): the contacts marked "authorised
- * for costs", never the person who merely reported the problem. No quote-to-tenant sending exists yet; whoever
- * builds it asks this for the recipients.
- */
-export async function resolveTenantCostApprovers(connection: Connection, tenantId: number): Promise<NoticeContact[]> {
-  return distinctByEmail((await loadActiveContacts(connection, tenantId)).filter((contact) => contact.authorisedForCosts));
-}

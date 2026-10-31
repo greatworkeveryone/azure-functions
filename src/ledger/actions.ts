@@ -188,8 +188,8 @@ export const LEDGER_ACTIONS = {
   "tenancy.request_photo": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
   "tenancy.request_submit": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
-  // The after-hours phone number tenants are told to ring (company setting or a building override). before and
-  // after hold the scope and the number. Read by the director (the default) and admin.
+  // The after-hours phone number tenants are told to ring (one company setting, no per-building override). before and
+  // after hold the number. Read by the director (the default) and admin.
   "settings.after_hours_set": { exception: false, reasonRequired: false, subjects: ["org_setting"] },
 
   // Stored-holdover reset, run once after deploy (WP23a)

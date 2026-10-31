@@ -1614,7 +1614,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
 
       // TR4: booked / complete on a tenant-linked job queues the tenant's notice (once per job and event; never throws).
       if (isRealTransition && priorState && resolvedNewStatus != null) {
-        await enqueueTenantNotice(connection, JobID, priorState, { awaitingRole: resolvedNewAwaitingRole ?? null, status: resolvedNewStatus });
+        await enqueueTenantNotice(connection, JobID, priorState, { awaitingRole: resolvedNewAwaitingRole ?? null, status: resolvedNewStatus }, (message) => context.warn(message));
       }
 
       await commitTransaction(connection);

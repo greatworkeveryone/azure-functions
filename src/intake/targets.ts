@@ -12,7 +12,8 @@ export interface IntakeTarget {
   setBy: string | null;
 }
 
-export const MAX_TARGET_HOURS = 720;
+/** Matches the CHECK in migration 182. */
+const MAX_TARGET_HOURS = 720;
 
 export async function readTargets(connection: Connection): Promise<IntakeTarget[]> {
   const rows = await executeQuery(connection, "SELECT Priority, AckWithinBusinessHours, SetAt, SetBy FROM dbo.IntakeResponseTargets");

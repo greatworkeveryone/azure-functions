@@ -8,7 +8,8 @@
 //
 // The outbox. The row is inserted by the transition's own connection, inside its transaction, so a rolled-back
 // transition leaves no notice. The unique index on (JobId, Event) makes it once per job and event whatever retries.
-// A failure here is logged and swallowed: a notice must never stop a job moving.
+// A failure here is swallowed after a warning (the caller's context.warn when it passes one, else the console): a
+// notice must never stop a job moving.
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../db";
@@ -35,7 +36,13 @@ const ENQUEUE_SQL = `INSERT INTO dbo.TenantNotices (JobId, WorkRequestId, Tenant
      AND NOT EXISTS (SELECT 1 FROM dbo.TenantNotices n WHERE n.JobId = j.JobID AND n.Event = @Event)`;
 
 /** Records that this job's tenant is owed a notice. Does nothing while the switch is off. Never throws. */
-export async function enqueueTenantNotice(connection: Connection, jobId: number, from: TransitionState | null, to: TransitionState | null): Promise<boolean> {
+export async function enqueueTenantNotice(
+  connection: Connection,
+  jobId: number,
+  from: TransitionState | null,
+  to: TransitionState | null,
+  warn: (message: string) => void = console.warn,
+): Promise<boolean> {
   if (noticesMode() === "off") return false;
   const event = noticeEventFor(from, to);
   if (event === null) return false;
@@ -46,7 +53,7 @@ export async function enqueueTenantNotice(connection: Connection, jobId: number,
     ]);
     return true;
   } catch (error) {
-    console.warn("enqueueTenantNotice:", error instanceof Error ? error.message : String(error));
+    warn(`enqueueTenantNotice: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }

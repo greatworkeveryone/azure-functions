@@ -1,5 +1,5 @@
 // The request_ack template (TR1): the email that tells a tenant their request is in. It is a correspondence
-// template in the procedures library (slug request-ack, seeded as a draft from the frontend's content/procedures).
+// template in the procedures library (slug request-ack, seeded as a draft by migration 182).
 // An approved (published) version is what goes out for real; a draft is used only while sends are off or a dry run,
 // so a template nobody has approved never reaches a tenant.
 

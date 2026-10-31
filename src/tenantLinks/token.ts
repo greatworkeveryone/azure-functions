@@ -4,10 +4,10 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 
-export const TOKEN_BYTES = 32;
+const TOKEN_BYTES = 32;
 /** base64url of 32 bytes. */
-export const TOKEN_LENGTH = 43;
-const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+const TOKEN_LENGTH = 43;
+const TOKEN_SHAPE = new RegExp(`^[A-Za-z0-9_-]{${TOKEN_LENGTH}}$`);
 
 export function newToken(): string {
   return randomBytes(TOKEN_BYTES).toString("base64url");
