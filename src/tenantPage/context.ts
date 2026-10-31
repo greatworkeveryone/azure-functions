@@ -35,7 +35,10 @@ function levelsText(levels: unknown): string {
 export async function readTenantContext(connection: Connection, identity: TenantLinkIdentity): Promise<TenantContextApi | null> {
   const [row] = await executeQuery(
     connection,
-    `SELECT t.TenantName, t.Levels, b.BuildingName, c.Name AS ContactName, c.ReportsIssues
+    `SELECT COALESCE(NULLIF(t.TradingName, ''), t.LegalName) AS TenantName,
+            (SELECT '[' + STRING_AGG('"' + STRING_ESCAPE(o.Level, 'json') + '"', ',') + ']'
+               FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId AND ArchivedAt IS NULL) o) AS Levels,
+            b.BuildingName, c.Name AS ContactName, c.ReportsIssues
        FROM dbo.Tenants t
        JOIN dbo.TenancyContacts c ON c.ContactId = @ContactId AND c.TenantId = t.TenantId
        LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingID

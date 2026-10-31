@@ -51,7 +51,10 @@ export type SubmitResult =
   | { ok: true; reference: string; repeat: boolean; requestId: number }
   | { error: string; ok: false; status: 403 | 404 | 429 };
 
-const WHO_SQL = `SELECT t.TenantName, t.Levels, b.BuildingName, c.Name AS ContactName, c.Phone, c.Email, c.ReportsIssues
+const WHO_SQL = `SELECT COALESCE(NULLIF(t.TradingName, ''), t.LegalName) AS TenantName,
+  (SELECT '[' + STRING_AGG('"' + STRING_ESCAPE(o.Level, 'json') + '"', ',') + ']'
+     FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId AND ArchivedAt IS NULL) o) AS Levels,
+  b.BuildingName, c.Name AS ContactName, c.Phone, c.Email, c.ReportsIssues
   FROM dbo.Tenants t
   JOIN dbo.TenancyContacts c ON c.ContactId = @ContactId AND c.TenantId = t.TenantId
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingID
