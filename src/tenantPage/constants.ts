@@ -31,7 +31,11 @@ export const LIMITS = {
   location: 200,
   maxPhotosPerRequest: 5,
   photoBytes: 8 * 1024 * 1024,
-  /** A tenancy's hard daily caps, counted from the database so they hold across instances. */
+  /**
+   * A tenancy's hard daily caps, counted from the database so they hold across instances. Only a tenant's explicit
+   * "emergency" choice may exceed requestsPerTenancyPerDay, and those have their own cap; keyword triage never does.
+   */
+  emergenciesPerTenancyPerDay: 5,
   requestsPerTenancyPerDay: 20,
   photosPerTenancyPerDay: 60,
   /** Photos may only be added to a request this recent. */

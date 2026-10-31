@@ -26,6 +26,7 @@ import { tenantUploadPhoto } from "../functions/tenantUploadPhoto";
 import { sniffImage } from "./imageSniff";
 import { resetTenantLimiter } from "./limiter";
 import { parseSubmit } from "./submit";
+import { LIMITS } from "./constants";
 import { timelineFor } from "./timeline";
 import { rulesTriage } from "./triage";
 import { newToken } from "../tenantLinks/token";
@@ -440,11 +441,23 @@ describe("hardening (review S2/S3)", () => {
     expect((await tenantSubmitRequest(req({ body: { ...GOOD, requestKey: "x" }, ip: "192.0.2.102" }), context)).status).toBe(400);
   });
 
-  it("lets an emergency through the daily cap and flags it, but stops a routine report", async () => {
+  it("lets the tenant's explicit emergency through the daily cap and flags it, but stops a routine report", async () => {
     const base = db.executeQuery.getMockImplementation() as (c: unknown, sql: string, p?: unknown) => Promise<unknown[]>;
-    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("COUNT(*) AS N FROM dbo.WorkRequests") ? [{ N: 20 }] : base(c, sql, p)));
+    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("AS Emergencies") ? [{ Emergencies: 1, N: 20 }] : base(c, sql, p)));
     expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "routine", description: "Please repaint the wall by the door" }, ip: "192.0.2.103" }), context)).status).toBe(429);
     expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "emergency" }, ip: "192.0.2.104" }), context)).status).toBe(201);
     expect(ledgerInserts(db.executeQuery).find((e) => e.action === "tenancy.request_submit")?.after).toMatchObject({ overDailyCap: true });
+  });
+
+  it("does not let keyword triage past the daily cap: typing 'fire' in a routine report is still capped", async () => {
+    const base = db.executeQuery.getMockImplementation() as (c: unknown, sql: string, p?: unknown) => Promise<unknown[]>;
+    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("AS Emergencies") ? [{ Emergencies: 0, N: 20 }] : base(c, sql, p)));
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "routine", description: "There is a fire in the bin room, please look" }, ip: "192.0.2.105" }), context)).status).toBe(429);
+  });
+
+  it("caps explicit emergencies at their own daily limit", async () => {
+    const base = db.executeQuery.getMockImplementation() as (c: unknown, sql: string, p?: unknown) => Promise<unknown[]>;
+    db.executeQuery.mockImplementation(async (c: unknown, sql: string, p?: unknown) => (sql.includes("AS Emergencies") ? [{ Emergencies: LIMITS.emergenciesPerTenancyPerDay, N: 6 }] : base(c, sql, p)));
+    expect((await tenantSubmitRequest(req({ body: { ...GOOD, urgency: "emergency" }, ip: "192.0.2.106" }), context)).status).toBe(429);
   });
 });

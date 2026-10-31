@@ -96,15 +96,18 @@ export async function submitRequest(connection: Connection, identity: TenantLink
   // A cap read from the table itself, so it holds across Function App instances.
   const [recent] = await executeQuery(
     connection,
-    `SELECT COUNT(*) AS N FROM dbo.WorkRequests WHERE SourceTenantId = @TenantId AND SourceKind = N'tenant_link' AND CreatedAt > DATEADD(HOUR, -24, GETUTCDATE())`,
+    `SELECT COUNT(*) AS N, SUM(CASE WHEN Priority = N'Emergency' THEN 1 ELSE 0 END) AS Emergencies
+       FROM dbo.WorkRequests WHERE SourceTenantId = @TenantId AND SourceKind = N'tenant_link' AND CreatedAt > DATEADD(HOUR, -24, GETUTCDATE())`,
     [{ name: "TenantId", type: TYPES.Int, value: identity.tenantId }],
   );
   const triage = rulesTriage(input.description, input);
-  // The daily cap never stands between a tenant and an emergency report (what they chose, or what the
-  // words say): it goes through and is flagged on the ledger for staff.
+  // Only the tenant's own explicit choice of "emergency" gets past the daily cap, and it has a cap of its own;
+  // what the words say (keyword triage) never does, or typing "fire" would defeat the limit. A capped-through
+  // emergency is flagged on the ledger for staff.
   const overCap = Number(recent?.N ?? 0) >= LIMITS.requestsPerTenancyPerDay;
-  const emergency = input.urgency === "emergency" || triage.urgency === "emergency";
+  const emergency = input.urgency === "emergency";
   if (overCap && !emergency) return { error: "rate_limited", ok: false, status: 429 };
+  if (emergency && Number(recent?.Emergencies ?? 0) >= LIMITS.emergenciesPerTenancyPerDay) return { error: "rate_limited", ok: false, status: 429 };
   const details = input.accessNotes ? `${input.description}\n\nAccess: ${input.accessNotes}` : input.description;
   await beginTransaction(connection);
   let requestId: number;
