@@ -173,7 +173,7 @@ describe("requestDecision", () => {
     expect(connection).toBe(conn);
     expect(input).toMatchObject({
       actor: alana,
-      dueAt: new Date("2026-10-19T07:30:00Z"), // soon: next Monday, 17:00 Darwin
+      dueAt: new Date("2026-10-19T07:00:00Z"), // soon: next Monday, 16:30 Darwin
       headline: "Decision needed: Pay the superseded lighting invoice?",
       note: "Pay the superseded lighting invoice?",
       now: NOW,
@@ -193,10 +193,10 @@ describe("requestDecision", () => {
         jobLabel: "Job #12 · Superseded lighting invoice · 25 Temira Crescent",
         question: "Pay the superseded lighting invoice?",
         requestId: 7,
-        respondBy: "2026-10-19T07:30:00.000Z",
+        respondBy: "2026-10-19T07:00:00.000Z",
         tier: "soon",
       },
-      schedule: { escalateAt: "2026-10-19T07:30:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
+      schedule: { escalateAt: "2026-10-19T07:00:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
     });
   });
 
@@ -211,7 +211,7 @@ describe("requestDecision", () => {
       Question: "Pay the superseded lighting invoice?",
       RequestedBy: "Alana",
       RequestedByUserId: 9,
-      RespondBy: new Date("2026-10-19T07:30:00Z"),
+      RespondBy: new Date("2026-10-19T07:00:00Z"),
       RoutineWeeks: null,
       SourceAttachmentId: 77,
       Tier: "soon",
@@ -237,11 +237,11 @@ describe("requestDecision", () => {
       autoEscalate: true,
       callThem: false,
       decisionMakers: { role: null, userIds: [3, 5] },
-      escalateAt: "2026-10-19T07:30:00.000Z",
+      escalateAt: "2026-10-19T07:00:00.000Z",
       question: "Pay the superseded lighting invoice?",
       remindAt: ["2026-10-15T23:00:00.000Z"],
       requestId: 7,
-      respondBy: "2026-10-19T07:30:00.000Z",
+      respondBy: "2026-10-19T07:00:00.000Z",
       state: "pending",
       tier: "soon",
     });
@@ -267,7 +267,7 @@ describe("requestDecision", () => {
       const input = raise.mock.calls[0][1];
       expect(input.urgent).toBe(true);
       expect(world.requests[0]).toMatchObject({ AutoEscalate: true, Tier: "urgent" });
-      expect(world.requests[0].RespondBy).toEqual(new Date("2026-10-13T07:30:00Z")); // Tue 13 Oct 17:00 Darwin
+      expect(world.requests[0].RespondBy).toEqual(new Date("2026-10-13T07:00:00Z")); // Tue 13 Oct 16:30 Darwin
       expect(input.context).toMatchObject({
         decision: { autoEscalate: true },
         schedule: { escalateAt: "2026-10-13T23:00:00.000Z", remindAt: ["2026-10-12T23:30:00.000Z"] }, // Tue 13 Oct 09:00 Darwin
@@ -287,10 +287,10 @@ describe("requestDecision", () => {
         expect(input.urgent).toBe(true);
         expect(input.dueAt).toBeNull();
         expect(input.context).toMatchObject({
-          decision: { autoEscalate: false, respondBy: "2026-10-13T07:30:00.000Z" },
+          decision: { autoEscalate: false, respondBy: "2026-10-13T07:00:00.000Z" },
           schedule: { escalateAt: null, remindAt: ["2026-10-12T23:30:00.000Z"] },
         });
-        expect(world.requests[0]).toMatchObject({ AutoEscalate: false, RespondBy: new Date("2026-10-13T07:30:00Z"), Tier: "urgent" });
+        expect(world.requests[0]).toMatchObject({ AutoEscalate: false, RespondBy: new Date("2026-10-13T07:00:00Z"), Tier: "urgent" });
         expect(outcome.request.autoEscalate).toBe(false);
         expect(outcome.schedule).toMatchObject({ autoEscalate: false, escalateAt: null, urgent: true });
         expect(ledger.mock.calls[0][1].after).toMatchObject({ autoEscalate: false, escalateAt: null, remindAt: ["2026-10-12T23:30:00.000Z"] });
@@ -301,13 +301,13 @@ describe("requestDecision", () => {
     it("routine: the weeks are kept on the request", async () => {
       await requestDecision(conn, ctx(), body({ routineWeeks: 3, tier: "routine" }));
       expect(world.requests[0]).toMatchObject({ AutoEscalate: true, RoutineWeeks: 3, Tier: "routine" });
-      expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-11-02T07:30:00Z"));
+      expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-11-02T07:00:00Z"));
     });
 
     it("fixed: reminders 4, 2 and 1 days before and on the day, moved up at its close", async () => {
       await requestDecision(conn, ctx(), body({ fixedDate: "2026-10-23", tier: "fixed" }));
       const input = raise.mock.calls[0][1];
-      expect(input.dueAt).toEqual(new Date("2026-10-23T07:30:00Z"));
+      expect(input.dueAt).toEqual(new Date("2026-10-23T07:00:00Z"));
       expect((input.context as { schedule: { remindAt: string[] } }).schedule.remindAt).toHaveLength(4);
       expect(world.requests[0]).toMatchObject({ AutoEscalate: true });
     });
@@ -331,7 +331,7 @@ describe("requestDecision", () => {
 
     it("soon, routine and fixed take the tick set to true and move up as they always do", async () => {
       await requestDecision(conn, ctx(), body({ autoEscalate: true, tier: "soon" }));
-      expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-10-19T07:30:00Z"));
+      expect(raise.mock.calls[0][1].dueAt).toEqual(new Date("2026-10-19T07:00:00Z"));
       expect(world.requests[0]).toMatchObject({ AutoEscalate: true, Tier: "soon" });
     });
 

@@ -6,11 +6,11 @@
 // and WEBSITE_TIME_ZONE stays unset; the same code gives the same answer on a
 // laptop in Copenhagen.
 //
-// Business hours are Monday to Friday, 08:30 to 17:00 Darwin. Weekends are
+// Business hours are Monday to Friday, 08:30 to 16:30 Darwin (Connor, 31 Oct 2026). Weekends are
 // skipped, and so are the public holidays in ESCALATION_HOLIDAYS (comma-separated
 // YYYY-MM-DD, Darwin dates) until a calendar exists. "8h = 1 business day" in
-// the policy table is hours of business time, not a clock span: 8 business hours
-// from Monday 08:30 ends Monday 16:30.
+// the policy table is one full business day: 8 business hours from Monday 08:30
+// ends Monday 16:30.
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -18,7 +18,7 @@ const DAY_MS = 86_400_000;
 
 export const DARWIN_OFFSET_MS = 9.5 * HOUR_MS;
 export const BUSINESS_DAY_START_MINUTES = 8 * 60 + 30;
-export const BUSINESS_DAY_END_MINUTES = 17 * 60;
+export const BUSINESS_DAY_END_MINUTES = 16 * 60 + 30;
 /** PLAN §3.7: policy hours count 8 to a business day. */
 export const BUSINESS_HOURS_PER_DAY = 8;
 
@@ -101,7 +101,7 @@ export function isBusinessDay(dateKey: string, holidays: Holidays = holidaysFrom
 
 /**
  * The instant `hours` of business time after `from`. A start outside business
- * hours counts from the next 08:30; a deadline that lands exactly on 17:00 stays
+ * hours counts from the next 08:30; a deadline that lands exactly on 16:30 stays
  * on that day. Zero hours returns `from` unchanged.
  */
 export function addBusinessHours(from: Date, hours: number, holidays: Holidays = holidaysFromEnv()): Date {
@@ -223,14 +223,14 @@ export function businessDayStart(dateKey: string): Date {
   return new Date(dayIndexOfKey(dateKey) * DAY_MS + BUSINESS_DAY_START_MINUTES * MINUTE_MS - DARWIN_OFFSET_MS);
 }
 
-/** 17:00 Darwin on a date: close of business. */
+/** 16:30 Darwin on a date: close of business. */
 export function businessDayEnd(dateKey: string): Date {
   return new Date(dayIndexOfKey(dateKey) * DAY_MS + BUSINESS_DAY_END_MINUTES * MINUTE_MS - DARWIN_OFFSET_MS);
 }
 
 /**
  * The first moment at or after `instant` that falls inside business hours (08:30
- * up to, not including, 17:00 on a business day). An instant already inside is
+ * up to, not including, 16:30 on a business day). An instant already inside is
  * returned as it is; one before opening waits for 08:30 that day, and one after
  * closing, at the weekend or on a holiday waits for 08:30 on the next business
  * day. For times people should be emailed, not left to arrive overnight.

@@ -47,27 +47,27 @@ describe("followUpTier", () => {
 
   describe("fixed", () => {
     it("keeps the date while it is still a working day to come (close of business that day)", () => {
-      const respondBy = darwin("2026-10-23", "17:00");
+      const respondBy = darwin("2026-10-23", "16:30");
       expect(followUpTier(request({ respondBy, tier: "fixed" }), "next_step", NOW, NO_HOLIDAYS)).toEqual({ fixedDate: "2026-10-23", tier: "fixed" });
       expect(followUpTier(request({ respondBy, tier: "fixed" }), "reask", NOW, NO_HOLIDAYS)).toEqual({ fixedDate: "2026-10-23", tier: "fixed" });
     });
 
     it("keeps today's date until the working day has closed", () => {
-      const respondBy = darwin("2026-10-12", "17:00");
+      const respondBy = darwin("2026-10-12", "16:30");
       expect(followUpTier(request({ respondBy, tier: "fixed" }), "next_step", NOW, NO_HOLIDAYS)).toEqual({ fixedDate: "2026-10-12", tier: "fixed" });
       const evening = darwin("2026-10-12", "17:30");
       expect(followUpTier(request({ respondBy, tier: "fixed" }), "next_step", evening, NO_HOLIDAYS)).toEqual({ autoEscalate: true, tier: "urgent" });
     });
 
     it("becomes urgent, moving up, when the date has gone", () => {
-      const respondBy = darwin("2026-10-08", "17:00");
+      const respondBy = darwin("2026-10-08", "16:30");
       for (const purpose of ["next_step", "reask"] as const) {
         expect(followUpTier(request({ respondBy, tier: "fixed" }), purpose, NOW, NO_HOLIDAYS)).toEqual({ autoEscalate: true, tier: "urgent" });
       }
     });
 
     it("becomes urgent when the date is a holiday that has since been declared", () => {
-      const respondBy = darwin("2026-10-23", "17:00");
+      const respondBy = darwin("2026-10-23", "16:30");
       const holidays: Holidays = new Set(["2026-10-23"]);
       expect(followUpTier(request({ respondBy, tier: "fixed" }), "next_step", NOW, holidays)).toEqual({ autoEscalate: true, tier: "urgent" });
     });
@@ -88,23 +88,23 @@ describe("followUpSchedule: when it is due, reminded and moved up", () => {
   it("a soon step is due a week on, reminded the working day before, and moves up at close of business", () => {
     const schedule = followUpSchedule(request({ tier: "soon" }), "next_step", NOW, NO_HOLIDAYS);
     expect(schedule).toMatchObject({ autoEscalate: true, dueDate: "2026-10-19", tier: "soon", urgent: false });
-    expect(schedule.respondBy).toEqual(darwin("2026-10-19", "17:00"));
-    expect(schedule.escalateAt).toEqual(darwin("2026-10-19", "17:00"));
+    expect(schedule.respondBy).toEqual(darwin("2026-10-19", "16:30"));
+    expect(schedule.escalateAt).toEqual(darwin("2026-10-19", "16:30"));
     expect(schedule.remindAt).toEqual([darwin("2026-10-16", "08:30")]);
   });
 
   it("an urgent step is due by tomorrow, is urgent, and always has a time it moves up", () => {
     const schedule = followUpSchedule(request({ autoEscalate: false, tier: "urgent" }), "next_step", NOW, NO_HOLIDAYS);
     expect(schedule).toMatchObject({ autoEscalate: true, dueDate: "2026-10-13", tier: "urgent", urgent: true });
-    expect(schedule.respondBy).toEqual(darwin("2026-10-13", "17:00"));
+    expect(schedule.respondBy).toEqual(darwin("2026-10-13", "16:30"));
     expect(schedule.escalateAt).not.toBeNull();
-    expect(schedule.escalateAt?.getTime()).toBeGreaterThan(darwin("2026-10-13", "17:00").getTime());
+    expect(schedule.escalateAt?.getTime()).toBeGreaterThan(darwin("2026-10-13", "16:30").getTime());
   });
 
   it("a question coming back from an unticked urgent request is still not moved up", () => {
     const schedule = followUpSchedule(request({ autoEscalate: false, tier: "urgent" }), "reask", NOW, NO_HOLIDAYS);
     expect(schedule).toMatchObject({ autoEscalate: false, escalateAt: null, tier: "urgent" });
-    expect(schedule.respondBy).toEqual(darwin("2026-10-13", "17:00"));
+    expect(schedule.respondBy).toEqual(darwin("2026-10-13", "16:30"));
   });
 
   it("is counted from the day it begins: the same request a month later is due a month later", () => {
@@ -119,7 +119,7 @@ describe("followUpSchedule: when it is due, reminded and moved up", () => {
   });
 
   it("a fixed step is due on the same day, with the same reminders still to come", () => {
-    const respondBy = darwin("2026-10-23", "17:00");
+    const respondBy = darwin("2026-10-23", "16:30");
     const schedule = followUpSchedule(request({ respondBy, tier: "fixed" }), "next_step", NOW, NO_HOLIDAYS);
     expect(schedule).toMatchObject({ dueDate: "2026-10-23", fixedDate: "2026-10-23", tier: "fixed" });
     expect(schedule.remindAt.length).toBeGreaterThan(0);
@@ -130,7 +130,7 @@ describe("followUpSchedule: when it is due, reminded and moved up", () => {
     for (const tier of tiers) {
       for (const hours of [0, 5, 12, 30, 50, 24 * 40]) {
         const now = new Date(NOW.getTime() + hours * 3_600_000);
-        const over = { respondBy: darwin("2026-10-14", "17:00"), routineWeeks: tier === "routine" ? 4 : null, tier };
+        const over = { respondBy: darwin("2026-10-14", "16:30"), routineWeeks: tier === "routine" ? 4 : null, tier };
         for (const purpose of ["next_step", "reask"] as const) {
           expect(() => followUpSchedule(request(over), purpose, now, NO_HOLIDAYS)).not.toThrow();
         }

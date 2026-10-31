@@ -332,8 +332,8 @@ describe("raise", () => {
       targetUserId: null,
       urgent: false,
     });
-    // 8 business hours from Monday 09:00 Darwin is Monday 17:00 Darwin = 07:30Z
-    expect(escalation.dueAt?.toISOString()).toBe("2026-10-12T07:30:00.000Z");
+    // 8 business hours from Monday 09:00 Darwin is Tuesday 09:00 Darwin = 23:30Z (30 minutes are left on Monday)
+    expect(escalation.dueAt?.toISOString()).toBe("2026-10-12T23:30:00.000Z");
     expect(escalation.context).toEqual({ title: "Leaking roof" });
   });
 
@@ -873,8 +873,8 @@ describe("escalateFurther", () => {
       summary: esc.summary,
       targetRole: "director",
     });
-    // director@16: 16 business hours from Monday 09:00 Darwin end Tuesday 16:30 Darwin
-    expect(next.dueAt?.toISOString()).toBe("2026-10-13T07:00:00.000Z");
+    // director@16: 16 business hours from Monday 09:00 Darwin end Wednesday 09:00 Darwin
+    expect(next.dueAt?.toISOString()).toBe("2026-10-13T23:30:00.000Z");
 
     expect(events).toEqual(["begin", "onChange", "ledger", "ledger", "commit", "notify", "notifyPrevious"]);
     const [superseded, raised] = ledgerCalls();
@@ -969,7 +969,7 @@ describe("escalateFurther", () => {
 
     expect(next).toMatchObject({ level: 1, targetRole: "facilities_manager" });
     expect(next.lastFollowUpAt).toEqual(NOW);
-    expect(next.dueAt?.toISOString()).toBe("2026-10-12T07:30:00.000Z");
+    expect(next.dueAt?.toISOString()).toBe("2026-10-12T23:30:00.000Z");
     expect(notifyTargets).toHaveBeenCalledWith(conn, expect.anything(), "follow_up", expect.anything());
     expect(ledgerCalls()[0]?.reason).toBe("A new email about this arrived, so the clock restarted");
   });
@@ -1166,8 +1166,8 @@ describe("the sweep drives the engine", () => {
     const [level1] = [...mockWorld.rows.values()];
     expect(level1).toMatchObject({ level: 1, policyKey: "job.unassigned", raisedByKind: "system", status: "open", targetRole: "facilities_manager" });
     expect(level1.summary).toBe("Job #12 · Leaking roof — Needs an owner: no one is assigned");
-    // 8 business hours from Monday 09:00 Darwin is Monday 17:00
-    expect(level1.dueAt?.toISOString()).toBe("2026-10-12T07:30:00.000Z");
+    // 8 business hours from Monday 09:00 Darwin is Tuesday 09:00 Darwin = 23:30Z
+    expect(level1.dueAt?.toISOString()).toBe("2026-10-12T23:30:00.000Z");
 
     // Before the SLA: nothing happens.
     const early = await sweepAt(at(7));
@@ -1175,7 +1175,7 @@ describe("the sweep drives the engine", () => {
 
     // Past the SLA with nobody having acknowledged it.
     ledger.mockClear();
-    const late = await sweepAt(at(8.5));
+    const late = await sweepAt(at(24));
     expect(late).toMatchObject({ errors: [], raised: 0, superseded: 1 });
 
     const all = [...mockWorld.rows.values()];
@@ -1191,11 +1191,11 @@ describe("the sweep drives the engine", () => {
   it("is settled after a run: the same sweep again changes nothing", async () => {
     jobs = [unassignedJob()];
     await sweepAt(MONDAY_9AM);
-    await sweepAt(at(8.5));
+    await sweepAt(at(24));
     const rows = JSON.stringify([...mockWorld.rows.values()]);
     ledger.mockClear();
 
-    const again = await sweepAt(at(8.5));
+    const again = await sweepAt(at(24));
 
     expect(again).toMatchObject({ autoResolved: 0, raised: 0, reminded: 0, superseded: 0 });
     expect(JSON.stringify([...mockWorld.rows.values()])).toBe(rows);
@@ -1303,7 +1303,7 @@ const askForDecision = (over: Partial<Parameters<typeof raise>[1]> = {}) =>
 
 describe("raise, for a caller with a deadline and an urgency of its own", () => {
   it("takes the first level's due moment from the caller, not from the ladder", async () => {
-    const due = new Date("2026-10-20T07:30:00Z");
+    const due = new Date("2026-10-20T07:00:00Z");
     const { escalation } = await askForDecision({ dueAt: due });
     expect(escalation.dueAt?.toISOString()).toBe(due.toISOString());
   });
@@ -1317,7 +1317,7 @@ describe("raise, for a caller with a deadline and an urgency of its own", () => 
     const { escalation } = await askForDecision();
     expect(escalation.dueAt).toBeNull();
     const manual = await raiseManual();
-    expect(manual.escalation.dueAt?.toISOString()).toBe("2026-10-12T07:30:00.000Z");
+    expect(manual.escalation.dueAt?.toISOString()).toBe("2026-10-12T23:30:00.000Z");
   });
 
   it("takes the urgency from the caller, over the policy's", async () => {
@@ -1370,7 +1370,7 @@ describe("raise, for a caller with a deadline and an urgency of its own", () => 
 
     expect(next).toMatchObject({ level: 2, parentEscalationId: first.escalation.escalationId, targetRole: "accounts_manager" });
     // the manager has 16 business hours; the people asked are still in the context
-    expect(next.dueAt?.toISOString()).toBe("2026-10-13T07:00:00.000Z"); // Tue 16:30 Darwin: 8h left on Monday, 8h on Tuesday
+    expect(next.dueAt?.toISOString()).toBe("2026-10-13T23:30:00.000Z"); // Wed 09:00 Darwin: 7.5h left on Monday, 8h on Tuesday, 0.5h on Wednesday
     expect(next.context).toMatchObject({ userTargets: [3, 5] });
   });
 });
@@ -1754,12 +1754,12 @@ describe("a next step is chased through its owner's manager", () => {
   });
 
   it("is chased by the policy's SLA at the manager's level, and by the caller's moment at the owner's", async () => {
-    const due = new Date("2026-10-20T07:30:00Z");
+    const due = new Date("2026-10-20T07:00:00Z");
     const { escalation } = await handOn({ dueAt: due });
     expect(escalation.dueAt?.toISOString()).toBe(due.toISOString());
 
     const { next } = await escalateFurther(conn, { actor: SWEEP_ACTOR, escalationId: escalation.escalationId, mode: "next_level", now: NOW, onlyIfOpen: true });
-    expect(next.dueAt?.toISOString()).toBe("2026-10-13T07:00:00.000Z"); // 16 business hours from Monday 09:00 Darwin
+    expect(next.dueAt?.toISOString()).toBe("2026-10-13T23:30:00.000Z"); // 16 business hours from Monday 09:00 Darwin end Wednesday 09:00
   });
 
   it("keeps no ladder in the context when none was given, or a blank role", async () => {

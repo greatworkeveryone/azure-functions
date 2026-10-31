@@ -119,26 +119,26 @@ describe("unassigned: a live job with no assignee past one business day", () => 
   it("waits one business day (8 business hours) from creation", () => {
     const created = darwin("2026-10-12 09:00"); // Monday
     const unassigned = job({ assigned: false, createdAt: created });
-    expect(isUnassigned(unassigned, darwin("2026-10-12 16:59"), NO_HOLIDAYS)).toBe(false);
-    expect(isUnassigned(unassigned, darwin("2026-10-12 17:00"), NO_HOLIDAYS)).toBe(true);
+    expect(isUnassigned(unassigned, darwin("2026-10-13 08:59"), NO_HOLIDAYS)).toBe(false);
+    expect(isUnassigned(unassigned, darwin("2026-10-13 09:00"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("counts business time only: Friday afternoon's job isn't overdue on Saturday morning", () => {
     const friday = job({ assigned: false, createdAt: darwin("2026-10-16 15:00") });
     expect(isUnassigned(friday, darwin("2026-10-17 09:00"), NO_HOLIDAYS)).toBe(false);
-    expect(isUnassigned(friday, darwin("2026-10-19 14:00"), NO_HOLIDAYS)).toBe(false);
-    expect(isUnassigned(friday, darwin("2026-10-19 15:30"), NO_HOLIDAYS)).toBe(true);
+    expect(isUnassigned(friday, darwin("2026-10-19 14:59"), NO_HOLIDAYS)).toBe(false);
+    expect(isUnassigned(friday, darwin("2026-10-19 15:00"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("skips public holidays", () => {
-    // Created Monday 16:00: 1h left that day, the other 7h land on Tuesday 15:30 ...
+    // Created Monday 16:00: 30 minutes left that day, the other 7.5h land on Tuesday 16:00 ...
     const monday = job({ assigned: false, createdAt: darwin("2026-10-12 16:00") });
     const tuesdayOff = parseHolidays("2026-10-13").holidays;
     expect(isUnassigned(monday, darwin("2026-10-13 16:00"), NO_HOLIDAYS)).toBe(true);
-    // ... unless Tuesday is a holiday, which pushes it to Wednesday 15:30.
+    // ... unless Tuesday is a holiday, which pushes it to Wednesday 16:00.
     expect(isUnassigned(monday, darwin("2026-10-13 16:00"), tuesdayOff)).toBe(false);
-    expect(isUnassigned(monday, darwin("2026-10-14 15:29"), tuesdayOff)).toBe(false);
-    expect(isUnassigned(monday, darwin("2026-10-14 15:30"), tuesdayOff)).toBe(true);
+    expect(isUnassigned(monday, darwin("2026-10-14 15:59"), tuesdayOff)).toBe(false);
+    expect(isUnassigned(monday, darwin("2026-10-14 16:00"), tuesdayOff)).toBe(true);
   });
 
   it("is not for assigned, archived or finished jobs", () => {
@@ -162,9 +162,9 @@ describe("quote not back", () => {
   const requested = job({ firstQuoteRequestAt: darwin("2026-10-12 09:00"), requestedContractors: 1, status: "Quote" }); // Mon 09:00
 
   it("waits 3 business days (24 business hours) after the first request", () => {
-    // 24h from Mon 09:00: Mon 8h, Tue 8.5h, Wed 7.5h -> Wed 16:00
-    expect(isQuoteNotBack(requested, darwin("2026-10-14 15:59"), NO_HOLIDAYS)).toBe(false);
-    expect(isQuoteNotBack(requested, darwin("2026-10-14 16:00"), NO_HOLIDAYS)).toBe(true);
+    // 24h from Mon 09:00: Mon 7.5h, Tue 8h, Wed 8h -> 23.5h, then 0.5h of Thursday -> Thu 09:00
+    expect(isQuoteNotBack(requested, darwin("2026-10-15 08:59"), NO_HOLIDAYS)).toBe(false);
+    expect(isQuoteNotBack(requested, darwin("2026-10-15 09:00"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("waits 1 business day for Critical and High", () => {
@@ -173,8 +173,8 @@ describe("quote not back", () => {
     expect(quoteWaitDays({ priority: "Normal" })).toBe(3);
     expect(quoteWaitDays({ priority: null })).toBe(3);
     const urgent = { ...requested, priority: "High" };
-    expect(isQuoteNotBack(urgent, darwin("2026-10-12 16:59"), NO_HOLIDAYS)).toBe(false);
-    expect(isQuoteNotBack(urgent, darwin("2026-10-12 17:00"), NO_HOLIDAYS)).toBe(true);
+    expect(isQuoteNotBack(urgent, darwin("2026-10-13 08:59"), NO_HOLIDAYS)).toBe(false);
+    expect(isQuoteNotBack(urgent, darwin("2026-10-13 09:00"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("clears the moment a quote is received", () => {
@@ -199,9 +199,9 @@ describe("invoice waiting", () => {
 
   it("waits 5 business days (40 business hours) from when the invoice arrived", () => {
     expect(INVOICE_WAIT_DAYS).toBe(5);
-    // 40h from Mon 09:00: Mon 8, Tue 8.5, Wed 8.5, Thu 8.5 = 33.5 -> Fri 08:30 + 6.5 = 15:00
-    expect(isInvoiceWaiting(waiting, darwin("2026-10-16 14:59"), NO_HOLIDAYS)).toBe(false);
-    expect(isInvoiceWaiting(waiting, darwin("2026-10-16 15:00"), NO_HOLIDAYS)).toBe(true);
+    // 40h from Mon 09:00: Mon 7.5, Tue-Fri 8 each = 39.5, then 0.5h of the next Monday -> Mon 09:00
+    expect(isInvoiceWaiting(waiting, darwin("2026-10-19 08:59"), NO_HOLIDAYS)).toBe(false);
+    expect(isInvoiceWaiting(waiting, darwin("2026-10-19 09:00"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("clears once the invoice is decided (no pending invoice)", () => {

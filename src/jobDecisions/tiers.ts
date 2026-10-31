@@ -5,9 +5,9 @@
 // No I/O and never the process time zone; the same answer on a laptop in Copenhagen.
 //
 // Everything is on the Darwin business calendar of the escalation engine
-// (escalation/businessTime.ts): Monday to Friday, 08:30 to 17:00, less the public
+// (escalation/businessTime.ts): Monday to Friday, 08:30 to 16:30, less the public
 // holidays in ESCALATION_HOLIDAYS. Nothing is scheduled for a weekend, a holiday or
-// the middle of the night. A deadline is close of business (17:00) on a business
+// the middle of the night. A deadline is close of business (16:30) on a business
 // day, a reminder set by the day goes out when that day opens (08:30), and an
 // escalation comes at the deadline or on the next business morning.
 //

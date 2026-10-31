@@ -898,13 +898,13 @@ describe("approving", () => {
       respondedBy: { name: "Cam", userId: 3 },
     });
     expect(body.decision.nextStep).toMatchObject({
-      dueAt: "2026-10-19T07:30:00.000Z",
+      dueAt: "2026-10-19T07:00:00.000Z",
       isOverdue: false,
       owner: { active: true, name: "Alana", role: null, roleLabel: null, userId: 9 },
       state: "open",
       text: "Pay the invoice",
     });
-    expect(body.decision.nextStep.chase).toMatchObject({ dueAt: "2026-10-19T07:30:00.000Z", level: 1, status: "open", targetRole: "accounts", urgent: false });
+    expect(body.decision.nextStep.chase).toMatchObject({ dueAt: "2026-10-19T07:00:00.000Z", level: 1, status: "open", targetRole: "accounts", urgent: false });
     expect(body.job).toEqual({ assignedTo: "Alana", assignedToUserId: 9, jobId: 12 });
     expect(body.replaced).toEqual([]);
   });
@@ -958,7 +958,7 @@ describe("approving", () => {
 
     const [step] = byPolicy("job.next_step");
     expect(step).toMatchObject({
-      dueAt: darwin("2026-10-19", "17:00"),
+      dueAt: darwin("2026-10-19", "16:30"),
       kind: "attention",
       level: 1,
       note: "Pay the invoice",
@@ -974,7 +974,7 @@ describe("approving", () => {
     expect(step.context).toMatchObject({
       ladder: { role: "accounts", userId: 9 },
       nextStep: { decisionId: 4, nextStep: "Pay the invoice", outcome: "approve", ownerUserId: 9, requestId: 7, respondedBy: "Cam" },
-      schedule: { escalateAt: "2026-10-19T07:30:00.000Z" },
+      schedule: { escalateAt: "2026-10-19T07:00:00.000Z" },
       userTargets: [9],
     });
   });
@@ -1017,7 +1017,7 @@ describe("approving", () => {
     expect(mail.body).toContain("Decision: Approved by Cam");
     expect(mail.body).toContain("Why: The lighting was ordered twice and the first order was paid.");
     expect(mail.body).toContain("Next step: Pay the invoice");
-    expect(mail.body).toContain("Due: 19/10/2026 17:00 Darwin time");
+    expect(mail.body).toContain("Due: 19/10/2026 16:30 Darwin time");
     expect(mail.body).toContain("Open it in Floorplan: https://floorplan.example/jobs?jobId=12");
   });
 
@@ -1111,11 +1111,11 @@ describe("approving", () => {
 
 describe("the urgency of the step follows the request", () => {
   it.each([
-    ["soon", {}, darwin("2026-10-19", "17:00"), false],
-    ["routine", { routineWeeks: 3 }, darwin("2026-11-02", "17:00"), false],
-    ["urgent", { autoEscalate: false }, darwin("2026-10-13", "17:00"), true],
-    ["fixed", { fixedDate: "2026-10-23" }, darwin("2026-10-23", "17:00"), false],
-    ["emergency", {}, darwin("2026-10-13", "17:00"), true],
+    ["soon", {}, darwin("2026-10-19", "16:30"), false],
+    ["routine", { routineWeeks: 3 }, darwin("2026-11-02", "16:30"), false],
+    ["urgent", { autoEscalate: false }, darwin("2026-10-13", "16:30"), true],
+    ["fixed", { fixedDate: "2026-10-23" }, darwin("2026-10-23", "16:30"), false],
+    ["emergency", {}, darwin("2026-10-13", "16:30"), true],
   ] as const)("a %s request gives a step due %#", async (tier, extra, due, urgent) => {
     await ask({ tier, ...extra });
     const res = await respond();
@@ -1261,7 +1261,7 @@ describe("a deferred question comes back on its day (the sweep)", () => {
     const [chase] = byPolicy("job.decision_pending").filter((r) => r.status === "open");
     expect(chase).toMatchObject({ kind: "authority", raisedByKind: "system", raisedByName: "Floorplan", subjectId: "12", targetRole: null, urgent: false });
     expect(chase.context).toMatchObject({ decision: { reaskOf: { askedBy: "Alana", decisionId: 4, deferredUntil: "2026-10-23" }, requestId: 8 }, ladder: { role: "accounts", userId: 9 }, userTargets: [3, 5] });
-    expect(chase.dueAt).toEqual(darwin("2026-10-30", "17:00"));
+    expect(chase.dueAt).toEqual(darwin("2026-10-30", "16:30"));
   });
 
   it("emails the decision-makers, saying it is due again and who first asked", async () => {

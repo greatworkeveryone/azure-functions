@@ -459,7 +459,7 @@ describe("requestJobDecision", () => {
       requestedBy: "Alana",
       requestedByUserId: 9,
       requestId: 7,
-      respondBy: "2026-10-19T07:30:00.000Z",
+      respondBy: "2026-10-19T07:00:00.000Z",
       routineWeeks: null,
       sourceAttachmentId: null,
       state: "pending",
@@ -469,7 +469,7 @@ describe("requestJobDecision", () => {
     expect(typeof body.request.rowVersion).toBe("string");
     expect(body.chase).toMatchObject({
       deepLink: "/jobs?jobId=12&step=decision&decisionRequestId=7#decision",
-      dueAt: "2026-10-19T07:30:00.000Z",
+      dueAt: "2026-10-19T07:00:00.000Z",
       escalationId: 100,
       isOverdue: false,
       level: 1,
@@ -498,7 +498,7 @@ describe("requestJobDecision", () => {
     const row = [...mockWorld.escalations.values()][0];
     expect(row).toMatchObject({
       buildingId: 5,
-      dueAt: new Date("2026-10-19T07:30:00Z"),
+      dueAt: new Date("2026-10-19T07:00:00Z"),
       kind: "authority",
       level: 1,
       noIndependentTarget: false,
@@ -517,7 +517,7 @@ describe("requestJobDecision", () => {
     expect(row.summary).toBe("Job #12 · Superseded lighting invoice · 25 Temira Crescent — Decision needed: Pay the superseded lighting invoice, or go back to the contractor?");
     expect(row.context).toMatchObject({
       decision: { requestId: 7, tier: "soon" },
-      schedule: { escalateAt: "2026-10-19T07:30:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
+      schedule: { escalateAt: "2026-10-19T07:00:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
       userTargets: [3, 5],
     });
   });
@@ -544,7 +544,7 @@ describe("requestJobDecision", () => {
       expect(mail.body).toContain("Question: Pay the superseded lighting invoice, or go back to the contractor?");
       expect(mail.body).toContain("Job: Job #12 · Superseded lighting invoice · 25 Temira Crescent");
       expect(mail.body).toContain("Asked of: Cam, Dee, Eli");
-      expect(mail.body).toContain("Respond by: 19/10/2026 17:00 Darwin time");
+      expect(mail.body).toContain("Respond by: 19/10/2026 16:30 Darwin time");
       expect(mail.body).toContain("Open it in Floorplan: https://floorplan.example/jobs?jobId=12");
     });
 
@@ -621,7 +621,7 @@ describe("requestJobDecision", () => {
       const res = await ask({ autoEscalate: true, tier: "urgent" });
       expect(res.status).toBe(201);
       const body = json(res);
-      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-10-13T07:30:00.000Z", tier: "urgent" });
+      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-10-13T07:00:00.000Z", tier: "urgent" });
       expect(body.chase.remindAt).toEqual(["2026-10-12T23:30:00.000Z"]);
       expect(body.chase.dueAt).toBe("2026-10-13T23:00:00.000Z");
       expect([...mockWorld.escalations.values()][0].dueAt).toEqual(new Date("2026-10-13T23:00:00Z"));
@@ -636,7 +636,7 @@ describe("requestJobDecision", () => {
 
         expect(res.status).toBe(201);
         const body = json(res);
-        expect(body.request).toMatchObject({ autoEscalate: false, callThem: false, respondBy: "2026-10-13T07:30:00.000Z", tier: "urgent" });
+        expect(body.request).toMatchObject({ autoEscalate: false, callThem: false, respondBy: "2026-10-13T07:00:00.000Z", tier: "urgent" });
         expect(body.chase).toMatchObject({ dueAt: null, isOverdue: false, remindAt: ["2026-10-12T23:30:00.000Z"], urgent: true });
         const row = [...mockWorld.escalations.values()][0];
         expect(row.dueAt).toBeNull();
@@ -648,7 +648,7 @@ describe("requestJobDecision", () => {
         // the people are told just the same, with the respond-by and as urgent
         expect(mockWorld.mail).toHaveLength(1);
         expect(mockWorld.mail[0].subject).toMatch(/^URGENT decision needed: /);
-        expect(mockWorld.mail[0].body).toContain("Respond by: 13/10/2026 17:00 Darwin time");
+        expect(mockWorld.mail[0].body).toContain("Respond by: 13/10/2026 16:30 Darwin time");
         // and what reads it back sees the same
         const read = json(await get(12));
         expect(read.request.autoEscalate).toBe(false);
@@ -678,13 +678,13 @@ describe("requestJobDecision", () => {
 
     it("routine: the weeks are kept", async () => {
       const body = json(await ask({ routineWeeks: 3, tier: "routine" }));
-      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-11-02T07:30:00.000Z", routineWeeks: 3, tier: "routine" });
+      expect(body.request).toMatchObject({ autoEscalate: true, respondBy: "2026-11-02T07:00:00.000Z", routineWeeks: 3, tier: "routine" });
       expect(body.chase.remindAt).toEqual(["2026-10-25T23:00:00.000Z"]); // Mon 26 Oct 08:30 Darwin: a week before
     });
 
     it("fixed: the date given, with reminders 4, 2 and 1 days before and on the day", async () => {
       const body = json(await ask({ fixedDate: "2026-10-23", tier: "fixed" }));
-      expect(body.request).toMatchObject({ autoEscalate: true, fixedDate: "2026-10-23", respondBy: "2026-10-23T07:30:00.000Z", tier: "fixed" });
+      expect(body.request).toMatchObject({ autoEscalate: true, fixedDate: "2026-10-23", respondBy: "2026-10-23T07:00:00.000Z", tier: "fixed" });
       expect(body.chase.remindAt).toEqual([
         "2026-10-18T23:00:00.000Z",
         "2026-10-20T23:00:00.000Z",
@@ -696,7 +696,7 @@ describe("requestJobDecision", () => {
     it("skips a holiday from ESCALATION_HOLIDAYS", async () => {
       process.env.ESCALATION_HOLIDAYS = "2026-10-19";
       const body = json(await ask());
-      expect(body.request.respondBy).toBe("2026-10-20T07:30:00.000Z");
+      expect(body.request.respondBy).toBe("2026-10-20T07:00:00.000Z");
     });
 
     it.each([

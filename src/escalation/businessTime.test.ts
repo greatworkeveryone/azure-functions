@@ -56,17 +56,17 @@ describe("addBusinessHours", () => {
     expect(plus("2026-10-12 08:30", 8)).toBe("2026-10-12 16:30");
   });
 
-  it("keeps a deadline that lands exactly on 17:00 on that day", () => {
-    expect(plus("2026-10-12 08:30", 8.5)).toBe("2026-10-12 17:00");
+  it("keeps a deadline that lands exactly on 16:30 on that day", () => {
+    expect(plus("2026-10-12 12:30", 4)).toBe("2026-10-12 16:30");
   });
 
-  it("rolls from 17:00 to 08:30 the next business day", () => {
-    expect(plus("2026-10-12 16:00", 2)).toBe("2026-10-13 09:30");
-    expect(plus("2026-10-12 16:59", 0.5)).toBe("2026-10-13 08:59");
+  it("rolls from 16:30 to 08:30 the next business day", () => {
+    expect(plus("2026-10-12 16:00", 2)).toBe("2026-10-13 10:00");
+    expect(plus("2026-10-12 16:29", 0.5)).toBe("2026-10-13 08:59");
   });
 
   it("starts from 08:30 when the clock starts after hours", () => {
-    expect(plus("2026-10-12 17:00", 1)).toBe("2026-10-13 09:30");
+    expect(plus("2026-10-12 16:30", 1)).toBe("2026-10-13 09:30");
     expect(plus("2026-10-12 23:45", 1)).toBe("2026-10-13 09:30");
   });
 
@@ -76,29 +76,30 @@ describe("addBusinessHours", () => {
   });
 
   it("skips weekends", () => {
-    expect(plus("2026-10-16 16:30", 1)).toBe("2026-10-19 09:00");
+    expect(plus("2026-10-16 16:30", 1)).toBe("2026-10-19 09:30");
     expect(plus("2026-10-17 10:00", 1)).toBe("2026-10-19 09:30");
     expect(plus("2026-10-18 10:00", 1)).toBe("2026-10-19 09:30");
   });
 
   it("carries across several days", () => {
-    expect(plus("2026-10-12 09:00", 16)).toBe("2026-10-13 16:30");
-    // 5 business days of 8h: Mon 08:30 .. Fri 14:30 (each day is 8.5h long)
-    expect(plus("2026-10-12 08:30", 40)).toBe("2026-10-16 14:30");
+    expect(plus("2026-10-12 09:00", 15.5)).toBe("2026-10-13 16:30");
+    expect(plus("2026-10-12 09:00", 16)).toBe("2026-10-14 09:00");
+    // 5 business days of 8h: Mon 08:30 .. Fri 16:30 (each day is 8h long)
+    expect(plus("2026-10-12 08:30", 40)).toBe("2026-10-16 16:30");
     // across a weekend
-    expect(plus("2026-10-15 16:00", 8)).toBe("2026-10-16 15:30");
-    expect(plus("2026-10-16 16:00", 8)).toBe("2026-10-19 15:30");
+    expect(plus("2026-10-15 16:00", 8)).toBe("2026-10-16 16:00");
+    expect(plus("2026-10-16 16:00", 8)).toBe("2026-10-19 16:00");
   });
 
   it("skips public holidays from ESCALATION_HOLIDAYS", () => {
     const tuesdayOff = parseHolidays("2026-10-13").holidays;
-    expect(plus("2026-10-12 16:00", 2, tuesdayOff)).toBe("2026-10-14 09:30");
+    expect(plus("2026-10-12 16:00", 2, tuesdayOff)).toBe("2026-10-14 10:00");
 
     const fridayOff = parseHolidays("2026-10-16").holidays;
-    expect(plus("2026-10-15 16:30", 1, fridayOff)).toBe("2026-10-19 09:00");
+    expect(plus("2026-10-15 16:30", 1, fridayOff)).toBe("2026-10-19 09:30");
 
     const fridayAndMonday = parseHolidays("2026-10-16, 2026-10-19").holidays;
-    expect(plus("2026-10-15 16:30", 1, fridayAndMonday)).toBe("2026-10-20 09:00");
+    expect(plus("2026-10-15 16:30", 1, fridayAndMonday)).toBe("2026-10-20 09:30");
   });
 
   it("treats a start on a holiday like a start on a weekend", () => {
@@ -113,7 +114,7 @@ describe("addBusinessHours", () => {
 
   it("accepts fractions of an hour", () => {
     expect(plus("2026-10-12 09:00", 0.25)).toBe("2026-10-12 09:15");
-    expect(plus("2026-10-12 16:45", 0.5)).toBe("2026-10-13 08:45");
+    expect(plus("2026-10-12 16:15", 0.5)).toBe("2026-10-13 08:45");
   });
 
   it("refuses hours that are negative or not numbers", () => {
@@ -150,7 +151,7 @@ describe("addBusinessHours", () => {
       if (original === undefined) delete process.env.TZ;
       else process.env.TZ = original;
     }
-    expect(new Set(results)).toEqual(new Set(["2026-10-13 09:30", "2026-10-19 09:00"]));
+    expect(new Set(results)).toEqual(new Set(["2026-10-13 10:00", "2026-10-19 09:30"]));
   });
 });
 
@@ -199,12 +200,12 @@ describe("parseHolidays and holidaysFromEnv", () => {
     const original = process.env.ESCALATION_HOLIDAYS;
     process.env.ESCALATION_HOLIDAYS = "2026-10-13";
     try {
-      expect(show(addBusinessHours(darwin("2026-10-12 16:00"), 2))).toBe("2026-10-14 09:30");
+      expect(show(addBusinessHours(darwin("2026-10-12 16:00"), 2))).toBe("2026-10-14 10:00");
     } finally {
       if (original === undefined) delete process.env.ESCALATION_HOLIDAYS;
       else process.env.ESCALATION_HOLIDAYS = original;
     }
-    expect(show(addBusinessHours(darwin("2026-10-12 16:00"), 2))).toBe("2026-10-13 09:30");
+    expect(show(addBusinessHours(darwin("2026-10-12 16:00"), 2))).toBe("2026-10-13 10:00");
   });
 });
 
@@ -225,11 +226,12 @@ describe("isBusinessDay", () => {
 describe("businessHoursElapsed and businessDaysToHours", () => {
   it("is false until the business hours have passed, true from the moment they have", () => {
     const since = darwin("2026-10-12 09:00");
-    expect(businessHoursElapsed(since, 8, darwin("2026-10-12 16:59"), NO_HOLIDAYS)).toBe(false);
-    expect(businessHoursElapsed(since, 8, darwin("2026-10-12 17:00"), NO_HOLIDAYS)).toBe(true);
-    // 16 business hours from Monday 09:00 end Tuesday 16:30
-    expect(businessHoursElapsed(since, 16, darwin("2026-10-13 16:30"), NO_HOLIDAYS)).toBe(true);
-    expect(businessHoursElapsed(since, 16, darwin("2026-10-13 16:29"), NO_HOLIDAYS)).toBe(false);
+    // 8 business hours from Monday 09:00 end Tuesday 09:00 (30 minutes are left after Monday's close)
+    expect(businessHoursElapsed(since, 8, darwin("2026-10-13 08:59"), NO_HOLIDAYS)).toBe(false);
+    expect(businessHoursElapsed(since, 8, darwin("2026-10-13 09:00"), NO_HOLIDAYS)).toBe(true);
+    // 15.5 business hours from Monday 09:00 end Tuesday 16:30
+    expect(businessHoursElapsed(since, 15.5, darwin("2026-10-13 16:29"), NO_HOLIDAYS)).toBe(false);
+    expect(businessHoursElapsed(since, 15.5, darwin("2026-10-13 16:30"), NO_HOLIDAYS)).toBe(true);
   });
 
   it("counts a business day as 8 hours (PLAN §3.7)", () => {
@@ -333,15 +335,15 @@ describe("addBusinessDays", () => {
 });
 
 describe("businessDayStart and businessDayEnd", () => {
-  it("are 08:30 and 17:00 Darwin", () => {
+  it("are 08:30 and 16:30 Darwin", () => {
     expect(show(businessDayStart("2026-10-12"))).toBe("2026-10-12 08:30");
-    expect(show(businessDayEnd("2026-10-12"))).toBe("2026-10-12 17:00");
+    expect(show(businessDayEnd("2026-10-12"))).toBe("2026-10-12 16:30");
     expect(businessDayStart("2026-10-12").toISOString()).toBe("2026-10-11T23:00:00.000Z");
-    expect(businessDayEnd("2026-10-12").toISOString()).toBe("2026-10-12T07:30:00.000Z");
+    expect(businessDayEnd("2026-10-12").toISOString()).toBe("2026-10-12T07:00:00.000Z");
   });
 
   it("do not depend on whether the day is a business day", () => {
-    expect(show(businessDayEnd("2026-10-17"))).toBe("2026-10-17 17:00");
+    expect(show(businessDayEnd("2026-10-17"))).toBe("2026-10-17 16:30");
     expect(() => businessDayStart("17/10/2026")).toThrow(RangeError);
   });
 });
@@ -352,13 +354,13 @@ describe("nextBusinessHoursInstant", () => {
   it("returns an instant inside business hours as it is, to the minute", () => {
     expect(next("2026-10-12 08:30")).toBe("2026-10-12 08:30");
     expect(next("2026-10-12 12:47")).toBe("2026-10-12 12:47");
-    expect(next("2026-10-12 16:59")).toBe("2026-10-12 16:59");
+    expect(next("2026-10-12 16:29")).toBe("2026-10-12 16:29");
   });
 
-  it("waits for opening before it, and for the next business day from 17:00", () => {
+  it("waits for opening before it, and for the next business day from 16:30", () => {
     expect(next("2026-10-12 06:15")).toBe("2026-10-12 08:30");
     expect(next("2026-10-12 08:29")).toBe("2026-10-12 08:30");
-    expect(next("2026-10-12 17:00")).toBe("2026-10-13 08:30");
+    expect(next("2026-10-12 16:30")).toBe("2026-10-13 08:30");
     expect(next("2026-10-12 23:59")).toBe("2026-10-13 08:30");
   });
 

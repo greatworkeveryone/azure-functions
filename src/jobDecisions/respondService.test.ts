@@ -101,7 +101,7 @@ const request = (over: Partial<DecisionRequestRow> = {}): DecisionRequestRow => 
   requestedAt: new Date("2026-10-09T00:00:00Z"),
   requestedBy: "Alana",
   requestedByUserId: ALANA.userId,
-  respondBy: new Date("2026-10-19T07:30:00Z"),
+  respondBy: new Date("2026-10-19T07:00:00Z"),
   routineWeeks: null,
   rowVersion: VERSION,
   sourceAttachmentId: null,
@@ -122,7 +122,7 @@ const decisionRow = (over: Partial<DecisionRow> = {}): DecisionRow => ({
   jobId: 12,
   nextStep: "Pay the invoice",
   nextStepClosed: null,
-  nextStepDueAt: new Date("2026-10-19T07:30:00Z"),
+  nextStepDueAt: new Date("2026-10-19T07:00:00Z"),
   nextStepOwnerRole: null,
   nextStepOwnerUserId: ALANA.userId,
   outcome: "approve",
@@ -290,7 +290,7 @@ describe("respondDecision: approving", () => {
       deferUntil: null,
       jobId: 12,
       nextStep: "Pay the invoice",
-      nextStepDueAt: new Date("2026-10-19T07:30:00Z"), // soon: a week from Monday, 17:00 Darwin
+      nextStepDueAt: new Date("2026-10-19T07:00:00Z"), // soon: a week from Monday, 16:30 Darwin
       nextStepOwnerRole: null,
       nextStepOwnerUserId: ALANA.userId,
       outcome: "approve",
@@ -320,7 +320,7 @@ describe("respondDecision: approving", () => {
     expect(entry.after).toMatchObject({
       answeredAs: "named",
       decisionId: 4,
-      nextStep: { dueAt: "2026-10-19T07:30:00.000Z", ownerUserId: ALANA.userId, text: "Pay the invoice" },
+      nextStep: { dueAt: "2026-10-19T07:00:00.000Z", ownerUserId: ALANA.userId, text: "Pay the invoice" },
       nextStepChased: true,
       nextStepOwner: { kind: "user", name: "Alana" },
       outcome: "approve",
@@ -376,7 +376,7 @@ describe("respondDecision: approving", () => {
     expect(connection).toBe(conn);
     expect(args).toMatchObject({
       actor: actorOf(CAM),
-      dueAt: new Date("2026-10-19T07:30:00Z"),
+      dueAt: new Date("2026-10-19T07:00:00Z"),
       headline: "Next step: Pay the invoice",
       ladderRaiser: { role: "accounts", userId: ALANA.userId },
       note: "Pay the invoice",
@@ -391,7 +391,7 @@ describe("respondDecision: approving", () => {
     expect(args.context).toEqual({
       nextStep: {
         decisionId: 4,
-        dueAt: "2026-10-19T07:30:00.000Z",
+        dueAt: "2026-10-19T07:00:00.000Z",
         jobLabel: "Job #12 · Superseded lighting invoice · 25 Temira Crescent",
         nextStep: "Pay the invoice",
         outcome: "approve",
@@ -401,7 +401,7 @@ describe("respondDecision: approving", () => {
         requestId: 7,
         respondedBy: "Cam",
       },
-      schedule: { escalateAt: "2026-10-19T07:30:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
+      schedule: { escalateAt: "2026-10-19T07:00:00.000Z", remindAt: ["2026-10-15T23:00:00.000Z"] },
     });
     expect(args.correlationId).toBe(ledger.mock.calls[0][1].correlationId);
   });
@@ -414,8 +414,8 @@ describe("respondDecision: approving", () => {
     const [, args] = raise.mock.calls[0];
     expect(args.urgent).toBe(true);
     expect(args.dueAt).not.toBeNull();
-    expect(dec.insertDecision.mock.calls[0][1].nextStepDueAt).toEqual(new Date("2026-10-13T07:30:00Z")); // close of business tomorrow
-    expect(args.dueAt?.getTime()).toBeGreaterThan(new Date("2026-10-13T07:30:00Z").getTime()); // and moves up the next business morning
+    expect(dec.insertDecision.mock.calls[0][1].nextStepDueAt).toEqual(new Date("2026-10-13T07:00:00Z")); // close of business tomorrow
+    expect(args.dueAt?.getTime()).toBeGreaterThan(new Date("2026-10-13T07:00:00Z").getTime()); // and moves up the next business morning
   });
 
   it("emails the owner only through the announce the engine handed back, and passes the caller's send options on", async () => {

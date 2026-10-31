@@ -99,20 +99,20 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-12 09:00")).toEqual({
       escalateAt: "2026-10-14 08:30",
       remindAt: ["2026-10-13 09:00"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
   });
 
   it("keeps the 24-hour mark to the minute when it falls in business hours", () => {
-    expect(ask(urgent, "2026-10-12 16:45").remindAt).toEqual(["2026-10-13 16:45"]);
+    expect(ask(urgent, "2026-10-12 16:15").remindAt).toEqual(["2026-10-13 16:15"]);
     expect(ask(urgent, "2026-10-12 08:30").remindAt).toEqual(["2026-10-13 08:30"]);
   });
 
-  it("asked at 16:45, the respond-by is 15 minutes after the reminder", () => {
-    expect(ask(urgent, "2026-10-12 16:45")).toEqual({
+  it("asked at 16:15, the respond-by is 15 minutes after the reminder", () => {
+    expect(ask(urgent, "2026-10-12 16:15")).toEqual({
       escalateAt: "2026-10-14 08:30",
-      remindAt: ["2026-10-13 16:45"],
-      respondBy: "2026-10-13 17:00",
+      remindAt: ["2026-10-13 16:15"],
+      respondBy: "2026-10-13 16:30",
     });
   });
 
@@ -120,21 +120,21 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-12 18:00")).toEqual({
       escalateAt: "2026-10-14 08:30",
       remindAt: ["2026-10-13 08:30"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
-    expect(ask(urgent, "2026-10-12 17:00").remindAt).toEqual(["2026-10-13 08:30"]);
-    expect(ask(urgent, "2026-10-12 23:59").respondBy).toBe("2026-10-13 17:00");
+    expect(ask(urgent, "2026-10-12 16:30").remindAt).toEqual(["2026-10-13 08:30"]);
+    expect(ask(urgent, "2026-10-12 23:59").respondBy).toBe("2026-10-13 16:30");
   });
 
-  it("asked at 16:59, the 24-hour mark is the last minute before close", () => {
-    expect(ask(urgent, "2026-10-12 16:59").remindAt).toEqual(["2026-10-13 16:59"]);
+  it("asked at 16:29, the 24-hour mark is the last minute before close", () => {
+    expect(ask(urgent, "2026-10-12 16:29").remindAt).toEqual(["2026-10-13 16:29"]);
   });
 
   it("asked before opening, the reminder waits for the opening", () => {
     expect(ask(urgent, "2026-10-12 06:00")).toEqual({
       escalateAt: "2026-10-14 08:30",
       remindAt: ["2026-10-13 08:30"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
   });
 
@@ -142,7 +142,7 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-16 15:00")).toEqual({
       escalateAt: "2026-10-20 08:30",
       remindAt: ["2026-10-19 08:30"],
-      respondBy: "2026-10-19 17:00",
+      respondBy: "2026-10-19 16:30",
     });
   });
 
@@ -150,12 +150,12 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-15 11:00")).toEqual({
       escalateAt: "2026-10-19 08:30",
       remindAt: ["2026-10-16 11:00"],
-      respondBy: "2026-10-16 17:00",
+      respondBy: "2026-10-16 16:30",
     });
   });
 
   it("asked on a weekend, it is due Monday, whatever the hour", () => {
-    const monday = { escalateAt: "2026-10-20 08:30", remindAt: ["2026-10-19 08:30"], respondBy: "2026-10-19 17:00" };
+    const monday = { escalateAt: "2026-10-20 08:30", remindAt: ["2026-10-19 08:30"], respondBy: "2026-10-19 16:30" };
     expect(ask(urgent, "2026-10-17 10:00")).toEqual(monday);
     expect(ask(urgent, "2026-10-18 22:00")).toEqual(monday);
     expect(ask(urgent, "2026-10-17 00:00")).toEqual(monday);
@@ -165,7 +165,7 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-16 15:00", holidays("2026-10-19"))).toEqual({
       escalateAt: "2026-10-21 08:30",
       remindAt: ["2026-10-20 08:30"],
-      respondBy: "2026-10-20 17:00",
+      respondBy: "2026-10-20 16:30",
     });
   });
 
@@ -173,7 +173,7 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-12 09:00", holidays("2026-10-14"))).toEqual({
       escalateAt: "2026-10-15 08:30",
       remindAt: ["2026-10-13 09:00"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
   });
 
@@ -181,7 +181,7 @@ describe("urgent, ticked to move up: by tomorrow, reminded at 24 hours, moved up
     expect(ask(urgent, "2026-10-12 09:00", holidays("2026-10-13"))).toEqual({
       escalateAt: "2026-10-15 08:30",
       remindAt: ["2026-10-14 08:30"],
-      respondBy: "2026-10-14 17:00",
+      respondBy: "2026-10-14 16:30",
     });
   });
 
@@ -201,7 +201,7 @@ describe("urgent, not ticked to move up (the default): same deadline and reminde
     expect(ask(unticked, "2026-10-12 09:00")).toEqual({
       escalateAt: null,
       remindAt: ["2026-10-13 09:00"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
   });
 
@@ -211,8 +211,8 @@ describe("urgent, not ticked to move up (the default): same deadline and reminde
       "2026-10-12 06:00",
       "2026-10-12 08:30",
       "2026-10-12 09:00",
-      "2026-10-12 16:45",
-      "2026-10-12 17:00",
+      "2026-10-12 16:15",
+      "2026-10-12 16:30",
       "2026-10-12 23:59",
       "2026-10-15 11:00",
       "2026-10-16 15:00",
@@ -232,7 +232,7 @@ describe("urgent, not ticked to move up (the default): same deadline and reminde
     const schedule = scheduleFor(unticked, darwin("2026-10-12 09:00"), NO_HOLIDAYS);
     expect(schedule.remindAt).toHaveLength(1);
     expect(show(schedule.remindAt[0])).toBe("2026-10-13 09:00");
-    expect(ask(unticked, "2026-10-12 16:45").remindAt).toEqual(["2026-10-13 16:45"]);
+    expect(ask(unticked, "2026-10-12 16:15").remindAt).toEqual(["2026-10-13 16:15"]);
     expect(ask(unticked, "2026-10-12 18:00").remindAt).toEqual(["2026-10-13 08:30"]);
   });
 
@@ -286,57 +286,57 @@ describe("soon: a week, reminded the business day before", () => {
 
   it("asked on a Monday: due next Monday close of business, reminded the Friday before, moved up at the deadline", () => {
     expect(ask(soon, "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-19 17:00",
+      escalateAt: "2026-10-19 16:30",
       remindAt: ["2026-10-16 08:30"],
-      respondBy: "2026-10-19 17:00",
+      respondBy: "2026-10-19 16:30",
     });
   });
 
   it("asked midweek: reminded the day before it is due", () => {
     expect(ask(soon, "2026-10-14 10:00")).toEqual({
-      escalateAt: "2026-10-21 17:00",
+      escalateAt: "2026-10-21 16:30",
       remindAt: ["2026-10-20 08:30"],
-      respondBy: "2026-10-21 17:00",
+      respondBy: "2026-10-21 16:30",
     });
     expect(ask(soon, "2026-10-16 10:00").remindAt).toEqual(["2026-10-22 08:30"]);
   });
 
   it("asked on a Saturday: the week ends on a Saturday, so it is due the Monday after", () => {
     expect(ask(soon, "2026-10-17 10:00")).toEqual({
-      escalateAt: "2026-10-26 17:00",
+      escalateAt: "2026-10-26 16:30",
       remindAt: ["2026-10-23 08:30"],
-      respondBy: "2026-10-26 17:00",
+      respondBy: "2026-10-26 16:30",
     });
   });
 
   it("asked on a Sunday: due the Monday a week on, reminded the Friday before", () => {
     expect(ask(soon, "2026-10-18 10:00")).toEqual({
-      escalateAt: "2026-10-26 17:00",
+      escalateAt: "2026-10-26 16:30",
       remindAt: ["2026-10-23 08:30"],
-      respondBy: "2026-10-26 17:00",
+      respondBy: "2026-10-26 16:30",
     });
   });
 
   it("moves a deadline off a public holiday to the next business day, and reminds the business day before that", () => {
     expect(ask(soon, "2026-10-12 10:00", holidays("2026-10-19"))).toEqual({
-      escalateAt: "2026-10-20 17:00",
+      escalateAt: "2026-10-20 16:30",
       remindAt: ["2026-10-16 08:30"],
-      respondBy: "2026-10-20 17:00",
+      respondBy: "2026-10-20 16:30",
     });
   });
 
   it("moves a reminder off a public holiday to the business day before it", () => {
     expect(ask(soon, "2026-10-14 10:00", holidays("2026-10-20"))).toEqual({
-      escalateAt: "2026-10-21 17:00",
+      escalateAt: "2026-10-21 16:30",
       remindAt: ["2026-10-19 08:30"],
-      respondBy: "2026-10-21 17:00",
+      respondBy: "2026-10-21 16:30",
     });
   });
 
   it("counts the day it is asked by the Darwin calendar, not the UTC one", () => {
     // 00:30 Darwin on Tuesday 13 Oct is Monday 12 Oct 15:00 UTC.
-    expect(ask(soon, "2026-10-13 00:30").respondBy).toBe("2026-10-20 17:00");
-    expect(ask(soon, "2026-10-13 23:30").respondBy).toBe("2026-10-20 17:00");
+    expect(ask(soon, "2026-10-13 00:30").respondBy).toBe("2026-10-20 16:30");
+    expect(ask(soon, "2026-10-13 23:30").respondBy).toBe("2026-10-20 16:30");
   });
 
   it("is not urgent", () => {
@@ -349,17 +349,17 @@ describe("routine: 2 to 8 weeks, reminded a week before", () => {
 
   it("two weeks from a Monday: due the Monday after next, reminded a week before it", () => {
     expect(ask(weeks(2), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-26 17:00",
+      escalateAt: "2026-10-26 16:30",
       remindAt: ["2026-10-19 08:30"],
-      respondBy: "2026-10-26 17:00",
+      respondBy: "2026-10-26 16:30",
     });
   });
 
   it("eight weeks from a Monday", () => {
     expect(ask(weeks(8), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-12-07 17:00",
+      escalateAt: "2026-12-07 16:30",
       remindAt: ["2026-11-30 08:30"],
-      respondBy: "2026-12-07 17:00",
+      respondBy: "2026-12-07 16:30",
     });
   });
 
@@ -368,27 +368,27 @@ describe("routine: 2 to 8 weeks, reminded a week before", () => {
     expect(schedule.routineWeeks).toBe(n);
     expect(schedule.dueDate).toBe(darwinDateKey(new Date(darwin("2026-10-14 10:00").getTime() + n * 7 * 86_400_000)));
     expect(schedule.remindAt).toHaveLength(1);
-    expect(schedule.respondBy!.getTime() - schedule.remindAt[0].getTime()).toBe(7 * 86_400_000 + 8.5 * 3_600_000);
+    expect(schedule.respondBy!.getTime() - schedule.remindAt[0].getTime()).toBe(7 * 86_400_000 + 8 * 3_600_000);
   });
 
   it("from a Saturday, the date moves to the Monday and the reminder to a week before that", () => {
     expect(ask(weeks(2), "2026-10-17 10:00")).toEqual({
-      escalateAt: "2026-11-02 17:00",
+      escalateAt: "2026-11-02 16:30",
       remindAt: ["2026-10-26 08:30"],
-      respondBy: "2026-11-02 17:00",
+      respondBy: "2026-11-02 16:30",
     });
   });
 
   it("moves a deadline off a public holiday, and the reminder to the business day before its week-earlier date", () => {
     expect(ask(weeks(2), "2026-10-12 10:00", holidays("2026-10-26"))).toEqual({
-      escalateAt: "2026-10-27 17:00",
+      escalateAt: "2026-10-27 16:30",
       remindAt: ["2026-10-20 08:30"],
-      respondBy: "2026-10-27 17:00",
+      respondBy: "2026-10-27 16:30",
     });
     expect(ask(weeks(2), "2026-10-12 10:00", holidays("2026-10-19"))).toEqual({
-      escalateAt: "2026-10-26 17:00",
+      escalateAt: "2026-10-26 16:30",
       remindAt: ["2026-10-16 08:30"],
-      respondBy: "2026-10-26 17:00",
+      respondBy: "2026-10-26 16:30",
     });
   });
 
@@ -402,17 +402,17 @@ describe("fixed: the date given, reminded 4, 2 and 1 days before and on the day"
 
   it("a Friday: Monday, Wednesday and Thursday before, and the day itself; moved up at its close", () => {
     expect(ask(on("2026-10-23"), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-23 17:00",
+      escalateAt: "2026-10-23 16:30",
       remindAt: ["2026-10-19 08:30", "2026-10-21 08:30", "2026-10-22 08:30", "2026-10-23 08:30"],
-      respondBy: "2026-10-23 17:00",
+      respondBy: "2026-10-23 16:30",
     });
   });
 
   it("a Monday: the weekend's two reminders collapse into the Friday before", () => {
     expect(ask(on("2026-10-26"), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-26 17:00",
+      escalateAt: "2026-10-26 16:30",
       remindAt: ["2026-10-22 08:30", "2026-10-23 08:30", "2026-10-26 08:30"],
-      respondBy: "2026-10-26 17:00",
+      respondBy: "2026-10-26 16:30",
     });
   });
 
@@ -426,9 +426,9 @@ describe("fixed: the date given, reminded 4, 2 and 1 days before and on the day"
 
   it("drops a reminder already in the past, keeping the rest", () => {
     expect(ask(on("2026-10-13"), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-13 17:00",
+      escalateAt: "2026-10-13 16:30",
       remindAt: ["2026-10-13 08:30"],
-      respondBy: "2026-10-13 17:00",
+      respondBy: "2026-10-13 16:30",
     });
     expect(ask(on("2026-10-16"), "2026-10-14 09:00").remindAt).toEqual(["2026-10-15 08:30", "2026-10-16 08:30"]);
   });
@@ -439,11 +439,11 @@ describe("fixed: the date given, reminded 4, 2 and 1 days before and on the day"
 
   it("asked on the day itself during business hours: due at close, no reminders left", () => {
     expect(ask(on("2026-10-12"), "2026-10-12 10:00")).toEqual({
-      escalateAt: "2026-10-12 17:00",
+      escalateAt: "2026-10-12 16:30",
       remindAt: [],
-      respondBy: "2026-10-12 17:00",
+      respondBy: "2026-10-12 16:30",
     });
-    expect(ask(on("2026-10-12"), "2026-10-12 16:59").respondBy).toBe("2026-10-12 17:00");
+    expect(ask(on("2026-10-12"), "2026-10-12 16:29").respondBy).toBe("2026-10-12 16:30");
   });
 
   it("moves a reminder that falls on a public holiday to the business day before", () => {
@@ -456,7 +456,7 @@ describe("fixed: the date given, reminded 4, 2 and 1 days before and on the day"
     for (const [date, start] of [
       ["2026-10-09", "2026-10-12 10:00"],
       ["2026-10-08", "2026-10-12 10:00"],
-      ["2026-10-12", "2026-10-12 17:00"],
+      ["2026-10-12", "2026-10-12 16:30"],
       ["2026-10-12", "2026-10-12 21:00"],
     ]) {
       expect(() => scheduleFor(on(date), darwin(start), NO_HOLIDAYS)).toThrow(expect.objectContaining({ code: "fixed_date_past", status: 422 }));
@@ -591,12 +591,12 @@ describe("the default calendar", () => {
   it("is ESCALATION_HOLIDAYS when no calendar is passed", () => {
     process.env.ESCALATION_HOLIDAYS = "2026-10-19";
     expect(view(scheduleFor({ tier: "soon" }, darwin("2026-10-12 10:00")))).toEqual({
-      escalateAt: "2026-10-20 17:00",
+      escalateAt: "2026-10-20 16:30",
       remindAt: ["2026-10-16 08:30"],
-      respondBy: "2026-10-20 17:00",
+      respondBy: "2026-10-20 16:30",
     });
     delete process.env.ESCALATION_HOLIDAYS;
-    expect(view(scheduleFor({ tier: "soon" }, darwin("2026-10-12 10:00"))).respondBy).toBe("2026-10-19 17:00");
+    expect(view(scheduleFor({ tier: "soon" }, darwin("2026-10-12 10:00"))).respondBy).toBe("2026-10-19 16:30");
   });
 });
 
@@ -627,7 +627,7 @@ describe("whenever it is asked", () => {
       expect(s.timed).toBe(true);
       expect({ label, ok: s.respondBy!.getTime() > now.getTime() }).toEqual({ label, ok: true });
       // the deadline is close of business on a business day
-      expect({ label, ok: isBusinessDay(darwinDateKey(s.respondBy!), CALENDAR) && darwinMinuteOfDay(s.respondBy!) === 17 * 60 }).toEqual({ label, ok: true });
+      expect({ label, ok: isBusinessDay(darwinDateKey(s.respondBy!), CALENDAR) && darwinMinuteOfDay(s.respondBy!) === 16 * 60 + 30 }).toEqual({ label, ok: true });
       // nobody is moved up before the deadline
       expect({ label, ok: s.escalateAt!.getTime() >= s.respondBy!.getTime() }).toEqual({ label, ok: true });
       // reminders: ascending, distinct, ahead of now, before the deadline, in business hours on business days
@@ -635,11 +635,11 @@ describe("whenever it is asked", () => {
       expect({ label, ok: times.every((time, i) => time > now.getTime() && time < s.respondBy!.getTime() && (i === 0 || time > times[i - 1])) }).toEqual({ label, ok: true });
       for (const r of s.remindAt) {
         const minute = darwinMinuteOfDay(r);
-        expect({ label, ok: isBusinessDay(darwinDateKey(r), CALENDAR) && minute >= 510 && minute < 1020 }).toEqual({ label, ok: true });
+        expect({ label, ok: isBusinessDay(darwinDateKey(r), CALENDAR) && minute >= 510 && minute < 990 }).toEqual({ label, ok: true });
       }
       // the move-up is also inside business hours, or at close of business itself
       const escMinute = darwinMinuteOfDay(s.escalateAt!);
-      expect({ label, ok: isBusinessDay(darwinDateKey(s.escalateAt!), CALENDAR) && escMinute >= 510 && escMinute <= 1020 }).toEqual({ label, ok: true });
+      expect({ label, ok: isBusinessDay(darwinDateKey(s.escalateAt!), CALENDAR) && escMinute >= 510 && escMinute <= 990 }).toEqual({ label, ok: true });
     }
   });
 

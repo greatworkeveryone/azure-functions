@@ -59,7 +59,7 @@ const original = (over: Partial<DecisionRequestRow> = {}): DecisionRequestRow =>
   requestedAt: new Date("2026-10-12T00:00:00Z"),
   requestedBy: "Alana",
   requestedByUserId: ALANA.userId,
-  respondBy: new Date("2026-10-19T07:30:00Z"),
+  respondBy: new Date("2026-10-19T07:00:00Z"),
   routineWeeks: null,
   rowVersion: VERSION,
   sourceAttachmentId: 77,
@@ -183,7 +183,7 @@ describe("asking a deferred question again", () => {
       question: "Pay the superseded lighting invoice?",
       requestedBy: "Alana",
       requestedByUserId: ALANA.userId,
-      respondBy: new Date("2026-10-30T07:30:00Z"), // soon: a week from today, close of business Darwin
+      respondBy: new Date("2026-10-30T07:00:00Z"), // soon: a week from today, close of business Darwin
       routineWeeks: null,
       sourceAttachmentId: 77,
       tier: "soon",
@@ -198,7 +198,7 @@ describe("asking a deferred question again", () => {
     expect(connection).toBe(conn);
     expect(args).toMatchObject({
       actor: { kind: "system", name: "escalationSweepTimer" },
-      dueAt: new Date("2026-10-30T07:30:00Z"),
+      dueAt: new Date("2026-10-30T07:00:00Z"),
       headline: "Decision needed (asked again): Pay the superseded lighting invoice?",
       ladderRaiser: { role: "accounts", userId: ALANA.userId },
       note: "Pay the superseded lighting invoice?",
@@ -220,10 +220,10 @@ describe("asking a deferred question again", () => {
         question: "Pay the superseded lighting invoice?",
         reaskOf: { askedBy: "Alana", decisionId: 4, deferredUntil: "2026-10-23" },
         requestId: 9,
-        respondBy: "2026-10-30T07:30:00.000Z",
+        respondBy: "2026-10-30T07:00:00.000Z",
         tier: "soon",
       },
-      schedule: { escalateAt: "2026-10-30T07:30:00.000Z", remindAt: ["2026-10-28T23:00:00.000Z"] },
+      schedule: { escalateAt: "2026-10-30T07:00:00.000Z", remindAt: ["2026-10-28T23:00:00.000Z"] },
     });
     expect(args.correlationId).toBe(ledger.mock.calls[0][1].correlationId);
   });
@@ -270,9 +270,9 @@ describe("asking a deferred question again", () => {
 
 describe("how long they are given the second time", () => {
   it("an urgent question comes back urgent, with the asker's tick (or no tick) as it was", async () => {
-    world.original = original({ autoEscalate: false, respondBy: new Date("2026-10-13T07:30:00Z"), tier: "urgent" });
+    world.original = original({ autoEscalate: false, respondBy: new Date("2026-10-13T07:00:00Z"), tier: "urgent" });
     await run();
-    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ autoEscalate: false, respondBy: new Date("2026-10-26T07:30:00Z"), tier: "urgent" });
+    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ autoEscalate: false, respondBy: new Date("2026-10-26T07:00:00Z"), tier: "urgent" });
     expect(raise.mock.calls[0][1]).toMatchObject({ dueAt: null, urgent: true });
 
     jest.clearAllMocks();
@@ -286,17 +286,17 @@ describe("how long they are given the second time", () => {
   it("a routine question gets the same number of weeks from today", async () => {
     world.original = original({ routineWeeks: 3, tier: "routine" });
     await run();
-    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ respondBy: new Date("2026-11-13T07:30:00Z"), routineWeeks: 3, tier: "routine" });
+    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ respondBy: new Date("2026-11-13T07:00:00Z"), routineWeeks: 3, tier: "routine" });
   });
 
   it("a fixed deadline that is still to come stays the deadline", async () => {
-    world.original = original({ respondBy: new Date("2026-10-28T07:30:00Z"), tier: "fixed" });
+    world.original = original({ respondBy: new Date("2026-10-28T07:00:00Z"), tier: "fixed" });
     await run();
-    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ respondBy: new Date("2026-10-28T07:30:00Z"), tier: "fixed" });
+    expect(store.insertRequest.mock.calls[0][1]).toMatchObject({ respondBy: new Date("2026-10-28T07:00:00Z"), tier: "fixed" });
   });
 
   it("a fixed deadline that went by while it was deferred, and an emergency, come back urgent and moving up", async () => {
-    for (const over of [{ respondBy: new Date("2026-10-20T07:30:00Z"), tier: "fixed" as const }, { autoEscalate: false, respondBy: null, tier: "emergency" as const }]) {
+    for (const over of [{ respondBy: new Date("2026-10-20T07:00:00Z"), tier: "fixed" as const }, { autoEscalate: false, respondBy: null, tier: "emergency" as const }]) {
       jest.clearAllMocks();
       world.events = [];
       world.original = original(over);
