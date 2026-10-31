@@ -19,6 +19,7 @@ import { MAX_INACTIVE_SHARE, type CoverMode } from "./config";
 import { applyCoverAction } from "./moves/apply";
 import type { PlanEntry } from "./plan";
 import { loadLiveView } from "./view";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export interface RunOptions {
   accessLoggingOn: boolean;
@@ -68,7 +69,7 @@ export async function runAbsenceCover(options: RunOptions): Promise<RunReport> {
   const log = options.log ?? (() => undefined);
   const now = options.now ?? new Date();
   const today = todayInDarwin(now);
-  const holidays = holidaysFromEnv();
+  const holidays = await loadBusinessCalendar(connection);
   const report: RunReport = { ...EMPTY, businessDay: isBusinessDay(today, holidays), dryRun: mode === "dry-run", errors: [] };
   if (!report.businessDay) {
     log(`absenceCover: ${today} is not a business day; nothing to do`);

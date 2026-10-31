@@ -1,6 +1,6 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
-import { DIGEST_CRON, digestRunDecision } from "../digest/schedule";
+import { DIGEST_CRON, digestRunDecisionWithClosures } from "../digest/schedule";
 import { myobDailyMode, runMyobDaily, type MyobDailyReport } from "../myob/daily/run";
 import { runTimer, type TimerCounts } from "../timerRuns";
 
@@ -9,7 +9,7 @@ import { runTimer, type TimerCounts } from "../timerRuns";
 // 13c): every record created, every proposal state change, what changed in
 // MYOB since, and every MYOB call, from the previous business morning to this
 // one, with who acted. Same schedule and calendar as the morning digest
-// (DIGEST_CRON, digestRunDecision): weekends, public holidays and a run hours
+// (DIGEST_CRON, digestRunDecisionWithClosures): weekends, public holidays and a run hours
 // late send nothing. Sent only when there is something; reads only.
 //
 // Off unless asked (both default off; dry run wins):
@@ -31,7 +31,7 @@ export async function myobDailyEmailTimer(_timer: Timer, context: InvocationCont
     return;
   }
   const now = new Date();
-  const decision = digestRunDecision(now);
+  const decision = await digestRunDecisionWithClosures(now);
   if (!decision.run) {
     context.log(`${ACTOR}: skipped ${decision.darwinDate} (${decision.reason})`);
     return;

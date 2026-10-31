@@ -6,6 +6,8 @@ import { fromName } from "../comms/config";
 import { executeQuery } from "../db";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { contactMayAct } from "../tenantLinks/purposes";
+import { loadOfficeCalendar } from "../officeClosures/calendar";
+import { officeStatus, type OfficeStatus } from "../officeClosures/status";
 import { LIMITS, REQUEST_CATEGORIES, URGENCIES } from "./constants";
 import { identityParams, suiteText, WHO_SQL } from "./who";
 
@@ -20,6 +22,8 @@ export interface TenantContextApi {
   /** Who the page speaks for (comms fromName), e.g. for "your landlord". */
   landlordName: string;
   limits: { accessNotes: number; descriptionMax: number; descriptionMin: number; location: number; maxPhotos: number; photoBytes: number };
+  /** Whether the office is open now (Mon-Fri 08:30-16:30 Darwin, minus public holidays and closures), and when it reopens. */
+  office: OfficeStatus;
   suite: string;
   urgencies: readonly string[];
 }
@@ -28,6 +32,7 @@ export interface TenantContextApi {
 export async function readTenantContext(connection: Connection, identity: TenantLinkIdentity, afterHoursPhone: string): Promise<TenantContextApi | null> {
   const [row] = await executeQuery(connection, WHO_SQL, identityParams(identity));
   if (!row) return null;
+  const office = officeStatus(new Date(), await loadOfficeCalendar(connection));
   return {
     afterHoursPhone,
     buildingName: String(row.BuildingName ?? ""),
@@ -44,6 +49,7 @@ export async function readTenantContext(connection: Connection, identity: Tenant
       maxPhotos: LIMITS.maxPhotosPerRequest,
       photoBytes: LIMITS.photoBytes,
     },
+    office,
     suite: suiteText(row.Levels),
     urgencies: URGENCIES,
   };

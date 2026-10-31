@@ -42,6 +42,7 @@ import {
   type DecisionRequestRow,
 } from "./store";
 import { scheduleFor, type TierSchedule } from "./tiers";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export type UserActor = Extract<LedgerActor, { kind: "user" }>;
 
@@ -111,7 +112,7 @@ export async function requestDecision(connection: Connection, context: RequestCo
   const now = context.now ?? new Date();
   const { actor } = context;
   // The tier is checked before anything is touched.
-  const schedule = scheduleFor(parsed.tier, now, context.holidays ?? holidaysFromEnv());
+  const schedule = scheduleFor(parsed.tier, now, context.holidays ?? (await loadBusinessCalendar(connection)));
 
   await beginTransaction(connection);
   let announce: () => Promise<EscalationRow>;

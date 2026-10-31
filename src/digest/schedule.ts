@@ -4,6 +4,7 @@
 // calendar itself (src/escalation/businessTime.ts): a Darwin weekend or public
 // holiday sends nothing, and neither does a run that is hours late.
 
+import { primeOfficeClosures } from "../officeClosures/calendar";
 import { darwinDateKey, darwinMinuteOfDay, holidaysFromEnv, isBusinessDay } from "../escalation/businessTime";
 
 /** 22:00 UTC Sunday to Thursday is 07:30 Darwin Monday to Friday. */
@@ -35,4 +36,12 @@ export function digestRunDecision(now: Date, env: NodeJS.ProcessEnv = process.en
   if (minute < WINDOW_START_MINUTES) return { darwinDate, reason: "too_early", run: false };
   if (minute >= WINDOW_END_MINUTES) return { darwinDate, reason: "too_late", run: false };
   return { darwinDate, run: true };
+}
+
+/** As digestRunDecision, but a weekday is checked against the office closures in the database first. A weekend is decided without touching the database. */
+export async function digestRunDecisionWithClosures(now: Date, env: NodeJS.ProcessEnv = process.env): Promise<DigestRunDecision> {
+  const first = digestRunDecision(now, env);
+  if (!first.run && first.reason === "weekend") return first;
+  await primeOfficeClosures(env);
+  return digestRunDecision(now, env);
 }

@@ -63,6 +63,7 @@ import { decisionEventText, decisionSnapshot, darwinDay } from "./snapshots";
 import { responderStanding } from "./standing";
 import { getRequestRow, lockJob, type DecisionRequestRow } from "./store";
 import { requestSnapshot, type UserActor } from "./service";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export interface RespondContext {
   actor: UserActor;
@@ -151,7 +152,7 @@ async function replaceOpenSteps(
  */
 export async function respondDecision(connection: Connection, context: RespondContext, input: ParsedResponse): Promise<AnsweredOutcome> {
   const now = context.now ?? new Date();
-  const holidays = context.holidays ?? holidaysFromEnv();
+  const holidays = context.holidays ?? (await loadBusinessCalendar(connection));
   const { actor } = context;
   // The date is checked before anything is touched.
   if (input.deferUntil !== null) validateDeferUntil(input.deferUntil, now, holidays);

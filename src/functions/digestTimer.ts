@@ -3,7 +3,7 @@ import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { digestMode } from "../digest/config";
 import { formatDigestSummary, runDigest, type DigestReport } from "../digest/run";
-import { DIGEST_CRON, digestRunDecision } from "../digest/schedule";
+import { DIGEST_CRON, digestRunDecisionWithClosures } from "../digest/schedule";
 import { Sentry } from "../sentry";
 
 // ── Timer trigger: 07:30 Darwin, business days ────────────────────────────────
@@ -78,7 +78,7 @@ export async function digestTimer(_timer: Timer, context: InvocationContext): Pr
   }
 
   const now = new Date();
-  const decision = digestRunDecision(now);
+  const decision = await digestRunDecisionWithClosures(now);
   if (!decision.run) {
     context.log(`digestTimer: skipped ${decision.darwinDate} (${decision.reason})`);
     return;

@@ -8,7 +8,7 @@
 //
 // Business hours are Monday to Friday, 08:30 to 16:30 Darwin (Connor, 31 Oct 2026). Weekends are
 // skipped, and so are the public holidays in ESCALATION_HOLIDAYS (comma-separated
-// YYYY-MM-DD, Darwin dates) until a calendar exists. "8h = 1 business day" in
+// YYYY-MM-DD, Darwin dates) and the active office closures in dbo.OfficeClosures (migration 191). "8h = 1 business day" in
 // the policy table is one full business day: 8 business hours from Monday 08:30
 // ends Monday 16:30.
 
@@ -56,14 +56,27 @@ export function parseHolidays(raw: string | null | undefined): { holidays: Holid
 }
 
 let cachedRaw: string | undefined;
+let cachedLoaded: Holidays = NO_HOLIDAYS;
 let cachedHolidays: Holidays = NO_HOLIDAYS;
+let loadedClosureDays: Holidays = NO_HOLIDAYS;
 
-/** Holidays from the environment. Parsed once per distinct value. */
+/**
+ * The office-closure days last read from the database (officeClosures/calendar.ts). Sites that load the
+ * calendar pass it on explicitly; this is the fallback for the deep call sites that default to
+ * holidaysFromEnv(), so a closure still counts once any request or sweep in this process has loaded it.
+ */
+export function setLoadedClosureDays(days: Holidays): void {
+  loadedClosureDays = days;
+}
+
+/** Holidays from the environment, plus any closure days loaded from the database. Parsed once per distinct value. */
 export function holidaysFromEnv(env: NodeJS.ProcessEnv = process.env): Holidays {
   const raw = env.ESCALATION_HOLIDAYS ?? "";
-  if (raw !== cachedRaw) {
+  if (raw !== cachedRaw || loadedClosureDays !== cachedLoaded) {
     cachedRaw = raw;
-    cachedHolidays = parseHolidays(raw).holidays;
+    cachedLoaded = loadedClosureDays;
+    const fromEnv = parseHolidays(raw).holidays;
+    cachedHolidays = loadedClosureDays.size === 0 ? fromEnv : new Set([...fromEnv, ...loadedClosureDays]);
   }
   return cachedHolidays;
 }

@@ -44,6 +44,7 @@ import { RequestError } from "./request";
 import { DECISION_MAKER_ROLES } from "./roles";
 import { requestSnapshot } from "./service";
 import { getRequestRow, insertRequest, lockJob, type DecisionRequestRow } from "./store";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export type ReaskResult = "asked" | "skipped";
 
@@ -86,7 +87,7 @@ async function rollback(connection: Connection): Promise<void> {
  */
 export async function reaskDeferral(connection: Connection, deferral: DueDeferral, options: ReaskOptions): Promise<ReaskResult> {
   const { now } = options;
-  const holidays = options.holidays ?? holidaysFromEnv();
+  const holidays = options.holidays ?? (await loadBusinessCalendar(connection));
 
   await beginTransaction(connection);
   let announce: () => Promise<EscalationRow>;

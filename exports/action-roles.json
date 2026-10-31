@@ -259,6 +259,11 @@
     "facilities_manager",
     "user"
   ],
+  "editOfficeClosures": [
+    "admin",
+    "director",
+    "facilities_manager"
+  ],
   "editProcedures": [
     "accounts_manager",
     "admin",

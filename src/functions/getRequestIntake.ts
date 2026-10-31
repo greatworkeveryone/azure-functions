@@ -21,6 +21,7 @@ import { intakePriority, viewState } from "../intake/state";
 import { checkRateLimit } from "../rateLimit";
 import { iso, trimmedOrNull as str } from "../sqlHelpers";
 import { parseWorkRequestId } from "../workRequestsNative";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 
 /** Requests raised in Floorplan carry negative ids (workRequestsNative), so any non-zero whole number is valid. */
@@ -43,6 +44,7 @@ export async function getRequestIntake(request: HttpRequest, context: Invocation
   let connection: Connection | undefined;
   try {
     connection = await createRequestConnection(auth.token);
+    await loadBusinessCalendar(connection);
     // Ids are whole numbers parsed above, so they are spliced in, not bound.
     const rows = await executeQuery(
       connection,

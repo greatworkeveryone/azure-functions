@@ -62,6 +62,7 @@ import { eventForRetry, isRetryDue, notifyTargets, type NotifyEvent, type Notify
 import { getPolicy } from "./policies";
 import { latestKey, latestTimesBySubject, listLiveEscalations, type LatestEscalationTimes } from "./store";
 import { RESOLUTION_CODES, type EscalationPolicy, type EscalationRow } from "./types";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export interface SweepOptions {
   dryRun: boolean;
@@ -336,7 +337,7 @@ async function reaskDeferred(run: Run): Promise<void> {
     return;
   }
 
-  const holidays = holidaysFromEnv(run.env);
+  const holidays = await loadBusinessCalendar(run.connection, run.env);
   for (const deferral of due) {
     if (!run.take()) return;
     if (run.options.dryRun) {
@@ -375,7 +376,7 @@ async function raiseForJobs(run: Run): Promise<void> {
   const facts = await run.deps.loadLiveJobFacts(run.connection);
   const latest = await run.deps.latestTimesBySubject(run.connection, "job");
   const live = new Set((await run.deps.listLiveEscalations(run.connection)).map(rowKey));
-  const rule = { env: run.env, holidays: holidaysFromEnv(run.env), now: run.now };
+  const rule = { env: run.env, holidays: await loadBusinessCalendar(run.connection, run.env), now: run.now };
 
   const candidates: Candidate[] = [];
   const handledStalled: JobFacts[] = [];

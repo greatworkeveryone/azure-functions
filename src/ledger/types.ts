@@ -35,6 +35,7 @@ export type LedgerSubjectType =
   | "myob_link"
   | "myob_proposal"
   | "occupancy"
+  | "office_closure"
   | "org_setting"
   | "payment"
   | "purchase_order"

@@ -35,7 +35,7 @@ import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROL
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
 import { EDIT_RESPONSIBILITIES_ROLES, VIEW_RESPONSIBILITIES_ROLES } from "./tenancyResponsibilities/roles";
-import { EDIT_AFTER_HOURS_ROLES } from "./orgSettings/roles";
+import { EDIT_AFTER_HOURS_ROLES, EDIT_OFFICE_CLOSURES_ROLES } from "./orgSettings/roles";
 import { ISSUE_TENANT_LINKS_ROLES, MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
 import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
@@ -331,6 +331,11 @@ export const ACTION_ROLES = {
     gate: EDIT_AFTER_HOURS_ROLES,
     routes: ["getAfterHours", "saveAfterHours"],
     why: "Read and edit the after-hours phone number tenants are told to ring, company-wide. Facilities manager (the role that approves work), director and admin.",
+  },
+  editOfficeClosures: {
+    gate: EDIT_OFFICE_CLOSURES_ROLES,
+    routes: ["saveOfficeClosure", "archiveOfficeClosure"],
+    why: "Add, edit and archive office closures (public holidays, the Christmas shutdown), company-wide. Same people as editAfterHours. Anyone signed in may read them (getOfficeClosures).",
   },
   importMyBuildings: {
     gate: [A.ADMIN],

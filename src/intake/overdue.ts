@@ -7,6 +7,7 @@ import type { Connection } from "tedious";
 import { executeQuery } from "../db";
 import { addBusinessHours, holidaysFromEnv } from "../escalation/businessTime";
 import { intakePriority } from "./state";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export const REQUEST_POLICY = "request.unacknowledged";
 export const REQUEST_SUBJECT_TYPE = "work_request";
@@ -32,7 +33,7 @@ export async function listOverdueRequests(connection: Connection, now: Date = ne
   const targets = new Map((await executeQuery(connection, TARGETS_SQL) ?? []).map((row) => [String(row.Priority), row]));
   if (targets.size === 0) return [];
   const rows = await executeQuery(connection, UNACKNOWLEDGED_SQL);
-  const holidays = holidaysFromEnv();
+  const holidays = await loadBusinessCalendar(connection);
   const overdue: OverdueRequest[] = [];
   for (const row of rows ?? []) {
     if (!(row.CreatedAt instanceof Date)) continue;

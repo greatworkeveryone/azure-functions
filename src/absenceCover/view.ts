@@ -13,6 +13,7 @@ import { loadInventory } from "./inventory";
 import { loadCoverState, type CoverState } from "./load";
 import { planCover, type Plan } from "./plan";
 import type { AbsentPerson, CoverContext, CoverItem } from "./types";
+import { loadBusinessCalendar } from "../officeClosures/calendar";
 
 export interface LiveView {
   absent: AbsentPerson[];
@@ -47,7 +48,7 @@ export interface Absences {
 export async function loadAbsences(connection: Connection, options: ViewOptions = {}): Promise<Absences> {
   const now = options.now ?? new Date();
   const today = todayInDarwin(now);
-  const holidays = holidaysFromEnv();
+  const holidays = await loadBusinessCalendar(connection);
   const logging = options.accessLoggingOn ?? accessLoggingOn();
   const state = await loadCoverState(connection, today, logging);
   const detection = detectAbsences({

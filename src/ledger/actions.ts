@@ -192,6 +192,11 @@ export const LEDGER_ACTIONS = {
   // after hold the number. Read by the director (the default) and admin.
   "settings.after_hours_set": { exception: false, reasonRequired: false, subjects: ["org_setting"] },
 
+  // Office closures (public holidays, the Christmas shutdown): whole Darwin days the office is shut. Archive, never delete.
+  "settings.office_closure_archive": { exception: true, reasonRequired: false, subjects: ["office_closure"] },
+  "settings.office_closure_create": { exception: false, reasonRequired: false, subjects: ["office_closure"] },
+  "settings.office_closure_update": { exception: false, reasonRequired: false, subjects: ["office_closure"] },
+
   // Stored-holdover reset, run once after deploy (WP23a)
   "tenancy.holdover_reset": { exception: false, reasonRequired: false, subjects: ["tenancy"] },
 
