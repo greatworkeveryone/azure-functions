@@ -16,6 +16,8 @@ interface Bucket {
 const buckets = new Map<string, Bucket>();
 
 const DEFAULT_LIMIT = 30;
+/** Upper bound on tracked keys: the anonymous tenant endpoints key by hashed address, so cardinality is not ours to choose. */
+const MAX_KEYS = 20_000;
 const DEFAULT_WINDOW_MS = 60_000;
 
 export type RateLimitResult =
@@ -40,6 +42,7 @@ export function checkRateLimit(
     // First request in this window (or previous window expired).
     buckets.set(key, { count: 1, resetAt: now + windowMs });
     purgeExpired(now);
+    capKeys();
     return { allowed: true };
   }
 
@@ -52,11 +55,31 @@ export function checkRateLimit(
 }
 
 /**
+ * True when `key` is already at its limit in the current window, without counting a hit. Used where a refusal must
+ * be checked before the work and only a failure should count (the tenant page's failed-link brake).
+ */
+export function isRateLimitFull(key: string, opts?: RateLimitOpts): RateLimitResult {
+  const existing = buckets.get(key);
+  const now = Date.now();
+  if (!existing || existing.resetAt <= now || existing.count < (opts?.limit ?? DEFAULT_LIMIT)) return { allowed: true };
+  return { allowed: false, retryAfterMs: Math.max(0, existing.resetAt - now) };
+}
+
+/**
  * Test-only helper to wipe all in-memory state. Not exported via any
  * public route — only the test suite imports it.
  */
 export function _resetRateLimitForTests(): void {
   buckets.clear();
+}
+
+// Still over the cap after purging: drop the oldest keys (insertion order) rather than refuse everyone.
+function capKeys(): void {
+  if (buckets.size <= MAX_KEYS) return;
+  for (const key of buckets.keys()) {
+    if (buckets.size <= MAX_KEYS * 0.9) break;
+    buckets.delete(key);
+  }
 }
 
 function purgeExpired(now: number): void {

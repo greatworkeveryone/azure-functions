@@ -1,5 +1,5 @@
 /// <reference types="jest" />
-import { _resetRateLimitForTests, checkRateLimit, checkSignInRateLimit, SIGN_IN_LIMITS } from "./rateLimit";
+import { _resetRateLimitForTests, checkRateLimit, isRateLimitFull, checkSignInRateLimit, SIGN_IN_LIMITS } from "./rateLimit";
 
 // SEC-10: sign-in is limited per user (20/min) with a generous per-IP ceiling
 // (120/min) so a shared office NAT is never locked out by its own staff, and
@@ -93,5 +93,22 @@ describe("a refused call does not extend the window (P4)", () => {
     expect(checkRateLimit("k", { limit: 3, windowMs: 1000 })).toEqual({ allowed: false, retryAfterMs: 100 });
     now.mockReturnValue(T0 + 1000);
     expect(checkRateLimit("k", { limit: 3, windowMs: 1000 }).allowed).toBe(true);
+  });
+});
+
+describe("isRateLimitFull", () => {
+  it("peeks without counting: only checkRateLimit hits fill the bucket", () => {
+    const opts = { limit: 2, windowMs: 60_000 };
+    for (let i = 0; i < 5; i += 1) expect(isRateLimitFull("peek", opts).allowed).toBe(true);
+    checkRateLimit("peek", opts);
+    checkRateLimit("peek", opts);
+    expect(isRateLimitFull("peek", opts).allowed).toBe(false);
+  });
+});
+
+describe("the key cap", () => {
+  it("keeps memory bounded when far more keys arrive than the cap, and still answers", () => {
+    for (let i = 0; i < 20_500; i += 1) expect(checkRateLimit(`flood:${i}`, { limit: 1, windowMs: 60_000 }).allowed).toBe(true);
+    expect(checkRateLimit("flood:fresh", { limit: 1, windowMs: 60_000 }).allowed).toBe(true);
   });
 });

@@ -17,19 +17,18 @@
 //
 // A failure in the work is a generic 500: no SQL text, no token, no identity in the reply or the log.
 
-import { createHash } from "node:crypto";
 import type { HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
 import { clientAddress, hashValue } from "../access/clientIp";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { isFeatureEnabledForRoles } from "../features/flags";
 import { resolveTenantLink } from "../tenantLinks/resolve";
-import { isTokenShaped } from "../tenantLinks/token";
+import { hashToken, isTokenShaped } from "../tenantLinks/token";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { RATE, TENANT_PAGE_FLAG } from "./constants";
 import { companyAfterHours } from "../orgSettings/afterHours";
 import { purposeOpens, type PageSection } from "../tenantLinks/purposes";
-import { hit, isFull } from "./limiter";
+import { checkRateLimit, isRateLimitFull } from "../rateLimit";
 
 export const TENANT_LINK_HEADER = "x-tenant-link";
 
@@ -54,7 +53,7 @@ export interface TenantOptions {
 export const linkNotValid = (): HttpResponseInit => ({ headers: NO_STORE, jsonBody: { error: "link_not_valid" }, status: 404 });
 
 const tooMany = (retryAfterMs: number): HttpResponseInit => ({
-  headers: { ...NO_STORE, "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
+  headers: { ...NO_STORE, "Retry-After": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
   jsonBody: { error: "rate_limited" },
   status: 429,
 });
@@ -83,22 +82,22 @@ export async function runTenant(
   const address = clientAddress(request);
   const clientKey = address ? hashValue("ip", address) : "unknown";
   const clientLimit = address ? RATE.client : RATE.unknownClient;
-  const byClient = hit(`tenant:client:${clientKey}`, clientLimit.limit, clientLimit.windowMs);
+  const byClient = checkRateLimit(`tenant:client:${clientKey}`, clientLimit);
   if (!byClient.allowed) return tooMany(byClient.retryAfterMs);
 
   const failedKey = `tenant:failed:${clientKey}`;
-  const alreadyFailing = isFull(failedKey, RATE.failedLink.limit, RATE.failedLink.windowMs);
+  const alreadyFailing = isRateLimitFull(failedKey, RATE.failedLink);
   if (!alreadyFailing.allowed) return tooMany(alreadyFailing.retryAfterMs);
   const failed = (): HttpResponseInit => {
-    hit(failedKey, RATE.failedLink.limit, RATE.failedLink.windowMs);
+    checkRateLimit(failedKey, RATE.failedLink);
     return linkNotValid();
   };
 
   const token = request.headers.get(TENANT_LINK_HEADER);
   if (!isTokenShaped(token)) return failed();
 
-  const tokenKey = createHash("sha256").update(token).digest("hex").slice(0, 24);
-  const byLink = hit(`tenant:link:${name}:${tokenKey}`, options.perLink.limit, options.perLink.windowMs);
+  const tokenKey = hashToken(token).toString("hex").slice(0, 24);
+  const byLink = checkRateLimit(`tenant:link:${name}:${tokenKey}`, options.perLink);
   if (!byLink.allowed) return tooMany(byLink.retryAfterMs);
 
   let connection: Connection | undefined;

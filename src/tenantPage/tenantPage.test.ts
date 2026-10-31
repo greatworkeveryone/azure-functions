@@ -24,7 +24,7 @@ import { tenantListRequests } from "../functions/tenantListRequests";
 import { tenantSubmitRequest } from "../functions/tenantSubmitRequest";
 import { tenantUploadPhoto } from "../functions/tenantUploadPhoto";
 import { sniffImage } from "./imageSniff";
-import { resetTenantLimiter } from "./limiter";
+import { _resetRateLimitForTests as resetTenantLimiter } from "../rateLimit";
 import { parseSubmit } from "./submit";
 import { LIMITS } from "./constants";
 import { timelineFor } from "./timeline";
