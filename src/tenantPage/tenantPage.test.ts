@@ -125,6 +125,16 @@ describe("the link gate", () => {
     expect((await tenantContext(req({ ip: "198.51.100.10", token: TOKEN_A }), context)).status).toBe(200);
   });
 
+  it("gives the page the landlord name and every input limit it validates against", async () => {
+    const r = await tenantContext(req({ ip: "198.51.100.12", token: TOKEN_A }), context);
+    expect(r.jsonBody).toMatchObject({
+      landlordName: expect.any(String),
+      limits: { accessNotes: LIMITS.accessNotes, descriptionMax: LIMITS.descriptionMax, descriptionMin: LIMITS.descriptionMin, location: LIMITS.location, maxPhotos: LIMITS.maxPhotosPerRequest, photoBytes: LIMITS.photoBytes },
+      urgencies: ["emergency", "urgent", "routine"],
+    });
+    expect((r.jsonBody as { landlordName: string }).landlordName.length).toBeGreaterThan(0);
+  });
+
   it("limits each link: the ninth submission in ten minutes is 429", async () => {
     const codes: number[] = [];
     for (let i = 0; i < 9; i += 1) codes.push((await tenantSubmitRequest(req({ body: GOOD, ip: `192.0.2.${i + 20}` }), context)).status ?? 0);

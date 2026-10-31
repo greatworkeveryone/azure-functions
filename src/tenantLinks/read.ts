@@ -1,6 +1,7 @@
 import { executeQuery } from "../db";
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
+import { DEFAULT_EXPIRY_MONTHS, expiryMonths } from "./token";
 import { listContacts, seedIfNoContacts, versionText } from "./store";
 import type { TenancyContactsApi } from "./types";
 
@@ -9,5 +10,5 @@ export async function loadTenancyContacts(connection: Connection, tenantId: numb
   const [tenancy] = await executeQuery(connection, `SELECT EmailOnly, RowVersion FROM dbo.Tenants WHERE TenantId = @TenantId`, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
   if (!tenancy) return null;
   await seedIfNoContacts(connection, tenantId, by);
-  return { contacts: await listContacts(connection, tenantId, now), emailOnly: tenancy.EmailOnly === true, tenancyRowVersion: versionText(tenancy.RowVersion), tenantId };
+  return { contacts: await listContacts(connection, tenantId, now), emailOnly: tenancy.EmailOnly === true, linkExpiryMonths: expiryMonths(undefined) ?? DEFAULT_EXPIRY_MONTHS, tenancyRowVersion: versionText(tenancy.RowVersion), tenantId };
 }

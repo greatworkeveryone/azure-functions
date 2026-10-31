@@ -119,4 +119,16 @@ describe("getTenancyContacts", () => {
     expect(db.executeQuery.mock.calls.some((c) => String(c[1]).includes("NOT EXISTS (SELECT 1 FROM dbo.TenancyContacts"))).toBe(true);
     expect((await getTenancyContacts(get("tenantId=x"), context)).status).toBe(400);
   });
+
+  it("tells the issue dialog how long a new link lasts (the same source token.ts uses)", async () => {
+    world([]);
+    delete process.env.TENANT_LINK_EXPIRY_MONTHS;
+    expect((await getTenancyContacts(get("tenantId=9"), context)).jsonBody).toMatchObject({ linkExpiryMonths: 12 });
+    process.env.TENANT_LINK_EXPIRY_MONTHS = "6";
+    try {
+      expect((await getTenancyContacts(get("tenantId=9"), context)).jsonBody).toMatchObject({ linkExpiryMonths: 6 });
+    } finally {
+      delete process.env.TENANT_LINK_EXPIRY_MONTHS;
+    }
+  });
 });

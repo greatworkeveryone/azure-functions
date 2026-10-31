@@ -1,6 +1,6 @@
 // GET /api/getTenancyContacts?tenantId=N  (TR2, PLAN §15)
 // The tenancy's contacts with roles and the status of each personal link, plus the email-only flag.
-// Seeds the primary contact on first read. Response: { contacts, emailOnly, tenancyRowVersion, tenantId }.
+// Seeds the primary contact on first read. Response: { contacts, emailOnly, linkExpiryMonths, tenancyRowVersion, tenantId }.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { loadTenancyContacts } from "../tenantLinks/read";

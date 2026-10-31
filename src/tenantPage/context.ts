@@ -2,6 +2,7 @@
 // identity resolveTenantLink returned; nothing from the request picks the tenancy.
 
 import { TYPES, type Connection } from "tedious";
+import { fromName } from "../comms/config";
 import { executeQuery } from "../db";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { companyAfterHours } from "../orgSettings/afterHours";
@@ -14,9 +15,11 @@ export interface TenantContextApi {
   categories: { key: string; label: string }[];
   companyName: string;
   contactName: string;
-  /** The building's own after-hours line, else the company's (Admin setting); null only if neither exists. */
+  /** The company after-hours line (Admin setting); null only if it is not set. */
   afterHoursPhone: string | null;
-  limits: { maxPhotos: number; photoBytes: number };
+  /** Who the page speaks for (comms fromName), e.g. for "your landlord". */
+  landlordName: string;
+  limits: { accessNotes: number; descriptionMax: number; descriptionMin: number; location: number; maxPhotos: number; photoBytes: number };
   suite: string;
   urgencies: readonly string[];
 }
@@ -57,7 +60,15 @@ export async function readTenantContext(connection: Connection, identity: Tenant
     categories: REQUEST_CATEGORIES.map((c) => ({ key: c.key, label: c.label })),
     companyName: String(row.TenantName ?? ""),
     contactName: String(row.ContactName ?? ""),
-    limits: { maxPhotos: LIMITS.maxPhotosPerRequest, photoBytes: LIMITS.photoBytes },
+    landlordName: fromName(),
+    limits: {
+      accessNotes: LIMITS.accessNotes,
+      descriptionMax: LIMITS.descriptionMax,
+      descriptionMin: LIMITS.descriptionMin,
+      location: LIMITS.location,
+      maxPhotos: LIMITS.maxPhotosPerRequest,
+      photoBytes: LIMITS.photoBytes,
+    },
     suite: levelsText(row.Levels),
     urgencies: URGENCIES,
   };

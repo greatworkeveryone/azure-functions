@@ -34,6 +34,8 @@ export interface ContactApi {
 export interface TenancyContactsApi {
   contacts: ContactApi[];
   emailOnly: boolean;
+  /** Months a newly issued link lasts by default (TENANT_LINK_EXPIRY_MONTHS, else 12): what the issue dialog shows. */
+  linkExpiryMonths: number;
   /** The tenancy's version: send it back with the email-only toggle. */
   tenancyRowVersion: string;
   tenantId: number;
