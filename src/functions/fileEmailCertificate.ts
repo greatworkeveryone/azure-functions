@@ -26,10 +26,9 @@ import { CERT_ACK_TEMPLATE_ID, CERT_ACK_TEMPLATE_SLUG, acknowledgementEnabled } 
 import { parseFileCertificateBody } from "../certificateIntake/input";
 import { attachmentsOf } from "../certificateIntake/load";
 import { authorizeActor, badRequest, conflict, noStore, notFound, type CommsActor } from "../comms/actor";
-import { approvalThreshold, commsMode, fromAddress, fromName } from "../comms/config";
-import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms/queueJob";
+import { commsMode } from "../comms/config";
+import { queueTemplatedLetter } from "../comms/templated";
 import { prepareSender } from "../comms/senderSetup";
-import type { NewJob } from "../comms/types";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { isFeatureEnabledForRoles } from "../features/flags";
@@ -53,31 +52,24 @@ async function sendAcknowledgement(connection: Connection, actor: CommsActor, to
   if (actor.roles.every((role) => role === AppRole.ADMIN)) return { detail: "Admin accounts don't send real email; use a staff account.", status: "not_sent" };
   const template = await loadTemplateBySlug(connection, CERT_ACK_TEMPLATE_SLUG);
   if (!template) return { detail: "The certificate_received email template isn't in the library yet.", status: "not_sent" };
-  if (!template.approved && commsMode() === "live") return { detail: "The certificate_received email template hasn't been approved yet, so it can't be sent.", status: "not_sent" };
   const setup = await prepareSender(connection, actor, { replyTo: { kind: "own" }, signatureMode: "personal" });
   if (!setup.ok) return { detail: "Your sending identity isn't set up, so the thank-you email wasn't queued.", status: "not_sent" };
-  const job: NewJob = {
-    bodyMarkdown: template.bodyMarkdown,
-    createdBy: { email: actor.email, name: actor.name, oid: actor.oid, role: actor.role },
-    fromAddress: fromAddress(),
-    fromName: fromName(),
+  const user = await findUserByOid(connection, actor.oid);
+  const result = await queueTemplatedLetter(connection, {
+    actor,
+    commsLive: commsMode() === "live",
+    key: filingKey,
     kind: "letter",
     recipients: [{ address: to.address, mergeValues: {}, name: to.name, recipientRefId: null, recipientType: "manual" }],
     replyTo: { address: setup.replyTo.address, identityId: setup.replyTo.identity?.identityId ?? null, name: setup.replyTo.name },
     signature: setup.signature,
     signatureMode: "personal",
-    subject: template.subject,
+    template,
     templateId: CERT_ACK_TEMPLATE_ID,
-    templateVersion: template.version,
-  };
-  const checked = await applyResolutions(connection, checkRecipients(job));
-  if (checked.every(isBlocked)) {
-    const first = checked[0];
-    return { detail: `The thank-you email can't be sent. ${first.refusal?.detail ?? (first.composed.ok ? "" : first.composed.detail)}`.trim(), status: "not_sent" };
-  }
-  const user = await findUserByOid(connection, actor.oid);
-  const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold(), filingKey);
-  return { correspondenceId: queued.correspondenceId, jobStatus: queued.status, status: "queued" };
+    userId: user?.userId ?? null,
+  });
+  if (!result.ok) return { detail: result.code === "blocked" ? `The thank-you email can't be sent. ${result.detail}` : `${result.detail}.`, status: "not_sent" };
+  return { correspondenceId: result.correspondenceId, jobStatus: result.status, status: "queued" };
 }
 
 export async function fileEmailCertificate(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {

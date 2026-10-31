@@ -15,11 +15,10 @@ import { ACTION_ROLES } from "../action-roles";
 import { inTransaction, readJsonBody, txOk } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { authorizeActor, badRequest, conflict, noStore, notFound } from "../comms/actor";
-import { approvalThreshold, commsMode, fromAddress, fromName } from "../comms/config";
-import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms/queueJob";
+import { commsMode } from "../comms/config";
+import { queueTemplatedLetter } from "../comms/templated";
 import { unexpectedKey } from "../comms/request";
 import { prepareSender } from "../comms/senderSetup";
-import type { NewJob } from "../comms/types";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { isFeatureEnabledForRoles } from "../features/flags";
@@ -73,21 +72,23 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
 
     let jobId: number | null = null;
     let queuedJobStatus: string | null = null;
+    let acknowledger: Awaited<ReturnType<typeof findUserByOid>> | null = null;
     if (!withoutEmail) {
       const address = text(row.ContactEmail).toLowerCase();
       if (address === "") return badRequest("This request has no contact email. If you have already told them another way, acknowledge without an email.");
       const template = await loadAckTemplate(connection);
       if (!template) return conflict("The request_ack email template isn't in the library yet");
-      if (!template.approved && commsMode() === "live") return conflict("The request_ack email template hasn't been approved yet, so it can't be sent");
       const setup = await prepareSender(connection, actor, { replyTo: { kind: "own" }, signatureMode: "personal" });
       if (!setup.ok) return setup.response;
       const reference = text(row.JobCode) || `REQ-${id}`;
       const summary = [text(row.RequestType), text(row.Category)].find(Boolean) ?? "your request";
-      const job: NewJob = {
-        bodyMarkdown: template.bodyMarkdown,
-        createdBy: { email: actor.email, name: actor.name, oid: actor.oid, role: actor.role },
-        fromAddress: fromAddress(),
-        fromName: fromName(),
+      const user = await findUserByOid(connection, actor.oid);
+      acknowledger = user;
+      // One key per request: a retry after a failure part-way finds the email already queued and doesn't queue a second.
+      const queued = await queueTemplatedLetter(connection, {
+        actor,
+        commsLive: commsMode() === "live",
+        key: `request-ack-wr-${id}`,
         kind: "letter",
         // A typed address: the egress guard still refuses any test tenancy's contact. The request's own contact is not a tenancy record.
         recipients: [
@@ -109,23 +110,16 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
         replyTo: { address: setup.replyTo.address, identityId: setup.replyTo.identity?.identityId ?? null, name: setup.replyTo.name },
         signature: setup.signature,
         signatureMode: "personal",
-        subject: template.subject,
+        template,
         templateId: ACK_TEMPLATE_ID,
-        templateVersion: template.version,
-      };
-      const checked = await applyResolutions(connection, checkRecipients(job));
-      if (checked.every(isBlocked)) {
-        const first = checked[0];
-        return badRequest(`The acknowledgement can't be sent. ${first.refusal?.detail ?? (first.composed.ok ? "" : first.composed.detail)}`.trim());
-      }
-      const user = await findUserByOid(connection, actor.oid);
-      // One key per request: a retry after a failure part-way finds the email already queued and doesn't queue a second.
-      const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold(), `request-ack-wr-${id}`);
+        userId: user?.userId ?? null,
+      });
+      if (!queued.ok) return queued.code === "blocked" ? badRequest(`The acknowledgement can't be sent. ${queued.detail}`.trim()) : conflict(queued.detail);
       jobId = queued.correspondenceId;
       queuedJobStatus = queued.status;
     }
 
-    const user = await findUserByOid(connection, actor.oid);
+    const user = acknowledger ?? (await findUserByOid(connection, actor.oid));
     const via = withoutEmail ? "other" : "email";
     const moved = await inTransaction<boolean>(connection, async () => {
       const done = await executeQuery(

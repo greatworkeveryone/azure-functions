@@ -4,9 +4,8 @@
 import type { Connection } from "tedious";
 import { AppRole } from "../auth";
 import type { CommsActor } from "../comms/actor";
-import { approvalThreshold, fromAddress, fromName, tenantReplyTo } from "../comms/config";
-import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms/queueJob";
-import type { NewJob } from "../comms/types";
+import { fromAddress, fromName, tenantReplyTo } from "../comms/config";
+import { queueTemplatedLetter } from "../comms/templated";
 import { loadTemplateBySlug } from "../intake/template";
 import type { NoticeContext } from "./context";
 import { LINK_BLOCK_SUFFIX, NOTICE_ACTOR_NAME, NOTICE_ACTOR_OID, NOTICE_TEMPLATES, type NoticeEvent } from "./config";
@@ -28,13 +27,10 @@ export async function queueNotice(
   // An email-only tenancy gets the same plain-text notice without the paragraph that points at a personal link.
   const template = await loadTemplateBySlug(connection, spec.slug, context.emailOnly ? { omitBlockIdSuffix: LINK_BLOCK_SUFFIX } : {});
   if (!template) return { detail: `The ${spec.id} template isn't in the library`, ok: false };
-  if (!template.approved && commsLive) return { detail: `The ${spec.id} template hasn't been approved yet`, ok: false };
-  const sender = actor();
-  const job: NewJob = {
-    bodyMarkdown: template.bodyMarkdown,
-    createdBy: { email: sender.email, name: sender.name, oid: sender.oid, role: sender.role },
-    fromAddress: fromAddress(),
-    fromName: fromName(),
+  const result = await queueTemplatedLetter(connection, {
+    actor: actor(),
+    commsLive,
+    key: noticeKey(jobId, event),
     kind: "system",
     recipients: contacts.map((contact) => ({
       address: contact.email.toLowerCase(),
@@ -52,16 +48,10 @@ export async function queueNotice(
     replyTo: { address: tenantReplyTo(), identityId: null, name: null },
     signature: { email: tenantReplyTo(), lines: ["Facilities team", fromName()], phone: null },
     signatureMode: "role",
-    subject: template.subject,
+    template,
     templateId: spec.id,
-    templateVersion: template.version,
-  };
-  const checked = await applyResolutions(connection, checkRecipients(job));
-  if (checked.every(isBlocked)) {
-    const first = checked[0];
-    return { detail: `Can't be sent: ${first.refusal?.detail ?? (first.composed.ok ? "no valid recipient" : first.composed.detail)}`.slice(0, 300), ok: false };
-  }
-  const queued = await writeJob(connection, job, checked, sender, null, approvalThreshold(), noticeKey(jobId, event));
-  const recipients = checked.filter((entry) => !isBlocked(entry)).map((entry) => (entry.recipient.name ? `${entry.recipient.name} <${entry.recipient.address}>` : entry.recipient.address));
-  return { correspondenceId: queued.correspondenceId, ok: true, recipients: recipients.join(", ").slice(0, 600) };
+    userId: null,
+  });
+  if (!result.ok) return { detail: (result.code === "blocked" ? `Can't be sent: ${result.detail}` : result.detail).slice(0, 300), ok: false };
+  return { correspondenceId: result.correspondenceId, ok: true, recipients: result.recipients };
 }
