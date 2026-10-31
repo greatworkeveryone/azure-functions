@@ -16,6 +16,7 @@ import { TYPES, type Connection } from "tedious";
 import { uploadTenantQuarantineBlob } from "../blob-storage";
 import { beginTransaction, commitTransaction, executeQuery, rollbackTransaction } from "../db";
 import { record } from "../ledger";
+import { parseWorkRequestId } from "../workRequestsNative";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { LIMITS } from "./constants";
 import { sniffImage, type ImageType } from "./imageSniff";
@@ -28,10 +29,10 @@ export type PhotoResult =
 /** Content-Type values a client may send; the sniffed type is what is stored, and must agree. */
 const DECLARED: Record<ImageType, string> = { "image/jpeg": "image/jpeg", "image/png": "image/png", "image/webp": "image/webp" };
 
+/** A tenant can only name a Floorplan-native (negative) request. */
 export function parseRequestId(header: string | null): number | null {
-  if (header === null || !/^-[1-9][0-9]{0,9}$/.test(header.trim())) return null;
-  const id = Number(header.trim());
-  return Number.isSafeInteger(id) && id >= -2_147_483_648 ? id : null;
+  const id = parseWorkRequestId(header?.trim());
+  return id !== null && id < 0 ? id : null;
 }
 
 /** A reserved row older than this has probably lost its upload; it stops counting toward the caps. */

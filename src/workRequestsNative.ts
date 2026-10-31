@@ -13,6 +13,17 @@ export const NATIVE_SOURCE_HOST = "floorplan";
 
 export const isNativeWorkRequestId = (id: number): boolean => id < 0;
 
+const INT_MAX = 2_147_483_647;
+
+/** The one parser for a work-request id: any non-zero whole number within SQL INT range (negative = Floorplan-native). Accepts a JS integer or its decimal string. */
+export function parseWorkRequestId(raw: unknown): number | null {
+  let id: number;
+  if (typeof raw === "number") id = raw;
+  else if (typeof raw === "string" && /^-?[1-9]\d{0,9}$/.test(raw)) id = Number(raw);
+  else return null;
+  return Number.isSafeInteger(id) && id !== 0 && Math.abs(id) <= INT_MAX ? id : null;
+}
+
 const text = (value: unknown): string | null =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 

@@ -5,6 +5,7 @@
 import { TYPES } from "tedious";
 import { executeQuery } from "../../db";
 import { storedState } from "../../intake/state";
+import { parseWorkRequestId } from "../../workRequestsNative";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
 
@@ -19,7 +20,7 @@ const SQL = `SELECT wr.WorkRequestID, wr.BuildingID, wr.BuildingName, wr.IntakeS
     LEFT JOIN dbo.WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID
    WHERE wr.WorkRequestID = @Id`;
 
-const requestId = (subjectId: string): number | null => (/^\d{1,10}$/.test(subjectId) && Number(subjectId) > 0 ? Number(subjectId) : null);
+const requestId = (subjectId: string): number | null => parseWorkRequestId(subjectId);
 
 async function load(connection: Parameters<EscalationAdapter["loadSummary"]>[0], id: number) {
   return (await executeQuery(connection, SQL, [{ name: "Id", type: TYPES.Int, value: id }]))[0] ?? null;

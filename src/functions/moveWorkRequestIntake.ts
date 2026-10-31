@@ -19,6 +19,7 @@ import { canMove, isClosed, isIntakeState, MAX_CLOSE_REASON_CHARS, storedState, 
 import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
 import { checkRateLimit } from "../rateLimit";
+import { parseWorkRequestId } from "../workRequestsNative";
 
 const TARGETS: readonly IntakeState[] = ["assessing", "closed_duplicate", "closed_not_ours"];
 
@@ -32,9 +33,8 @@ export async function moveWorkRequestIntake(request: HttpRequest, context: Invoc
   if (!body) return badRequest("JSON object required");
   const extra = unexpectedKey(body, ["workRequestId", "to", "reason"]);
   if (extra) return badRequest(extra);
-  const id = body.workRequestId;
-  // Floorplan-raised requests have negative ids (workRequestsNative); only zero is never a request.
-  if (typeof id !== "number" || !Number.isInteger(id) || id === 0 || Math.abs(id) > 2_147_483_647) return badRequest("workRequestId must be a whole number");
+  const id = typeof body.workRequestId === "number" ? parseWorkRequestId(body.workRequestId) : null;
+  if (id === null) return badRequest("workRequestId must be a whole number");
   const to = body.to;
   if (!isIntakeState(to) || !TARGETS.includes(to)) return badRequest("to must be assessing, closed_duplicate or closed_not_ours");
   const reason = typeof body.reason === "string" ? body.reason.trim() : "";

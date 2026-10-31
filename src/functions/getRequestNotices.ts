@@ -12,18 +12,19 @@ import { errorResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery, type SqlRow } from "../db";
 import { READ_LIMIT, tooManyRequests } from "../inboundTriage/limits";
 import { checkRateLimit } from "../rateLimit";
+import { parseWorkRequestId } from "../workRequestsNative";
 
 const MISSING_TABLE = /Invalid object name 'dbo\.TenantNotices'/i;
 const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
 const str = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
-const whole = (raw: string | null): number | null => (raw !== null && /^-?\d{1,10}$/.test(raw) && Number(raw) !== 0 ? Number(raw) : null);
+const whole = (raw: string | null): number | null => (raw !== null && /^[1-9]\d{0,9}$/.test(raw) && Number(raw) <= 2_147_483_647 ? Number(raw) : null);
 
 export async function getRequestNotices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeWrite(request, ACTION_ROLES.viewRequestIntake.gate);
   if (!auth.ok) return auth.response;
   const limited = checkRateLimit(`getRequestNotices:${auth.caller.oid}`, READ_LIMIT);
   if (!limited.allowed) return tooManyRequests(limited.retryAfterMs);
-  const workRequestId = whole(request.query.get("workRequestId"));
+  const workRequestId = parseWorkRequestId(request.query.get("workRequestId"));
   const jobId = whole(request.query.get("jobId"));
   if ((workRequestId === null) === (jobId === null)) return badRequest("Give either workRequestId or jobId, as a whole number");
 

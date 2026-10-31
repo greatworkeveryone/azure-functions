@@ -7,6 +7,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { authorize } from "../assetRegisterSupport";
 import { executeQuery } from "../db";
+import { parseWorkRequestId } from "../workRequestsNative";
 import { refusal, runStaff } from "../tenantLinks/http";
 import { tradeForRequestCategory } from "../tenancyResponsibilities/parse";
 import { RESPONSIBILITIES_FLAG, VIEW_RESPONSIBILITIES_ROLES } from "../tenancyResponsibilities/roles";
@@ -16,14 +17,14 @@ export async function getRequestResponsibilities(request: HttpRequest, context: 
   const auth = await authorize(request, VIEW_RESPONSIBILITIES_ROLES);
   if (!auth.ok) return auth.response;
   return runStaff(request, context, "getRequestResponsibilities", auth.token, false, async ({ connection }) => {
-    const raw = request.query.get("workRequestId");
-    if (raw === null || !/^-?[1-9]\d{0,9}$/.test(raw) || Math.abs(Number(raw)) > 2_147_483_647) return refusal(400, "workRequestId must be a whole number");
+    const requestId = parseWorkRequestId(request.query.get("workRequestId"));
+    if (requestId === null) return refusal(400, "workRequestId must be a whole number");
     const [row] = await executeQuery(
       connection,
       `SELECT wr.SourceTenantId, COALESCE(wr.TenantCategory, wr.TriageCategory) AS RequestCategory, t.LegalName
          FROM dbo.WorkRequests wr LEFT JOIN dbo.Tenants t ON t.TenantId = wr.SourceTenantId
         WHERE wr.WorkRequestID = @Id`,
-      [{ name: "Id", type: TYPES.Int, value: Number(raw) }],
+      [{ name: "Id", type: TYPES.Int, value: requestId }],
     );
     if (!row) return refusal(404, "Request not found");
     if (row.SourceTenantId == null || row.LegalName == null) {

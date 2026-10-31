@@ -19,6 +19,7 @@ import { ackDelivery } from "../intake/delivery";
 import { dueAtFor } from "../intake/overdue";
 import { intakePriority, viewState } from "../intake/state";
 import { checkRateLimit } from "../rateLimit";
+import { parseWorkRequestId } from "../workRequestsNative";
 
 const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
 const str = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
@@ -27,9 +28,9 @@ const str = (value: unknown): string | null => (typeof value === "string" && val
 export function parseRequestIds(raw: string | null): { ok: true; value: number[] } | { ok: false; error: string } {
   const parts = (raw ?? "").split(",").map((part) => part.trim()).filter((part) => part !== "");
   if (parts.length === 0 || parts.length > MAX_EMAIL_IDS) return { error: `Send between 1 and ${MAX_EMAIL_IDS} request ids.`, ok: false };
-  const ids = parts.map((part) => (/^-?[1-9]\d{0,9}$/.test(part) ? Number(part) : NaN));
-  if (!ids.every((id) => Number.isSafeInteger(id) && Math.abs(id) <= 2_147_483_647)) return { error: "Each request id must be a whole number other than zero.", ok: false };
-  return { ok: true, value: [...new Set(ids)] };
+  const ids = parts.map(parseWorkRequestId);
+  if (ids.some((id) => id === null)) return { error: "Each request id must be a whole number other than zero.", ok: false };
+  return { ok: true, value: [...new Set(ids as number[])] };
 }
 
 export async function getRequestIntake(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
