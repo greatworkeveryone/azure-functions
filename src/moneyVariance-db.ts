@@ -123,7 +123,9 @@ export async function checkVariance(connection: Connection, input: VarianceCheck
       ? { displayName: named.displayName, email: named.email, roles: named.roles, userId: named.userId }
       : { roles: [], userId: namedId };
   }
-  const [facts, authority] = await Promise.all([loadVarianceFacts(connection), loadApprovalFacts(connection, input.buildingId)]);
+  // Sequential: tedious runs one request per connection (EINVALIDSTATE otherwise).
+  const facts = await loadVarianceFacts(connection);
+  const authority = await loadApprovalFacts(connection, input.buildingId);
   const decision = varianceDecision(
     { acceptedAmount, buildingId: input.buildingId ?? 0, editor: input.editor, newAmount: next, originalAmount, request, subject: input.subject },
     facts,

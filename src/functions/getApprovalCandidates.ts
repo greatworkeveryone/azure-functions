@@ -50,7 +50,9 @@ export async function getApprovalCandidates(request: HttpRequest, context: Invoc
   let connection;
   try {
     connection = await createRequestConnection(token);
-    const [facts, users] = await Promise.all([loadApprovalFacts(connection, null), listActiveUsers(connection)]);
+    // Sequential: tedious runs one request per connection (EINVALIDSTATE otherwise).
+    const facts = await loadApprovalFacts(connection, null);
+    const users = await listActiveUsers(connection);
     const creator =
       subject === "quote" && quoteId !== null
         ? ((await executeQuery(connection, "SELECT CreatedBy FROM Quotes WHERE QuoteID = @Id", [{ name: "Id", type: TYPES.Int, value: quoteId }]))[0]?.CreatedBy ?? null)

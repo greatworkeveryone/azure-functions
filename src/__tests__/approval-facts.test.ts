@@ -123,6 +123,14 @@ describe("director_approval_threshold", () => {
     expect(res.status).toBe(200);
   });
 
+  it("is refused for an admin without the director role, with the director message", async () => {
+    auth.rolesForRequest.mockResolvedValue(["admin"]);
+    const res = await setApprovalFact(post({ factKey: "director_approval_threshold", value: 8000 }), ctx);
+    expect(res.status).toBe(403);
+    expect(res.jsonBody).toEqual({ error: "Director role required to set the director approval threshold" });
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+  });
+
   it("a director still cannot set the CFO's margin", async () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
     expect((await setApprovalFact(post({ factKey: "po_variance_margin_percent", value: 5 }), ctx)).status).toBe(403);
