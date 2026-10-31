@@ -7,17 +7,15 @@
 --                 The business-time engine skips active closures like weekends, and the tenant page tells
 --                 tenants when the office is closed and when it reopens.
 --
--- SEED: NT public holidays for 2026 and 2027, insert-only (WHEN NOT MATCHED), so running this again never
+-- SEED: NT public holidays for 2026 to 2028, insert-only (WHEN NOT MATCHED), so running this again never
 -- overwrites an edit or brings back an archived row.
 --   Source: NT Government, "NT public and regional holidays", https://nt.gov.au/nt-public-holidays
---   (Public Holidays Act 1981). The page blocked automated download from the build session (HTTP 403), so the
---   dates were read through search results quoting that page and the weekday of each was checked by calendar.
---   Included: only holidays that fall on a weekday (weekend ones change nothing).
---   NOT seeded, staff add or confirm in Admin > Company settings:
---     - Christmas Eve and New Year's Eve: part-day (from 7pm), the office is shut by then anyway; not closures.
---     - Anzac Day 2027 (Sunday 25 April): sources disagreed on a substitute Monday, so it is left out.
---     - Regional show days (Darwin Show Day, July): regional holidays, not confirmed from the source; add if the
---       office closes for it.
+--   (Public Holidays Act 1981), read in a browser on 31 Oct 2026 and checked line by line.
+--   Included: holidays that fall on a weekday, with the official substitute days, and Darwin Show Day
+--   (a regional holiday that applies to the Darwin region, where the office is).
+--   NOT seeded, staff add or archive in Admin > Company settings:
+--     - Christmas Eve and New Year's Eve: part-day (7pm to midnight), after close; not closures.
+--     - Other regions' show days (Alice Springs, Tennant Creek, Katherine, Borroloola).
 --     - The Christmas shutdown: staff add it.
 --
 -- RUNBOOK: apply after 190.
@@ -60,18 +58,32 @@ USING (VALUES
   (CAST('2026-04-06' AS DATE), N'Easter Monday'),
   (CAST('2026-05-04' AS DATE), N'May Day'),
   (CAST('2026-06-08' AS DATE), N'King''s Birthday'),
+  (CAST('2026-07-24' AS DATE), N'Darwin Show Day'),
   (CAST('2026-08-03' AS DATE), N'Picnic Day'),
   (CAST('2026-12-25' AS DATE), N'Christmas Day'),
-  (CAST('2026-12-28' AS DATE), N'Boxing Day (substitute)'),
+  (CAST('2026-12-28' AS DATE), N'Boxing Day (Monday)'),
   (CAST('2027-01-01' AS DATE), N'New Year''s Day'),
   (CAST('2027-01-26' AS DATE), N'Australia Day'),
   (CAST('2027-03-26' AS DATE), N'Good Friday'),
   (CAST('2027-03-29' AS DATE), N'Easter Monday'),
+  (CAST('2027-04-26' AS DATE), N'Anzac Day (Monday)'),
   (CAST('2027-05-03' AS DATE), N'May Day'),
   (CAST('2027-06-14' AS DATE), N'King''s Birthday'),
+  (CAST('2027-07-23' AS DATE), N'Darwin Show Day'),
   (CAST('2027-08-02' AS DATE), N'Picnic Day'),
-  (CAST('2027-12-27' AS DATE), N'Christmas Day (substitute)'),
-  (CAST('2027-12-28' AS DATE), N'Boxing Day (substitute)')
+  (CAST('2027-12-27' AS DATE), N'Christmas Day (Monday)'),
+  (CAST('2027-12-28' AS DATE), N'Boxing Day (Tuesday)'),
+  (CAST('2028-01-03' AS DATE), N'New Year''s Day (Monday)'),
+  (CAST('2028-01-26' AS DATE), N'Australia Day'),
+  (CAST('2028-04-14' AS DATE), N'Good Friday'),
+  (CAST('2028-04-17' AS DATE), N'Easter Monday'),
+  (CAST('2028-04-25' AS DATE), N'Anzac Day'),
+  (CAST('2028-05-01' AS DATE), N'May Day'),
+  (CAST('2028-06-12' AS DATE), N'King''s Birthday'),
+  (CAST('2028-07-28' AS DATE), N'Darwin Show Day'),
+  (CAST('2028-08-07' AS DATE), N'Picnic Day'),
+  (CAST('2028-12-25' AS DATE), N'Christmas Day'),
+  (CAST('2028-12-26' AS DATE), N'Boxing Day')
 ) AS source (OnDate, Label)
   ON target.StartsOn = source.OnDate AND target.EndsOn = source.OnDate AND target.Kind = N'public_holiday'
 WHEN NOT MATCHED BY TARGET THEN

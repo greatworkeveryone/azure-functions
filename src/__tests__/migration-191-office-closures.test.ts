@@ -25,11 +25,13 @@ describe("migration 191", () => {
     expect(code).toMatch(/WHEN NOT MATCHED BY TARGET THEN\s+INSERT/);
     expect(code).not.toMatch(/WHEN MATCHED/);
   });
-  it("seeds only weekday NT public holidays for 2026 and 2027, none of them part-day, and cites its source", () => {
+  it("seeds only weekday NT public holidays (with Darwin Show Day) for 2026 to 2028, none of them part-day, and cites its source", () => {
     const dates = [...code.matchAll(/CAST\('(\d{4}-\d{2}-\d{2})' AS DATE\)/g)].map((m) => m[1]);
-    expect(dates.length).toBe(18);
+    expect(dates.length).toBe(32);
+    expect(dates).toContain("2027-04-26"); // Anzac Day 2027 falls on a Sunday; the Monday is the holiday
+    expect(dates).toContain("2026-07-24"); // Darwin Show Day
     for (const d of dates) {
-      expect(["2026", "2027"]).toContain(d.slice(0, 4));
+      expect(["2026", "2027", "2028"]).toContain(d.slice(0, 4));
       const weekday = new Date(`${d}T00:00:00Z`).getUTCDay();
       expect(weekday).toBeGreaterThanOrEqual(1);
       expect(weekday).toBeLessThanOrEqual(5);
