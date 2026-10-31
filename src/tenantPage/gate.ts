@@ -27,7 +27,7 @@ import { resolveTenantLink } from "../tenantLinks/resolve";
 import { isTokenShaped } from "../tenantLinks/token";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
 import { TENANT_PAGE_FLAG } from "./constants";
-import { afterHoursFor } from "../orgSettings/afterHours";
+import { companyAfterHours } from "../orgSettings/afterHours";
 import { purposeOpens, type PageSection } from "../tenantLinks/purposes";
 import { hit, isFull } from "./limiter";
 
@@ -116,9 +116,9 @@ export async function runTenant(
     if (!identity) return failed();
     // A working link only opens what its purpose is for.
     if (!purposeOpens(identity.purpose, options.section)) return tenantJson(403, { error: "link_purpose" });
-    // Fail closed: no after-hours number for this building (its own, else the company's) means no page
+    // Fail closed: no company after-hours number means no page
     // (only a real link holder sees this).
-    if ((await afterHoursFor(connection, identity.buildingId)) === null) return unavailable();
+    if ((await companyAfterHours(connection)) === null) return unavailable();
     return await work({ connection, context, identity, request });
   } catch (error) {
     context.error(`${name} failed: ${error instanceof Error ? error.name : "error"}`);

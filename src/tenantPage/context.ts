@@ -4,7 +4,7 @@
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../db";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
-import { afterHoursFor } from "../orgSettings/afterHours";
+import { companyAfterHours } from "../orgSettings/afterHours";
 import { contactMayAct } from "../tenantLinks/purposes";
 import { LIMITS, REQUEST_CATEGORIES, URGENCIES } from "./constants";
 
@@ -48,7 +48,7 @@ export async function readTenantContext(connection: Connection, identity: Tenant
   );
   if (!row) return null;
   return {
-    afterHoursPhone: await afterHoursFor(connection, identity.buildingId),
+    afterHoursPhone: await companyAfterHours(connection),
     buildingName: String(row.BuildingName ?? ""),
     canReport: contactMayAct(identity.purpose, { reportsIssues: row.ReportsIssues === true }),
     categories: REQUEST_CATEGORIES.map((c) => ({ key: c.key, label: c.label })),

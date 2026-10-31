@@ -36,7 +36,7 @@ describe("saving and the page gate", () => {
 
   it("ledgers the old and new company number", async () => {
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("SELECT SettingValue FROM dbo.OrgSettings WITH") ? [{ SettingValue: "08 8941 0000" }] : []));
-    expect(await saveAfterHours(conn, { actor, buildingId: null, phone: "08 8941 1234" })).toEqual({ ok: true });
+    expect(await saveAfterHours(conn, { actor, phone: "08 8941 1234" })).toEqual({ ok: true });
     const [entry] = ledgerInserts(db.executeQuery);
     expect(entry).toMatchObject({ action: "settings.after_hours_set" });
     expect(entry.before).toMatchObject({ phone: "08 8941 0000", scope: "company" });
@@ -44,29 +44,25 @@ describe("saving and the page gate", () => {
   });
 
   it("refuses a number that is not Australian, before touching the database", async () => {
-    const r = await saveAfterHours(conn, { actor, buildingId: null, phone: "+44 20 7946 0958" });
+    const r = await saveAfterHours(conn, { actor, phone: "+44 20 7946 0958" });
     expect(r).toMatchObject({ ok: false, status: 400 });
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
-  it("clears a building override with null and ledgers it against the building", async () => {
-    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("WITH (UPDLOCK, HOLDLOCK) WHERE BuildingID") ? [{ BuildingName: "Tower One", EmergencyPhone: "0412 345 678" }] : []));
-    expect(await saveAfterHours(conn, { actor, buildingId: 5, phone: null })).toEqual({ ok: true });
-    const [entry] = ledgerInserts(db.executeQuery);
-    expect(entry.before).toMatchObject({ phone: "0412 345 678", scope: "building" });
-    expect(entry.after).toMatchObject({ phone: null });
+  it("blocks the tenant page until a company number exists", async () => {
+    const rows = (company: string | null) =>
+      db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("FROM dbo.OrgSettings") ? (company ? [{ SettingValue: company }] : []) : []));
+    rows(null);
+    expect(await afterHoursProblem(conn)).toMatch(/Company settings/);
+    expect(await afterHoursProblem(conn)).not.toMatch(/every building/);
+    rows("08 8941 1234");
+    expect(await afterHoursProblem(conn)).toBeNull();
   });
 
-  it("blocks the tenant page until a company number exists or every building with tenants has its own", async () => {
-    const rows = (company: string | null, buildings: { BuildingName: string; EmergencyPhone: string | null }[]) =>
-      db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("FROM dbo.OrgSettings") ? (company ? [{ SettingValue: company }] : []) : sql.includes("FROM dbo.Buildings b") ? buildings : []));
-    rows(null, []);
-    expect(await afterHoursProblem(conn)).toMatch(/after-hours phone number/);
-    rows(null, [{ BuildingName: "Tower One", EmergencyPhone: "08 8941 1234" }, { BuildingName: "Annex", EmergencyPhone: null }]);
-    expect(await afterHoursProblem(conn)).toMatch(/Annex/);
-    rows(null, [{ BuildingName: "Tower One", EmergencyPhone: "08 8941 1234" }]);
-    expect(await afterHoursProblem(conn)).toBeNull();
-    rows("08 8941 1234", []);
-    expect(await afterHoursProblem(conn)).toBeNull();
+  it("never reads or writes Buildings.EmergencyPhone", async () => {
+    db.executeQuery.mockResolvedValue([]);
+    await saveAfterHours(conn, { actor, phone: null });
+    await afterHoursProblem(conn);
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => String(c[1]).includes("EmergencyPhone"))).toBe(false);
   });
 });

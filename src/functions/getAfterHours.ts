@@ -1,6 +1,6 @@
 // GET /api/getAfterHours  (PLAN §15, Connor 31 Oct 2026)
-// The after-hours phone number tenants are told to ring: the company number and each building's optional
-// override. Response: { companyPhone, updatedAt, updatedBy, buildings: [{ buildingId, buildingName, phone }] }.
+// The after-hours phone number tenants are told to ring: the company number.
+// Response: { companyPhone, updatedAt, updatedBy }.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { authorize } from "../assetRegisterSupport";

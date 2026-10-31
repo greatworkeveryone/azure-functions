@@ -60,8 +60,7 @@ const WHO = { BuildingName: "Tower One", ContactName: "Pat", Email: "pat@acme.te
 let whoRow: Record<string, unknown> | null = WHO;
 let ownedRows: unknown[] = [{ WorkRequestID: -7 }];
 let photoCount = 0;
-let emergencyRows: unknown[] = [{ EmergencyPhone: "1800 555 000" }];
-let companyRows: unknown[] = [];
+let companyRows: unknown[] = [{ SettingValue: "1800 555 000" }];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -71,12 +70,10 @@ beforeEach(() => {
   whoRow = WHO;
   ownedRows = [{ WorkRequestID: -7 }];
   photoCount = 0;
-  emergencyRows = [{ EmergencyPhone: "1800 555 000" }];
-  companyRows = [];
+  companyRows = [{ SettingValue: "1800 555 000" }];
   resolver.resolveTenantLink.mockImplementation(async (token: string) => (token === TOKEN_A ? A : token === TOKEN_B ? B : null));
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (sql.includes("FROM dbo.FeatureFlags")) return flagOn ? [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }] : [];
-    if (sql.includes("SELECT EmergencyPhone FROM dbo.Buildings")) return emergencyRows;
     if (sql.includes("FROM dbo.OrgSettings")) return companyRows;
     if (sql.includes("JOIN dbo.TenancyContacts c")) return whoRow ? [whoRow] : [];
     if (sql.includes("COL_LENGTH")) return [{ Len: null }];
@@ -322,7 +319,7 @@ describe("photo upload", () => {
     const order: string[] = [];
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (sql.includes("FROM dbo.FeatureFlags")) return [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }];
-      if (sql.includes("SELECT EmergencyPhone")) return [{ EmergencyPhone: "1800 555 000" }];
+      if (sql.includes("FROM dbo.OrgSettings")) return [{ SettingValue: "1800 555 000" }];
       if (sql.includes("SELECT WorkRequestID FROM dbo.WorkRequests")) return ownedRows;
       if (sql.includes("INSERT INTO dbo.TenantRequestPhotos")) { order.push("reserve"); return [{ PhotoId: 9 }]; }
       if (sql.includes("FROM dbo.TenantRequestPhotos")) return [{ N: 0 }];
@@ -376,24 +373,21 @@ describe("hardening (review S2/S3)", () => {
     expect(resolver.resolveTenantLink).not.toHaveBeenCalled();
   });
 
-  it("answers 503 page_unavailable when there is no after-hours number, building or company (fail closed)", async () => {
+  it("answers 503 page_unavailable when there is no company after-hours number (fail closed)", async () => {
     process.env.TENANT_EMERGENCY_PHONE = "08 8941 1234"; // the old fallback is gone: it must not rescue the page
-    emergencyRows = [{ EmergencyPhone: null }];
+    companyRows = [];
     const r = await tenantContext(req({ ip: "198.51.100.41" }), context);
     delete process.env.TENANT_EMERGENCY_PHONE;
     expect(r.status).toBe(503);
     expect(bodyOf(r)).toContain("page_unavailable");
   });
 
-  it("falls back to the company after-hours number, and a building override wins over it", async () => {
-    emergencyRows = [{ EmergencyPhone: null }];
+  it("tells the tenant the company after-hours number, and ignores any per-building column", async () => {
     companyRows = [{ SettingValue: "08 8941 1234" }];
     const company = await tenantContext(req({ ip: "198.51.100.42" }), context);
     expect(company.status).toBe(200);
     expect(company.jsonBody).toMatchObject({ afterHoursPhone: "08 8941 1234" });
-    emergencyRows = [{ EmergencyPhone: "0412 345 678" }];
-    const own = await tenantContext(req({ ip: "198.51.100.43" }), context);
-    expect(own.jsonBody).toMatchObject({ afterHoursPhone: "0412 345 678" });
+    expect(db.executeQuery.mock.calls.some((c: unknown[]) => String(c[1]).includes("EmergencyPhone"))).toBe(false);
   });
 
   it("refuses a link whose purpose does not open the section (403), without counting a failed attempt", async () => {
