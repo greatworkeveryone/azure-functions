@@ -10,7 +10,7 @@
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "./db";
-import { MAX_SIZE_BYTES, bytesMatchMediaType, isAllowedContentType, normaliseMediaType } from "./upload-constants";
+import { MAX_SIZE_BYTES, bytesMatchMediaType, isAllowedContentType, mediaTypeFromExtension, normaliseMediaType } from "./upload-constants";
 import { resolveAll } from "./sync-helpers";
 import type { MyAttachmentRef, MyWorkRequest } from "./mybuildings-client";
 
@@ -66,10 +66,6 @@ export interface ImportResult {
 const empty = (): BuildingCounts => ({
   attachmentsFlagged: 0, attachmentsImported: 0, attachmentsSkipped: 0, flagged: 0, inserted: 0, seen: 0, unchanged: 0, updated: 0,
 });
-
-const MIME_BY_EXTENSION: Record<string, string> = {
-  gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg", pdf: "application/pdf", png: "image/png", webp: "image/webp",
-};
 
 function sourceKeyOf(ref: MyAttachmentRef): string | null {
   const key = ref.AttachmentID ?? ref.Attachment_URL ?? ref.Attachment_Name;
@@ -245,7 +241,7 @@ async function importAttachments(
     try {
       const { bytes, contentType } = await deps.downloadAttachment(ref.Attachment_URL);
       const ext = (ref.Attachment_Extension ?? name.split(".").pop() ?? "").replace(/^\./, "").toLowerCase();
-      const type = normaliseMediaType(ref.ContentType || contentType || MIME_BY_EXTENSION[ext] || "");
+      const type = normaliseMediaType(ref.ContentType || contentType || mediaTypeFromExtension(ext) || "");
       if (bytes.length > MAX_SIZE_BYTES) throw new Error("file is over the size limit");
       if (!isAllowedContentType(type)) throw new Error(`file type "${type || "unknown"}" is not allowed`);
       if (!bytesMatchMediaType(type, bytes)) throw new Error("file contents do not match its type");

@@ -1,16 +1,10 @@
 // Validation of responsibility writes (TR7). Pure; the handlers do the I/O.
 
 import { ASSET_CATEGORIES } from "../assetRegister";
-import { positiveId, type Parsed } from "../tenantLinks/contacts";
+import { positiveId, text, type Parsed } from "../tenantLinks/contacts";
 import { MAINTAINED_BY, type MaintainedBy, type ResponsibilityFields } from "./types";
 
 const fail = (error: string): { error: string; ok: false } => ({ error, ok: false });
-const text = (value: unknown, max: number): string | null | undefined => {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim().replace(/\s+/g, " ");
-  return trimmed.length === 0 ? null : trimmed.length > max ? undefined : trimmed;
-};
 const optionalId = (value: unknown): number | null | undefined => (value === undefined || value === null ? null : (positiveId(value) ?? undefined));
 
 export function parseResponsibilityFields(body: Record<string, unknown>): Parsed<ResponsibilityFields> {

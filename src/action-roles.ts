@@ -35,7 +35,7 @@ import { ASK_FOR_DECISION_ROLES, COMPLETE_NEXT_STEP_ROLES, MANAGER_AND_ABOVE_ROL
 import { FLAG_ROLES } from "./jobTransitionGuard";
 import { CHECKIN_KEYS_ROLES, CHECKOUT_KEYS_ROLES } from "./keyRoles";
 import { EDIT_RESPONSIBILITIES_ROLES, VIEW_RESPONSIBILITIES_ROLES } from "./tenancyResponsibilities/roles";
-import { EDIT_AFTER_HOURS_ROLES } from "./orgSettings/afterHours";
+import { EDIT_AFTER_HOURS_ROLES } from "./orgSettings/roles";
 import { ISSUE_TENANT_LINKS_ROLES, MANAGE_TENANT_LINKS_ROLES, VIEW_TENANT_LINKS_ROLES } from "./tenantLinks/roles";
 import { MANAGE_COVER_ROLES, VIEW_COVER_ROLES } from "./absenceCover/roles";
 
@@ -60,7 +60,7 @@ const roles = (list: readonly string[]): readonly AppRole[] => list as readonly 
 // Job actions: the handlers named in `routes` read these gates directly.
 const JOB_EDIT: readonly AppRole[] = [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL];
 const JOB_READ: readonly AppRole[] = JOB_EDIT;
-const TENANCY_DESK: readonly AppRole[] = [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.ADMIN, A.DIRECTOR];
+export const TENANCY_DESK: readonly AppRole[] = [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.ADMIN, A.DIRECTOR];
 const REVIEW_APPROVERS: readonly AppRole[] = [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR];
 const ADMIN_TEST_ONLY = "admin acts on test records only (beta sprint decision 4), and a screen doesn't know whether a record is one";
 
@@ -330,7 +330,12 @@ export const ACTION_ROLES = {
   editAfterHours: {
     gate: EDIT_AFTER_HOURS_ROLES,
     routes: ["getAfterHours", "saveAfterHours"],
-    why: "Read and edit the after-hours phone number tenants are told to ring, company-wide and per building. Facilities manager (the role that approves work), director and admin.",
+    why: "Read and edit the after-hours phone number tenants are told to ring, company-wide. Facilities manager (the role that approves work), director and admin.",
+  },
+  importMyBuildings: {
+    gate: [A.ADMIN],
+    routes: ["importMyBuildings"],
+    why: "Staff-triggered import of work requests, their history and attachments from myBuildings (TR6). Admin only; a dry run unless dryRun=false; inserts and updates, never deletes.",
   },
   manageManualBuildings: {
     gate: [A.ADMIN],
@@ -665,8 +670,8 @@ export const ACTION_ROLES = {
   viewTechnicalSettings: { gate: [A.ADMIN], match: "exact", routes: [], why: "Technical administration pages remain admin-only; directors have business Settings." },
   viewAdmin: {
     gate: [A.ADMIN, A.DIRECTOR],
-    routes: ["upsertFeatureFlag"],
-    why: "Settings and rollout controls: admin and directors (decision 6); CFO controls live in Finance.",
+    routes: ["upsertFeatureFlag", "tenantPhotoOrphans"],
+    why: "Settings and rollout controls: admin and directors (decision 6); CFO controls live in Finance. Includes the read-only report of tenant photo uploads that never finished (tenantPhotoOrphans).",
   },
   viewAllEscalations: {
     gate: [A.DIRECTOR],

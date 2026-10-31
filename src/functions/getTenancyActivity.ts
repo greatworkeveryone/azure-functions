@@ -12,10 +12,13 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { errorResponse, extractToken, requireRole, rolesForRequest, rolesPassGate, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { isFeatureEnabledForRoles } from "../features/flags";
 import { TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { ACTIVITY_AMOUNT_ROLES, ACTIVITY_CAP, buildTenancyActivity } from "../tenancyActivity/build";
 import { showTestParam } from "../test-data";
 import { WR_OVERLAY_JOIN, workRequestSelectColumns } from "../wr-overlay";
+
+const TENANCY_ACTIVITY_FLAG = "tenancyActivity";
 
 export async function getTenancyActivity(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -28,9 +31,12 @@ export async function getTenancyActivity(request: HttpRequest, context: Invocati
 
   let connection;
   try {
-    const showAmounts = rolesPassGate(await rolesForRequest(request), ACTIVITY_AMOUNT_ROLES);
+    const roles = await rolesForRequest(request);
+    const showAmounts = rolesPassGate(roles, ACTIVITY_AMOUNT_ROLES);
     const showTest = await showTestParam(request);
     connection = await createRequestConnection(token);
+    // The same rollout gate the other tenancy endpoints enforce in runStaff: the frontend hiding it is UX only.
+    if (!(await isFeatureEnabledForRoles(TENANCY_ACTIVITY_FLAG, roles, { connection }))) return { jsonBody: { error: "Not available" }, status: 404 };
     const capParam = { name: "Cap", type: TYPES.Int, value: ACTIVITY_CAP + 1 };
     const tenantParam = { name: "TenantId", type: TYPES.Int, value: tenantId };
 
@@ -38,12 +44,9 @@ export async function getTenancyActivity(request: HttpRequest, context: Invocati
     if (tenants.length === 0) return { status: 404, jsonBody: { error: "Tenant not found" } };
     const tenant = tenants[0];
 
-    // TR1 adds WorkRequests.IntakeState; until it exists on this database the existing Status is shown.
-    const intake = await executeQuery(connection, "SELECT COL_LENGTH(N'dbo.WorkRequests', N'IntakeState') AS Len", []);
-
     const wrRows = await executeQuery(
       connection,
-      `SELECT TOP (@Cap) ${workRequestSelectColumns()}, wr.SourceHost
+      `SELECT TOP (@Cap) ${workRequestSelectColumns()}, wr.SourceHost, wr.IntakeState
          FROM WorkRequests wr ${WR_OVERLAY_JOIN}
         WHERE wr.BuildingID = @BuildingId
           AND COALESCE(o.TenantName, wr.TenantName) IN (@LegalName, @TradingName)
@@ -55,15 +58,6 @@ export async function getTenancyActivity(request: HttpRequest, context: Invocati
         { name: "TradingName", type: TYPES.NVarChar, value: tenant.TradingName ?? null },
       ],
     );
-    if (intake[0]?.Len != null && wrRows.length > 0) {
-      const states = await executeQuery(
-        connection,
-        "SELECT WorkRequestID, IntakeState FROM WorkRequests WHERE WorkRequestID IN (SELECT CAST(value AS INT) FROM OPENJSON(@Ids))",
-        [{ name: "Ids", type: TYPES.NVarChar, value: JSON.stringify(wrRows.map((r) => r.WorkRequestID)) }],
-      );
-      const byId = new Map(states.map((r) => [r.WorkRequestID, r.IntakeState]));
-      for (const row of wrRows) row.IntakeState = byId.get(row.WorkRequestID) ?? null;
-    }
     const jobRows = await executeQuery(
       connection,
       `SELECT TOP (@Cap) JobID, WorkRequestID, JobCode, Title, Status, IsOnchargeable, OnchargeAmount, CreatedAt

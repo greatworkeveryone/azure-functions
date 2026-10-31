@@ -3,19 +3,20 @@
 // maths here: an on-charge's amount is the job's own OnchargeAmount, copied as is,
 // so the list can never disagree with the job record (no second ledger).
 
-import { AppRole } from "../auth";
+import { TENANCY_DESK } from "../action-roles";
+import type { AppRole } from "../auth";
 import { JobStatus } from "../jobStatusMachine";
 import { isClosed, isIntakeState } from "../intake/state";
 
 export const ACTIVITY_CAP = 200;
 
 /** Roles that see on-charge amounts here: the roles that see them on a job and may read a tenancy. */
-export const ACTIVITY_AMOUNT_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
+export const ACTIVITY_AMOUNT_ROLES: readonly AppRole[] = TENANCY_DESK;
 
 export type ActivityType = "invoice" | "job" | "on_charge" | "work_request";
 
 export interface ActivityItem {
-  /** Only when a source says so (TR1's WorkRequests.IntakeState); otherwise absent. */
+  /** WorkRequests.IntakeState as stored; absent when the request has none (NULL reads as received). */
   intakeState?: string;
   amount: number | null;
   /** ISO timestamp the row was created. */

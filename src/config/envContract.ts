@@ -33,6 +33,8 @@ export const ENV_CONTRACT: readonly EnvSetting[] = [
   optional("DIRECTOR_APPROVAL_EMAILS", "Fallback director list: used only when no active user has the director role."),
   optional("FACILITIES_MANAGER_EMAILS", "Fallback facilities-manager list for escalation emails."),
   optional("FEEDBACK_EMAIL_RECIPIENTS", "The in-app feedback form answers 500."),
+  optional("TENANT_REPLY_TO", "Tenant link emails and status notices ask tenants to reply to workrequests@randazzo.properties."),
+  optional("TENANT_LINK_EXPIRY_MONTHS", "New tenant links last 12 months."),
   optional("GRAPH_MAILBOX_DEV", "Inbound email is not synced; parsing runs on what is already stored."),
   required("GRAPH_MAILBOX_ACTIVE", "Unset means the DEV mailbox is read in production; set it to \"prod\"."),
   required("GRAPH_MAILBOX_PROD", "Inbound email is not synced from the production mailbox."),

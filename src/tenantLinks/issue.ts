@@ -12,7 +12,7 @@
 // A send that fails revokes the new link and leaves the old one as it was; a crash between 2 and 3
 // leaves an unusable link (the contact asks for another), never a usable link nobody was told of.
 
-import { commsMode, fromAddress, fromName, type CommsMode } from "../comms/config";
+import { commsMode, fromAddress, fromName, tenantReplyTo, type CommsMode } from "../comms/config";
 import { composeForRecipient } from "../comms/compose";
 import { createGraphSender, MailSendError, toSendError, type MailSender } from "../comms/graphSend";
 import { resolveRecipientRecord } from "../comms/recipientRecords";
@@ -26,7 +26,7 @@ import type { Connection } from "tedious";
 import { contactSnapshot } from "./contacts";
 import { PURPOSE_POLICY, type LinkPurpose } from "./purposes";
 import { activateLink, insertPendingLink, liveLinkIds, readContact, readTenancy, revokeLink } from "./store";
-import { LINK_SUBJECT, LINK_TEMPLATE_ID, LINK_TEMPLATE_VERSION, linkBody } from "./template";
+import { linkSubject, LINK_TEMPLATE_ID, LINK_TEMPLATE_VERSION, linkBody } from "./template";
 import { addMonths, hashToken, linkUrl, newToken } from "./token";
 
 export interface IssueInput {
@@ -52,7 +52,6 @@ export type IssueResult =
   | { error: string; ok: false; status: number };
 
 const refuse = (status: number, error: string): { error: string; ok: false; status: number } => ({ error, ok: false, status });
-const REPLY_TO_DEFAULT = "workrequests@randazzo.properties";
 
 const darwinDay = (d: Date): string =>
   new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "long", timeZone: "Australia/Darwin", year: "numeric" }).format(d);
@@ -107,16 +106,17 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
   if (!stored.ok) return refuse(stored.response.status ?? 500, (stored.response.jsonBody as { error: string }).error);
   const link = stored.value;
 
+  const replyTo = { address: tenantReplyTo(), name: fromName() };
   const composed = composeForRecipient(
     {
       bodyMarkdown: linkBody(linkUrl(link.token), darwinDay(link.expiresAt)),
       companyName: fromName(),
       createdByName: by,
       kind: "system",
-      replyTo: { address: process.env.TENANT_LINK_REPLY_TO?.trim() || REPLY_TO_DEFAULT, name: fromName() },
+      replyTo,
       signature: { email: null, lines: [fromName()], phone: null },
       signatureMode: "role",
-      subject: LINK_SUBJECT,
+      subject: linkSubject(fromName()),
     },
     { mergeValues: {}, name: link.name, recipientType: "tenancy" },
     now,
@@ -151,7 +151,7 @@ export async function issueLink(connection: Connection, input: IssueInput, deps:
     await sender.sendWithoutCopy({
       from: { address: fromAddress(), name: fromName() },
       html: composed.email.html,
-      replyTo: { address: process.env.TENANT_LINK_REPLY_TO?.trim() || REPLY_TO_DEFAULT, name: fromName() },
+      replyTo,
       subject,
       to: target.address,
     });

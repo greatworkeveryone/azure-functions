@@ -28,6 +28,9 @@ import { showTestData } from "../test-data";
 import { procedureSearchText } from "../procedureSearchText";
 import { getProcedures } from "./getProcedures";
 import { checkRateLimit } from "../rateLimit";
+import { bytesMatchMediaType } from "../upload-constants";
+
+const REGISTER_FILE_TYPES = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
 
 const TENANCY_ROLES = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
 const str = (name: string, value: unknown): SqlParam => ({ name, type: TYPES.NVarChar, value });
@@ -377,7 +380,7 @@ export async function uploadRegisterDocument(
     }
     const file = form.get("file") as File | null;
     if (!file || typeof file.arrayBuffer !== "function") return badRequest("File required");
-    if (!["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(file.type))
+    if (!REGISTER_FILE_TYPES.includes(file.type))
       return { status: 415, jsonBody: { error: "Use PDF, JPEG, PNG or WebP" } };
     if (file.size < 1 || file.size > 10 * 1024 * 1024)
       return { status: 413, jsonBody: { error: "Use a file up to 10 MB" } };
@@ -405,14 +408,7 @@ export async function storeRegisterDocument(
   inside?: (documentId: number) => Promise<HttpResponseInit | null>,
 ): Promise<HttpResponseInit> {
   const bytes = file.bytes;
-  const matches =
-    file.contentType === "application/pdf"
-      ? bytes.subarray(0, 5).toString() === "%PDF-"
-      : file.contentType === "image/jpeg"
-        ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
-        : file.contentType === "image/png"
-          ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-          : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP";
+  const matches = REGISTER_FILE_TYPES.includes(file.contentType) && bytesMatchMediaType(file.contentType, bytes);
   if (!matches) return badRequest("File contents do not match the selected type");
   const fileName = file.fileName.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 200) || "document";
   let blob: string | undefined;

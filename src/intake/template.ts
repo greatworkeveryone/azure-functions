@@ -10,7 +10,7 @@ export const ACK_TEMPLATE_SLUG = "request-ack";
 /** What the correspondence row records as the template. */
 export const ACK_TEMPLATE_ID = "request_ack";
 
-export interface AckTemplate {
+export interface LibraryTemplate {
   approved: boolean;
   bodyMarkdown: string;
   subject: string;
@@ -38,7 +38,7 @@ export function blocksToMarkdown(blocks: unknown, options: { omitBlockIdSuffix?:
 }
 
 /** The published version of a library template if there is one, else the draft; null when the library has neither. */
-export async function loadTemplateBySlug(connection: Connection, slug: string, options: { omitBlockIdSuffix?: string } = {}): Promise<AckTemplate | null> {
+export async function loadTemplateBySlug(connection: Connection, slug: string, options: { omitBlockIdSuffix?: string } = {}): Promise<LibraryTemplate | null> {
   const rows = await executeQuery(
     connection,
     `SELECT TOP (1) Title, BlocksJson, VersionNo, Status
@@ -58,4 +58,4 @@ export async function loadTemplateBySlug(connection: Connection, slug: string, o
   return { approved: row.Status === "published", bodyMarkdown: blocksToMarkdown(blocks, options), subject: String(row.Title), version: Number(row.VersionNo) };
 }
 
-export const loadAckTemplate = (connection: Connection): Promise<AckTemplate | null> => loadTemplateBySlug(connection, ACK_TEMPLATE_SLUG);
+export const loadAckTemplate = (connection: Connection): Promise<LibraryTemplate | null> => loadTemplateBySlug(connection, ACK_TEMPLATE_SLUG);

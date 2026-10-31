@@ -8,6 +8,8 @@
 //   COMMS_MAX_PER_MINUTE    most messages one minute may send (default 25; Exchange allows
 //                           about 30 a minute per mailbox)
 //   COMMS_APPROVAL_THRESHOLD  a job to more recipients than this waits for a manager (default 20)
+//   TENANT_REPLY_TO         where tenants reply to link emails and status notices (default workrequests@randazzo.properties);
+//                           the older TENANT_NOTICES_REPLY_TO / TENANT_LINK_REPLY_TO are still read if it is unset
 //   COMMS_FOOTER_ADDRESS    postal address for the email footer; defaults to RP's (Connor, 24 Oct)
 //
 // DEV_EMAIL_OVERRIDE rewrites every recipient through resolveRecipient (src/email-recipient.ts).
@@ -52,6 +54,13 @@ export function fromAddress(env: NodeJS.ProcessEnv = process.env): string {
 
 export function fromName(env: NodeJS.ProcessEnv = process.env): string {
   return env.COMMS_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
+}
+
+export const DEFAULT_TENANT_REPLY_TO = "workrequests@randazzo.properties";
+
+/** The tenant-facing address (PLAN §15): tenants reply here. */
+export function tenantReplyTo(env: NodeJS.ProcessEnv = process.env): string {
+  return env.TENANT_REPLY_TO?.trim() || env.TENANT_NOTICES_REPLY_TO?.trim() || env.TENANT_LINK_REPLY_TO?.trim() || DEFAULT_TENANT_REPLY_TO;
 }
 
 export function footerAddress(env: NodeJS.ProcessEnv = process.env): string {

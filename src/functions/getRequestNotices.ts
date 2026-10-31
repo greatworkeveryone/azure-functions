@@ -12,11 +12,10 @@ import { errorResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery, type SqlRow } from "../db";
 import { READ_LIMIT, tooManyRequests } from "../inboundTriage/limits";
 import { checkRateLimit } from "../rateLimit";
+import { iso, trimmedOrNull as str } from "../sqlHelpers";
 import { parseWorkRequestId } from "../workRequestsNative";
 
 const MISSING_TABLE = /Invalid object name 'dbo\.TenantNotices'/i;
-const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
-const str = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
 const whole = (raw: string | null): number | null => (raw !== null && /^[1-9]\d{0,9}$/.test(raw) && Number(raw) <= 2_147_483_647 ? Number(raw) : null);
 
 export async function getRequestNotices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {

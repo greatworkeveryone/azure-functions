@@ -13,6 +13,7 @@ import { insertNativeWorkRequest } from "../workRequestsNative";
 import { CATEGORY_KEYS, categoryLabel, LIMITS, URGENCIES, URGENCY_PRIORITY, type Urgency } from "./constants";
 import { referenceFor } from "./list";
 import { cleanText } from "./text";
+import { identityParams, suiteText, WHO_SQL } from "./who";
 import { rulesTriage, suggestTriage } from "./triage";
 
 export interface SubmitInput {
@@ -51,36 +52,10 @@ export type SubmitResult =
   | { ok: true; reference: string; repeat: boolean; requestId: number }
   | { error: string; ok: false; status: 403 | 404 | 429 };
 
-const WHO_SQL = `SELECT COALESCE(NULLIF(t.TradingName, ''), t.LegalName) AS TenantName,
-  (SELECT '[' + STRING_AGG('"' + STRING_ESCAPE(o.Level, 'json') + '"', ',') + ']'
-     FROM (SELECT DISTINCT Level FROM dbo.TenantOccupancies WHERE TenantId = t.TenantId AND ArchivedAt IS NULL) o) AS Levels,
-  b.BuildingName, c.Name AS ContactName, c.Phone, c.Email, c.ReportsIssues
-  FROM dbo.Tenants t
-  JOIN dbo.TenancyContacts c ON c.ContactId = @ContactId AND c.TenantId = t.TenantId
-  LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingID
- WHERE t.TenantId = @TenantId AND t.BuildingID = @BuildingId`;
-
 const SOURCE_SQL = `UPDATE dbo.WorkRequests
    SET SourceKind = N'tenant_link', SourceTenantId = @TenantId, SourceContactId = @ContactId, TenantCategory = @Category,
        TriageCategory = @TriageCategory, TriageUrgency = @TriageUrgency, TriageSource = @TriageSource, ClientRequestId = @ClientRequestId
  WHERE WorkRequestID = @Id AND SourceKind IS NULL`;
-
-const identityParams = (id: TenantLinkIdentity) => [
-  { name: "TenantId", type: TYPES.Int, value: id.tenantId },
-  { name: "ContactId", type: TYPES.Int, value: id.contactId },
-  { name: "BuildingId", type: TYPES.Int, value: id.buildingId },
-];
-
-function suiteText(levels: unknown): string {
-  if (typeof levels !== "string") return "";
-  try {
-    const parsed: unknown = JSON.parse(levels);
-    if (Array.isArray(parsed)) return parsed.filter((l): l is string => typeof l === "string").slice(0, 10).join(", ");
-  } catch {
-    // plain text
-  }
-  return levels.slice(0, 200);
-}
 
 export async function submitRequest(connection: Connection, identity: TenantLinkIdentity, input: SubmitInput): Promise<SubmitResult> {
   const [who] = await executeQuery(connection, WHO_SQL, identityParams(identity));
@@ -97,8 +72,11 @@ export async function submitRequest(connection: Connection, identity: TenantLink
   const [recent] = await executeQuery(
     connection,
     `SELECT COUNT(*) AS N, SUM(CASE WHEN Priority = N'Emergency' THEN 1 ELSE 0 END) AS Emergencies
-       FROM dbo.WorkRequests WHERE SourceTenantId = @TenantId AND SourceKind = N'tenant_link' AND CreatedAt > DATEADD(HOUR, -24, GETUTCDATE())`,
-    [{ name: "TenantId", type: TYPES.Int, value: identity.tenantId }],
+       FROM dbo.WorkRequests WHERE SourceTenantId = @TenantId AND SourceKind = N'tenant_link' AND CreatedAt > DATEADD(HOUR, -@Hours, GETUTCDATE())`,
+    [
+      { name: "TenantId", type: TYPES.Int, value: identity.tenantId },
+      { name: "Hours", type: TYPES.Int, value: LIMITS.dailyWindowHours },
+    ],
   );
   const triage = rulesTriage(input.description, input);
   // Only the tenant's own explicit choice of "emergency" gets past the daily cap, and it has a cap of its own;

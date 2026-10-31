@@ -12,13 +12,6 @@ export function noticesMode(env: NodeJS.ProcessEnv = process.env): NoticeMode {
   return env.TENANT_NOTICES_ENABLED === "true" ? "live" : "off";
 }
 
-/** Tenants reply here: the tenant-facing address (PLAN §15). */
-export const DEFAULT_NOTICE_REPLY_TO = "workrequests@randazzo.properties";
-
-export function noticeReplyTo(env: NodeJS.ProcessEnv = process.env): string {
-  return env.TENANT_NOTICES_REPLY_TO?.trim() || DEFAULT_NOTICE_REPLY_TO;
-}
-
 /** Notices are made by the system, not by a person; the comms core records this as the creator. */
 export const NOTICE_ACTOR_OID = "system:tenant-notices";
 export const NOTICE_ACTOR_NAME = "Floorplan notices";

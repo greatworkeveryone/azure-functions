@@ -26,7 +26,7 @@ import { isFeatureEnabledForRoles } from "../features/flags";
 import { resolveTenantLink } from "../tenantLinks/resolve";
 import { isTokenShaped } from "../tenantLinks/token";
 import type { TenantLinkIdentity } from "../tenantLinks/types";
-import { TENANT_PAGE_FLAG } from "./constants";
+import { RATE, TENANT_PAGE_FLAG } from "./constants";
 import { companyAfterHours } from "../orgSettings/afterHours";
 import { purposeOpens, type PageSection } from "../tenantLinks/purposes";
 import { hit, isFull } from "./limiter";
@@ -34,13 +34,6 @@ import { hit, isFull } from "./limiter";
 export const TENANT_LINK_HEADER = "x-tenant-link";
 
 const NO_STORE = { "Cache-Control": "no-store" };
-const MINUTE = 60_000;
-/** Per client: all tenant endpoints together. */
-const CLIENT_LIMIT = { limit: 90, windowMs: MINUTE };
-/** Per client when the address is unreadable (shared bucket, so a little more generous). */
-const UNKNOWN_CLIENT_LIMIT = { limit: 240, windowMs: MINUTE };
-/** Failed link presentations per client before it is turned away for the window. */
-const FAILED_LINK_LIMIT = { limit: 10, windowMs: 10 * MINUTE };
 
 export interface TenantWork {
   connection: Connection;
@@ -89,15 +82,15 @@ export async function runTenant(
 ): Promise<HttpResponseInit> {
   const address = clientAddress(request);
   const clientKey = address ? hashValue("ip", address) : "unknown";
-  const clientLimit = address ? CLIENT_LIMIT : UNKNOWN_CLIENT_LIMIT;
+  const clientLimit = address ? RATE.client : RATE.unknownClient;
   const byClient = hit(`tenant:client:${clientKey}`, clientLimit.limit, clientLimit.windowMs);
   if (!byClient.allowed) return tooMany(byClient.retryAfterMs);
 
   const failedKey = `tenant:failed:${clientKey}`;
-  const alreadyFailing = isFull(failedKey, FAILED_LINK_LIMIT.limit, FAILED_LINK_LIMIT.windowMs);
+  const alreadyFailing = isFull(failedKey, RATE.failedLink.limit, RATE.failedLink.windowMs);
   if (!alreadyFailing.allowed) return tooMany(alreadyFailing.retryAfterMs);
   const failed = (): HttpResponseInit => {
-    hit(failedKey, FAILED_LINK_LIMIT.limit, FAILED_LINK_LIMIT.windowMs);
+    hit(failedKey, RATE.failedLink.limit, RATE.failedLink.windowMs);
     return linkNotValid();
   };
 

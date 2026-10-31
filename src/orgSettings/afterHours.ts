@@ -1,21 +1,21 @@
 // The after-hours line: the number a tenant is told to ring about an urgent building problem after hours
-// (PLAN §15, Connor 31 Oct 2026). One company setting (dbo.OrgSettings, key 'afterHoursPhone') plus an
-// 000, 131 444 and 132 500 are constants on the tenant page and never satisfy the gate.
-// dbo.Buildings.EmergencyPhone is retired: unused since 31 Oct 2026, may be dropped later only with an approved destructive migration.
+// (PLAN §15, Connor 31 Oct 2026). One company setting (dbo.OrgSettings, key 'afterHoursPhone'), no per-building
+// override. The emergency numbers 000, 131 444 and 132 500 are constants on the tenant page and never satisfy the
+// gate (orgSettings/phone.ts).
+// dbo.Buildings.EmergencyPhone (migration 184) is retired: unused since 31 Oct 2026, may be dropped later only with an approved destructive migration.
 //
-// Who edits: ADMIN, DIRECTOR and FACILITIES_APPROVAL (the facilities manager, the role that approves work).
+// Who edits: EDIT_AFTER_HOURS_ROLES (orgSettings/roles.ts).
 // Mirrored in the frontend as the `editAfterHours` capability (src/constants/action-roles.json).
 
 import { TYPES, type Connection } from "tedious";
 import { inTransaction, txOk } from "../assetRegisterSupport";
-import { AppRole } from "../auth";
 import { executeQuery } from "../db";
 import { record } from "../ledger";
 import type { LedgerActor } from "../ledger/types";
 import { parseAustralianPhone } from "./phone";
 
 export const AFTER_HOURS_KEY = "afterHoursPhone";
-export const EDIT_AFTER_HOURS_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
+export { EDIT_AFTER_HOURS_ROLES } from "./roles";
 
 export interface AfterHoursApi {
   companyPhone: string | null;

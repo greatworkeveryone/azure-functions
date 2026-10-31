@@ -3,11 +3,12 @@
 // Scope is the resolved tenancy; nothing in the request can change it.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { RATE } from "../tenantPage/constants";
 import { runTenant, tenantJson } from "../tenantPage/gate";
 import { listTenantRequests } from "../tenantPage/list";
 
 export async function tenantListRequests(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  return runTenant(request, context, "tenantListRequests", { perLink: { limit: 30, windowMs: 60_000 }, recordUse: false, section: "requests" }, async ({ connection, identity }) =>
+  return runTenant(request, context, "tenantListRequests", { perLink: RATE.list, recordUse: false, section: "requests" }, async ({ connection, identity }) =>
     tenantJson(200, { requests: await listTenantRequests(connection, identity.tenantId) }),
   );
 }

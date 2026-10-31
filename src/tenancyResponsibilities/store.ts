@@ -2,11 +2,11 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam, type SqlRow } from "../db";
+import { iso, sqlParam } from "../sqlHelpers";
 import { versionText } from "../tenantLinks/store";
 import type { MaintainedBy, ResponsibilityApi, ResponsibilityFields } from "./types";
 
-const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
-const p = (name: string, type: SqlParam["type"], value: unknown): SqlParam => ({ name, type, value });
+const p = sqlParam;
 const str = (value: unknown): string | null => (value == null ? null : String(value));
 
 const COLUMNS = `SELECT r.ResponsibilityId, r.TenantId, r.Item, r.Category, r.Location, r.MaintainedBy, r.AssetId, r.ProjectEventId,

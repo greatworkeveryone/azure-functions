@@ -5,8 +5,9 @@
 // buildingId, attachmentLimit (1-100, default 25), recheckAttachments=true.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { ACTION_ROLES } from "../action-roles";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
+import { extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { uploadBlob } from "../blob-storage";
 import { mayPullWorkRequests } from "../config/mybuildingsSwitches";
 import { downloadAttachmentBytes, fetchWorkRequestAttachments, fetchWorkRequests } from "../mybuildings-client";
@@ -17,7 +18,7 @@ import { parseIntegerParam, upsertWorkRequest } from "./workRequests";
 export async function handleImportMyBuildings(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const denied = await requireRole(request, [AppRole.ADMIN]);
+  const denied = await requireRole(request, ACTION_ROLES.importMyBuildings.gate);
   if (denied) return denied;
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();

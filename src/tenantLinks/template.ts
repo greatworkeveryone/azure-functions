@@ -8,7 +8,7 @@ export const LINK_TEMPLATE_ID = "tenant_link_issue";
 export const LINK_TEMPLATE_VERSION = 1;
 export const LINK_TEMPLATE_STATUS = "draft";
 
-export const LINK_SUBJECT = "Your Randazzo Properties link for reporting a problem";
+export const linkSubject = (company: string): string => `Your ${company} link for reporting a problem`;
 
 export function linkBody(url: string, expiresOn: string): string {
   return [

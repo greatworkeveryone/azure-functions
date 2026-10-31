@@ -22,7 +22,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { badRequest as badRequestResponse, readJsonBody } from "../assetRegisterSupport";
 import { AppRole, errorResponse } from "../auth";
 import { downloadBlob } from "../blob-storage";
-import { ACK_TEMPLATE_ID, ACK_TEMPLATE_SLUG, acknowledgementEnabled } from "../certificateIntake/config";
+import { CERT_ACK_TEMPLATE_ID, CERT_ACK_TEMPLATE_SLUG, acknowledgementEnabled } from "../certificateIntake/config";
 import { parseFileCertificateBody } from "../certificateIntake/input";
 import { attachmentsOf } from "../certificateIntake/load";
 import { authorizeActor, badRequest, conflict, noStore, notFound, type CommsActor } from "../comms/actor";
@@ -51,7 +51,7 @@ type Ack = { status: "failed" | "not_sent"; detail: string } | { status: "queued
 async function sendAcknowledgement(connection: Connection, actor: CommsActor, to: { address: string; name: string }, filingKey: string): Promise<Ack> {
   if (!acknowledgementEnabled()) return { detail: "The thank-you email is switched off.", status: "not_sent" };
   if (actor.roles.every((role) => role === AppRole.ADMIN)) return { detail: "Admin accounts don't send real email; use a staff account.", status: "not_sent" };
-  const template = await loadTemplateBySlug(connection, ACK_TEMPLATE_SLUG);
+  const template = await loadTemplateBySlug(connection, CERT_ACK_TEMPLATE_SLUG);
   if (!template) return { detail: "The certificate_received email template isn't in the library yet.", status: "not_sent" };
   if (!template.approved && commsMode() === "live") return { detail: "The certificate_received email template hasn't been approved yet, so it can't be sent.", status: "not_sent" };
   const setup = await prepareSender(connection, actor, { replyTo: { kind: "own" }, signatureMode: "personal" });
@@ -67,7 +67,7 @@ async function sendAcknowledgement(connection: Connection, actor: CommsActor, to
     signature: setup.signature,
     signatureMode: "personal",
     subject: template.subject,
-    templateId: ACK_TEMPLATE_ID,
+    templateId: CERT_ACK_TEMPLATE_ID,
     templateVersion: template.version,
   };
   const checked = await applyResolutions(connection, checkRecipients(job));

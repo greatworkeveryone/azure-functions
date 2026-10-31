@@ -4,6 +4,7 @@
 // nothing is filed until a person files it.
 
 import type { SenderKind } from "../inboundTriage/types";
+import { mediaTypeFromExtension } from "../upload-constants";
 
 export interface EmailAttachmentRef {
   blobName: string;
@@ -31,12 +32,14 @@ export interface CertificateSignal {
   reasons: string[];
 }
 
-const FILE_TYPES: Record<string, string> = { jpeg: "image/jpeg", jpg: "image/jpeg", pdf: "application/pdf", png: "image/png", webp: "image/webp" };
+// The register takes PDF, JPEG, PNG and WebP; a GIF is recognised by name but not accepted.
+const ACCEPTED = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
 
 /** The attachment's media type when the register accepts it (PDF, JPEG, PNG, WebP), from its file name; null otherwise. */
 export function certificateFileType(fileName: string): string | null {
   const extension = fileName.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1];
-  return extension ? (FILE_TYPES[extension] ?? null) : null;
+  const type = extension ? mediaTypeFromExtension(extension) : null;
+  return type !== null && ACCEPTED.has(type) ? type : null;
 }
 
 const STRONG = /\b(?:certificates?\s+of\s+(?:currency|insurance)|insurance\s+certificates?|currency\s+certificates?|certificates?\s+of\s+cover|c\.?o\.?c\.?|c\.?o\.?i\.?)\b/i;

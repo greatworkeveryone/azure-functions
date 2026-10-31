@@ -4,12 +4,12 @@
 import type { Connection } from "tedious";
 import { AppRole } from "../auth";
 import type { CommsActor } from "../comms/actor";
-import { approvalThreshold, fromAddress, fromName } from "../comms/config";
+import { approvalThreshold, fromAddress, fromName, tenantReplyTo } from "../comms/config";
 import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms/queueJob";
 import type { NewJob } from "../comms/types";
 import { loadTemplateBySlug } from "../intake/template";
 import type { NoticeContext } from "./context";
-import { LINK_BLOCK_SUFFIX, NOTICE_ACTOR_NAME, NOTICE_ACTOR_OID, NOTICE_TEMPLATES, noticeReplyTo, type NoticeEvent } from "./config";
+import { LINK_BLOCK_SUFFIX, NOTICE_ACTOR_NAME, NOTICE_ACTOR_OID, NOTICE_TEMPLATES, type NoticeEvent } from "./config";
 import type { NoticeContact } from "./recipients";
 
 export type SendOutcome = { correspondenceId: number; ok: true; recipients: string } | { detail: string; ok: false };
@@ -49,8 +49,8 @@ export async function queueNotice(
       recipientRefId: String(tenantId),
       recipientType: "tenancy" as const,
     })),
-    replyTo: { address: noticeReplyTo(), identityId: null, name: null },
-    signature: { email: noticeReplyTo(), lines: ["Facilities team", "Randazzo Properties"], phone: null },
+    replyTo: { address: tenantReplyTo(), identityId: null, name: null },
+    signature: { email: tenantReplyTo(), lines: ["Facilities team", fromName()], phone: null },
     signatureMode: "role",
     subject: template.subject,
     templateId: spec.id,

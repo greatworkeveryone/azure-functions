@@ -39,7 +39,7 @@ export function parseRequestId(header: string | null): number | null {
 export const RESERVATION_MINUTES = 15;
 const COUNTING = `(UploadState = N'stored' OR (UploadState = N'reserved' AND UploadedAt > DATEADD(MINUTE, -${RESERVATION_MINUTES}, SYSUTCDATETIME())))`;
 const COUNT_LOCKED_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WITH (UPDLOCK, HOLDLOCK) WHERE WorkRequestID = @Id AND TenantId = @TenantId AND ${COUNTING}`;
-const TODAY_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WHERE TenantId = @TenantId AND ${COUNTING} AND UploadedAt > DATEADD(HOUR, -24, SYSUTCDATETIME())`;
+const TODAY_SQL = `SELECT COUNT(*) AS N FROM dbo.TenantRequestPhotos WHERE TenantId = @TenantId AND ${COUNTING} AND UploadedAt > DATEADD(HOUR, -@DayHours, SYSUTCDATETIME())`;
 
 export async function storePhoto(
   connection: Connection,
@@ -74,9 +74,9 @@ export async function storePhoto(
     const [again] = await executeQuery(connection, COUNT_LOCKED_SQL, params);
     if (Number(again?.N ?? 0) >= LIMITS.maxPhotosPerRequest) {
       await rollbackTransaction(connection);
-      return { error: "A request can have up to five photos", ok: false, status: 409 };
+      return { error: `A request can have up to ${LIMITS.maxPhotosPerRequest} photos`, ok: false, status: 409 };
     }
-    const [today] = await executeQuery(connection, TODAY_SQL, [params[1]]);
+    const [today] = await executeQuery(connection, TODAY_SQL, [params[1], { name: "DayHours", type: TYPES.Int, value: LIMITS.dailyWindowHours }]);
     if (Number(today?.N ?? 0) >= LIMITS.photosPerTenancyPerDay) {
       await rollbackTransaction(connection);
       return { error: "rate_limited", ok: false, status: 429 };

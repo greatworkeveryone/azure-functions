@@ -24,8 +24,30 @@ export type Urgency = (typeof URGENCIES)[number];
 /** Stored in WorkRequests.Priority. */
 export const URGENCY_PRIORITY: Record<Urgency, string> = { emergency: "Emergency", routine: "Routine", urgent: "Urgent" };
 
+const MINUTE = 60_000;
+type Rate = { limit: number; windowMs: number };
+
+/** Per-instance sliding-window limits (limiter.ts); the per-tenancy daily caps in LIMITS are counted from the database instead. */
+export const RATE = {
+  /** Per client, all tenant endpoints together. */
+  client: { limit: 90, windowMs: MINUTE },
+  context: { limit: 30, windowMs: MINUTE },
+  /** Failed link presentations per client before it is turned away for the window. */
+  failedLink: { limit: 10, windowMs: 10 * MINUTE },
+  list: { limit: 30, windowMs: MINUTE },
+  submit: { limit: 8, windowMs: 10 * MINUTE },
+  /** Per client when the address is unreadable (a shared bucket, so a little more generous). */
+  unknownClient: { limit: 240, windowMs: MINUTE },
+  upload: { limit: 20, windowMs: 10 * MINUTE },
+} as const satisfies Record<string, Rate>;
+
+/** The most a submit body may be, in bytes. */
+export const MAX_BODY_BYTES = 16 * 1024;
+
 export const LIMITS = {
   accessNotes: 500,
+  /** The window the per-tenancy daily caps below count over. */
+  dailyWindowHours: 24,
   descriptionMax: 2000,
   descriptionMin: 10,
   location: 200,

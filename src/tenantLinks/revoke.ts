@@ -4,6 +4,7 @@ import type { Connection } from "tedious";
 import { inTransaction, txFail, txOk } from "../assetRegisterSupport";
 import { record } from "../ledger";
 import type { LedgerActor } from "../ledger/types";
+import { normaliseEmail } from "./contacts";
 import { mayIssuePurpose } from "./purposes";
 import { liveLinkIds, liveLinksOfTenancy, readContact, readTenancy, revokeLink, setEmailOnlyFlag, versionBuffer } from "./store";
 
@@ -72,7 +73,7 @@ export async function revokeOnEmailChange(
   connection: Connection,
   input: { actor: LedgerActor; after: string | null; before: string | null; contactId: number },
 ): Promise<number[]> {
-  const norm = (e: string | null) => (e ?? "").trim().toLowerCase();
+  const norm = normaliseEmail;
   if (norm(input.before) === norm(input.after)) return [];
   const live = await liveLinkIds(connection, input.contactId, 0, true);
   for (const link of live) await revokeLink(connection, link.linkId, input.actor.name, "email_changed");

@@ -19,10 +19,9 @@ import { ackDelivery } from "../intake/delivery";
 import { dueAtFor } from "../intake/overdue";
 import { intakePriority, viewState } from "../intake/state";
 import { checkRateLimit } from "../rateLimit";
+import { iso, trimmedOrNull as str } from "../sqlHelpers";
 import { parseWorkRequestId } from "../workRequestsNative";
 
-const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
-const str = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
 
 /** Requests raised in Floorplan carry negative ids (workRequestsNative), so any non-zero whole number is valid. */
 export function parseRequestIds(raw: string | null): { ok: true; value: number[] } | { ok: false; error: string } {

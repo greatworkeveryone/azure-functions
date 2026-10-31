@@ -11,6 +11,7 @@ import { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "../db";
 import { downloadBlob } from "../blob-storage";
+import { mediaTypeFromExtension } from "../upload-constants";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import type {
   PacketInput,
@@ -268,15 +269,7 @@ async function loadSourcePointAttachments(
 /** Best-effort content type from file extension when the DB doesn't store it. */
 function inferContentType(fileName: string): string {
   const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    pdf: "application/pdf",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-  };
-  return map[ext] ?? "application/octet-stream";
+  return mediaTypeFromExtension(ext) ?? "application/octet-stream";
 }
 
 // Stored names (quote/invoice PDFs, claimed attachments) are downloaded with

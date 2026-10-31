@@ -3,7 +3,7 @@
 // A priority with no target is never listed, and a target only counts requests that arrived after it was set, so
 // setting one never raises the backlog. The clock is business hours on the Darwin calendar, like the policy's.
 
-import { TYPES, type Connection } from "tedious";
+import type { Connection } from "tedious";
 import { executeQuery } from "../db";
 import { addBusinessHours, holidaysFromEnv } from "../escalation/businessTime";
 import { intakePriority } from "./state";
@@ -17,28 +17,31 @@ export interface OverdueRequest {
   workRequestId: number;
 }
 
-/** The open, unacknowledged requests of one list, with the time each one is due when its priority has a target. */
+/** The open, unacknowledged requests, with the priority they are filed under. The priority-to-target mapping is intakePriority (state.ts), applied in TS so there is one copy of it. */
 const UNACKNOWLEDGED_SQL = `
-  SELECT wr.WorkRequestID, wr.CreatedAt, COALESCE(o.Priority, wr.Priority) AS Priority,
-         t.AckWithinBusinessHours AS Hours, t.SetAt
+  SELECT wr.WorkRequestID, wr.CreatedAt, COALESCE(o.Priority, wr.Priority) AS Priority
     FROM dbo.WorkRequests wr
     LEFT JOIN dbo.WorkRequestOverrides o ON o.WorkRequestID = wr.WorkRequestID
-    INNER JOIN dbo.IntakeResponseTargets t
-      ON t.Priority = CASE COALESCE(o.Priority, wr.Priority) WHEN N'Emergency' THEN N'Critical' WHEN N'Urgent' THEN N'High' WHEN N'Critical' THEN N'Critical' WHEN N'High' THEN N'High' WHEN N'Low' THEN N'Low' ELSE N'Normal' END
-   WHERE t.AckWithinBusinessHours IS NOT NULL AND t.SetAt IS NOT NULL
-     AND wr.CreatedAt >= t.SetAt
-     AND ISNULL(wr.IntakeState, N'received') = N'received'
+   WHERE ISNULL(wr.IntakeState, N'received') = N'received'
      AND wr.ActualCompletionDate IS NULL
      AND NOT EXISTS (SELECT 1 FROM dbo.Jobs j WHERE j.WorkRequestID = wr.WorkRequestID)`;
 
+const TARGETS_SQL = `SELECT Priority, AckWithinBusinessHours AS Hours, SetAt FROM dbo.IntakeResponseTargets WHERE AckWithinBusinessHours IS NOT NULL AND SetAt IS NOT NULL`;
+
 export async function listOverdueRequests(connection: Connection, now: Date = new Date()): Promise<OverdueRequest[]> {
+  const targets = new Map((await executeQuery(connection, TARGETS_SQL) ?? []).map((row) => [String(row.Priority), row]));
+  if (targets.size === 0) return [];
   const rows = await executeQuery(connection, UNACKNOWLEDGED_SQL);
   const holidays = holidaysFromEnv();
   const overdue: OverdueRequest[] = [];
   for (const row of rows ?? []) {
     if (!(row.CreatedAt instanceof Date)) continue;
-    const dueAt = addBusinessHours(row.CreatedAt, Number(row.Hours), holidays);
-    if (dueAt.getTime() <= now.getTime()) overdue.push({ dueAt, priority: intakePriority(row.Priority), workRequestId: Number(row.WorkRequestID) });
+    const priority = intakePriority(row.Priority);
+    const target = targets.get(priority);
+    // A target only counts requests that arrived after it was set.
+    if (!target || !(target.SetAt instanceof Date) || row.CreatedAt.getTime() < target.SetAt.getTime()) continue;
+    const dueAt = addBusinessHours(row.CreatedAt, Number(target.Hours), holidays);
+    if (dueAt.getTime() <= now.getTime()) overdue.push({ dueAt, priority, workRequestId: Number(row.WorkRequestID) });
   }
   return overdue.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime() || a.workRequestId - b.workRequestId);
 }
@@ -48,5 +51,3 @@ export function dueAtFor(createdAt: Date | null, hours: number | null, setAt: Da
   if (createdAt === null || hours === null || setAt === null || createdAt.getTime() < setAt.getTime()) return null;
   return addBusinessHours(createdAt, hours, holidaysFromEnv());
 }
-
-export const idParam = (id: number) => ({ name: "Id", type: TYPES.Int, value: id });

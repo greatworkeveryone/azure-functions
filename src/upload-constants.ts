@@ -19,6 +19,12 @@ export const ALLOWED_CONTENT_TYPES: ReadonlySet<string> = new Set([
   "text/plain",
 ]);
 
+// File extension (no dot, any case) to the media type for the formats we recognise by name: images and PDF.
+const MEDIA_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
+  gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg", pdf: "application/pdf", png: "image/png", webp: "image/webp",
+};
+export const mediaTypeFromExtension = (extension: string): string | null => MEDIA_TYPE_BY_EXTENSION[extension.replace(/^\./, "").toLowerCase()] ?? null;
+
 // Strips parameters ("; charset=utf-8") and case so the allowlist sees the bare media type.
 export function normaliseMediaType(raw: string): string {
   return (raw ?? "").split(";")[0].trim().toLowerCase();

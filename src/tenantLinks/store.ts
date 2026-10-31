@@ -2,10 +2,10 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam, type SqlRow } from "../db";
+import { iso, sqlParam } from "../sqlHelpers";
 import { DEFAULT_PURPOSE, isLinkPurpose, type LinkPurpose } from "./purposes";
 import type { ContactApi, LinkApi, LinkStatus, TenancyState } from "./types";
 
-const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
 export const versionText = (value: unknown): string => (Buffer.isBuffer(value) ? value.toString("base64") : "");
 
 /** A stale or malformed version never matches a row, which is what returns 409. */
@@ -62,7 +62,7 @@ export function contactFromRow(row: SqlRow, now: Date): ContactApi {
   };
 }
 
-const p = (name: string, type: SqlParam["type"], value: unknown): SqlParam => ({ name, type, value });
+const p = sqlParam;
 
 export async function listContacts(connection: Connection, tenantId: number, now: Date = new Date()): Promise<ContactApi[]> {
   const rows = await executeQuery(connection, CONTACTS_SQL, [p("TenantId", TYPES.Int, tenantId)]);

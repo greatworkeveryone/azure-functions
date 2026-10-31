@@ -8,6 +8,8 @@ import { buildTenancyActivity } from "../tenancyActivity/build";
 import { getRequest } from "./fixtures/rentReviewFakes";
 
 jest.mock("../db", () => ({ closeConnection: jest.fn(), createRequestConnection: jest.fn().mockResolvedValue({}), executeQuery: jest.fn() }));
+jest.mock("../features/flags", () => ({ isFeatureEnabledForRoles: jest.fn().mockResolvedValue(true) }));
+const { isFeatureEnabledForRoles } = jest.requireMock("../features/flags") as { isFeatureEnabledForRoles: jest.Mock };
 const { executeQuery } = jest.requireMock("../db") as { executeQuery: jest.Mock };
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 
@@ -23,11 +25,11 @@ const WRS = [
 beforeEach(() => {
   jest.clearAllMocks();
   clearRoleCache();
+  isFeatureEnabledForRoles.mockResolvedValue(true);
   process.env.DEV_ROLE_OVERRIDE_ENABLED = "true";
   process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
   executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (sql.includes("FROM dbo.Tenants")) return [{ BuildingId: 1, LegalName: "Acme Pty Ltd", TradingName: "Acme" }];
-    if (sql.includes("COL_LENGTH")) return [{ Len: null }];
     if (sql.includes("FROM WorkRequests")) return WRS;
     if (sql.includes("FROM Jobs")) return JOBS;
     return [];
@@ -53,16 +55,24 @@ describe("getTenancyActivity", () => {
     expect((await getTenancyActivity(getRequest({ tenantId: "7" }, "accounts"), ctx)).status).toBe(404);
   });
 
-  it("shows the intake state when the column exists", async () => {
+  it("shows the intake state read in the same query as the requests", async () => {
     executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (sql.includes("FROM dbo.Tenants")) return [{ BuildingId: 1, LegalName: "A", TradingName: null }];
-      if (sql.includes("COL_LENGTH")) return [{ Len: 40 }];
-      if (sql.includes("IntakeState FROM")) return [{ IntakeState: "Assessing", WorkRequestID: 55 }];
-      if (sql.includes("FROM WorkRequests")) return [{ ...WRS[0] }];
+      if (sql.includes("FROM WorkRequests")) return [{ ...WRS[0], IntakeState: "assessing" }];
       return [];
     });
     const res = await getTenancyActivity(getRequest({ tenantId: "7" }, "accounts"), ctx);
-    expect(body(res).items[0]).toMatchObject({ intakeState: "Assessing", isOpen: true });
+    expect(body(res).items[0]).toMatchObject({ intakeState: "assessing", isOpen: true });
+    const sqls = executeQuery.mock.calls.map((c) => String(c[1]));
+    expect(sqls.some((q) => q.includes("COL_LENGTH") || q.includes("OPENJSON"))).toBe(false);
+    expect(sqls.find((q) => q.includes("FROM WorkRequests wr"))).toContain("wr.IntakeState");
+  });
+
+  it("is not available while the tenancyActivity flag is off for the caller", async () => {
+    isFeatureEnabledForRoles.mockResolvedValue(false);
+    const res = await getTenancyActivity(getRequest({ tenantId: "7" }, "accounts"), ctx);
+    expect(res.status).toBe(404);
+    expect(isFeatureEnabledForRoles).toHaveBeenCalledWith("tenancyActivity", expect.anything(), expect.anything());
   });
 });
 

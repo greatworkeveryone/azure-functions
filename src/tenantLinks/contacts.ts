@@ -6,7 +6,9 @@ export type Parsed<T> = { ok: true; value: T } | { error: string; ok: false };
 const fail = (error: string): { error: string; ok: false } => ({ error, ok: false });
 
 const EMAIL = /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/;
-const text = (value: unknown, max: number): string | null | undefined => {
+/** An email as compared: trimmed and lower-cased; blank for a non-string. */
+export const normaliseEmail = (value: unknown): string => (typeof value === "string" ? value.trim().toLowerCase() : "");
+export const text = (value: unknown, max: number): string | null | undefined => {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim().replace(/\s+/g, " ");

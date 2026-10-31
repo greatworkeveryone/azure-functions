@@ -3,8 +3,10 @@ import { join } from "node:path";
 import { migrationFromSql, validateMigration } from "../migrate-files";
 import { canMove, intakePriority, isClosed, storedState, viewState } from "./state";
 import { blocksToMarkdown } from "./template";
-import { dueAtFor } from "./overdue";
+import { dueAtFor, listOverdueRequests } from "./overdue";
 import { parseTargets } from "./targets";
+
+jest.mock("../db", () => ({ executeQuery: jest.fn() }));
 
 describe("intake state", () => {
   it("reads NULL as received and a linked job as converted", () => {
@@ -89,5 +91,27 @@ describe("migration 182", () => {
 
   it("seeds every target unset, so no clock runs until Facilities sets one", () => {
     expect(code).toMatch(/INSERT \(Priority, AckWithinBusinessHours\) VALUES \(source\.Priority, NULL\)/);
+  });
+});
+
+describe("listOverdueRequests", () => {
+  const db = require("../db") as { executeQuery: jest.Mock };
+
+  const setAt = new Date("2026-10-01T00:00:00Z");
+  const run = async (requests: Record<string, unknown>[]) => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("IntakeResponseTargets") ? [{ Hours: 8, Priority: "High", SetAt: setAt }] : requests));
+    return listOverdueRequests({} as never, new Date("2026-10-20T00:00:00Z"));
+  };
+
+  it("maps tenant priorities through intakePriority (Urgent is High), and ignores priorities without a target", async () => {
+    const out = await run([
+      { CreatedAt: new Date("2026-10-05T00:00:00Z"), Priority: "Urgent", WorkRequestID: -4 },
+      { CreatedAt: new Date("2026-10-05T00:00:00Z"), Priority: "Routine", WorkRequestID: -5 },
+    ]);
+    expect(out.map((r) => [r.workRequestId, r.priority])).toEqual([[-4, "High"]]);
+  });
+
+  it("skips a request that arrived before the target was set", async () => {
+    expect(await run([{ CreatedAt: new Date("2026-09-30T00:00:00Z"), Priority: "High", WorkRequestID: 9 }])).toEqual([]);
   });
 });

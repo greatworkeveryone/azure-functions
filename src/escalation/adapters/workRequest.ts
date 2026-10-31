@@ -3,14 +3,13 @@
 // still received: acknowledging it, closing it, raising a job from it or completing it ends the escalation.
 
 import { TYPES } from "tedious";
+import { ACTION_ROLES } from "../../action-roles";
+import { rolesPassGate } from "../../auth";
 import { executeQuery } from "../../db";
 import { storedState } from "../../intake/state";
 import { parseWorkRequestId } from "../../workRequestsNative";
-import { normaliseRole, ROLES } from "../roles";
+import { normaliseRole } from "../roles";
 import type { EscalationAdapter } from "./registry";
-
-// Who may see escalations about a request: whoever may read work requests (getWorkRequests).
-const VIEW_ROLES: ReadonlySet<string> = new Set([ROLES.accounts, ROLES.accountsManager, ROLES.admin, ROLES.cfo, ROLES.director, ROLES.facilities, ROLES.facilitiesManager]);
 
 const SQL = `SELECT wr.WorkRequestID, wr.BuildingID, wr.BuildingName, wr.IntakeState, wr.ActualCompletionDate,
          COALESCE(o.TenantName, wr.TenantName) AS TenantName, COALESCE(o.[Type], wr.[Type]) AS RequestType,
@@ -52,5 +51,6 @@ export const workRequestAdapter: EscalationAdapter = {
     };
   },
 
-  visibleTo: (viewer) => viewer.roles.some((role) => VIEW_ROLES.has(normaliseRole(role))),
+  // Whoever may see a request's intake: the same gate as getRequestIntake, so the two cannot drift.
+  visibleTo: (viewer) => rolesPassGate(viewer.roles.map(normaliseRole), ACTION_ROLES.viewRequestIntake.gate),
 };

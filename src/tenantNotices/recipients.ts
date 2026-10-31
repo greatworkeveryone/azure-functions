@@ -4,6 +4,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "../db";
+import { normaliseEmail } from "../tenantLinks/contacts";
 
 export interface NoticeContact {
   authorisedForCosts: boolean;
@@ -19,7 +20,7 @@ const CONTACTS_SQL = `SELECT c.ContactId, c.Name, c.Email, c.ReportsIssues, c.Au
  WHERE c.TenantId = @TenantId AND c.ArchivedAt IS NULL AND t.ArchivedAt IS NULL AND NULLIF(LTRIM(RTRIM(c.Email)), N'') IS NOT NULL
  ORDER BY c.ContactId`;
 
-const norm = (value: unknown): string => (typeof value === "string" ? value.trim().toLowerCase() : "");
+const norm = normaliseEmail;
 
 export async function loadActiveContacts(connection: Connection, tenantId: number): Promise<NoticeContact[]> {
   const rows = await executeQuery(connection, CONTACTS_SQL, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
