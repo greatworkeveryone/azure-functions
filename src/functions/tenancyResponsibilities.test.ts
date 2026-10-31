@@ -127,6 +127,8 @@ describe("reading", () => {
     expect((res.jsonBody as { items: unknown[] }).items).toHaveLength(1);
     world([], { LegalName: null, RequestCategory: null, SourceTenantId: null });
     expect((await getRequestResponsibilities(get("workRequestId=31"), context)).jsonBody).toMatchObject({ items: [], tenantId: null });
+    expect((await getRequestResponsibilities(get("workRequestId=-4"), context)).status).toBe(200); // raised in Floorplan
+    expect((await getRequestResponsibilities(get("workRequestId=0"), context)).status).toBe(400);
     world([], null);
     expect((await getRequestResponsibilities(get("workRequestId=31"), context)).status).toBe(404);
   });

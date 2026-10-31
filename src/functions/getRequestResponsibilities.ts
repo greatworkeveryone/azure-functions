@@ -17,7 +17,7 @@ export async function getRequestResponsibilities(request: HttpRequest, context: 
   if (!auth.ok) return auth.response;
   return runStaff(request, context, "getRequestResponsibilities", auth.token, false, async ({ connection }) => {
     const raw = request.query.get("workRequestId");
-    if (raw === null || !/^[1-9]\d{0,9}$/.test(raw)) return refusal(400, "workRequestId must be a whole number");
+    if (raw === null || !/^-?[1-9]\d{0,9}$/.test(raw) || Math.abs(Number(raw)) > 2_147_483_647) return refusal(400, "workRequestId must be a whole number");
     const [row] = await executeQuery(
       connection,
       `SELECT wr.SourceTenantId, COALESCE(wr.TenantCategory, wr.TriageCategory) AS RequestCategory, t.LegalName

@@ -53,7 +53,8 @@ export async function acknowledgeWorkRequest(request: HttpRequest, context: Invo
   const extra = unexpectedKey(body, ["workRequestId", "withoutEmail"]);
   if (extra) return badRequest(extra);
   const id = body.workRequestId;
-  if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) return badRequest("workRequestId must be a whole number");
+  // Floorplan-raised requests have negative ids (workRequestsNative); only zero is never a request.
+  if (typeof id !== "number" || !Number.isInteger(id) || id === 0 || Math.abs(id) > 2_147_483_647) return badRequest("workRequestId must be a whole number");
   if (body.withoutEmail !== undefined && typeof body.withoutEmail !== "boolean") return badRequest("withoutEmail must be true or false");
   const withoutEmail = body.withoutEmail === true;
 

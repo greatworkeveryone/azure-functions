@@ -122,8 +122,12 @@ describe("acknowledgeWorkRequest", () => {
     expect((await acknowledgeWorkRequest(post({ workRequestId: 31 }), context)).status).toBe(403);
   });
 
+  it("accepts a request raised in Floorplan, whose id is negative", async () => {
+    expect((await acknowledgeWorkRequest(post({ workRequestId: -1, withoutEmail: true }), context)).status).toBe(200);
+  });
+
   it("rejects a malformed body", async () => {
-    for (const body of [{}, { workRequestId: "31" }, { workRequestId: 31, to: "x" }, { workRequestId: 31, withoutEmail: "yes" }]) {
+    for (const body of [{}, { workRequestId: "31" }, { workRequestId: 0 }, { workRequestId: 31, to: "x" }, { workRequestId: 31, withoutEmail: "yes" }]) {
       expect((await acknowledgeWorkRequest(post(body), context)).status).toBe(400);
     }
   });

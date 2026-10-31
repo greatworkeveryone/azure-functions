@@ -12,7 +12,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { authorizeWrite, badRequest } from "../assetRegisterSupport";
 import { errorResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
-import { parseEmailIds } from "../inboundTriage/input";
+import { MAX_EMAIL_IDS } from "../inboundTriage/input";
 import { READ_LIMIT, tooManyRequests } from "../inboundTriage/limits";
 import { commsMode } from "../comms/config";
 import { ackDelivery } from "../intake/delivery";
@@ -23,13 +23,22 @@ import { checkRateLimit } from "../rateLimit";
 const iso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : null);
 const str = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value : null);
 
+/** Requests raised in Floorplan carry negative ids (workRequestsNative), so any non-zero whole number is valid. */
+export function parseRequestIds(raw: string | null): { ok: true; value: number[] } | { ok: false; error: string } {
+  const parts = (raw ?? "").split(",").map((part) => part.trim()).filter((part) => part !== "");
+  if (parts.length === 0 || parts.length > MAX_EMAIL_IDS) return { error: `Send between 1 and ${MAX_EMAIL_IDS} request ids.`, ok: false };
+  const ids = parts.map((part) => (/^-?[1-9]\d{0,9}$/.test(part) ? Number(part) : NaN));
+  if (!ids.every((id) => Number.isSafeInteger(id) && Math.abs(id) <= 2_147_483_647)) return { error: "Each request id must be a whole number other than zero.", ok: false };
+  return { ok: true, value: [...new Set(ids)] };
+}
+
 export async function getRequestIntake(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeWrite(request, ACTION_ROLES.viewRequestIntake.gate);
   if (!auth.ok) return auth.response;
   const limited = checkRateLimit(`getRequestIntake:${auth.caller.oid}`, READ_LIMIT);
   if (!limited.allowed) return tooManyRequests(limited.retryAfterMs);
-  const ids = parseEmailIds(request.query.get("ids"));
-  if (!ids.ok) return badRequest(ids.error.replace(/email/g, "request"));
+  const ids = parseRequestIds(request.query.get("ids"));
+  if (!ids.ok) return badRequest(ids.error);
 
   let connection: Connection | undefined;
   try {
