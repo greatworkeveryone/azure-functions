@@ -183,7 +183,7 @@ describe("approvals", () => {
     const [row] = await loadApprovalItems(conn, [manager], context);
     expect(row).toMatchObject({ capability: null, id: "9", move: "notice", ownerUserId: 2, type: "approval", importance: "medium" });
     expect(row.money).toEqual({ amount: 5000, buildingId: 3, createdByName: "Fay Facilities", subject: "quote" });
-    expect(row.dueAt?.toISOString()).toBe("2026-10-27T07:30:00.000Z"); // 16 business hours after Mon 26 Oct 09:30 Darwin: Tue 17:00
+    expect(row.dueAt?.toISOString()).toBe("2026-10-28T00:00:00.000Z"); // 16 business hours after Mon 26 Oct 09:30 Darwin: Wed 09:30 (8:30–4:30 days)
     expect(row.label).toContain("Quote Q-9 from Acme awaiting approval");
   });
 
@@ -231,7 +231,7 @@ describe("emails", () => {
     expect(lastSql()).toContain("e.IsTest = 0 AND e.Status NOT IN (N'promoted', N'archived')");
     expect(row).toMatchObject({ capability: "promoteEmail", id: "77", importance: "medium", move: "email_assignee", ownerUserId: 1, type: "email" });
     expect(row.label).toBe("Email from tenant@example.com: Leak in the lobby");
-    expect(row.dueAt?.toISOString()).toBe("2026-10-26T23:30:00.000Z"); // Tue 09:00 in Darwin
+    expect(row.dueAt?.toISOString()).toBe("2026-10-27T00:00:00.000Z"); // one business day after Mon 09:30: Tue 09:30 in Darwin
   });
 });
 
