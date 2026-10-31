@@ -60,6 +60,7 @@ const WHO = { BuildingName: "Tower One", ContactName: "Pat", Email: "pat@acme.te
 let whoRow: Record<string, unknown> | null = WHO;
 let ownedRows: unknown[] = [{ WorkRequestID: -7 }];
 let photoCount = 0;
+let listRows: Record<string, unknown>[] = [];
 let companyRows: unknown[] = [{ SettingValue: "1800 555 000" }];
 
 beforeEach(() => {
@@ -70,13 +71,14 @@ beforeEach(() => {
   whoRow = WHO;
   ownedRows = [{ WorkRequestID: -7 }];
   photoCount = 0;
+  listRows = [];
   companyRows = [{ SettingValue: "1800 555 000" }];
   resolver.resolveTenantLink.mockImplementation(async (token: string) => (token === TOKEN_A ? A : token === TOKEN_B ? B : null));
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (sql.includes("FROM dbo.FeatureFlags")) return flagOn ? [{ FeatureKey: "tenantPage", RoleName: "tenant", Visibility: "enabled" }] : [];
     if (sql.includes("FROM dbo.OrgSettings")) return companyRows;
     if (sql.includes("JOIN dbo.TenancyContacts c")) return whoRow ? [whoRow] : [];
-    if (sql.includes("COL_LENGTH")) return [{ Len: null }];
+    if (sql.includes("SELECT TOP (50) w.WorkRequestID")) return listRows;
     if (sql.includes("INSERT INTO WorkRequests")) return [{ WorkRequestID: -7 }];
     if (sql.includes("COUNT(*) AS N FROM dbo.WorkRequests")) return [{ N: 0 }];
     if (sql.includes("FROM dbo.TenantRequestPhotos")) return [{ N: photoCount }];
@@ -359,6 +361,21 @@ describe("status timeline", () => {
     expect(done.steps.every((s) => s.reached)).toBe(true);
     expect(done.steps[0].at).toBe(at.toISOString());
   });
+  it("follows the job for a request raised in Floorplan: booked at Work, completed when the job completes", () => {
+    const base = { completedAt: null, native: true, status: "New", submittedAt: at };
+    const job = (over: Partial<{ allComplete: boolean; anyBooked: boolean; hasJob: boolean }>) => ({ allComplete: false, anyBooked: false, hasJob: true, ...over });
+    expect(timelineFor({ ...base, intakeState: null, job: null }).current).toBe("received");
+    expect(timelineFor({ ...base, intakeState: "assessing", job: null }).current).toBe("acknowledged");
+    expect(timelineFor({ ...base, intakeState: null, job: job({}) }).current).toBe("acknowledged");
+    expect(timelineFor({ ...base, intakeState: null, job: job({ anyBooked: true }) }).current).toBe("booked");
+    const done = timelineFor({ ...base, intakeState: null, job: job({ allComplete: true, anyBooked: true }) });
+    expect(done.current).toBe("completed");
+    expect(done.steps.every((step) => step.reached)).toBe(true);
+    expect(timelineFor({ ...base, intakeState: "closed_not_ours", job: null }).closed).toBe(true);
+  });
+  it("ignores free-text status for a native request (the regex is only for myBuildings rows)", () => {
+    expect(timelineFor({ completedAt: null, intakeState: null, native: true, status: "In Progress", submittedAt: at }).current).toBe("received");
+  });
   it("says only closed for a duplicate or not-ours request", () => {
     const closed = timelineFor({ completedAt: null, intakeState: "closed_duplicate", status: "New", submittedAt: at });
     expect(closed.closed).toBe(true);
@@ -388,6 +405,16 @@ describe("hardening (review S2/S3)", () => {
     expect(company.status).toBe(200);
     expect(company.jsonBody).toMatchObject({ afterHoursPhone: "08 8941 1234" });
     expect(db.executeQuery.mock.calls.some((c: unknown[]) => String(c[1]).includes("EmergencyPhone"))).toBe(false);
+  });
+
+  it("lists a native request as booked once its job is at Work, from the Jobs facts in the SQL", async () => {
+    listRows = [{ ActualCompletionDate: null, CreatedAt: new Date("2026-11-02T01:00:00Z"), Details: "Leak", ExactLocation: "Kitchen", IntakeState: null, JobCount: 1, JobsBooked: 1, JobsComplete: 0, PhotoCount: 0, Priority: "Urgent", Status: "New", TenantCategory: "plumbing", WorkRequestID: -7 }];
+    const r = await tenantListRequests(req({ ip: "198.51.100.45" }), context);
+    expect(r.status).toBe(200);
+    expect((r.jsonBody as { requests: { timeline: { current: string } }[] }).requests[0].timeline.current).toBe("booked");
+    const listSql = String(db.executeQuery.mock.calls.map((c: unknown[]) => c[1]).find((q: unknown) => String(q).includes("SELECT TOP (50) w.WorkRequestID")));
+    expect(listSql).toContain("dbo.Jobs j");
+    expect(listSql).not.toContain("COL_LENGTH");
   });
 
   it("refuses a link whose purpose does not open the section (403), without counting a failed attempt", async () => {
