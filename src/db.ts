@@ -303,12 +303,24 @@ export async function createServiceRequestConnection(): Promise<Connection> {
   return createConnection(await getServiceToken());
 }
 
+// tedious allows ONE in-flight request per connection and rejects a second with
+// EINVALIDSTATE. Every request-issuing helper below chains onto this per-connection
+// tail so concurrent callers (e.g. Promise.all) run one after another instead.
+const connectionTails = new WeakMap<Connection, Promise<unknown>>();
+
+function enqueue<T>(connection: Connection, issue: () => Promise<T>): Promise<T> {
+  const tail = connectionTails.get(connection) ?? Promise.resolve();
+  const result = tail.then(issue, issue);
+  connectionTails.set(connection, result.catch(() => undefined));
+  return result;
+}
+
 export function executeQuery(
   connection: Connection,
   sql: string,
   params?: SqlParam[]
 ): Promise<SqlRow[]> {
-  return new Promise((resolve, reject) => {
+  return enqueue(connection, () => new Promise<SqlRow[]>((resolve, reject) => {
     const rows: SqlRow[] = [];
 
     const request = new Request(sql, (err) => {
@@ -334,7 +346,7 @@ export function executeQuery(
     });
 
     connection.execSql(request);
-  });
+  }));
 }
 
 /**
@@ -343,9 +355,9 @@ export function executeQuery(
  * which sp_executesql would revert when it returns. No parameters.
  */
 export function executeBatch(connection: Connection, sql: string): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return enqueue(connection, () => new Promise<void>((resolve, reject) => {
     connection.execSqlBatch(new Request(sql, (err) => (err ? reject(err) : resolve())));
-  });
+  }));
 }
 
 export function closeConnection(connection: Connection): void {
@@ -359,28 +371,28 @@ export function closeConnection(connection: Connection): void {
 }
 
 export function beginTransaction(connection: Connection): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return enqueue(connection, () => new Promise<void>((resolve, reject) => {
     connection.beginTransaction((err) => {
       if (err) reject(err);
       else resolve();
     });
-  });
+  }));
 }
 
 export function commitTransaction(connection: Connection): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return enqueue(connection, () => new Promise<void>((resolve, reject) => {
     connection.commitTransaction((err) => {
       if (err) reject(err);
       else resolve();
     });
-  });
+  }));
 }
 
 export function rollbackTransaction(connection: Connection): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return enqueue(connection, () => new Promise<void>((resolve, reject) => {
     connection.rollbackTransaction((err) => {
       if (err) reject(err);
       else resolve();
     });
-  });
+  }));
 }

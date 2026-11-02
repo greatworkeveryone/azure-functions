@@ -30,7 +30,7 @@ const VISIBILITIES = ["enabled", "preview", "hidden"] as const;
 const ROLE_NAMES: readonly string[] = [...Object.values(AppRole), "tenant"];
 const FEATURE_KEYS = [
   "absenceCover", "activity", "aiAssist", "aiDocumentExtraction", "assets", "certificateIntake", "comms", "complianceReport",
-  "contractorSuggestions", "decisionJobs", "documentation", "emailBroadcast", "emailSending", "escalations",
+  "contractorSuggestions", "decisionJobs", "directorsDesk", "documentation", "emailBroadcast", "emailSending", "escalations",
   "finance", "guidedHelp", "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
   "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
   "quotes", "recurringFaults", "rentReviews", "teamsAlerts", "tenancyActivity", "tenancyResponsibilities", "tenancySchedule",
