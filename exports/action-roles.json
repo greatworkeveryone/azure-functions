@@ -341,6 +341,9 @@
   "manageEmailIdentities": [
     "admin"
   ],
+  "manageFeatureFlags": [
+    "admin"
+  ],
   "manageFinancialEvents": [
     "admin",
     "cfo",
@@ -401,6 +404,9 @@
     "admin"
   ],
   "manageUsageAnalytics": [
+    "admin"
+  ],
+  "manageUsers": [
     "admin"
   ],
   "manageVarianceMargin": [

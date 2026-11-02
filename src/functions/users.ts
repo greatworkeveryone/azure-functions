@@ -19,6 +19,7 @@ import {
   verifiedIdentityFromRequest,
   verifiedRequestClaims,
 } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { noteSignIn } from "../access/accessEvents";
 import { clientAddress } from "../access/clientIp";
 import { record } from "../ledger";
@@ -98,14 +99,15 @@ export async function getAppUsers(
 }
 
 // ── POST /api/upsertAppUser ───────────────────────────────────────────────────
-// Create or update an AppUser. Admin or Director.
+// Create or update an AppUser. Admin only (ACTION_ROLES.manageUsers).
 // INSERT body: { email, displayName?, role?, isActive? }
 // UPDATE body: { userId, role?, isActive? } — Email/DisplayName/EntraOid are
 // immutable after the row exists; only Role and IsActive can change.
 
-const MANAGE_USER_ROLES = [AppRole.ADMIN, AppRole.DIRECTOR] as const;
+const MANAGE_USER_ROLES = ACTION_ROLES.manageUsers.gate;
 const VALID_ROLES = new Set(Object.values(AppRole));
 
+// Admin is the only caller who reaches this handler now; the check below stays as defence in depth.
 // Separation of duties: a director could otherwise mint a second director or
 // cfo identity and approve their own proposals. Only admin assigns, changes or
 // deactivates these roles. Mirrored in the frontend capability map (roles.ts).

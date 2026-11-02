@@ -84,8 +84,8 @@ export async function upsertFeatureFlag(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  // Decision 6: directors share Settings/rollout access; CFO policy is separate.
-  const denied = await requireRole(request, ACTION_ROLES.viewAdmin.gate);
+  // Admin only (2 Nov 2026): directors view the matrix but do not change it.
+  const denied = await requireRole(request, ACTION_ROLES.manageFeatureFlags.gate);
   if (denied) return denied;
 
   const token = extractToken(request);
