@@ -393,6 +393,11 @@ export async function upsertAppUser(
 // No role required — any authenticated user can call this.
 // Three-way lookup: OID match → email match (pre-invite) → new pending user.
 
+function nameIsOnlyTheAddress(name: string | null, email: string): boolean {
+  const trimmed = (name ?? "").trim().toLowerCase();
+  return trimmed === "" || trimmed === email.trim().toLowerCase();
+}
+
 export async function registerSelf(
   request: HttpRequest,
   context: InvocationContext,
@@ -433,13 +438,29 @@ export async function registerSelf(
     // Step 1: existing user matched by OID (returning user).
     const byOid = await executeQuery(
       connection,
-      `SELECT UserID, Role FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
+      `SELECT UserID, Role, DisplayName, Email FROM dbo.AppUsers WHERE EntraOid = @Oid AND IsActive = 1`,
       [{ name: "Oid", type: TYPES.NVarChar, value: oid }],
     );
     if (byOid.length > 0) {
       // Email is set at invite or first registration only. preferred_username
       // is mutable, and the director-reply check trusts the stored address.
-      const { UserID, Role } = byOid[0] as { UserID: number; Role: string | null };
+      const { UserID, Role, DisplayName, Email } = byOid[0] as {
+        UserID: number;
+        Role: string | null;
+        DisplayName: string | null;
+        Email: string | null;
+      };
+      // An invite with no name stored the address as the name: replace it with the real one.
+      if (nameIsOnlyTheAddress(DisplayName, Email ?? email) && !nameIsOnlyTheAddress(name, email)) {
+        await executeQuery(
+          connection,
+          `UPDATE dbo.AppUsers SET DisplayName = @DisplayName WHERE UserID = @UserID`,
+          [
+            { name: "DisplayName", type: TYPES.NVarChar, value: name },
+            { name: "UserID",      type: TYPES.Int,      value: UserID },
+          ],
+        );
+      }
       return { status: 200, jsonBody: { accessHints: true, userId: UserID, role: Role ?? null } };
     }
 
@@ -482,10 +503,9 @@ export async function registerSelf(
         Role: string | null;
         DisplayName: string | null;
       };
-      const existingName = (DisplayName ?? "").trim();
       // Only adopt the token's display name when the pre-invite row didn't
-      // carry one — never stomp an admin-typed name.
-      if (existingName.length === 0) {
+      // carry one (an invite with no name stored the address) — never stomp an admin-typed name.
+      if (nameIsOnlyTheAddress(DisplayName, email)) {
         await executeQuery(
           connection,
           `UPDATE dbo.AppUsers

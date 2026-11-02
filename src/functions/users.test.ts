@@ -664,6 +664,20 @@ describe("registerSelf", () => {
     expect((res.jsonBody as { role: string }).role).toBe("facilities");
   });
 
+  it("replaces a name that is only the address with the real name at sign-in, and leaves a real name alone", async () => {
+    db.executeQuery
+      .mockResolvedValueOnce([{ UserID: 1, Role: "director", DisplayName: "test@co.com", Email: "test@co.com" }])
+      .mockResolvedValueOnce([]);
+    await registerSelf(makeAuthReq({ name: "Jane Doe", preferred_username: "jane@co.com" }), ctx);
+    const healed = db.executeQuery.mock.calls.find(([, sql]: [unknown, string]) => sql.includes("SET DisplayName"));
+    expect(healed?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "DisplayName", value: "Test User" })]));
+
+    db.executeQuery.mockClear();
+    db.executeQuery.mockResolvedValueOnce([{ UserID: 1, Role: "director", DisplayName: "Jane Typed", Email: "test@co.com" }]);
+    await registerSelf(makeAuthReq({ name: "Jane Doe", preferred_username: "jane@co.com" }), ctx);
+    expect(db.executeQuery.mock.calls.some(([, sql]: [unknown, string]) => sql.includes("SET DisplayName"))).toBe(false);
+  });
+
   it("claims a pre-invite by email when OID has no match", async () => {
     db.executeQuery
       .mockResolvedValueOnce([])
