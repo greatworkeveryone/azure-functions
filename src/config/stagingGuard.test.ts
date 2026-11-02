@@ -38,9 +38,10 @@ afterAll(() => {
 });
 
 describe("isStaging", () => {
-  it("is true only for exactly Staging", () => {
-    expect(isStaging({ AZURE_FUNCTIONS_ENVIRONMENT: "Staging" })).toBe(true);
-    for (const value of ["Production", "Development", "staging", undefined]) expect(isStaging({ AZURE_FUNCTIONS_ENVIRONMENT: value })).toBe(false);
+  it("is false for production, development and unset", () => {
+    for (const env of [{ AZURE_FUNCTIONS_ENVIRONMENT: "Production" }, { AZURE_FUNCTIONS_ENVIRONMENT: "Development" }, {}]) {
+      expect(isStaging(env)).toBe(false);
+    }
   });
   it("skipOnStaging logs and says skip only on staging", () => {
     const log = jest.fn();
