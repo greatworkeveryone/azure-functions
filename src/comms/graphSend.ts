@@ -6,6 +6,7 @@
 // Errors carry a CODE only: Graph's own text can hold addresses and message content, so it is
 // never stored or logged. This file is new and leaves src/graph.ts and its senders alone.
 
+import { isStaging, logStagingEmailSkipped, syntheticStagingId } from "../config/stagingGuard";
 import { getGraphToken } from "../graph";
 
 export interface DraftInput {
@@ -98,6 +99,11 @@ export function createGraphSender(fetchImpl: typeof fetch = fetch, tokenSource: 
 
   return {
     async createDraft(input) {
+      // Staging: no network call; a synthetic draft id lets the broadcast walk through its states.
+      if (isStaging()) {
+        logStagingEmailSkipped();
+        return { graphMessageId: syntheticStagingId(), internetMessageId: null };
+      }
       const message = {
         body: { content: input.html, contentType: "HTML" },
         from: { emailAddress: { address: input.from.address, name: input.from.name } },
@@ -113,6 +119,7 @@ export function createGraphSender(fetchImpl: typeof fetch = fetch, tokenSource: 
       return { graphMessageId: created.id, internetMessageId: typeof created.internetMessageId === "string" ? created.internetMessageId : null };
     },
     async sendDraft(from, graphMessageId) {
+      if (isStaging()) return logStagingEmailSkipped();
       await post(`${BASE}/${encodeURIComponent(from)}/messages/${encodeURIComponent(graphMessageId)}/send`, "send");
     },
   };

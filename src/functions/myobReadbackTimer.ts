@@ -1,4 +1,5 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
+import { skipOnStaging } from "../config/stagingGuard";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { darwinDateKey, darwinMinuteOfDay, isBusinessDay } from "../escalation/businessTime";
 import { readbackMode, runReadback } from "../myob/readbackRun";
@@ -29,6 +30,7 @@ export function readbackDue(now: Date): boolean {
 }
 
 export async function myobReadbackTimer(_timer: Timer, context: InvocationContext): Promise<TimerCounts | void> {
+  if (skipOnStaging((message) => context.log(message), `${ACTOR} (MYOB is not connected)`)) return { skipped: true };
   const mode = readbackMode();
   if (mode === "off") {
     context.log(`${ACTOR}: off. Set MYOB_READBACK_DRY_RUN=true to see what it would record, then MYOB_READBACK_ENABLED=true.`);

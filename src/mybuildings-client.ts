@@ -2,6 +2,15 @@
 // Covers: Buildings, Work Requests, Invoices, Contractors, Attachments, Bulk Status Update
 
 import { assertMayLeave, type EgressSubject } from "./test-data";
+import { isStaging } from "./config/stagingGuard";
+
+/** Thrown instead of calling out when staging tries to write to the real myBuildings. */
+export class MyBuildingsStagingWriteError extends Error {
+  constructor() {
+    super("staging: myBuildings writes are off");
+    this.name = "MyBuildingsStagingWriteError";
+  }
+}
 
 const API_URL = process.env.MYBUILDINGS_API_URL!;
 const BEARER_TOKEN = process.env.MYBUILDINGS_BEARER_TOKEN!;
@@ -14,6 +23,8 @@ async function apiFetch(
   method: "GET" | "POST" | "PUT" = "GET",
   body?: unknown,
 ): Promise<any> {
+  // Staging: any write, to any myBuildings path, is refused. Reads stay as they are.
+  if (method !== "GET" && isStaging()) throw new MyBuildingsStagingWriteError();
   const url = `${API_URL}${path}`;
   const options: RequestInit = {
     method,

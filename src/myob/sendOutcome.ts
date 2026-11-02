@@ -46,6 +46,7 @@ const REFUSED: Record<RefusalReason, string> = {
   not_floorplan_record: `Not sent: Floorplan didn't create that MYOB record, so it may not change it. ${STAYS}`,
   no_record: `Not sent: the MYOB request didn't name the Floorplan record it is for. ${STAYS}`,
   outside_period: `Not sent: MYOB's current-period rule refused it (Floorplan writes only records dated in the current period). ${STAYS}`,
+  staging: "Not sent: MYOB is not connected on staging.",
   test_record: `Not sent: test record. Test records never go to MYOB. ${STAYS}`,
   writes_disabled: `Not sent: MYOB writes are switched off for this environment. ${STAYS}`,
 };

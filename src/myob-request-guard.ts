@@ -20,7 +20,8 @@
 // bytes it is about to send.
 
 import { assertMyobControlsAllow } from "./myob-controls";
-import { MyobRequestRefusedError, MyobWritesDisabledError } from "./myob-errors";
+import { isStaging } from "./config/stagingGuard";
+import { MyobNotConnectedOnStagingError, MyobRequestRefusedError, MyobWritesDisabledError } from "./myob-errors";
 import { classifyMyobRequest, type MyobMethod, type MyobOperation } from "./myob-endpoints";
 import { checkMyobPeriod } from "./myob-period";
 import { lookupMyobTestRecord, type MyobRecordRef, type MyobTestRecordLookup } from "./myob-test-records";
@@ -83,6 +84,8 @@ export async function guardMyobRequest(
   now: Date = new Date(),
   deps: { testRecords?: MyobTestRecordLookup } = {},
 ): Promise<GuardedRequest> {
+  // Staging is never connected to MYOB: stricter than, and independent of, MYOB_WRITES_ENABLED.
+  if (isStaging()) throw new MyobNotConnectedOnStagingError();
   const classified = classifyMyobRequest(input.method, input.url);
   if (classified.kind === "refused") {
     throw new MyobRequestRefusedError("not_allowed", classified.reason, classified.forbiddenCentre);

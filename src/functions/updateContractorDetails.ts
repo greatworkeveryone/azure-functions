@@ -14,6 +14,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
+import { isStaging } from "../config/stagingGuard";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { authorizeWrite, badRequest, conflict, inTransaction, notFound, readJsonBody, txFail, txOk } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery, type SqlParam } from "../db";
@@ -55,7 +56,8 @@ export function parseContractorDetails(body: Record<string, unknown>): ParseResu
   return { contractorId, details, ok: true, version: body.version };
 }
 
-const pushEnabled = () => process.env.MYBUILDINGS_CONTRACTOR_PUSH !== "false";
+// Staging never writes to the real myBuildings, whatever the setting says (config/stagingGuard.ts).
+const pushEnabled = () => !isStaging() && process.env.MYBUILDINGS_CONTRACTOR_PUSH !== "false";
 
 const SELECT_ROW = `SELECT ContractorID, ContractorName, ContactFirstName, ContactLastName, PhoneNumber, MobileNumber, EmailAddress, ABN,
   COALESCE(CONVERT(varchar(33), UpdatedAt, 126), '') AS Version

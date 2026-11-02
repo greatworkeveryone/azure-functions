@@ -4,6 +4,7 @@
 // An alert is a pointer into Floorplan: no amounts, names or addresses in its text.
 
 import type { Connection } from "tedious";
+import { skipOnStaging } from "../config/stagingGuard";
 import { domainOf, orgEmailDomains } from "../email/sender-auth";
 import { resolveRecipient } from "../email-recipient";
 import { sendActivityNotification, type TeamsSendDeps } from "../teams/activity";
@@ -94,6 +95,8 @@ export function workflowsChannel(deps: WorkflowsDeps): AlertChannel {
       const env = deps.env ?? process.env;
       const mode = teamsMode(env);
       if (mode === "off") return { detail: null, status: "skipped" };
+      // Staging posts nothing to Teams, whatever the alert settings say.
+      if (skipOnStaging(deps.log ?? ((message: string) => console.warn(message)), "Teams alert", env)) return { detail: "staging", status: "skipped" };
 
       const address = resolveRecipient(target.email).address;
       if (address === null) return { detail: "no email address", status: "no_user" };
