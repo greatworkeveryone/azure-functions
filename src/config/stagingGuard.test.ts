@@ -154,3 +154,16 @@ describe("on staging: Teams alerts post nothing", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("what counts as staging", () => {
+  it.each([
+    [{ AZURE_FUNCTIONS_ENVIRONMENT: "Staging" }, true],
+    [{ AZURE_FUNCTIONS_ENVIRONMENT: " staging " }, true],
+    [{ WEBSITE_SITE_NAME: "rpcc-api-staging" }, true],
+    [{ AZURE_FUNCTIONS_ENVIRONMENT: "Production", WEBSITE_SITE_NAME: "rpcc-api-staging" }, true],
+    [{ AZURE_FUNCTIONS_ENVIRONMENT: "Production", WEBSITE_SITE_NAME: "rpcc-api2" }, false],
+    [{}, false],
+  ])("%j is %s", (env, expected) => {
+    expect(isStaging(env)).toBe(expected);
+  });
+});
