@@ -22,7 +22,7 @@ const JOB_READ = [
 ] as const;
 
 // getRegisterTenant in functions/tenancy.ts; getRentReview and getRentReviews share it (rentReview/http.ts)
-const TENANCY_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR] as const;
+const TENANCY_READ = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL] as const;
 
 // getQuotes in functions/quotes.ts
 const QUOTE_READ = [

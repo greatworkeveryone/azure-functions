@@ -3,7 +3,7 @@
 // maths here: an on-charge's amount is the job's own OnchargeAmount, copied as is,
 // so the list can never disagree with the job record (no second ledger).
 
-import { TENANCY_DESK } from "../action-roles";
+import { TENANCY_READERS } from "../action-roles";
 import type { AppRole } from "../auth";
 import { JobStatus } from "../jobStatusMachine";
 import { isClosed, isIntakeState } from "../intake/state";
@@ -11,7 +11,7 @@ import { isClosed, isIntakeState } from "../intake/state";
 export const ACTIVITY_CAP = 200;
 
 /** Roles that see on-charge amounts here: the roles that see them on a job and may read a tenancy. */
-export const ACTIVITY_AMOUNT_ROLES: readonly AppRole[] = TENANCY_DESK;
+export const ACTIVITY_AMOUNT_ROLES: readonly AppRole[] = TENANCY_READERS;
 
 export type ActivityType = "invoice" | "job" | "on_charge" | "work_request";
 

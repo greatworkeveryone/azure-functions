@@ -1,5 +1,6 @@
 // azure-functions/src/functions/vacancies.ts
 
+import { skipOnStaging } from "../config/stagingGuard";
 import { sqlDateToIso } from "../nextReviewDate";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
@@ -1044,6 +1045,7 @@ async function uploadImageToWp(
 }
 
 export async function unpublishFromWordPress(wpPostId: number): Promise<void> {
+  if (skipOnStaging(console.warn, "website unpublish")) return;
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
   const resp = await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
     method: "POST",
@@ -1076,6 +1078,10 @@ async function handlePublishVacancy(
   // requests (uploadImageToWp loops over every image) — keep blast radius low.
   const rl = checkRateLimit(`publishVacancy:${identity.oid}`, VACANCY_PUBLISH_LIMIT);
   if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
+
+  if (skipOnStaging(context.warn.bind(context), "website publish")) {
+    return { status: 409, jsonBody: { error: "The website is not connected on staging, so vacancies cannot be published here." } };
+  }
 
   const wpBase = process.env.WORDPRESS_API_URL;
   if (!wpBase) {

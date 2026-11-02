@@ -294,7 +294,7 @@ describe("getPortfolioOccupancy", () => {
     expect(res.status).toBe(403);
   });
 
-  it.each([["facilities"], ["facilities_manager"]])("withholds annualRent from %s but keeps the rest", async (role) => {
+  it.each([["facilities"]])("withholds annualRent from %s but keeps the rest", async (role) => {
     (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
     db.executeQuery.mockResolvedValueOnce([
       { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },
@@ -306,7 +306,7 @@ describe("getPortfolioOccupancy", () => {
     expect(JSON.stringify(res.jsonBody)).not.toContain("250000");
   });
 
-  it.each([["accounts_manager"], ["director"], ["admin"]])("returns annualRent to %s", async (role) => {
+  it.each([["accounts_manager"], ["director"], ["admin"], ["facilities_manager"]])("returns annualRent to %s", async (role) => {
     (require("../auth") as { rolesForRequest: jest.Mock }).rolesForRequest.mockResolvedValueOnce([role]);
     db.executeQuery.mockResolvedValueOnce([
       { BuildingId: 5, ActiveSqm: 800, TotalSqm: 1000, AnnualRent: 250000, ActiveTenantCount: 4 },

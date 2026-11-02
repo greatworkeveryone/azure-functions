@@ -109,8 +109,8 @@ describe("the rent review action codes", () => {
 });
 
 describe("who may read a review's decision history", () => {
-  it("is whoever may read the tenancy: accounts, accounts managers, directors and admin (cfo through the hierarchy)", () => {
-    expect(historyReadRoles("rent_review")).toEqual([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  it("is whoever may read the tenancy: accounts, accounts managers, directors, admin and facilities managers (cfo through the hierarchy)", () => {
+    expect(historyReadRoles("rent_review")).toEqual([AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL]);
     expect(historyReadRoles("rent_review")).toEqual(historyReadRoles("tenancy"));
     expect(historyReadRoles("rent_review")).toEqual([...TENANCY_VIEW_ROLES]);
   });

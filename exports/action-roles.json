@@ -792,7 +792,8 @@
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "viewLeave": [
     "accounts",
@@ -879,7 +880,8 @@
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "viewRequestIntake": [
     "accounts",
@@ -905,14 +907,16 @@
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "viewTenancyDecisionHistory": [
     "accounts",
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "viewTenancyResponsibilities": [
     "accounts",

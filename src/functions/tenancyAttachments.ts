@@ -6,6 +6,7 @@
 // No myBuildings push — tenancy docs are not work-request attachments.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
@@ -132,7 +133,7 @@ async function handleGetTenancyAttachments(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_VIEW_ROLES);
   if (roleCheck) return roleCheck;
 
   const raw = request.query.get("tenantId");

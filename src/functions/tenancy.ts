@@ -1,3 +1,4 @@
+import { TENANCY_VIEW_ROLES } from "../rentReview/http";
 import { manualRentReduction } from "../manualRentReduction";
 import { raiseWithin as raiseReviewNotice } from "../escalation/engine";
 import "../escalation/adapters";
@@ -791,7 +792,7 @@ async function getRegisterTenants(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_VIEW_ROLES);
   if (roleCheck) return roleCheck;
 
   const buildingIdRaw = request.query.get("buildingId");
@@ -906,7 +907,7 @@ async function getRegisterTenant(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_VIEW_ROLES);
   if (roleCheck) return roleCheck;
 
   const tenantIdRaw = request.query.get("tenantId");
@@ -2300,8 +2301,6 @@ async function getReviewsDue(
 // back to 0 / no value for those. Residences are the family's own houses and stay
 // out of these company figures (T10); see portfolioOccupancy.ts.
 
-const TENANCY_DESK_ROLES: readonly AppRole[] = [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR];
-
 async function getPortfolioOccupancy(
   request: HttpRequest,
   context: InvocationContext,
@@ -2311,8 +2310,8 @@ async function getPortfolioOccupancy(
   const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR, AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL]);
   if (roleCheck) return roleCheck;
 
-  // Rent is the tenancy desk's; facilities read the rest. Mirrors the gate above.
-  const seesRent = rolesPassGate(await rolesForRequest(request), TENANCY_DESK_ROLES);
+  // Rent goes to those who may read a tenancy; facilities read the rest.
+  const seesRent = rolesPassGate(await rolesForRequest(request), TENANCY_VIEW_ROLES);
   const showTest = await showTestParam(request);
   let connection;
   try {
@@ -3034,7 +3033,7 @@ async function getCarparks(
 ): Promise<HttpResponseInit> {
   const token = extractToken(request);
   if (!token) return unauthorizedResponse();
-  const roleCheck = await requireRole(request, [AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.ADMIN, AppRole.DIRECTOR]);
+  const roleCheck = await requireRole(request, TENANCY_VIEW_ROLES);
   if (roleCheck) return roleCheck;
 
   let connection;

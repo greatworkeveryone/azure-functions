@@ -168,3 +168,23 @@ describe("what counts as staging", () => {
     expect(isStaging(env)).toBe(expected);
   });
 });
+
+describe("on staging: Planner and the website are off", () => {
+  it("Planner stays off even when its setting is on, and works outside staging", () => {
+    const { plannerSyncEnabled } = jest.requireActual<typeof import("../plannerFlag")>("../plannerFlag");
+    expect(plannerSyncEnabled({ AZURE_FUNCTIONS_ENVIRONMENT: "Staging", PLANNER_SYNC_ENABLED: "true" } as NodeJS.ProcessEnv)).toBe(false);
+    expect(plannerSyncEnabled({ AZURE_FUNCTIONS_ENVIRONMENT: "Production", PLANNER_SYNC_ENABLED: "true" } as NodeJS.ProcessEnv)).toBe(true);
+  });
+});
+
+describe("facilities managers and tenancies (Connor, 2 Nov 2026)", () => {
+  const { ACTION_ROLES } = jest.requireActual<typeof import("../action-roles")>("../action-roles");
+  const has = (key: keyof typeof ACTION_ROLES) => (ACTION_ROLES[key].gate as readonly string[]).includes("facilities_manager");
+
+  it("can read tenancies and handle tenant links", () => {
+    for (const key of ["viewTenancy", "viewLeaseEvents", "viewRentReviews", "viewTenantLinks", "issueTenantLinks", "manageTenantLinks"] as const) expect(has(key)).toBe(true);
+  });
+  it("cannot change a tenancy or its schedule", () => {
+    for (const key of ["editTenancy", "archiveTenancy", "requestScheduleChange", "ratifyScheduleChange", "signOffTenancySchedule", "commenceRentReview", "deleteTenancyRegisterRows"] as const) expect(has(key)).toBe(false);
+  });
+});

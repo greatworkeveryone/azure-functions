@@ -25,6 +25,8 @@ export const TENANCY_VIEW_ROLES: readonly AppRole[] = [
   AppRole.ACCOUNTS_APPROVAL,
   AppRole.ADMIN,
   AppRole.DIRECTOR,
+  // Read only (Connor, 2 Nov 2026): they cannot change the schedule. The edit gates do not use this list.
+  AppRole.FACILITIES_APPROVAL,
 ];
 
 /**

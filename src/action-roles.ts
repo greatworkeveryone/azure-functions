@@ -61,6 +61,8 @@ const roles = (list: readonly string[]): readonly AppRole[] => list as readonly 
 const JOB_EDIT: readonly AppRole[] = [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL];
 const JOB_READ: readonly AppRole[] = JOB_EDIT;
 export const TENANCY_DESK: readonly AppRole[] = [A.ACCOUNTS, A.ACCOUNTS_APPROVAL, A.ADMIN, A.DIRECTOR];
+/** Who may read a tenancy: the desk, and facilities managers read only (Connor, 2 Nov 2026). */
+export const TENANCY_READERS: readonly AppRole[] = [...TENANCY_DESK, A.FACILITIES_APPROVAL];
 const REVIEW_APPROVERS: readonly AppRole[] = [A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR];
 const ADMIN_TEST_ONLY = "admin acts on test records only (beta sprint decision 4), and a screen doesn't know whether a record is one";
 
@@ -809,12 +811,12 @@ export const ACTION_ROLES = {
     why: "Read a job's quotes.",
   },
   viewLeaseEvents: {
-    gate: TENANCY_DESK,
+    gate: TENANCY_READERS,
     routes: ["getTenancyLeaseEvents"],
     why: "A tenancy's option exercises and renewals (LEASE_EVENT_VIEW_ROLES: the roles that may read a tenancy).",
   },
   viewRentReviews: {
-    gate: TENANCY_DESK,
+    gate: TENANCY_READERS,
     routes: ["getRentReviews", "getRentReview", "getUpcomingLeaseEvents"],
     why: "Rent reviews and the lease-events feed (TENANCY_VIEW_ROLES).",
   },
@@ -824,12 +826,12 @@ export const ACTION_ROLES = {
     why: "The escalation inbox's Team view (TEAM_ESCALATION_ROLES, getEscalations?view=team).",
   },
   viewTenancy: {
-    gate: TENANCY_DESK,
+    gate: TENANCY_READERS,
     routes: ["getRegisterTenants", "getRegisterTenant", "getScheduleChanges", "getReviewsDue", "getTenancyActivity"],
     why: "The tenancy register, a tenant's detail and its schedule changes (TENANCY_VIEW_ROLES, CHANGE_VIEW_ROLES).",
   },
   viewTenancyDecisionHistory: {
-    gate: TENANCY_DESK,
+    gate: TENANCY_READERS,
     routes: [],
     why: "A tenancy's Decision history (historyRoles.ts TENANCY_READ).",
   },
