@@ -610,8 +610,14 @@ export const ACTION_ROLES = {
   viewTechnicalSettings: { gate: [A.ADMIN], match: "exact", routes: [], why: "Technical administration pages remain admin-only; directors have business Settings." },
   viewAdmin: {
     gate: [A.ADMIN, A.DIRECTOR],
+    routes: [],
+    why: "View Settings and rollout controls: admin and directors (decision 6); CFO controls live in Finance. Changing a feature flag is admin only (manageFeatureFlags).",
+  },
+  manageFeatureFlags: {
+    gate: [A.ADMIN],
+    match: "exact",
     routes: ["upsertFeatureFlag"],
-    why: "Settings and rollout controls: admin and directors (decision 6); CFO controls live in Finance.",
+    why: "Change who sees a feature (Admin > Features): admin only (Connor, 2 Nov 2026). Directors keep viewing the matrix (viewAdmin).",
   },
   viewAllEscalations: {
     gate: [A.DIRECTOR],
@@ -764,8 +770,14 @@ export const ACTION_ROLES = {
   },
   viewUserManagement: {
     gate: [A.ADMIN, A.DIRECTOR],
+    routes: [],
+    why: "See the users table (VIEW_USERS_ROLES, users.ts): admin and directors. Inviting and changing roles is admin only (manageUsers).",
+  },
+  manageUsers: {
+    gate: [A.ADMIN],
+    match: "exact",
     routes: ["upsertAppUser"],
-    why: "User management (MANAGE_USER_ROLES, users.ts).",
+    why: "Invite users and change roles or active state (MANAGE_USER_ROLES, users.ts): admin only (Connor, 2 Nov 2026). A director can no longer reach it.",
   },
   viewVacancies: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL, A.ACCOUNTS, A.ACCOUNTS_APPROVAL],

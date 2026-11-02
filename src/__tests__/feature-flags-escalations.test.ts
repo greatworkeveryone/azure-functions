@@ -23,11 +23,11 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "none" })}.${encode(payload)}.sig`;
 }
 
-const request = (body: unknown): HttpRequest =>
+const request = (body: unknown, devRole = "admin"): HttpRequest =>
   ({
     headers: {
       get: (key: string) =>
-        ({ authorization: `Bearer ${makeJwt({ name: "Ada Admin", oid: "oid-ada", preferred_username: "ada@example.com" })}`, "x-dev-roles": "admin" })[key.toLowerCase()] ?? null,
+        ({ authorization: `Bearer ${makeJwt({ name: "Ada Admin", oid: "oid-ada", preferred_username: "ada@example.com" })}`, "x-dev-roles": devRole })[key.toLowerCase()] ?? null,
     },
     json: async () => body,
   }) as unknown as HttpRequest;
@@ -50,6 +50,12 @@ describe("upsertFeatureFlag", () => {
       expect(res.status).toBe(200);
     }
     expect(db.executeQuery).toHaveBeenCalledTimes(5);
+  });
+
+  it("is admin only: a director is refused", async () => {
+    const res = await upsertFeatureFlag(request({ featureKey: "escalations", roleName: "cfo", visibility: "hidden" }, "director"), ctx);
+    expect(res.status).toBe(403);
+    expect(db.executeQuery).not.toHaveBeenCalled();
   });
 
   it("still refuses a module it doesn't know", async () => {
