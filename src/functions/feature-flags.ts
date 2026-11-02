@@ -32,7 +32,7 @@ const FEATURE_KEYS = [
   "absenceCover", "activity", "aiAssist", "aiDocumentExtraction", "assets", "certificateIntake", "comms", "complianceReport",
   "contractorSuggestions", "decisionJobs", "directorsDesk", "documentation", "emailBroadcast", "emailSending", "escalations",
   "finance", "guidedHelp", "inboundTriage", "incoming", "inspectionJobSuggestions", "inspections", "jobs", "keys",
-  "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "payroll", "procedures",
+  "leaseEvents", "libraryAsk", "maintenance", "maintenanceSpendReport", "majorEvents", "mybuildingsExit", "payroll", "procedures",
   "quotes", "recurringFaults", "rentReviews", "teamsAlerts", "tenancyActivity", "tenancyResponsibilities", "tenancySchedule",
   "tenancyScheduleReport", "tenancyVacancies", "tenantLinks", "tenantPage", "tenantRequests", "timesheets",
   "usageAnalytics",
