@@ -33,7 +33,8 @@ export type MyobRefusalCode =
   | "controls" // Johanne's controls are missing or say no
   | "dry_run" // the operation is in dry run: logged with its payload, not sent
   | "config" // a MYOB setting is missing or malformed
-  | "no_record"; // a company-file write that names no Floorplan record (D9)
+  | "no_record" // a company-file write that names no Floorplan record (D9)
+  | "staging"; // staging is never connected to MYOB
 
 /** Refused inside Floorplan before anything was sent to MYOB. */
 export class MyobRequestRefusedError extends Error {
@@ -55,5 +56,19 @@ export class MyobTimeoutError extends Error {
   constructor() {
     super(`MYOB did not answer within ${MYOB_TIMEOUT_MS / 1000} s`);
     this.name = "MyobTimeoutError";
+  }
+}
+
+export const STAGING_MYOB_MESSAGE = "MYOB is not connected on staging";
+
+/**
+ * Thrown on staging (AZURE_FUNCTIONS_ENVIRONMENT=Staging) instead of any MYOB call, reads, writes and
+ * OAuth alike, whatever MYOB_WRITES_ENABLED or the CFO's controls say. A refusal, so timers count it as
+ * a skip, not a failure.
+ */
+export class MyobNotConnectedOnStagingError extends MyobRequestRefusedError {
+  constructor() {
+    super("staging", STAGING_MYOB_MESSAGE);
+    this.name = "MyobNotConnectedOnStagingError";
   }
 }

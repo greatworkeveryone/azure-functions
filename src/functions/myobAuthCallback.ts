@@ -1,4 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { isStaging } from "../config/stagingGuard";
 import { completeMyobLink } from "../myob-link";
 import { MyobTokenCryptoError } from "../myob-token-crypto";
 
@@ -34,6 +35,7 @@ function escapeHtml(s: string): string {
 }
 
 async function myobAuthCallback(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  if (isStaging()) return htmlPage(`<h1>MYOB is not connected on staging</h1><p>Nothing was linked.</p>`, 409);
   const code = request.query.get("code");
   const state = request.query.get("state");
   const error = request.query.get("error");

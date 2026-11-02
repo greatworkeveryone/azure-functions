@@ -10,6 +10,8 @@
 //     upstream. off: nothing calls the myBuildings work-request API.
 //     An unrecognised value fails safe to off, never to normal.
 
+import { isStaging } from "./stagingGuard";
+
 export type SyncMode = "normal" | "read_only" | "off";
 
 export interface MyBuildingsSwitches {
@@ -39,6 +41,8 @@ export function mayPullWorkRequests(env: Env = process.env): boolean {
 
 /** Whether anything may write a work request or attachment to myBuildings. */
 export function mayPushWorkRequests(env: Env = process.env): boolean {
+  // Staging never writes to the real myBuildings, whatever the settings say.
+  if (isStaging(env)) return false;
   return pushEnabled(env) && syncMode(env) === "normal";
 }
 

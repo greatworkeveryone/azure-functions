@@ -2,6 +2,7 @@
 // Covers: Buildings, Work Requests, Invoices, Contractors, Attachments, Bulk Status Update
 
 import { assertMayLeave, type EgressSubject } from "./test-data";
+import { isStaging } from "./config/stagingGuard";
 import { MyBuildingsSwitchedOffError, mayPullWorkRequests, mayPushWorkRequests } from "./config/mybuildingsSwitches";
 
 const API_URL = process.env.MYBUILDINGS_API_URL!;
@@ -21,6 +22,8 @@ async function apiFetch(
     if (!mayPullWorkRequests()) throw new MyBuildingsSwitchedOffError("pull");
     if (method !== "GET" && !mayPushWorkRequests()) throw new MyBuildingsSwitchedOffError("push");
   }
+  // Staging: any write, to any myBuildings path, is refused. Reads stay as they are.
+  if (method !== "GET" && isStaging()) throw new MyBuildingsSwitchedOffError("push");
   const url = `${API_URL}${path}`;
   const options: RequestInit = {
     method,

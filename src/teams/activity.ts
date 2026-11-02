@@ -7,6 +7,7 @@
 // fall back to email. Only a test record (TestDataEgressError, D9), an unsafe
 // route and a missing TEAMS_APP_ID throw, before anything leaves.
 
+import { skipOnStaging } from "../config/stagingGuard";
 import { clearGraphTokenCache, getGraphToken } from "../graph";
 import { assertMayLeave, type EgressSubject } from "../test-data";
 import { teamsAppId, teamsMode, type TeamsMode } from "./config";
@@ -79,6 +80,8 @@ export async function sendActivityNotification(oid: string, alert: TeamsAlert, d
   const log = deps.log ?? ((message: string) => console.warn(message));
   const mode = teamsMode(env);
   if (mode === "off") return { mode, status: "skipped" };
+  // Staging posts nothing to Teams, whatever the alert settings say.
+  if (skipOnStaging(log, "Teams alert", env)) return { mode, status: "skipped" };
 
   const appId = teamsAppId(env);
   if (appId === null) throw new Error("TEAMS_APP_ID not configured");

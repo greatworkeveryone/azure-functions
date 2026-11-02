@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "crypto";
 import { TYPES, type Connection } from "tedious";
 import { createRequestConnection, createServiceRequestConnection, executeQuery, closeConnection } from "../db";
 import { AppRole, extractToken, oidFromToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { skipOnStaging } from "../config/stagingGuard";
 import { graphCreateSubscription, graphRenewSubscription } from "../graph";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
@@ -37,6 +38,8 @@ export async function graphNotification(
   if (validationToken) {
     return { status: 200, headers: { "Content-Type": "text/plain" }, body: validationToken };
   }
+
+  if (skipOnStaging((m) => context.log(m), "graphNotification (no mail is read)")) return { status: 202 };
 
   interface GraphChangeNotification { clientState?: string; subscriptionId?: string; changeType?: string; resource?: string }
   const body = (await request.json().catch(() => null)) as { value?: unknown } | null;
@@ -124,6 +127,10 @@ export async function setupGraphSubscription(
 
   const denied = await requireRole(request, [AppRole.ADMIN]);
   if (denied) return denied;
+
+  if (skipOnStaging((m) => context.log(m), "setupGraphSubscription (no mail is read)")) {
+    return { status: 409, jsonBody: { error: "Staging does not read email, so no mailbox subscription is made" } };
+  }
 
   const callerOid = oidFromToken(token) ?? "unknown";
   const rl = checkRateLimit(`setupGraphSubscription:${callerOid}`, { limit: 30, windowMs: 60_000 });
@@ -224,6 +231,7 @@ export async function renewGraphSubscription(
   _myTimer: unknown,
   context: InvocationContext,
 ): Promise<void> {
+  if (skipOnStaging((m) => context.log(m), "renewGraphSubscription (no mail is read)")) return;
   const mailbox = incomingMailbox();
   const notificationUrl = process.env.GRAPH_NOTIFICATION_URL;
   const clientState = process.env.GRAPH_SUBSCRIPTION_CLIENT_STATE;

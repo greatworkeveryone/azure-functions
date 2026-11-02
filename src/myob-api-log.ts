@@ -20,9 +20,10 @@
 
 import { randomUUID } from "crypto";
 import { TYPES } from "tedious";
+import { isStaging } from "./config/stagingGuard";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "./db";
 import { extractMyobUid, loggablePath, redactedResponse, serialiseBody } from "./myob-api-log-format";
-import { MYOB_TIMEOUT_MS, MyobAuditLogError, MyobRequestRefusedError, MyobTimeoutError } from "./myob-errors";
+import { MYOB_TIMEOUT_MS, MyobAuditLogError, MyobNotConnectedOnStagingError, MyobRequestRefusedError, MyobTimeoutError } from "./myob-errors";
 import { MYOB_HEALTH_SUBJECTS, raiseMyobHealth } from "./myob-health";
 import type { MyobActor, MyobRequestInput, MyobResponse } from "./myob-api-types";
 import { guardMyobRequest, withCompanyFileCredentials, type GuardedRequest } from "./myob-request-guard";
@@ -34,6 +35,7 @@ export { MAX_LOGGED_RESPONSE_CHARS, redactSecrets } from "./myob-api-log-format"
 export {
   MYOB_TIMEOUT_MS,
   MyobAuditLogError,
+  MyobNotConnectedOnStagingError,
   MyobRequestRefusedError,
   MyobTimeoutError,
   MyobWritesDisabledError,
@@ -188,6 +190,8 @@ async function refuse(base: Omit<LogRow, "phase">, err: unknown, loggableBody: s
  * because the side effect has already happened by then.
  */
 export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse> {
+  // Before any audit row or header build: on staging nothing about MYOB is touched, not even the database.
+  if (isStaging()) throw new MyobNotConnectedOnStagingError();
   const { actor, method, purpose, url } = input;
   if (input.correlationId !== undefined && !GUID.test(input.correlationId)) {
     throw new TypeError("myobRequest: correlationId must be a UUID");

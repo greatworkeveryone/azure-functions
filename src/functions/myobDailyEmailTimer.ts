@@ -1,6 +1,7 @@
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { DIGEST_CRON, digestRunDecisionWithClosures } from "../digest/schedule";
+import { skipOnStaging } from "../config/stagingGuard";
 import { myobDailyMode, runMyobDaily, type MyobDailyReport } from "../myob/daily/run";
 import { runTimer, type TimerCounts } from "../timerRuns";
 
@@ -25,6 +26,7 @@ function counts(report: MyobDailyReport): TimerCounts {
 }
 
 export async function myobDailyEmailTimer(_timer: Timer, context: InvocationContext): Promise<TimerCounts | void> {
+  if (skipOnStaging((message) => context.log(message), `${ACTOR} (MYOB is not connected)`)) return { skipped: true };
   const mode = myobDailyMode();
   if (mode === "off") {
     context.log(`${ACTOR}: off. Set MYOB_DAILY_EMAIL_DRY_RUN=true to see what it would send, then MYOB_DAILY_EMAIL_ENABLED=true.`);

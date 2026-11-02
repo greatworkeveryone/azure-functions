@@ -34,6 +34,7 @@ import {
   SqlRow,
 } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
+import { skipOnStaging } from "../config/stagingGuard";
 import { generateReadSasUrl } from "../blob-storage";
 import { isDevOverrideEnabled } from "../jwt";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
@@ -919,6 +920,7 @@ async function parseQueued(caller: string, context: InvocationContext, deadline:
 // Every 2 minutes. Timer triggers are singletons, so ticks never overlap.
 
 export async function parseEmailsTimer(_timer: unknown, context: InvocationContext): Promise<void> {
+  if (skipOnStaging((m) => context.log(m), "parseEmailsTimer (no mail is read)")) return;
   await parseQueued("parseEmailsTimer", context, Date.now() + RUN_BUDGET_MS);
 }
 
@@ -929,6 +931,7 @@ export async function parseEmailsTimer(_timer: unknown, context: InvocationConte
 // Graph webhook or an expired subscription (nothing else polls the mailbox).
 
 export async function parseEmailsDailyRetry(_timer: unknown, context: InvocationContext): Promise<void> {
+  if (skipOnStaging((m) => context.log(m), "parseEmailsDailyRetry (no mail is read)")) return;
   enqueueEmailSync(context, "timer");
   await parseQueued("parseEmailsDailyRetry", context, Date.now() + RUN_BUDGET_MS);
 }
@@ -940,6 +943,7 @@ export async function parseEmailsDailyRetry(_timer: unknown, context: Invocation
 // email-sync-poison); parse failures never throw — they are recorded per row.
 
 export async function processEmailSync(message: unknown, context: InvocationContext): Promise<void> {
+  if (skipOnStaging((m) => context.log(m), "processEmailSync (no mail is read)")) return;
   const deadline = Date.now() + RUN_BUDGET_MS;
   const source = isEmailSyncMessage(message) ? message.source : "unknown";
 
@@ -984,6 +988,10 @@ export async function adminTriggerEmailParse(
   if (!token) return unauthorizedResponse();
   const roleCheck = await requireRole(request, [AppRole.ADMIN]);
   if (roleCheck) return roleCheck;
+
+  if (skipOnStaging((m) => context.log(m), "triggerEmailParse (no mail is read)")) {
+    return { status: 200, jsonBody: { queued: false, reset: 0, staging: true } };
+  }
 
   if (!toddlerConfigured(context, "adminTriggerEmailParse")) {
     return { status: 503, jsonBody: { error: "Email AI parsing is not configured (TODDLER_URL / TODDLER_SERVICE_KEY)" } };

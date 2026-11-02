@@ -10,6 +10,7 @@
 // If any credential is absent, graphSendReply throws — callers should catch
 // and record the error rather than blocking the DB write.
 
+import { isStaging, logStagingEmailSkipped, syntheticStagingId } from "./config/stagingGuard";
 import { assessSenderAuth, type MessageHeader } from "./email/sender-auth";
 import { replyHeaders } from "./inboundTriage/messageIds";
 import { assertMayLeave, type EgressSubject } from "./test-data";
@@ -95,6 +96,11 @@ export async function getGraphToken(): Promise<string> {
  * more. Graph refused the first call outright, so the retry can't duplicate a send.
  */
 async function postSendMail(senderEmail: string, message: Record<string, unknown>): Promise<void> {
+  // Last line of defence: the public senders skip earlier, so this only fires if a new path forgets to.
+  if (isStaging()) {
+    logStagingEmailSkipped();
+    return;
+  }
   const send = async (): Promise<Response> =>
     fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}/sendMail`, {
       method: "POST",
@@ -141,6 +147,11 @@ export async function graphSendReply(
   ccAddresses?: string[],
 ): Promise<string> {
   assertMayLeave("email", egress);
+  // Staging sends no email: no token, no network call, a synthetic id so the flow still completes.
+  if (isStaging()) {
+    logStagingEmailSkipped();
+    return syntheticStagingId("graph-sent-staging");
+  }
   await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
@@ -191,6 +202,10 @@ export async function graphSendMail(
   ccAddresses?: string[],
 ): Promise<void> {
   assertMayLeave("email", egress);
+  if (isStaging()) {
+    logStagingEmailSkipped();
+    return;
+  }
   await getGraphToken(); // credentials fail first, as before; postSendMail reuses the cached token
   const senderEmail = process.env.GRAPH_SENDER_EMAIL;
   if (!senderEmail) {
@@ -220,11 +235,17 @@ export async function graphSendMail(
   await postSendMail(senderEmail, message);
 }
 
+/** Staging never reads a mailbox or subscribes to one. Callers skip first; this makes a missed path fail closed. */
+function assertNotStagingMailRead(): void {
+  if (isStaging()) throw new Error("staging: mailbox not read");
+}
+
 export async function graphCreateSubscription(
   mailbox: string,
   notificationUrl: string,
   clientState: string,
 ): Promise<{ subscriptionId: string; expiresAt: string; resource: string }> {
+  assertNotStagingMailRead();
   const token = await getGraphToken();
   // Mail subscriptions max out at 4230 minutes (~3 days)
   const expiresAt = new Date(Date.now() + 4230 * 60 * 1000).toISOString();
@@ -253,6 +274,7 @@ export async function graphCreateSubscription(
 }
 
 export async function graphRenewSubscription(subscriptionId: string): Promise<string> {
+  assertNotStagingMailRead();
   const token = await getGraphToken();
   const expiresAt = new Date(Date.now() + 4230 * 60 * 1000).toISOString();
 
@@ -442,6 +464,7 @@ export async function* graphFetchEmailPages(
   sinceDateTime?: string,
   knownMessageIds: ReadonlySet<string> = new Set(),
 ): AsyncGenerator<GraphEmailPage> {
+  assertNotStagingMailRead();
   const token = await getGraphToken();
 
   const url = new URL(

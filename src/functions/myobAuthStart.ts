@@ -8,7 +8,9 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { isStaging } from "../config/stagingGuard";
 import { buildAuthorizeUrl } from "../myob-auth";
+import { STAGING_MYOB_MESSAGE } from "../myob-errors";
 import { createAuthState } from "../myob-auth-state";
 import { checkRateLimit } from "../rateLimit";
 
@@ -21,6 +23,8 @@ async function myobAuthStart(request: HttpRequest, _context: InvocationContext):
   if (!token) return unauthorizedResponse();
   const forbidden = await requireRole(request, [AppRole.ADMIN]);
   if (forbidden) return forbidden;
+
+  if (isStaging()) return { jsonBody: { error: STAGING_MYOB_MESSAGE }, status: 409 };
 
   const rl = checkRateLimit(`myobAuthStart:${oidFromToken(token) ?? "unknown"}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
