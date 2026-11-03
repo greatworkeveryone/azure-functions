@@ -119,11 +119,11 @@ describe("who may read which history (each list mirrors that subject's own read 
     expect(await allowed("job", "user")).toBe(false);
   });
 
-  it("tenancy history: the roles that can read a tenancy (accounts side, directors, admin)", async () => {
-    for (const role of ["admin", "director", "accounts", "accounts_manager"]) {
+  it("tenancy history: the roles that can read a tenancy (accounts side, directors, admin, facilities managers)", async () => {
+    for (const role of ["admin", "director", "accounts", "accounts_manager", "facilities_manager"]) {
       expect(await allowed("tenancy", role)).toBe(true);
     }
-    for (const role of ["facilities", "facilities_manager", "user"]) {
+    for (const role of ["facilities", "user"]) {
       expect(await allowed("tenancy", role)).toBe(false);
     }
   });

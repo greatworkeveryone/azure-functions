@@ -36,11 +36,11 @@ describe("who may ask", () => {
     expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
-  it.each(["accounts", "accounts_manager", "cfo", "director", "admin"])("lets %s read", async (role) => {
+  it.each(["accounts", "accounts_manager", "cfo", "director", "admin", "facilities_manager"])("lets %s read", async (role) => {
     expect((await ask("tenantId=7", role)).status).toBe(200);
   });
 
-  it.each(["facilities", "facilities_manager", "user"])("refuses %s before touching the database", async (role) => {
+  it.each(["facilities", "user"])("refuses %s before touching the database", async (role) => {
     expect((await ask("tenantId=7", role)).status).toBe(403);
     expect(db.createRequestConnection).not.toHaveBeenCalled();
   });

@@ -58,9 +58,14 @@ beforeEach(() => {
 });
 
 describe("the lists mirror the tenancy endpoints they were copied from", () => {
-  it("reads: getRegisterTenant's, which getRegisterTenants and getCpiIndex share", () => {
-    expect(TENANCY_VIEW_ROLES).toEqual(gateOf("getRegisterTenant").map((name) => ROLE_NAME[name]));
-    expect(TENANCY_VIEW_ROLES).toEqual(gateOf("getRegisterTenants").map((name) => ROLE_NAME[name]));
+  it("reads: the editors plus facilities managers, and the register reads use the list itself", () => {
+    expect([...TENANCY_VIEW_ROLES].sort()).toEqual([...TENANCY_EDIT_ROLES, AppRole.FACILITIES_APPROVAL].sort());
+    for (const handler of ["getRegisterTenants", "getRegisterTenant", "getCarparks"]) {
+      const start = TENANCY_SOURCE.indexOf(`async function ${handler}(`);
+      expect(start).toBeGreaterThan(-1);
+      expect(TENANCY_SOURCE.slice(start)).toMatch(/^[\s\S]*?requireRole\(request, TENANCY_VIEW_ROLES\)/);
+      expect(TENANCY_SOURCE.slice(start, TENANCY_SOURCE.indexOf("requireRole(", start))).not.toContain("async function upsert");
+    }
   });
 
   it("commence: upsertRegisterTenant's, the roles that may edit a tenancy", () => {
@@ -99,12 +104,24 @@ describe("every endpoint answers 401 with no token and 403 below its gate", () =
     ],
   ];
 
+  // Facilities managers read tenancies but never change them (Connor, 2 Nov 2026).
+  describe.each(reads)("%s", (_name, call) => {
+    it("lets a facilities manager read, and still refuses facilities staff", async () => {
+      expect((await call("facilities_manager")).status).not.toBe(403);
+      expect((await call("facilities")).status).toBe(403);
+    });
+  });
+
+  it.each(writes)("%s refuses a facilities manager", async (_name, call) => {
+    expect((await call("facilities_manager")).status).toBe(403);
+  });
+
   describe.each([...reads, ...writes])("%s", (_name, call) => {
     it("needs a token", async () => {
       expect((await call(null)).status).toBe(401);
     });
 
-    it.each(ALL_ROLES.filter((role) => !TENANCY_ROLES.includes(role)))("refuses %s", async (role) => {
+    it.each(ALL_ROLES.filter((role) => !TENANCY_ROLES.includes(role) && role !== "facilities_manager"))("refuses %s", async (role) => {
       expect((await call(role)).status).toBe(403);
     });
 

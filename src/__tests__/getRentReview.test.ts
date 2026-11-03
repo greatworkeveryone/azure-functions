@@ -59,8 +59,8 @@ beforeEach(() => {
 describe("who may ask, and what", () => {
   it("needs a token and one of the tenancy viewer roles", async () => {
     expect((await ask("reviewId=rev-1", null)).status).toBe(401);
-    for (const role of ["facilities", "facilities_manager", "user"]) expect((await ask("reviewId=rev-1", role)).status).toBe(403);
-    for (const role of ["accounts", "accounts_manager", "cfo", "director", "admin"]) expect((await ask("reviewId=rev-1", role)).status).toBe(200);
+    for (const role of ["facilities", "user"]) expect((await ask("reviewId=rev-1", role)).status).toBe(403);
+    for (const role of ["accounts", "accounts_manager", "cfo", "director", "admin", "facilities_manager"]) expect((await ask("reviewId=rev-1", role)).status).toBe(200);
   });
 
   it.each(["", "reviewId=", "reviewId=a b", "reviewId=" + "x".repeat(41), "reviewId=rev;DROP"])("refuses %j", async (query) => {

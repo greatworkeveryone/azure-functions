@@ -76,11 +76,11 @@ describe("who may ask", () => {
     expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
-  it.each(["accounts", "accounts_manager", "cfo", "director", "admin"])("lets %s, a reader of tenancies", async (role) => {
+  it.each(["accounts", "accounts_manager", "cfo", "director", "admin", "facilities_manager"])("lets %s, a reader of tenancies", async (role) => {
     expect((await ask("", role)).status).toBe(200);
   });
 
-  it.each(["facilities", "facilities_manager", "user"])(
+  it.each(["facilities", "user"])(
     "refuses %s, who could see whole tenancies through getReviewsDue and now can't see this",
     async (role) => {
       expect((await ask("", role)).status).toBe(403);
