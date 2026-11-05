@@ -34,11 +34,14 @@ jest.mock("../email/mail-sync", () => ({
   syncMailbox: jest.fn().mockResolvedValue({ fetched: 2, since: null }),
 }));
 
+jest.mock("../ai", () => ({ ...jest.requireActual("../ai"), recordExternalAiCall: jest.fn(async () => undefined) }));
+
 import { emailSyncQueueOutput } from "../email/sync-queue";
 
 const db = require("../db") as { executeQuery: jest.Mock };
 // Required here so isolated module loads reuse this same mock instance.
 const mailSync = require("../email/mail-sync") as { syncMailbox: jest.Mock };
+const aiLog = require("../ai") as { recordExternalAiCall: jest.Mock };
 const { hydrateAttachmentRefs, positiveIntFromEnv } = require("./parseEmails") as typeof import("./parseEmails");
 const blob = require("../blob-storage") as { generateReadSasUrl: jest.Mock };
 const SAS = "https://acct.blob.core.windows.net/x?sig=1";
@@ -228,6 +231,34 @@ describe("runParseBatch → result handling", () => {
     ) as unknown[] | undefined;
     const params = errCall?.[2] as { name: string; value: unknown }[];
     expect(params.find((p) => p.name === "Error")?.value).toMatch(/Toddler 401/);
+  });
+});
+
+describe("runParseBatch → the AI call log", () => {
+  const logged = () => aiLog.recordExternalAiCall.mock.calls.map((c: unknown[]) => c[0] as Record<string, unknown>);
+
+  it("logs an answered parse as email reading, tied to the email", async () => {
+    mockFetchJson(toddlerOk);
+    await loadRunParseBatch(ENV)("tok", context);
+    expect(logged()).toEqual([
+      expect.objectContaining({ errorCode: null, provider: "toddler", purpose: "email_reading", recordId: "42", recordType: "email" }),
+    ]);
+  });
+
+  it("logs a model error and a refused request as failed calls", async () => {
+    mockFetchJson({ ...toddlerOk, data: {}, error: "LLM returned invalid JSON" });
+    await loadRunParseBatch(ENV)("tok", context);
+    mockFetchJson({ detail: "Missing credentials" }, false, 401);
+    stubClaims([claimedEmail]);
+    await loadRunParseBatch(ENV)("tok", context);
+    expect(logged().map((call) => call.errorCode)).toEqual(["provider_error", "provider_error"]);
+  });
+
+  it("logs nothing for a skipped sender: no model was called", async () => {
+    const fetchMock = mockFetchJson(toddlerOk);
+    await loadRunParseBatch({ ...ENV, AI_PARSE_SKIP_SENDERS: "@" })("tok", context);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logged()).toEqual([]);
   });
 });
 

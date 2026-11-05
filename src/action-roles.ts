@@ -541,7 +541,7 @@ export const ACTION_ROLES = {
   },
   viewUsageAnalytics: {
     gate: [A.ADMIN, A.DIRECTOR],
-    routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi"],
+    routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi", "getAiCost"],
     why: "Audit log → Usage: who uses Floorplan, for how long, on what kind of device, plus the email and AI breakdowns (PLAN §14): admin and directors. The CFO is refused these routes and has the Finance view instead (usage/scope.ts holds the scope).",
   },
   viewFinanceUsageAnalytics: {

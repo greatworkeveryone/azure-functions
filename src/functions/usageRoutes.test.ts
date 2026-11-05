@@ -2,6 +2,7 @@
 import { HttpRequest, type InvocationContext } from "@azure/functions";
 import { ACTION_ROLES, exportActionRoles } from "../action-roles";
 import { AppRole } from "../auth";
+import { getAiCost } from "./getAiCost";
 import { getUsageAi } from "./getUsageAi";
 import { getUsageDevices } from "./getUsageDevices";
 import { getUsageEmail } from "./getUsageEmail";
@@ -27,8 +28,10 @@ jest.mock("../usage/queries/devices", () => ({ loadUsageDevices: jest.fn(async (
 jest.mock("../usage/queries/modules", () => ({ loadUsageModules: jest.fn(async () => ({ view: "modules" })) }));
 jest.mock("../usage/queries/email", () => ({ loadUsageEmail: jest.fn(async () => ({ view: "email" })) }));
 jest.mock("../usage/queries/ai", () => ({ loadUsageAi: jest.fn(async () => ({ view: "ai" })) }));
+jest.mock("../usage/aiCost", () => ({ fetchAiCost: jest.fn(async () => ({ available: false, reason: "off" })) }));
 
 import { createRequestConnection } from "../db";
+import { fetchAiCost } from "../usage/aiCost";
 
 type Handler = (request: HttpRequest, context: InvocationContext) => Promise<{ jsonBody?: unknown; status?: number }>;
 const ROUTES: [string, Handler][] = [
@@ -38,6 +41,7 @@ const ROUTES: [string, Handler][] = [
   ["getUsageModules", getUsageModules],
   ["getUsageEmail", getUsageEmail],
   ["getUsageAi", getUsageAi],
+  ["getAiCost", getAiCost],
 ];
 const ctx = { error: jest.fn() } as unknown as InvocationContext;
 const get = (name: string, qs = "") => new HttpRequest({ method: "GET", url: `http://localhost/api/${name}${qs}` });
@@ -68,6 +72,7 @@ describe.each(ROUTES)("%s", (name, handler) => {
     roles = [role];
     expect((await handler(get(name), ctx)).status).toBe(403);
     expect(createRequestConnection).not.toHaveBeenCalled();
+    expect(fetchAiCost).not.toHaveBeenCalled();
   });
 
   it("answers 403 for the CFO: she has the Finance view, not this one", async () => {

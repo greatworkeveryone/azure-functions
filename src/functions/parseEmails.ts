@@ -35,7 +35,6 @@ import {
 } from "../db";
 import { AppRole, errorResponse, extractToken, oidFromToken, requireRole, unauthorizedResponse } from "../auth";
 import { generateReadSasUrl } from "../blob-storage";
-import { isDevOverrideEnabled } from "../jwt";
 import { isBlobName, WR_ATTACHMENTS_SHAPES } from "../blob-names";
 import { syncMailbox } from "../email/mail-sync";
 import { runTriageStep, syncExtraMailboxes } from "../inboundTriage/steps";
@@ -46,6 +45,8 @@ import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMe
 import { checkRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { type AiRefusalCode, recordExternalAiCall } from "../ai";
+import { assertSafeToddlerUrl } from "../toddlerUrl";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -54,20 +55,8 @@ const TODDLER_URL = process.env.TODDLER_URL ?? "";
 // anonymous calls with 401, so without it every parse burns a retry.
 const TODDLER_SERVICE_KEY = process.env.TODDLER_SERVICE_KEY ?? "";
 
-// The service key and SAS URLs go in these requests: https only, except
-// loopback or the local dev override. Throws a config error otherwise.
-export function assertSafeToddlerUrl(url: string, devOverride: boolean = isDevOverrideEnabled()): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("TODDLER_URL is not a valid URL");
-  }
-  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
-  if (parsed.protocol !== "https:" && !devOverride && !loopback) {
-    throw new Error("TODDLER_URL must use https: (the service key and file URLs are sent to it)");
-  }
-}
+// Re-exported for the tests that pin it here.
+export { assertSafeToddlerUrl };
 
 // A user token, or null for the service identity (timers and queue triggers
 // have no caller; a SQL_USER_CONNECTION rollback must not hand them a user path).
@@ -750,6 +739,33 @@ export function hydrateAttachmentRefs(raw: string | null): ToddlerAttachmentRef[
 
 // ── Shared batch runner ────────────────────────────────────────────────────
 
+// Every toddler parse gets an AiCallLog row (best effort), so AI usage and cost per call count email reading.
+function logEmailReading(
+  email: ClaimedEmail,
+  request: ToddlerRequest,
+  startedAt: number,
+  result: ToddlerResponse | null,
+  errorCode: AiRefusalCode | null,
+  context: InvocationContext,
+): Promise<void> {
+  return recordExternalAiCall(
+    {
+      actorName: "Email parsing",
+      errorCode,
+      input: `${request.subject ?? ""}\n${request.html}`,
+      latencyMs: Date.now() - startedAt,
+      model: result?.modelVersion ?? null,
+      outputChars: result ? (result.rawResponse ?? JSON.stringify(result.data)).length : null,
+      promptVersion: "parse-incoming@toddler",
+      provider: "toddler",
+      purpose: "email_reading",
+      recordId: String(email.EmailID),
+      recordType: "email",
+    },
+    (error: unknown) => context.warn(`AI call log row for email #${email.EmailID} not written:`, error instanceof Error ? error.message : String(error)),
+  );
+}
+
 export interface ParseBatchResult {
   claimed: number;
   errored: number;
@@ -791,7 +807,7 @@ async function parseClaimedEmail(
     }
     const senderTrust = await resolveSenderTrust(token, email, context);
     context.info(`email #${email.EmailID} senderTrust=${senderTrust}`);
-    const result = await callToddler({
+    const request: ToddlerRequest = {
       attachments: hydrateAttachmentRefs(email.AttachmentBlobs),
       fromAddress: cap(email.FromAddress, FIELD_CAPS.fromAddress),
       hints,
@@ -799,7 +815,16 @@ async function parseClaimedEmail(
       html: email.Body ?? "",
       subject: cap(email.Subject, FIELD_CAPS.subject),
       ...(knownJob ? { knownJob } : {}),
-    });
+    };
+    const startedAt = Date.now();
+    let result: ToddlerResponse;
+    try {
+      result = await callToddler(request);
+    } catch (err: unknown) {
+      await logEmailReading(email, request, startedAt, null, err instanceof Error && err.name === "AbortError" ? "timeout" : "provider_error", context);
+      throw err;
+    }
+    await logEmailReading(email, request, startedAt, result, result.error ? "provider_error" : null, context);
     if (result.error) {
       // Toddler returned 200 but the LLM itself errored — treat as transient
       // so the email stays in the queue and gets retried. Toddler always
