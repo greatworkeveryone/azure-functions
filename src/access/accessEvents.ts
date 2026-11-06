@@ -38,6 +38,10 @@ interface HeaderSource {
 const MONITOR_ACTOR = { kind: "system", name: "accessMonitor" } as const;
 const DETAIL_MAX = 2000;
 const LEDGER_REPEAT_MS = 6 * 60 * 60_000;
+// registerSelf runs on every full page load, not only at the Microsoft sign-in.
+// A repeat from the same person, device and network inside this window is the
+// same session, so the log keeps one sign-in row rather than one per reload.
+const SIGN_IN_REPEAT_MINUTES = 30;
 const COUNTRY = /^[A-Z]{2}$/;
 
 // ── Switch ───────────────────────────────────────────────────────────────────
@@ -118,7 +122,12 @@ const SELECT_CONTEXT = `SELECT u.UserID, u.Role, u.AccessProfile,
     CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
                        WHERE e.Oid = @Oid AND e.UserAgentHash = @UserAgentHash
                          AND e.At >= DATEADD(DAY, -90, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS DeviceSeen,
-    CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e WHERE e.Oid = @Oid) THEN 1 ELSE 0 END AS HasHistory
+    CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e WHERE e.Oid = @Oid) THEN 1 ELSE 0 END AS HasHistory,
+    CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
+                       WHERE e.Oid = @Oid AND e.Kind = 'signin'
+                         AND ((e.UserAgentHash = @UserAgentHash) OR (e.UserAgentHash IS NULL AND @UserAgentHash IS NULL))
+                         AND ((e.IpHash = @IpHash) OR (e.IpHash IS NULL AND @IpHash IS NULL))
+                         AND e.At >= DATEADD(MINUTE, -@SignInRepeatMinutes, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS RecentSignIn
   FROM (SELECT 1 AS One) AS anchor
   OUTER APPLY (SELECT TOP 1 UserID, Role, AccessProfile FROM dbo.AppUsers
                 WHERE EntraOid = @Oid AND IsActive = 1) AS u`;
@@ -156,8 +165,11 @@ export async function recordAccess(observation: AccessObservation): Promise<{ an
     const rows = await executeQuery(connection, SELECT_CONTEXT, [
       { name: "Oid", type: TYPES.NVarChar, value: observation.oid },
       { name: "UserAgentHash", type: TYPES.VarChar, value: observation.userAgentHash },
+      { name: "IpHash", type: TYPES.VarChar, value: observation.ipHash },
+      { name: "SignInRepeatMinutes", type: TYPES.Int, value: SIGN_IN_REPEAT_MINUTES },
     ]);
     const context = rows[0] ?? {};
+    if (observation.kind === "signin" && context.RecentSignIn === 1) return { anomaly: "none" };
     const role = (context.Role as string | null | undefined)?.toLowerCase() ?? null;
     const userId = (context.UserID as number | null | undefined) ?? null;
     const profile = parseStoredProfile((context.AccessProfile as string | null | undefined) ?? null, role);

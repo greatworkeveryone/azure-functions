@@ -239,6 +239,21 @@ describe("the request-path hooks", () => {
     expect(kinds.sort()).toEqual(["money", "signin", "signin"]);
   });
 
+  it("keeps one sign-in row per person, device and network within half an hour", async () => {
+    _setAccessLoggingForTests(true);
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      String(sql).includes("AS RecentSignIn") ? [{ DeviceSeen: 1, HasHistory: 1, RecentSignIn: 1, Role: "admin", UserID: 1 }] : [],
+    );
+    noteSignIn(req({}), "oid-1");
+    noteMoneyAction(req({}), "oid-1", { outcome: "allowed", route: "markPaymentPaid" });
+    await flush();
+    await flush();
+    const kinds = db.executeQuery.mock.calls
+      .filter((c) => String(c[1]).includes("INSERT INTO dbo.AccessEvents"))
+      .map((c) => paramsOf(c).Kind);
+    expect(kinds).toEqual(["money"]);
+  });
+
   it("logs and swallows a database failure", async () => {
     _setAccessLoggingForTests(true);
     const warn = jest.spyOn(console, "warn").mockImplementation(() => {});

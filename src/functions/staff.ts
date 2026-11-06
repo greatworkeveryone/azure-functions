@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { graphGetGroupUsers, type GraphUser } from "../graph";
 
 const STAFF_ROLES = [
@@ -33,7 +34,34 @@ export function mapUsersToStaff(users: GraphUser[]): StaffMember[] {
   return staff.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function getStaff(
+// The Planner groups are the legacy directory. Where they are not configured
+// (staging, and production once Planner is retired) the app's own user table
+// is the staff list: active people who have signed in and hold a role.
+async function staffFromAppUsers(token: string): Promise<StaffMember[]> {
+  const connection = await createRequestConnection(token);
+  try {
+    const rows = await executeQuery(
+      connection,
+      `SELECT DisplayName, Email FROM dbo.AppUsers
+       WHERE IsActive = 1 AND EntraOid IS NOT NULL AND Role IS NOT NULL`,
+    );
+    return mapUsersToStaff(
+      rows.map((row) => ({ displayName: String(row.DisplayName), id: "", mail: String(row.Email), mobilePhone: null })),
+    );
+  } finally {
+    closeConnection(connection);
+  }
+}
+
+async function staffFromPlannerGroups(facilitiesGroupId: string, accountsGroupId: string): Promise<StaffMember[]> {
+  const [facilities, accounts] = await Promise.all([
+    graphGetGroupUsers(facilitiesGroupId),
+    graphGetGroupUsers(accountsGroupId),
+  ]);
+  return mapUsersToStaff([...facilities, ...accounts]);
+}
+
+export async function getStaff(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -45,20 +73,12 @@ async function getStaff(
 
   const facilitiesGroupId = process.env.PLANNER_FACILITIES_GROUP_ID;
   const accountsGroupId = process.env.PLANNER_ACCOUNTS_GROUP_ID;
-  if (!facilitiesGroupId || !accountsGroupId) {
-    context.error(
-      "getStaff: PLANNER_FACILITIES_GROUP_ID / PLANNER_ACCOUNTS_GROUP_ID not configured",
-    );
-    return errorResponse("Staff directory not configured");
-  }
 
   try {
-    const [facilities, accounts] = await Promise.all([
-      graphGetGroupUsers(facilitiesGroupId),
-      graphGetGroupUsers(accountsGroupId),
-    ]);
-    const staff = mapUsersToStaff([...facilities, ...accounts]);
-
+    const staff =
+      facilitiesGroupId && accountsGroupId
+        ? await staffFromPlannerGroups(facilitiesGroupId, accountsGroupId)
+        : await staffFromAppUsers(token);
     return { status: 200, jsonBody: { staff } };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
