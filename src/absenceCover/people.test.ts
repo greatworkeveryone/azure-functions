@@ -9,6 +9,12 @@ describe("possibleCovers", () => {
     expect(people.find((person) => person.userId === 2)).toEqual({ name: "Max Manager", role: "facilities_manager", roleLabel: "Facilities manager", userId: 2 });
   });
 
+  it("leaves out an invitee who has never signed in, but keeps a row built without the field", () => {
+    const ids = possibleCovers([...DIRECTORY, { ...user(11, "facilities", "Ivy Invited"), entraOid: null }, { ...user(12, "facilities", "Sal Signed"), entraOid: "oid-12" }], 1).map((person) => person.userId);
+    expect(ids).not.toContain(11);
+    expect(ids).toEqual(expect.arrayContaining([7, 12]));
+  });
+
   it("leaves out the person themselves, admin, and a baseline user who can do nothing with it", () => {
     const ids = possibleCovers([...DIRECTORY, user(10, "user", "Una User")], 7).map((person) => person.userId);
     expect(ids).not.toContain(7);

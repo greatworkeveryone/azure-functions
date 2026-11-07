@@ -3,7 +3,8 @@
 // is submitted; callers include the returned URL in their request body.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import ExcelJS from "exceljs";
+import type ExcelJS from "exceljs";
+import { loadExcelJS } from "../xlsx-load";
 import { assertSafeXlsx, XlsxRejectedError } from "../xlsx-safe";
 import { type Connection, TYPES } from "tedious";
 import {
@@ -1302,7 +1303,8 @@ async function keyImportTemplate(
     // can't do conditional validation without VBA, so we show the full set.
     const allSubTypes = [...KEY_SUB_TYPES, ...CODE_SUB_TYPES];
 
-    const wb = new ExcelJS.Workbook();
+    const { Workbook } = await loadExcelJS();
+    const wb = new Workbook();
 
     // Keys sheet — first = active on open
     const headers = [
@@ -1404,7 +1406,8 @@ async function bulkImportKeys(
       if (error instanceof XlsxRejectedError) return { status: 400, jsonBody: { error: error.message } };
       throw error;
     }
-    const wb = new ExcelJS.Workbook();
+    const { Workbook } = await loadExcelJS();
+    const wb = new Workbook();
     await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
     // Use "Keys" sheet by name — don't rely on index since the template has hidden reference sheets
     const ws = wb.getWorksheet("Keys") ??

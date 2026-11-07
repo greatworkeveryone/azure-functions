@@ -23,12 +23,16 @@ const builtAt = process.env.BUILD_TIME ?? "unknown";
 const deploymentId = process.env.WEBSITE_DEPLOYMENT_ID ?? "unknown";
 
 // Last TimerRuns row per timer; a timer that never ran comes back with NULLs.
+// Ordered by StartedAt alone so each TOP 1 is one seek on IX_TimerRuns_Name_StartedAt
+// (migration 128). With the TimerRunId tie-break the plan could walk the clustered
+// index backwards instead, and a name with no rows then read the whole table: the
+// read timed out at 15 s on staging (7 Nov 2026) while every other query was quick.
 const LAST_TIMER_RUNS_SQL = `SELECT n.value AS Name, r.StartedAt, r.FinishedAt, r.Outcome, r.Error
   FROM STRING_SPLIT(@Names, N',') n
   OUTER APPLY (SELECT TOP 1 t.StartedAt, t.FinishedAt, t.Outcome, t.Error
                  FROM dbo.TimerRuns t
                 WHERE t.Name = n.value
-                ORDER BY t.StartedAt DESC, t.TimerRunId DESC) r`;
+                ORDER BY t.StartedAt DESC) r`;
 
 const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : null);
 

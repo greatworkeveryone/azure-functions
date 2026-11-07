@@ -117,12 +117,12 @@ export async function loadAssignedContractors(connection: Connection, buildingId
   return ids;
 }
 
-/** Active staff in the roles. Roles are stored lower case. */
+/** Active, signed-in staff in the roles (an invitee has no EntraOid until they sign in). Roles are stored lower case. */
 export async function loadStaff(connection: Connection, roles: readonly string[]): Promise<StaffRow[]> {
   const rows = await executeQuery(
     connection,
     `SELECT UserID, DisplayName, Email, Role FROM dbo.AppUsers
-      WHERE IsActive = 1 AND LOWER(Role) IN (SELECT LOWER([value]) FROM OPENJSON(@Roles)) ORDER BY DisplayName, UserID`,
+      WHERE IsActive = 1 AND EntraOid IS NOT NULL AND LOWER(Role) IN (SELECT LOWER([value]) FROM OPENJSON(@Roles)) ORDER BY DisplayName, UserID`,
     [jsonParam("Roles", roles)],
   );
   return rows.map((row) => ({ email: String(row.Email ?? ""), name: String(row.DisplayName), role: String(row.Role).toLowerCase(), userId: Number(row.UserID) }));

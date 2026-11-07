@@ -11,8 +11,8 @@
 // All inputs are optional (except `job`); the packet builds with whatever
 // is available so it can be downloaded at any stage of the job.
 
-import PDFDocument from "pdfkit";
-import { PDFDocument as PDFLibDocument } from "pdf-lib";
+import type { PDFDocument as PdfLibDocument } from "pdf-lib";
+import { loadPdfKit, loadPdfLib } from "./pdfLibs";
 
 export interface PacketJob {
   id: number;
@@ -84,7 +84,7 @@ export function nonMergeableAttachments(input: PacketInput): PacketAttachment[] 
 export async function buildJobPacket(input: PacketInput): Promise<Buffer> {
   const coverBytes = await renderCover(input);
 
-  const merged = await PDFLibDocument.create();
+  const merged = await (await loadPdfLib()).create();
   await appendPdfBytes(merged, coverBytes);
 
   if (input.selectedQuote?.pdfBytes) {
@@ -105,7 +105,8 @@ export async function buildJobPacket(input: PacketInput): Promise<Buffer> {
   return Buffer.from(out);
 }
 
-function renderCover(input: PacketInput): Promise<Buffer> {
+async function renderCover(input: PacketInput): Promise<Buffer> {
+  const PDFDocument = await loadPdfKit();
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     const chunks: Buffer[] = [];
@@ -216,13 +217,13 @@ function keyValue(doc: PDFKit.PDFDocument, key: string, value: string) {
   doc.fillColor("#000").text(value);
 }
 
-async function appendPdfBytes(target: PDFLibDocument, bytes: Buffer | Uint8Array) {
-  const src = await PDFLibDocument.load(bytes, { ignoreEncryption: true });
+async function appendPdfBytes(target: PdfLibDocument, bytes: Buffer | Uint8Array) {
+  const src = await (await loadPdfLib()).load(bytes, { ignoreEncryption: true });
   const copied = await target.copyPages(src, src.getPageIndices());
   for (const p of copied) target.addPage(p);
 }
 
-async function appendAttachment(target: PDFLibDocument, a: PacketAttachment) {
+async function appendAttachment(target: PdfLibDocument, a: PacketAttachment) {
   if (a.contentType === "application/pdf") {
     await appendPdfBytes(target, a.bytes);
     return;

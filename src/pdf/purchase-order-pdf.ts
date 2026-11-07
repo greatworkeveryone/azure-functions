@@ -3,7 +3,7 @@
 // Layout is deliberately simple (single column, standard fonts) so the
 // output is diff-friendly and renders the same everywhere pdfkit does.
 
-import PDFDocument from "pdfkit";
+import { loadPdfKit } from "./pdfLibs";
 
 export interface PurchaseOrderPdfInput {
   po: {
@@ -63,6 +63,7 @@ export async function renderPurchaseOrderPDF(
 ): Promise<Buffer> {
   const { po, job } = input;
 
+  const PDFDocument = await loadPdfKit();
   const doc = new PDFDocument({ size: "A4", margin: 50 });
   const chunks: Buffer[] = [];
   const done = new Promise<Buffer>((resolve, reject) => {

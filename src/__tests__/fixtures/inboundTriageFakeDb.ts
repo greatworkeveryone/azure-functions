@@ -29,7 +29,7 @@ export function fakeExecute(state: FakeState) {
   return async (...call: unknown[]): Promise<Record<string, unknown>[]> => {
     const sql = String(call[1]);
     const params = asParams(call);
-    if (/FROM dbo\.AppUsers\s+WHERE IsActive = 1 AND \(Role IN/.test(sql)) {
+    if (/FROM dbo\.AppUsers\s+WHERE IsActive = 1 AND EntraOid IS NOT NULL AND \(Role IN/.test(sql)) {
       return state.staff.map((person) => ({ DisplayName: person.name, Role: person.role, UserID: person.userId }));
     }
     if (/FROM dbo\.LeaveRequests/.test(sql)) return state.leave.map((UserId) => ({ UserId }));

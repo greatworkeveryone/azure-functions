@@ -148,6 +148,9 @@ describe("resolveBroadcastAudience", () => {
       ["staff", "3", "zed@randazzo.properties"],
       ["manual", null, "x@y.com"],
     ]);
+    // An invitee who has never signed in (no EntraOid) is not staff to send to.
+    const staffCall = db.executeQuery.mock.calls.find(([, sql]) => /FROM dbo\.AppUsers/.test(String(sql)) && /OPENJSON\(@Roles\)/.test(String(sql)));
+    expect(String(staffCall?.[1])).toMatch(/IsActive = 1 AND EntraOid IS NOT NULL/);
   });
 
   it("asks for contractors by trade and staff by role", async () => {
@@ -209,6 +212,9 @@ describe("getBroadcastOptions", () => {
     const approverCall = db.executeQuery.mock.calls.find(([, sql]) => /EntraOid <> @Oid/.test(String(sql)));
     expect(approverCall?.[2]).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Oid", value: "fay-oid" })]));
     expect(JSON.parse(approverCall?.[2][0].value)).not.toContain("admin");
+    // The counts say "only active staff": pending invitees (no EntraOid yet) are not counted.
+    const countCall = db.executeQuery.mock.calls.find(([, sql]) => /GROUP BY LOWER\(Role\)/.test(String(sql)));
+    expect(String(countCall?.[1])).toMatch(/IsActive = 1 AND EntraOid IS NOT NULL/);
   });
 
   it("reports the configured threshold", async () => {

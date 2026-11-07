@@ -1,11 +1,11 @@
-import PDFDocument from "pdfkit";
-import { PDFDocument as PDFLib } from "pdf-lib";
 import { createHash } from "crypto";
 import type { SqlRow } from "./db";
 import type { EventPlan } from "./majorEvents";
+import { loadPdfKit, loadPdfLib } from "./pdf/pdfLibs";
 
 /** Printable handover plus original documents embedded as PDF attachments (no recompression). */
 export async function majorEventPack(event: { id: number; title: string; status: string; domain: string; brief: string; ownerName: string; startsAt: string | null; endsAt: string | null; plan: EventPlan }, entries: SqlRow[], buildings: SqlRow[], files: { name: string; bytes: Buffer; contentType: string }[]): Promise<Buffer> {
+  const [PDFDocument, PDFLib] = await Promise.all([loadPdfKit(), loadPdfLib()]);
   const chunks: Buffer[] = [];
   const pdf = new PDFDocument({ size: "A4", margin: 48, info: { Title: event.title, Author: "Floorplan" } });
   const finished = new Promise<Buffer>((resolve, reject) => {

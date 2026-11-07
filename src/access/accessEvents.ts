@@ -11,7 +11,7 @@ import { record } from "../ledger";
 import { describeAnomaly, evaluateAccess, localClock, primaryAnomaly, type AccessKind, type AnomalyCode } from "./anomaly";
 import { clientAddress, hashValue } from "./clientIp";
 import { parseStoredProfile } from "./profile";
-import { countForBurst, shouldSampleRequest } from "./sampling";
+import { countForBurst, SAMPLE_INTERVAL_MS, shouldSampleRequest } from "./sampling";
 
 // The access log (decision 15). Request handling never waits for it: the
 // note* functions copy what they need from the request synchronously and hand
@@ -45,9 +45,12 @@ const LEDGER_REPEAT_MS = 6 * 60 * 60_000;
 // registerSelf runs on every full page load, not only at the Microsoft sign-in.
 // The browser marks the call that follows an interactive login (X-Fp-Signin);
 // that is always a sign-in row. An unmarked call is a reload or a new tab, which
-// is recorded only as a device's first appearance in a day, so a token used from
-// somewhere new still shows up even if that client never sends the mark.
+// is recorded only as a device's first appearance on a network in a day, so a
+// token used from somewhere new still shows up even if that client never sends
+// the mark. Sampled requests are likewise checked against the table, not only
+// this instance's memory, so a second instance does not repeat the sample.
 const SIGN_IN_BASELINE_HOURS = 24;
+const SAMPLE_MINUTES = SAMPLE_INTERVAL_MS / 60_000;
 const COUNTRY = /^[A-Z]{2}$/;
 
 // ── Switch ───────────────────────────────────────────────────────────────────
@@ -138,7 +141,13 @@ const SELECT_CONTEXT = `SELECT u.UserID, u.Role, u.AccessProfile,
     CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
                        WHERE e.Oid = @Oid AND e.Kind = 'signin'
                          AND ((e.UserAgentHash = @UserAgentHash) OR (e.UserAgentHash IS NULL AND @UserAgentHash IS NULL))
-                         AND e.At >= DATEADD(HOUR, -@SignInBaselineHours, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS SignInSeenToday
+                         AND ((e.IpHash = @IpHash) OR (e.IpHash IS NULL AND @IpHash IS NULL))
+                         AND e.At >= DATEADD(HOUR, -@SignInBaselineHours, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS SignInSeenToday,
+    CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
+                       WHERE e.Oid = @Oid AND e.Kind = 'request'
+                         AND ((e.UserAgentHash = @UserAgentHash) OR (e.UserAgentHash IS NULL AND @UserAgentHash IS NULL))
+                         AND ((e.IpHash = @IpHash) OR (e.IpHash IS NULL AND @IpHash IS NULL))
+                         AND e.At >= DATEADD(MINUTE, -@SampleMinutes, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS RequestSeenRecently
   FROM (SELECT 1 AS One) AS anchor
   OUTER APPLY (SELECT TOP 1 UserID, Role, AccessProfile FROM dbo.AppUsers
                 WHERE EntraOid = @Oid AND IsActive = 1) AS u`;
@@ -162,6 +171,14 @@ export function _resetAccessLedgerMemoForTests(): void {
   lastLedgered.clear();
 }
 
+/** A repeat the table already holds: an unmarked sign-in from a device and network seen today, or a
+ *  sampled request another instance recorded in the last 15 minutes. Bursts are always written. */
+function alreadyRecorded(observation: AccessObservation, context: Record<string, unknown>): boolean {
+  if (observation.kind === "signin") return !observation.interactive && context.SignInSeenToday === 1;
+  if (observation.kind === "request") return !observation.burst && context.RequestSeenRecently === 1;
+  return false;
+}
+
 function detailText(detail: Record<string, unknown>): string | null {
   if (Object.keys(detail).length === 0) return null;
   const text = JSON.stringify(detail);
@@ -178,9 +195,10 @@ export async function recordAccess(observation: AccessObservation): Promise<{ an
       { name: "UserAgentHash", type: TYPES.VarChar, value: observation.userAgentHash },
       { name: "IpHash", type: TYPES.VarChar, value: observation.ipHash },
       { name: "SignInBaselineHours", type: TYPES.Int, value: SIGN_IN_BASELINE_HOURS },
+      { name: "SampleMinutes", type: TYPES.Int, value: SAMPLE_MINUTES },
     ]);
     const context = rows[0] ?? {};
-    if (observation.kind === "signin" && !observation.interactive && context.SignInSeenToday === 1) return { anomaly: "none" };
+    if (alreadyRecorded(observation, context)) return { anomaly: "none" };
     const role = (context.Role as string | null | undefined)?.toLowerCase() ?? null;
     const userId = (context.UserID as number | null | undefined) ?? null;
     const profile = parseStoredProfile((context.AccessProfile as string | null | undefined) ?? null, role);

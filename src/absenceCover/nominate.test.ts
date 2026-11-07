@@ -25,7 +25,7 @@ const input = (over = {}) => ({ delegateUserId: 7, fromDate: "2026-10-26", leave
 
 beforeEach(() => {
   jest.resetAllMocks();
-  escalation.listActiveUsers.mockResolvedValue([...DIRECTORY, user(10, "user", "Una User")]);
+  escalation.listActiveUsers.mockResolvedValue([...DIRECTORY, user(10, "user", "Una User"), { ...user(11, "facilities", "Ivy Invited"), entraOid: null }]);
   people.loadPeople.mockResolvedValue({ links: [], revision: 1, staff: [], updatedAt: new Date(), updatedBy: "x" });
   store.listUpcomingDelegates.mockResolvedValue([]);
   store.insertDelegate.mockResolvedValue(5);
@@ -91,6 +91,7 @@ describe("saveNomination", () => {
       ["admin", 9, "delegate_cannot_cover"],
       ["someone who cannot work in the inbox", 10, "delegate_cannot_cover"],
       ["someone who is not an active user", 99, "delegate_not_active"],
+      ["an invitee who has never signed in", 11, "delegate_not_active"],
     ])("refuses %s", async (_label, delegateUserId, code) => {
       await expect(saveNomination(conn, fay, input({ delegateUserId }), TODAY)).rejects.toMatchObject({ code, status: 422 });
       expect(store.insertDelegate).not.toHaveBeenCalled();

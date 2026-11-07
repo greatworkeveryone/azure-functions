@@ -4,10 +4,11 @@
 // asset tags and contractors are matched by name; every row is checked before
 // anything is written, and one bad row means nothing is imported.
 
-import ExcelJS from "exceljs";
+import type ExcelJS from "exceljs";
 import { TYPES, type Connection } from "tedious";
 import { executeQuery } from "./db";
 import { parseScheduleInput, type ScheduleInput } from "./serviceSchedules";
+import { loadExcelJS } from "./xlsx-load";
 import { assertSafeXlsx, type XlsxLimits } from "./xlsx-safe";
 
 export const IMPORT_HEADERS = [
@@ -52,7 +53,8 @@ function cellValue(value: ExcelJS.CellValue): ImportCell {
 export async function readImportRows(buffer: Buffer): Promise<ImportRow[]> {
   // Throws XlsxRejectedError for a zip bomb or a file that isn't an .xlsx.
   assertSafeXlsx(buffer, IMPORT_UNPACK_LIMITS);
-  const wb = new ExcelJS.Workbook();
+  const { Workbook } = await loadExcelJS();
+  const wb = new Workbook();
   await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
   const ws = wb.getWorksheet(IMPORT_SHEET) ?? wb.worksheets.find((sheet) => !sheet.name.startsWith("_"));
   if (!ws) return [];

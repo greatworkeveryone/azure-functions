@@ -76,7 +76,8 @@ async function loadTrades(connection: Connection): Promise<string[]> {
 export async function loadBroadcastOptions(connection: Connection, callerOid: string): Promise<BroadcastOptions> {
   const buildings = await loadBuildings(connection);
   const trades = await loadTrades(connection);
-  const roles = await executeQuery(connection, `SELECT LOWER(Role) AS Role, COUNT(*) AS N FROM dbo.AppUsers WHERE IsActive = 1 AND Role IS NOT NULL GROUP BY LOWER(Role)`);
+  // Signed-in people only (EntraOid is null until the first sign-in), so the count matches who loadStaff sends to.
+  const roles = await executeQuery(connection, `SELECT LOWER(Role) AS Role, COUNT(*) AS N FROM dbo.AppUsers WHERE IsActive = 1 AND EntraOid IS NOT NULL AND Role IS NOT NULL GROUP BY LOWER(Role)`);
   // Admin is refused approving (approveEmail.refused) and is not in this gate, so it is never offered.
   const approverRoles = ACTION_ROLES.approveEmail.gate;
   const approvers = await executeQuery(

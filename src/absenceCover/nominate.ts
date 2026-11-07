@@ -14,6 +14,7 @@ import { inTeamOf, type CoverCaller } from "./access";
 import { archiveDelegateRow, getDelegate, insertDelegate, listUpcomingDelegates, type DelegateRow } from "./delegateStore";
 import { coverError } from "./errors";
 import { holdsCapability } from "./eligibility";
+import { hasSignedIn } from "./people";
 
 export const MAX_NOMINATION_DAYS = 366;
 const REASON_MAX = 200;
@@ -92,7 +93,7 @@ export async function saveNomination(connection: Connection, caller: CoverCaller
     throw coverError.forbidden("Only they, their manager or their team's manager can choose who covers for them.");
   }
   const delegate = directory.find((user) => user.userId === input.delegateUserId);
-  if (!delegate) throw coverError.refused("delegate_not_active", "That person is not an active user, so they cannot cover.");
+  if (!delegate || !hasSignedIn(delegate)) throw coverError.refused("delegate_not_active", "That person is not an active user, so they cannot cover.");
   if (delegate.userId === subject.userId) throw coverError.refused("delegate_is_self", "Choose someone else to cover.");
   if (delegate.role === ROLES.admin || !holdsCapability(delegate.role, "viewEscalations")) {
     throw coverError.refused("delegate_cannot_cover", `${delegate.name} cannot take on this work, so choose someone else.`);

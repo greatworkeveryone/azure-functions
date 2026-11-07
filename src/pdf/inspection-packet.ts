@@ -3,7 +3,7 @@
 // returns a Buffer. Inspection attachments are all images, so this uses
 // PDFKit alone (doc.image) — no pdf-lib merge step.
 
-import PDFDocument from "pdfkit";
+import { loadPdfKit } from "./pdfLibs";
 
 export interface PacketPhoto {
   fileName: string;
@@ -46,7 +46,8 @@ export interface InspectionPacketInput {
 const PHOTOS_PER_ROW = 2;
 const PHOTO_GAP = 12;
 
-export function buildInspectionPacket(input: InspectionPacketInput): Promise<Buffer> {
+export async function buildInspectionPacket(input: InspectionPacketInput): Promise<Buffer> {
+  const PDFDocument = await loadPdfKit();
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     const chunks: Buffer[] = [];

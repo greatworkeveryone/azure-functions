@@ -4,8 +4,10 @@
 // minutes (so the out-of-hours and country rules see ordinary use, and a second
 // network or device is never hidden in the first one's sample) and bursts. Bursts are
 // counted here because sampled rows can't show them. Flex Consumption scales
-// out, so a burst split across instances can go unseen here; the App Insights
-// alert in docs/runbooks/monitoring.md counts across all of them.
+// out: each instance starts with an empty window, so a sample that passes here is
+// checked against the table before it is written (accessEvents.ts, RequestSeenRecently).
+// A burst split across instances can still go unseen here; the App Insights alert
+// in docs/runbooks/monitoring.md counts across all of them.
 
 export const SAMPLE_INTERVAL_MS = 15 * 60_000;
 export const BURST_WINDOW_MS = 5 * 60_000;

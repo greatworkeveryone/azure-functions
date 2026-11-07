@@ -17,10 +17,11 @@ export interface StaffRow {
 }
 
 // The role list is a constant of this file, never input, so it is written into the statement.
+// EntraOid is null until a person first signs in: an invitee is never handed mail.
 const STAFF_SQL = `SELECT UserID, DisplayName, Role FROM dbo.AppUsers
-  WHERE IsActive = 1 AND (Role IN (${STAFF_ROLES.map((role) => `'${role}'`).join(", ")}) OR UserID = @Extra)`;
+  WHERE IsActive = 1 AND EntraOid IS NOT NULL AND (Role IN (${STAFF_ROLES.map((role) => `'${role}'`).join(", ")}) OR UserID = @Extra)`;
 
-/** Active people in a staff role, plus `extraUserId` when they are active in any role (the sender of the send being answered). */
+/** Active, signed-in people in a staff role, plus `extraUserId` when they are active in any role (the sender of the send being answered). */
 export async function loadStaff(connection: Connection, extraUserId: number | null): Promise<StaffRow[]> {
   const rows = await executeQuery(connection, STAFF_SQL, [{ name: "Extra", type: TYPES.Int, value: extraUserId }]);
   return rows.map((row) => ({ name: String(row.DisplayName), role: String(row.Role ?? ""), userId: Number(row.UserID) }));

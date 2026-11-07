@@ -281,6 +281,33 @@ describe("the request-path hooks", () => {
     expect(JSON.parse(String(paramsOf(inserts[0]).Detail))).toEqual({ how: "session" });
   });
 
+  it("keys the once-a-day reload on the network as well as the device, so a token reused from elsewhere gets its row", async () => {
+    _setAccessLoggingForTests(true);
+    context({ SignInSeenToday: 1 });
+    noteSignIn(req({}), "oid-1");
+    await flush();
+    await flush();
+    const lookup = db.executeQuery.mock.calls.find((c) => String(c[1]).includes("AS SignInSeenToday"));
+    const clause = String(lookup?.[1]).split("e.Kind = 'signin'")[1]?.split("AS SignInSeenToday")[0] ?? "";
+    expect(clause).toContain("e.UserAgentHash = @UserAgentHash");
+    expect(clause).toContain("e.IpHash = @IpHash");
+    expect(insertCall()).toBeUndefined();
+  });
+
+  it("skips a sampled request another instance recorded in the last 15 minutes, but never a burst", async () => {
+    _setAccessLoggingForTests(true);
+    context({ RequestSeenRecently: 1 });
+    noteAccess(req({}), "oid-1", ["accounts"]);
+    await flush();
+    await flush();
+    expect(insertCall()).toBeUndefined();
+    const lookup = db.executeQuery.mock.calls.find((c) => String(c[1]).includes("AS RequestSeenRecently"));
+    expect(paramsOf(lookup as unknown[]).SampleMinutes).toBe(15);
+
+    await recordAccess(observation({ burst: true }));
+    expect(paramsOf(insertCall() as unknown[]).Kind).toBe("request");
+  });
+
   it("logs and swallows a database failure", async () => {
     _setAccessLoggingForTests(true);
     const warn = jest.spyOn(console, "warn").mockImplementation(() => {});

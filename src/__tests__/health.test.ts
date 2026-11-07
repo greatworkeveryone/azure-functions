@@ -141,6 +141,10 @@ describe("health?deep=true", () => {
       name: "ledgerVerifyTimer",
     });
     expect(body.timers).toContainEqual({ lastRun: null, name: "plannerSyncTimer" });
+    // One index seek per timer: ordered by StartedAt alone, which IX_TimerRuns_Name_StartedAt serves.
+    const [, sql] = db.executeQuery.mock.calls.find(([, text]) => /FROM STRING_SPLIT/.test(String(text))) as [unknown, string];
+    expect(sql).toMatch(/ORDER BY t\.StartedAt DESC\)/);
+    expect(sql).not.toMatch(/TimerRunId/);
   });
 
   it("is not ok when a timer's last run failed", async () => {

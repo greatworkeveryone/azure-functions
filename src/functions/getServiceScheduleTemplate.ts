@@ -5,7 +5,6 @@
 // what each column takes. Managers only (they are the ones who import).
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
-import ExcelJS from "exceljs";
 import { TYPES, type Connection } from "tedious";
 import { errorResponse } from "../auth";
 import { authorize, errorMessage } from "../assetRegisterSupport";
@@ -13,6 +12,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { DEFAULT_LEAD_DAYS, MAINTENANCE_SERVICES } from "../facilitiesRules";
 import { CONTRACTOR_LIST, IMPORT_HEADERS, IMPORT_SHEET } from "../serviceScheduleImport";
+import { loadExcelJS } from "../xlsx-load";
 
 const INFO: Array<[string, string]> = [
   ["Building", "The building's name or code, as in Floorplan."],
@@ -40,7 +40,8 @@ export async function getServiceScheduleTemplate(request: HttpRequest, context: 
     const contractorRows = await executeQuery(connection, CONTRACTOR_LIST, [{ name: "Active", type: TYPES.Bit, value: true }]);
     const contractors = contractorRows.map((row) => String(row.ContractorName ?? "")).filter(Boolean);
 
-    const wb = new ExcelJS.Workbook();
+    const { Workbook } = await loadExcelJS();
+    const wb = new Workbook();
     const ws = wb.addWorksheet(IMPORT_SHEET);
     ws.columns = IMPORT_HEADERS.map((header) => ({ header, key: header, width: Math.max(14, header.length + 2) }));
     // dataValidations exists at runtime but is missing from exceljs 4.x's type declarations.
