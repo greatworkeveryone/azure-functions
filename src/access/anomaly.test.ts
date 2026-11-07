@@ -22,8 +22,10 @@ function facts(overrides: Partial<AccessFacts> = {}): AccessFacts {
     at: DARWIN_1000_THU,
     burst: false,
     country: "AU",
+    countryClaimed: true,
     deviceSeen: true,
     hasHistory: true,
+    networkSeen: true,
     kind: "request",
     profile: defaultAccessProfile(role),
     role,
@@ -82,6 +84,21 @@ describe("evaluateAccess — device, burst and unknowns", () => {
 
   it("does not flag the very first device anyone signs in with", () => {
     expect(evaluateAccess(facts({ deviceSeen: false, hasHistory: false }))).toEqual([]);
+  });
+
+  it("flags an unseen network once the person has history, from the server's own view", () => {
+    expect(evaluateAccess(facts({ networkSeen: false }))).toEqual(["new_network"]);
+    expect(evaluateAccess(facts({ hasHistory: false, networkSeen: false }))).toEqual([]);
+    // A country claim set to match does not hide it.
+    expect(evaluateAccess(facts({ country: "AU", networkSeen: false }))).toEqual(["new_network"]);
+  });
+
+  it("flags a known person's sign-in that carries no country claim, but not a request or a first contact", () => {
+    expect(evaluateAccess(facts({ country: null, countryClaimed: false, kind: "signin" }))).toEqual(["no_country"]);
+    expect(evaluateAccess(facts({ country: null, countryClaimed: false, kind: "request" }))).toEqual([]);
+    expect(evaluateAccess(facts({ country: null, countryClaimed: false, hasHistory: false, kind: "signin" }))).toEqual([]);
+    // The app's "XX" (zone not mapped) is a claim, just an empty one.
+    expect(evaluateAccess(facts({ country: null, countryClaimed: true, kind: "signin" }))).toEqual([]);
   });
 
   it("flags a burst", () => {

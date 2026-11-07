@@ -7,10 +7,10 @@ import { minutesOf, type AccessProfile } from "./profile";
 // are the alert rules in docs/runbooks/monitoring.md.
 
 export type AccessKind = "money" | "request" | "signin";
-export type AnomalyCode = "burst" | "new_country" | "new_device" | "outside_window";
+export type AnomalyCode = "burst" | "new_country" | "new_device" | "new_network" | "no_country" | "outside_window";
 
 /** Most serious first; AccessEvents.Anomaly stores the first that applies. */
-export const ANOMALY_SEVERITY: readonly AnomalyCode[] = ["new_country", "burst", "outside_window", "new_device"];
+export const ANOMALY_SEVERITY: readonly AnomalyCode[] = ["new_country", "no_country", "new_network", "burst", "outside_window", "new_device"];
 
 export const BURST_DESCRIPTION = "more than 300 requests in 5 minutes";
 
@@ -23,11 +23,15 @@ export interface AccessFacts {
   burst: boolean;
   /** Client-reported country (x-fp-country); null when unknown. */
   country: string | null;
+  /** The request carried a country claim at all ("XX" = the app could not tell). */
+  countryClaimed: boolean;
   /** The user agent hash was seen for this person in the last 90 days. */
   deviceSeen: boolean;
   /** The person has any earlier access event: the first device is a baseline. */
   hasHistory: boolean;
   kind: AccessKind;
+  /** The address hash was seen for this person in the last 90 days. */
+  networkSeen: boolean;
   profile: AccessProfile;
   role: string | null;
 }
@@ -64,6 +68,12 @@ export function evaluateAccess(facts: AccessFacts): AnomalyCode[] {
   const { profile } = facts;
 
   if (facts.country && !profile.countries.includes(facts.country)) found.add("new_country");
+  // The app always sends a country claim with a sign-in. One without, from someone
+  // the log already knows, is a client that is not the app (or a stripped header).
+  if (facts.kind === "signin" && !facts.countryClaimed && facts.hasHistory) found.add("no_country");
+  // Server-side, from the address the request actually came from: a phished
+  // account or a replayed token used from somewhere new, whatever the browser claims.
+  if (facts.hasHistory && !facts.networkSeen) found.add("new_network");
   if (facts.burst) found.add("burst");
 
   if (!withinWindow(localClock(facts.at, profile.timeZone), profile)) {
@@ -97,6 +107,10 @@ export function describeAnomaly(code: AnomalyCode, facts: AccessFacts): string {
   switch (code) {
     case "new_country":
       return `Used Floorplan from ${facts.country}, which is not one of this person's expected countries (${profile.countries.join(", ")}).`;
+    case "no_country":
+      return "Signed in without the app's country claim: the client may not be Floorplan.";
+    case "new_network":
+      return "Used Floorplan from a network address not seen for this person in 90 days.";
     case "outside_window": {
       const clock = localClock(facts.at, profile.timeZone);
       const what = facts.kind === "money" ? "A money action" : facts.kind === "signin" ? "A sign-in" : "Use of Floorplan";

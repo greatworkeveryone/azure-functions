@@ -24,7 +24,11 @@ export interface AccessObservation {
   at: Date;
   burst: boolean;
   country: string | null;
+  /** The request carried an x-fp-country header at all. */
+  countryClaimed: boolean;
   detail: Record<string, unknown> | null;
+  /** A sign-in the browser says followed an interactive Microsoft login. */
+  interactive: boolean;
   ipHash: string | null;
   kind: AccessKind;
   oid: string;
@@ -39,9 +43,11 @@ const MONITOR_ACTOR = { kind: "system", name: "accessMonitor" } as const;
 const DETAIL_MAX = 2000;
 const LEDGER_REPEAT_MS = 6 * 60 * 60_000;
 // registerSelf runs on every full page load, not only at the Microsoft sign-in.
-// A repeat from the same person, device and network inside this window is the
-// same session, so the log keeps one sign-in row rather than one per reload.
-const SIGN_IN_REPEAT_MINUTES = 30;
+// The browser marks the call that follows an interactive login (X-Fp-Signin);
+// that is always a sign-in row. An unmarked call is a reload or a new tab, which
+// is recorded only as a device's first appearance in a day, so a token used from
+// somewhere new still shows up even if that client never sends the mark.
+const SIGN_IN_BASELINE_HOURS = 24;
 const COUNTRY = /^[A-Z]{2}$/;
 
 // ── Switch ───────────────────────────────────────────────────────────────────
@@ -70,12 +76,15 @@ export function observationFromRequest(
 ): AccessObservation {
   const address = clientAddress(request);
   const userAgent = request.headers.get("user-agent")?.trim() || null;
-  const country = request.headers.get("x-fp-country")?.trim().toUpperCase() ?? "";
+  const claim = request.headers.get("x-fp-country")?.trim().toUpperCase() ?? "";
   return {
     at: new Date(),
     burst: extra.burst ?? false,
-    country: COUNTRY.test(country) ? country : null,
+    // "XX" is the app saying it could not map the browser's zone: a claim, just an empty one.
+    country: COUNTRY.test(claim) && claim !== "XX" ? claim : null,
+    countryClaimed: claim !== "",
     detail: extra.detail ?? null,
+    interactive: kind === "signin" && request.headers.get("x-fp-signin")?.trim().toLowerCase() === "interactive",
     ipHash: address ? hashValue("ip", address) : null,
     kind,
     oid,
@@ -122,12 +131,14 @@ const SELECT_CONTEXT = `SELECT u.UserID, u.Role, u.AccessProfile,
     CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
                        WHERE e.Oid = @Oid AND e.UserAgentHash = @UserAgentHash
                          AND e.At >= DATEADD(DAY, -90, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS DeviceSeen,
+    CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
+                       WHERE e.Oid = @Oid AND e.IpHash = @IpHash
+                         AND e.At >= DATEADD(DAY, -90, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS NetworkSeen,
     CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e WHERE e.Oid = @Oid) THEN 1 ELSE 0 END AS HasHistory,
     CASE WHEN EXISTS (SELECT 1 FROM dbo.AccessEvents e
                        WHERE e.Oid = @Oid AND e.Kind = 'signin'
                          AND ((e.UserAgentHash = @UserAgentHash) OR (e.UserAgentHash IS NULL AND @UserAgentHash IS NULL))
-                         AND ((e.IpHash = @IpHash) OR (e.IpHash IS NULL AND @IpHash IS NULL))
-                         AND e.At >= DATEADD(MINUTE, -@SignInRepeatMinutes, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS RecentSignIn
+                         AND e.At >= DATEADD(HOUR, -@SignInBaselineHours, SYSUTCDATETIME())) THEN 1 ELSE 0 END AS SignInSeenToday
   FROM (SELECT 1 AS One) AS anchor
   OUTER APPLY (SELECT TOP 1 UserID, Role, AccessProfile FROM dbo.AppUsers
                 WHERE EntraOid = @Oid AND IsActive = 1) AS u`;
@@ -166,10 +177,10 @@ export async function recordAccess(observation: AccessObservation): Promise<{ an
       { name: "Oid", type: TYPES.NVarChar, value: observation.oid },
       { name: "UserAgentHash", type: TYPES.VarChar, value: observation.userAgentHash },
       { name: "IpHash", type: TYPES.VarChar, value: observation.ipHash },
-      { name: "SignInRepeatMinutes", type: TYPES.Int, value: SIGN_IN_REPEAT_MINUTES },
+      { name: "SignInBaselineHours", type: TYPES.Int, value: SIGN_IN_BASELINE_HOURS },
     ]);
     const context = rows[0] ?? {};
-    if (observation.kind === "signin" && context.RecentSignIn === 1) return { anomaly: "none" };
+    if (observation.kind === "signin" && !observation.interactive && context.SignInSeenToday === 1) return { anomaly: "none" };
     const role = (context.Role as string | null | undefined)?.toLowerCase() ?? null;
     const userId = (context.UserID as number | null | undefined) ?? null;
     const profile = parseStoredProfile((context.AccessProfile as string | null | undefined) ?? null, role);
@@ -177,9 +188,11 @@ export async function recordAccess(observation: AccessObservation): Promise<{ an
       at: observation.at,
       burst: observation.burst,
       country: observation.country,
+      countryClaimed: observation.countryClaimed,
       deviceSeen: observation.userAgentHash === null || context.DeviceSeen === 1,
       hasHistory: context.HasHistory === 1,
       kind: observation.kind,
+      networkSeen: observation.ipHash === null || context.NetworkSeen === 1,
       profile,
       role,
     };
@@ -187,6 +200,7 @@ export async function recordAccess(observation: AccessObservation): Promise<{ an
     const anomaly = primaryAnomaly(codes);
     const detail = {
       ...(observation.detail ?? {}),
+      ...(observation.kind === "signin" ? { how: observation.interactive ? "interactive" : "session" } : {}),
       ...(observation.burst ? { burst: true } : {}),
       ...(codes.length > 1 ? { alsoFlagged: codes.slice(1) } : {}),
     };

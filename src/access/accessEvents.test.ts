@@ -44,7 +44,9 @@ function observation(overrides: Partial<AccessObservation> = {}): AccessObservat
     at: DAYTIME,
     burst: false,
     country: "AU",
+    countryClaimed: true,
     detail: null,
+    interactive: false,
     ipHash: "a".repeat(32),
     kind: "request",
     oid: "oid-1",
@@ -55,7 +57,7 @@ function observation(overrides: Partial<AccessObservation> = {}): AccessObservat
 
 function context(row: Record<string, unknown>): void {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-    sql.includes("FROM (SELECT 1 AS One)") ? [{ AccessProfile: null, DeviceSeen: 1, HasHistory: 1, Role: "accounts", UserID: 7, ...row }] : [],
+    sql.includes("FROM (SELECT 1 AS One)") ? [{ AccessProfile: null, DeviceSeen: 1, HasHistory: 1, NetworkSeen: 1, Role: "accounts", UserID: 7, ...row }] : [],
   );
 }
 
@@ -83,6 +85,12 @@ describe("observationFromRequest", () => {
     expect(obs.ipHash).toMatch(/^[0-9a-f]{32}$/);
     expect(obs.userAgentHash).toMatch(/^[0-9a-f]{32}$/);
     expect(JSON.stringify(obs)).not.toMatch(/203\.0\.113\.5|Mozilla/);
+  });
+
+  it("tells an absent claim from the app's XX", () => {
+    expect(observationFromRequest(req({}), "oid-1", "signin")).toMatchObject({ country: null, countryClaimed: false });
+    expect(observationFromRequest(req({ "x-fp-country": "XX" }), "oid-1", "signin")).toMatchObject({ country: null, countryClaimed: true });
+    expect(observationFromRequest(req({ "x-fp-country": "dk" }), "oid-1", "signin")).toMatchObject({ country: "DK", countryClaimed: true });
   });
 
   it("drops a country claim that is not two letters", () => {
@@ -155,6 +163,12 @@ describe("recordAccess", () => {
     context({ AccessProfile: null, Role: null, UserID: null });
     await recordAccess(observation({ country: "US" }));
     expect(ledger.record.mock.calls[0][1].subject).toEqual({ id: "oid-1", type: "app_user" });
+  });
+
+  it("flags a known person's first use from a new network, whatever the browser claims", async () => {
+    context({ NetworkSeen: 0 });
+    await expect(recordAccess(observation({ country: "AU" }))).resolves.toEqual({ anomaly: "new_network" });
+    expect(paramsOf(insertCall() as unknown[]).Anomaly).toBe("new_network");
   });
 
   it("treats the first device anyone uses as a baseline", async () => {
@@ -239,19 +253,32 @@ describe("the request-path hooks", () => {
     expect(kinds.sort()).toEqual(["money", "signin", "signin"]);
   });
 
-  it("keeps one sign-in row per person, device and network within half an hour", async () => {
+  it("records an interactive sign-in every time, and a reload only as a device's first of the day", async () => {
     _setAccessLoggingForTests(true);
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-      String(sql).includes("AS RecentSignIn") ? [{ DeviceSeen: 1, HasHistory: 1, RecentSignIn: 1, Role: "admin", UserID: 1 }] : [],
+      String(sql).includes("AS SignInSeenToday") ? [{ DeviceSeen: 1, HasHistory: 1, NetworkSeen: 1, Role: "admin", SignInSeenToday: 1, UserID: 1 }] : [],
     );
     noteSignIn(req({}), "oid-1");
-    noteMoneyAction(req({}), "oid-1", { outcome: "allowed", route: "markPaymentPaid" });
+    noteSignIn(req({ "x-fp-signin": "interactive" }), "oid-1");
+    noteSignIn(req({ "x-fp-signin": "interactive" }), "oid-1");
     await flush();
     await flush();
-    const kinds = db.executeQuery.mock.calls
-      .filter((c) => String(c[1]).includes("INSERT INTO dbo.AccessEvents"))
-      .map((c) => paramsOf(c).Kind);
-    expect(kinds).toEqual(["money"]);
+    const inserts = db.executeQuery.mock.calls.filter((c) => String(c[1]).includes("INSERT INTO dbo.AccessEvents"));
+    expect(inserts).toHaveLength(2);
+    expect(inserts.map((c) => JSON.parse(String(paramsOf(c).Detail)).how)).toEqual(["interactive", "interactive"]);
+  });
+
+  it("records a reload as a sign-in when this device has not been seen today", async () => {
+    _setAccessLoggingForTests(true);
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      String(sql).includes("AS SignInSeenToday") ? [{ DeviceSeen: 1, HasHistory: 1, NetworkSeen: 1, Role: "admin", SignInSeenToday: 0, UserID: 1 }] : [],
+    );
+    noteSignIn(req({}), "oid-1");
+    await flush();
+    await flush();
+    const inserts = db.executeQuery.mock.calls.filter((c) => String(c[1]).includes("INSERT INTO dbo.AccessEvents"));
+    expect(inserts).toHaveLength(1);
+    expect(JSON.parse(String(paramsOf(inserts[0]).Detail))).toEqual({ how: "session" });
   });
 
   it("logs and swallows a database failure", async () => {

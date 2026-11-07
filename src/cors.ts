@@ -54,7 +54,9 @@ export function corsHeaders(origin: string): Record<string, string> {
     // X-Fp-Country: the browser's country hint for the access log (S10). The
     // frontend sends it only after registerSelf advertises accessHints, so a
     // frontend deployed ahead of this backend never fails a preflight.
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Token, X-Fp-Country, X-Show-Test-Data" +
+    // X-Fp-Signin: the browser's "this follows an interactive login" mark on
+    // registerSelf, so the access log tells a sign-in from a reload.
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-App-Token, X-Fp-Country, X-Fp-Signin, X-Show-Test-Data" +
       (process.env.DEV_ROLE_OVERRIDE_ENABLED === "true" ? ", X-Dev-Roles" : ""),
     // Response headers the page may read. Retry-After: the sign-in screen waits
     // at least that long after a 429. Content-Disposition: the decisions export

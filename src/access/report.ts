@@ -40,6 +40,10 @@ function what(row: Row): string {
       return row.Kind === "money" ? `a money action out of hours${hour}` : `used Floorplan out of hours${hour}`;
     case "new_device":
       return "signed in from a new device or browser";
+    case "new_network":
+      return "used Floorplan from a network address not seen for them in 90 days";
+    case "no_country":
+      return "signed in without the app's country claim (the client may not be Floorplan)";
     case "burst":
       return BURST_DESCRIPTION;
     default:

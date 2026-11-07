@@ -77,5 +77,6 @@ describe("registerSelf", () => {
 describe("CORS", () => {
   it("allows the country hint header", () => {
     expect(corsHeaders("https://floorplan.randazzo.properties")["Access-Control-Allow-Headers"]).toContain("X-Fp-Country");
+    expect(corsHeaders("https://floorplan.randazzo.properties")["Access-Control-Allow-Headers"]).toContain("X-Fp-Signin");
   });
 });

@@ -234,7 +234,7 @@ describe("dynamic SQL in guarded migrations", () => {
 // copies the table it changes to a dated backup before its first DELETE or
 // UPDATE (creating the backup only once, so a re-run keeps the first copy),
 // and runs in one transaction that rolls back and rethrows.
-const APPROVED_DESTRUCTIVE = ["121_approval_limits_normalise.sql"];
+const APPROVED_DESTRUCTIVE = ["121_approval_limits_normalise.sql", "181_access_profile_connor_denmark.sql"];
 
 describe.each(APPROVED_DESTRUCTIVE)("approved destructive migration %s", (file) => {
   const raw = read(file);

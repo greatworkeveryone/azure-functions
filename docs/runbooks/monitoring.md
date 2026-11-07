@@ -21,6 +21,8 @@ AU, call-outs for facilities roles) and gets one of:
 |------------------|----------------------------------------------------------------------------------------------|
 | `new_country`    | the browser's country hint (`x-fp-country`) is not in the profile's countries                 |
 | `outside_window` | a money action, or any request by a non-director/non-admin without call-outs, outside the window |
+| `no_country`     | a sign-in with no country hint at all from someone the log already knows: the app always sends one, so the client may not be the app (migration 180) |
+| `new_network`    | address hash not seen for that person in 90 days (the first network ever is a baseline); server-side, so it holds when the country hint is missing or set to match (migration 180) |
 | `new_device`     | user-agent hash not seen for that person in 90 days (the first device ever is a baseline)     |
 | `burst`          | more than 300 requests in 5 minutes from one person (per instance)                            |
 
