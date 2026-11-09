@@ -43,6 +43,8 @@ describe("getUsageFinance: who may call it", () => {
     roles = [role];
     expect((await getUsageFinance(get(), ctx)).status).toBe(403);
     expect(createRequestConnection).not.toHaveBeenCalled();
+    expect(loadUsageFinance).not.toHaveBeenCalled();
+    expect(roleOfUser).not.toHaveBeenCalled();
   });
 
   it.each([
