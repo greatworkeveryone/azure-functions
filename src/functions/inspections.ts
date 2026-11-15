@@ -33,6 +33,7 @@ import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
 import { showTestParam, testFlagForCreate } from "../test-data";
 import { resolveLedgerActor } from "../ledger/actor";
+import { record } from "../ledger";
 import type { LedgerActor } from "../ledger";
 import {
   levelRemoval,
@@ -155,12 +156,16 @@ interface InspectionApiLevel {
 }
 
 interface InspectionApi {
+  archivedAt?: string;
+  archivedBy?: UserRef;
   buildingId: number;
   buildingName: string;
   completedAt?: string;
   completedBy?: UserRef;
   createdAt: string;
   createdBy: UserRef;
+  /** Set once the inspection has ever been completed (survives a reopen). */
+  firstCompletedAt?: string;
   id: number;
   lastModified: string;
   levels: InspectionApiLevel[];
@@ -196,7 +201,8 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
     `SELECT i.Id, i.BuildingId, b.BuildingName, i.Title, i.Status, i.Revision,
             i.CreatedAt, i.CreatedById, i.CreatedByName,
             i.LastModifiedAt, i.CompletedAt, i.CompletedById, i.CompletedByName,
-            i.MergedIntoId, i.IsTest
+            i.MergedIntoId, i.IsTest,
+            i.ArchivedAt, i.ArchivedById, i.ArchivedByName, i.FirstCompletedAt
      FROM dbo.Inspections i
      JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
      WHERE i.Id = @Id`,
@@ -346,6 +352,14 @@ async function loadInspection(connection: any, id: number): Promise<InspectionAp
       name: (i.CompletedByName as string) ?? "",
     };
   }
+  if (i.FirstCompletedAt) out.firstCompletedAt = toIso(i.FirstCompletedAt);
+  if (i.ArchivedAt) {
+    out.archivedAt = toIso(i.ArchivedAt);
+    out.archivedBy = {
+      id: (i.ArchivedById as string) ?? "",
+      name: (i.ArchivedByName as string) ?? "",
+    };
+  }
   if (i.MergedIntoId) out.mergedIntoId = i.MergedIntoId as number;
   if (i.IsTest === true || i.IsTest === 1) out.isTest = true;
   if (mergeSourceRows.length > 0) {
@@ -415,7 +429,7 @@ export async function getInspections(
               i.MergedIntoId, i.IsTest
        FROM dbo.Inspections i
        JOIN dbo.Buildings b ON b.BuildingID = i.BuildingId
-       WHERE (i.IsTest = 0 OR @ShowTest = 1)
+       WHERE (i.IsTest = 0 OR @ShowTest = 1) AND i.ArchivedAt IS NULL
        ORDER BY i.Id DESC`,
       [await showTestParam(request)],
     );
@@ -543,7 +557,7 @@ export async function getInspections(
 
 // ── GET /api/getInspection?id=N ──────────────────────────────────────────────
 
-async function getInspection(
+export async function getInspection(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -688,12 +702,17 @@ export async function applyInspectionOps(
       // (closes a TOCTOU window under concurrent writers).
       const rev = await executeQuery(
         connection,
-        `SELECT Revision, Status FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        `SELECT Revision, Status, ArchivedAt FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
         [{ name: "Id", type: TYPES.Int, value: inspectionId }],
       );
       if (rev.length === 0) {
         await rollbackTransaction(connection).catch(() => {});
         return { status: 404, jsonBody: { error: "Inspection not found" } };
+      }
+      // An archived inspection is kept for records: no edits by id (B2).
+      if (rev[0].ArchivedAt) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 409, jsonBody: { error: "This inspection has been archived." } };
       }
       // Completed/merged inspections are read-only — reject the whole batch.
       if (rev[0].Status !== "draft") {
@@ -1380,10 +1399,11 @@ export async function completeInspection(
 
     const rows = await executeQuery(
       connection,
-      `SELECT Status FROM dbo.Inspections WHERE Id = @Id`,
+      `SELECT Status, ArchivedAt FROM dbo.Inspections WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: inspectionId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    if (rows[0].ArchivedAt) return { status: 409, jsonBody: { error: "This inspection has been archived." } };
     const status = rows[0].Status as string;
     if (status === "merged") {
       return { status: 400, jsonBody: { error: "Merged inspections cannot be completed" } };
@@ -1419,7 +1439,7 @@ export async function completeInspection(
 
 // ── POST /api/revertInspection ───────────────────────────────────────────────
 
-async function revertInspection(
+export async function revertInspection(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
@@ -1447,10 +1467,11 @@ async function revertInspection(
     // own-row gate in deleteInspection).
     const rows = await executeQuery(
       connection,
-      `SELECT CreatedById FROM dbo.Inspections WHERE Id = @Id`,
+      `SELECT CreatedById, ArchivedAt FROM dbo.Inspections WHERE Id = @Id`,
       [{ name: "Id", type: TYPES.Int, value: inspectionId }],
     );
     if (rows.length === 0) return { status: 404, jsonBody: { error: "Inspection not found" } };
+    if (rows[0].ArchivedAt) return { status: 409, jsonBody: { error: "This inspection has been archived." } };
     const roles = await rolesForRequest(request);
     const canRevertAny =
       roles.includes(AppRole.ADMIN) ||
@@ -1460,18 +1481,56 @@ async function revertInspection(
       return forbiddenResponse("You can only reopen inspections you created.");
     }
 
-    await executeQuery(
-      connection,
-      `UPDATE dbo.Inspections
-       SET Status = 'draft',
-           CompletedAt = NULL,
-           CompletedById = NULL,
-           CompletedByName = NULL,
-           LastModifiedAt = SYSUTCDATETIME(),
-           Revision = Revision + 1
-       WHERE Id = @Id AND Status = 'complete'`,
-      [{ name: "Id", type: TYPES.Int, value: inspectionId }],
-    );
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+
+    // One transaction: the stamp, the reopen and its ledger row land together or not at all.
+    await beginTransaction(connection);
+    try {
+      const locked = await executeQuery(
+        connection,
+        `SELECT BuildingId, Status, CompletedAt, CompletedById, CompletedByName, FirstCompletedAt, ArchivedAt
+         FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      if (locked[0]?.ArchivedAt) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 409, jsonBody: { error: "This inspection has been archived." } };
+      }
+      // FirstCompletedAt is stamped before CompletedAt is cleared: a reopened draft must still
+      // show it was once completed, so deleteInspection archives it instead of erasing it.
+      await executeQuery(
+        connection,
+        `UPDATE dbo.Inspections
+         SET FirstCompletedAt = COALESCE(FirstCompletedAt, CompletedAt),
+             Status = 'draft',
+             CompletedAt = NULL,
+             CompletedById = NULL,
+             CompletedByName = NULL,
+             LastModifiedAt = SYSUTCDATETIME(),
+             Revision = Revision + 1
+         WHERE Id = @Id AND Status = 'complete'`,
+        [{ name: "Id", type: TYPES.Int, value: inspectionId }],
+      );
+      if (locked[0]?.Status === "complete") {
+        await record(connection, {
+          action: "inspection.reopen",
+          actor,
+          before: {
+            completedAt: locked[0].CompletedAt ? new Date(locked[0].CompletedAt).toISOString() : null,
+            completedById: (locked[0].CompletedById as string | null) ?? null,
+            completedByName: (locked[0].CompletedByName as string | null) ?? null,
+            status: "complete",
+          },
+          buildingId: (locked[0].BuildingId as number | null) ?? null,
+          subject: { id: inspectionId, type: "inspection" },
+        });
+      }
+      await commitTransaction(connection);
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
     const inspection = await loadInspection(connection, inspectionId);
     return { status: 200, jsonBody: { inspection } };
   } catch (error: any) {
@@ -1539,7 +1598,9 @@ export async function uploadInspectionAttachment(
 
 // ── POST /api/deleteInspection ───────────────────────────────────────────────
 // Body: { InspectionId: number }
-// Only draft inspections can be deleted. Blobs are orphaned (no storage cleanup here).
+// Only draft inspections can be deleted. A draft that was ever completed, holds points or has
+// raised jobs is archived instead (B2); only an untouched empty draft is hard-deleted.
+// Blobs are never removed here.
 
 export async function deleteInspection(
   request: HttpRequest,
@@ -1586,50 +1647,122 @@ export async function deleteInspection(
       return forbiddenResponse("You can only delete inspections you created.");
     }
 
-    // Delete non-cascading child rows first, then the root (which cascades to
-    // levels → rooms → points → attachments). All four run in one transaction
-    // so a mid-sequence failure can't leave a half-deleted inspection behind.
+    const actor = await resolveLedgerActor(request, connection);
+    if (!actor) return unauthorizedResponse();
+    const idParam = { name: "Id", type: TYPES.Int, value: InspectionId };
+
+    // Everything below runs in one transaction on a row we hold a range lock on, so a
+    // concurrent complete / raise-jobs / edit cannot change the answer between the read
+    // and the write. Anything that was ever completed, holds points or raised jobs is
+    // archived (rule 1: business data is archived, not deleted); only an untouched empty
+    // draft is hard-deleted.
     await beginTransaction(connection);
+    let archived = false;
     try {
-      await executeQuery(
+      const locked = await executeQuery(
         connection,
-        `DELETE FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
+        `SELECT BuildingId, Status, Title, CompletedAt, FirstCompletedAt, ArchivedAt,
+                (SELECT COUNT(*) FROM dbo.InspectionLevels l
+                   JOIN dbo.InspectionRooms r ON r.LevelId = l.Id
+                   JOIN dbo.InspectionPoints p ON p.RoomId = r.Id
+                  WHERE l.InspectionId = @Id) AS Points,
+                (SELECT COUNT(*) FROM dbo.InspectionLevels WHERE InspectionId = @Id) AS Levels,
+                (SELECT COUNT(*) FROM dbo.InspectionOperationLog WHERE InspectionId = @Id) AS OperationLogs,
+                (SELECT COUNT(*) FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id) AS MergeTargets,
+                (SELECT COUNT(*) FROM dbo.InspectionRaisedJobs rj WHERE rj.InspectionId = @Id) AS RaisedJobs,
+                (SELECT COUNT(*) FROM dbo.Jobs WHERE SourceInspectionId = @Id) AS SourceJobs
+         FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id`,
+        [idParam],
       );
-      await executeQuery(
-        connection,
-        `DELETE FROM dbo.InspectionOperationLog WHERE InspectionId = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-      );
-      await executeQuery(
-        connection,
-        `DELETE FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id OR SourceInspectionId = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-      );
-      // If this row is a merge target, the source husks still reference it via
-      // Inspections.MergedIntoId (FK, m034) and would make the root DELETE fail
-      // with an FK violation. Detach them and revert them to draft so they
-      // render as normal drafts and become individually deletable again.
-      await executeQuery(
-        connection,
-        `UPDATE dbo.Inspections
-         SET MergedIntoId = NULL, Status = 'draft', LastModifiedAt = SYSUTCDATETIME()
-         WHERE MergedIntoId = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-      );
-      await executeQuery(
-        connection,
-        `DELETE FROM dbo.Inspections WHERE Id = @Id`,
-        [{ name: "Id", type: TYPES.Int, value: InspectionId }],
-      );
+      if (locked.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Inspection not found" } };
+      }
+      const row = locked[0];
+      if (row.Status !== "draft") {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 400, jsonBody: { error: "Only draft inspections can be deleted" } };
+      }
+      if (row.ArchivedAt) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 200, jsonBody: { archived: true } };
+      }
+
+      // Anything that shows the inspection was worked on or relied on keeps it. A reopened
+      // inspection from before m181 has no FirstCompletedAt, but its levels, operation log or
+      // raised jobs still give it away; only a truly untouched empty draft is hard-deleted.
+      const n = (v: unknown) => Number(v) || 0;
+      const completedBefore = !!row.FirstCompletedAt || !!row.CompletedAt;
+      const relied =
+        completedBefore ||
+        n(row.Points) > 0 ||
+        n(row.Levels) > 0 ||
+        n(row.OperationLogs) > 0 ||
+        n(row.MergeTargets) > 0 ||
+        n(row.RaisedJobs) > 0 ||
+        n(row.SourceJobs) > 0;
+      const snapshot = {
+        completedBefore,
+        levels: n(row.Levels),
+        operationLogs: n(row.OperationLogs),
+        points: n(row.Points),
+        raisedJobs: n(row.RaisedJobs),
+        sourceJobs: n(row.SourceJobs),
+        title: (row.Title as string | null) ?? null,
+      };
+      const subject = { id: InspectionId as number, type: "inspection" as const };
+      const buildingId = (row.BuildingId as number | null) ?? null;
+
+      if (relied) {
+        archived = true;
+        await executeQuery(
+          connection,
+          `UPDATE dbo.Inspections
+           SET ArchivedAt = SYSUTCDATETIME(),
+               ArchivedById = @ArchivedById,
+               ArchivedByName = @ArchivedByName,
+               LastModifiedAt = SYSUTCDATETIME(),
+               Revision = Revision + 1
+           WHERE Id = @Id`,
+          [
+            idParam,
+            { name: "ArchivedById", type: TYPES.NVarChar, value: identity.oid },
+            { name: "ArchivedByName", type: TYPES.NVarChar, value: identity.name },
+          ],
+        );
+        await record(connection, { action: "inspection.archive", actor, after: snapshot, buildingId, subject });
+      } else {
+        // An empty, never-completed draft: no points, no raised jobs. Delete non-cascading
+        // child rows first, then the root (which cascades to levels and rooms).
+        await executeQuery(connection, `DELETE FROM dbo.InspectionRaisedJobs WHERE InspectionId = @Id`, [idParam]);
+        await executeQuery(connection, `DELETE FROM dbo.InspectionOperationLog WHERE InspectionId = @Id`, [idParam]);
+        await executeQuery(
+          connection,
+          `DELETE FROM dbo.InspectionMergeSources WHERE MergedInspectionId = @Id OR SourceInspectionId = @Id`,
+          [idParam],
+        );
+        // If this row is a merge target, the source husks still reference it via
+        // Inspections.MergedIntoId (FK, m034) and would make the root DELETE fail
+        // with an FK violation. Detach them and revert them to draft so they
+        // render as normal drafts and become individually deletable again.
+        await executeQuery(
+          connection,
+          `UPDATE dbo.Inspections
+           SET MergedIntoId = NULL, Status = 'draft', LastModifiedAt = SYSUTCDATETIME()
+           WHERE MergedIntoId = @Id`,
+          [idParam],
+        );
+        await executeQuery(connection, `DELETE FROM dbo.Inspections WHERE Id = @Id`, [idParam]);
+        await record(connection, { action: "inspection.delete", actor, before: snapshot, buildingId, subject });
+      }
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
       throw err;
     }
 
-    context.log(`deleteInspection: deleted inspection ${InspectionId}`);
-    return { status: 200, jsonBody: { deleted: true } };
+    context.log(`deleteInspection: ${archived ? "archived" : "deleted"} inspection ${InspectionId}`);
+    return { status: 200, jsonBody: archived ? { archived: true } : { archived: false, deleted: true } };
   } catch (error: any) {
     context.error("deleteInspection failed:", error.message);
     return errorResponse("Failed to delete inspection", error.message);
@@ -1678,12 +1811,16 @@ export async function mergeInspections(
       // between this check and the merge below.
       const sourceRows = await executeQuery(
         connection,
-        `SELECT Id, BuildingId, Status, CreatedById FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id IN (${placeholders})`,
+        `SELECT Id, BuildingId, Status, CreatedById, ArchivedAt FROM dbo.Inspections WITH (UPDLOCK, HOLDLOCK) WHERE Id IN (${placeholders})`,
         params,
       );
       if (sourceRows.length !== sourceIds.length) {
         await rollbackTransaction(connection).catch(() => {});
         return { status: 404, jsonBody: { error: "One or more source inspections not found" } };
+      }
+      if (sourceRows.some((r) => r.ArchivedAt)) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 409, jsonBody: { error: "This inspection has been archived." } };
       }
       // Ownership gate: base editors may only merge drafts they all created;
       // admin / director / facilities_approval may merge any (mirrors the

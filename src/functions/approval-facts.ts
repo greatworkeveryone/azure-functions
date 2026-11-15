@@ -9,7 +9,7 @@
 // Changing a fact is a decision (PLAN §3.12): the value and its ledger row
 // (approval_fact.change, an exception) commit together. Re-saving the value a
 // fact already has changes nothing and writes no row. A money action (S11).
-// director_approval_threshold is director/admin only; margin and cap are CFO only.
+// director_approval_threshold is director only; margin and cap are CFO only.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
@@ -32,8 +32,9 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
 
   const userRoles = await rolesForRequest(request);
   const isCfo = userRoles.includes(AppRole.CFO);
-  const isDirector = userRoles.includes(AppRole.DIRECTOR) || userRoles.includes(AppRole.ADMIN);
-  if (!isCfo && !isDirector) {
+  // Admin is a technical role and approves nothing real: only DIRECTOR sets the threshold.
+  const isDirector = userRoles.includes(AppRole.DIRECTOR);
+  if (!isCfo && !isDirector && !userRoles.includes(AppRole.ADMIN)) {
     return { status: 403, jsonBody: { error: "CFO role required" } };
   }
   // Money action (S11): allowed network, fresh sign-in, MFA. src/money-gated-routes.ts

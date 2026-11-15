@@ -29,7 +29,9 @@ export async function getCorrespondence(request: HttpRequest, context: Invocatio
     const job = await readJob(connection, id);
     if (!job) return notFound("That send doesn't exist");
     if (job.createdByOid !== actor.oid && !isSendManager(actor.roles) && !actor.roles.includes(AppRole.ADMIN)) return forbidden("You can only open your own sends");
-    const [recipients, events] = await Promise.all([readRecipients(connection, id), readEvents(connection, id)]);
+    // Sequential: tedious runs one request per connection (EINVALIDSTATE otherwise).
+    const recipients = await readRecipients(connection, id);
+    const events = await readEvents(connection, id);
     return {
       headers: noStore,
       jsonBody: {

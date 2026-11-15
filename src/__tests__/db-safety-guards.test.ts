@@ -78,9 +78,10 @@ describe("the migration scan, on crafted text", () => {
 const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: number; deleteOther?: number }> = {
   "src/blob-storage.ts": { deleteBlob: 1 },
   "src/functions/attachments.ts": { deleteBlob: 1, deleteFrom: 2 },
-  // deleteOther: the four alias-form deletes (removeRoom, removePoint,
-  // removeAttachment, the linkRooms fold), invisible to the FROM-only count
-  // until D5. Grandfathered for the inspection archive package (D6), not reviewed safe.
+  // REVIEWED (B2, 31 Oct 2026): deleteInspection hard-deletes only an untouched empty draft (never completed, no points,
+  // no raised jobs, re-read under UPDLOCK/HOLDLOCK) and writes inspection.delete; anything else is archived (m181) and ledgered.
+  // deleteOther: the four alias-form deletes (removeRoom, removePoint, removeAttachment, the linkRooms fold), draft-only
+  // and ledgered before removal (inspection.*_removed).
   // No deleteBlob: point, room, level and photo removal all write their ledger row first
   // and leave the files in storage (UX fix round 2, B2).
   "src/functions/inspections.ts": { deleteFrom: 6, deleteOther: 4 },

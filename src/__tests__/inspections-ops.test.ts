@@ -388,7 +388,7 @@ describe("opRejectionReason (F12)", () => {
 
 describe("completeInspection (F11)", () => {
   it("returns 404 for a nonexistent inspection", async () => {
-    mockDb([{ match: "SELECT Status FROM dbo.Inspections", rows: [] }]);
+    mockDb([{ match: "SELECT Status, ArchivedAt FROM dbo.Inspections", rows: [] }]);
 
     const res = await completeInspection(
       makeRequest({ headers: authHeaders("facilities"), body: { InspectionId: 7 } }),
@@ -399,7 +399,7 @@ describe("completeInspection (F11)", () => {
   });
 
   it("returns 400 for a merged inspection", async () => {
-    mockDb([{ match: "SELECT Status FROM dbo.Inspections", rows: [{ Status: "merged" }] }]);
+    mockDb([{ match: "SELECT Status, ArchivedAt FROM dbo.Inspections", rows: [{ Status: "merged" }] }]);
 
     const res = await completeInspection(
       makeRequest({ headers: authHeaders("facilities"), body: { InspectionId: 7 } }),
@@ -412,7 +412,7 @@ describe("completeInspection (F11)", () => {
 
   it("is idempotent for an already-complete inspection", async () => {
     mockDb([
-      { match: "SELECT Status FROM dbo.Inspections", rows: [{ Status: "complete" }] },
+      { match: "SELECT Status, ArchivedAt FROM dbo.Inspections", rows: [{ Status: "complete" }] },
       { match: "JOIN dbo.Buildings b", rows: [inspectionRow({ Status: "complete", CompletedAt: new Date(), CompletedById: CALLER_OID, CompletedByName: "Test User" })] },
     ]);
 
@@ -428,7 +428,7 @@ describe("completeInspection (F11)", () => {
 
   it("completes a draft inspection", async () => {
     mockDb([
-      { match: "SELECT Status FROM dbo.Inspections", rows: [{ Status: "draft" }] },
+      { match: "SELECT Status, ArchivedAt FROM dbo.Inspections", rows: [{ Status: "draft" }] },
       { match: "JOIN dbo.Buildings b", rows: [inspectionRow({ Status: "complete" })] },
     ]);
 
@@ -445,12 +445,18 @@ describe("completeInspection (F11)", () => {
 // ── F6 + F5: deleteInspection role gate + merge-target unblocking ────────────
 
 describe("deleteInspection gate (F6) and merge-target handling (F5)", () => {
+  // The first read gates by role / own row; the locked re-read (B2) decides archive vs delete.
+  // An untouched empty draft: never completed, no points, no raised jobs, so it is hard-deleted.
   function deletableRow(createdById: string): { match: string; rows: Row[] } {
     return { match: "SELECT Id, Status, CreatedById FROM dbo.Inspections", rows: [{ Id: 7, Status: "draft", CreatedById: createdById }] };
   }
+  const LOCKED_EMPTY_DRAFT = {
+    match: "WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id",
+    rows: [{ BuildingId: 10, Status: "draft", CompletedAt: null, FirstCompletedAt: null, ArchivedAt: null, Points: 0, RaisedJobs: 0 }],
+  };
 
   it("lets a DIRECTOR delete an inspection they did not create", async () => {
-    mockDb([deletableRow("someone-else")]);
+    mockDb([deletableRow("someone-else"), LOCKED_EMPTY_DRAFT]);
 
     const res = await deleteInspection(
       makeRequest({ headers: authHeaders("director"), body: { InspectionId: 7 } }),
@@ -458,7 +464,7 @@ describe("deleteInspection gate (F6) and merge-target handling (F5)", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ deleted: true });
+    expect(res.jsonBody).toEqual({ archived: false, deleted: true });
     expect(db.commitTransaction).toHaveBeenCalled();
   });
 
@@ -475,7 +481,7 @@ describe("deleteInspection gate (F6) and merge-target handling (F5)", () => {
   });
 
   it("lets a base FACILITIES user delete their own inspection", async () => {
-    mockDb([deletableRow(CALLER_OID)]);
+    mockDb([deletableRow(CALLER_OID), LOCKED_EMPTY_DRAFT]);
 
     const res = await deleteInspection(
       makeRequest({ headers: authHeaders("facilities"), body: { InspectionId: 7 } }),
@@ -486,7 +492,7 @@ describe("deleteInspection gate (F6) and merge-target handling (F5)", () => {
   });
 
   it("detaches merged husks (MergedIntoId → NULL, back to draft) before the root delete", async () => {
-    mockDb([deletableRow(CALLER_OID)]);
+    mockDb([deletableRow(CALLER_OID), LOCKED_EMPTY_DRAFT]);
 
     await deleteInspection(
       makeRequest({ headers: authHeaders("facilities"), body: { InspectionId: 7 } }),
