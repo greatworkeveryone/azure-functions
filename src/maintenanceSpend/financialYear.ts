@@ -49,8 +49,15 @@ export function parseFinancialYear(raw: string | null | undefined, today: string
   return financialYear(start);
 }
 
-/** Whether an instant falls in the year, read on the Darwin calendar. */
-export function isInFinancialYear(instant: Date, year: FinancialYear): boolean {
+/** Any Darwin-calendar span, first to last day inclusive: a financial year or a calendar month. */
+export interface Period {
+  from: string;
+  label: string;
+  to: string;
+}
+
+/** Whether an instant falls in the period (a financial year or a month), read on the Darwin calendar. */
+export function isInFinancialYear(instant: Date, year: Pick<Period, "from" | "to">): boolean {
   const date = todayInDarwin(instant);
   return date >= year.from && date <= year.to;
 }
@@ -61,6 +68,6 @@ export function isInFinancialYear(instant: Date, year: FinancialYear): boolean {
  * time, by isInFinancialYear, so a read can never leave out an invoice that
  * belongs (Darwin midnight is 14:30 UTC the day before).
  */
-export function queryWindow(year: FinancialYear): { from: Date; to: Date } {
+export function queryWindow(year: Pick<Period, "from" | "to">): { from: Date; to: Date } {
   return { from: new Date(`${addDaysIso(year.from, -1)}T00:00:00Z`), to: new Date(`${addDaysIso(year.to, 2)}T00:00:00Z`) };
 }

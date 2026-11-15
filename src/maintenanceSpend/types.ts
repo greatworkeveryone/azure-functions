@@ -35,6 +35,8 @@ export interface MaintenanceSpendResponse {
   };
   financialYear: { from: string; label: string; to: string };
   generatedAt: string;
+  /** Only on a ?month= request: the Darwin calendar month every figure covers (financialYear is then just the year it falls in). */
+  month?: { from: string; label: string; to: string };
   portfolio: MaintenanceSpendTotals & { buildingCount: number };
   /** Up to five, by spend across the buildings in scope. */
   topTrades: MaintenanceSpendTrade[];

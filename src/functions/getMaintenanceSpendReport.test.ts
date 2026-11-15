@@ -128,6 +128,54 @@ describe("parameters", () => {
     },
   );
 
+  it.each([["?month=2026-13"], ["?month=2026-1"], ["?month=1999-12"], ["?month=2999-01"], ["?month=nov"]])(
+    "returns 400 for a bad month (%s)",
+    async (qs) => {
+      const r = await getMaintenanceSpendReport(request(qs), ctx);
+      expect(r.status).toBe(400);
+      expect(body(r).error).toEqual(expect.stringContaining("month"));
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reports a calendar month: same shape plus month, with the year it falls in", async () => {
+    const r = await getMaintenanceSpendReport(request("?month=2026-06&buildingId=all"), ctx);
+    expect(r.status).toBe(200);
+    expect(body(r).month).toEqual({ from: "2026-06-01", label: "2026-06", to: "2026-06-30" });
+    expect(body(r).financialYear.label).toBe("2025-26");
+    const invoiceCall = query.mock.calls.find((c) => /FROM dbo\.JobInvoices/.test(c[1]))!;
+    expect(param(invoiceCall, "From")).toEqual(new Date("2026-05-31T00:00:00Z"));
+    expect(param(invoiceCall, "To")).toEqual(new Date("2026-07-02T00:00:00Z"));
+    expect(param(invoiceCall, "BuildingId")).toBeNull();
+  });
+
+  it("a month at the financial year boundary counts only that month's invoices", async () => {
+    seed(BUILDINGS, [
+      row({ JobID: 1, JobInvoiceID: 1, ReceivedAt: new Date("2026-06-29T20:00:00Z") }), // 30 Jun 05:30 Darwin
+      row({ JobID: 2, JobInvoiceID: 2, ReceivedAt: new Date("2026-06-30T15:00:00Z"), Amount: 220 }), // 1 Jul 00:30 Darwin
+    ]);
+    const june = body(await getMaintenanceSpendReport(request("?month=2026-06"), ctx));
+    const july = body(await getMaintenanceSpendReport(request("?month=2026-07"), ctx));
+    expect(june.portfolio.spend).toBe(100);
+    expect(july.portfolio.spend).toBe(200);
+    expect(july.financialYear.label).toBe("2026-27");
+  });
+
+  it("a month request for one building passes its id, and a missing building is 404", async () => {
+    const r = await getMaintenanceSpendReport(request("?month=2026-11&buildingId=3"), ctx);
+    expect(r.status).toBe(200);
+    for (const call of query.mock.calls) expect(param(call, "BuildingId")).toBe(3);
+    seed([], []);
+    expect((await getMaintenanceSpendReport(request("?month=2026-11&buildingId=3"), ctx)).status).toBe(404);
+  });
+
+  it("a month request keeps the role gate and a financial-year request carries no month field", async () => {
+    roles = [AppRole.ACCOUNTS];
+    expect((await getMaintenanceSpendReport(request("?month=2026-11"), ctx)).status).toBe(403);
+    roles = [AppRole.CFO];
+    expect(body(await getMaintenanceSpendReport(request("?financialYear=2025-26"), ctx))).not.toHaveProperty("month");
+  });
+
   it("defaults to this financial year and all buildings", async () => {
     const r = await getMaintenanceSpendReport(request(), ctx);
     expect(r.status).toBe(200);

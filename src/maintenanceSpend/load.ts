@@ -5,7 +5,7 @@
 
 import { TYPES, type Connection } from "tedious";
 import { executeQuery, type SqlParam } from "../db";
-import { queryWindow, type FinancialYear } from "./financialYear";
+import { queryWindow, type Period } from "./financialYear";
 import type { MaintenanceSpendData } from "./build";
 import type { MaintenanceSpendScope } from "./types";
 
@@ -42,7 +42,7 @@ const INVOICES_SQL = `SELECT i.JobInvoiceID, i.JobID, i.Direction, i.Amount, i.R
 export async function loadMaintenanceSpendData(
   connection: Connection,
   scope: MaintenanceSpendScope,
-  year: FinancialYear,
+  year: Pick<Period, "from" | "to">,
   showTest: boolean,
 ): Promise<MaintenanceSpendData> {
   const window = queryWindow(year);

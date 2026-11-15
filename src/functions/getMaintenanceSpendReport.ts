@@ -6,7 +6,9 @@
 // buildings only (residences never appear). Read-only. The CFO, directors, admin
 // and facilities managers (ACTION_ROLES.viewOperationsReports). Test records are
 // left out unless an admin has Show test data on. Both parameters are optional:
-// this financial year and all commercial buildings.
+// this financial year and all commercial buildings. ?month=YYYY-MM (Darwin calendar
+// month, first to last day) reports that month instead, same shape plus a "month"
+// field; it takes precedence over financialYear.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import type { Connection } from "tedious";
@@ -16,13 +18,14 @@ import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import { showTestParam } from "../test-data";
 import { buildMaintenanceSpend } from "../maintenanceSpend/build";
-import { parseFinancialYear, type FinancialYear } from "../maintenanceSpend/financialYear";
+import { financialYearOf, parseFinancialYear, type FinancialYear, type Period } from "../maintenanceSpend/financialYear";
+import { parseMonth } from "../maintenanceSpend/month";
 import { loadMaintenanceSpendData } from "../maintenanceSpend/load";
 import type { MaintenanceSpendScope } from "../maintenanceSpend/types";
 
 const badRequest = (error: string): HttpResponseInit => ({ status: 400, jsonBody: { error } });
 
-type Params = { financialYear: FinancialYear; scope: MaintenanceSpendScope } | { error: string };
+type Params = { financialYear: FinancialYear; month?: Period; scope: MaintenanceSpendScope } | { error: string };
 
 /** buildingId: "all" (the default) or a whole number (manual buildings have negative ids); financialYear: "2025-26". */
 export function readParams(request: HttpRequest, today: string): Params {
@@ -34,6 +37,13 @@ export function readParams(request: HttpRequest, today: string): Params {
       return { error: "buildingId must be a building id or all" };
     }
     scope = { buildingId };
+  }
+  const rawMonth = request.query.get("month")?.trim() ?? "";
+  if (rawMonth !== "") {
+    // ?month=2026-11 reports that calendar month; financialYear is ignored then.
+    const month = parseMonth(rawMonth, today);
+    if ("error" in month) return month;
+    return { financialYear: financialYearOf(month.from), month, scope };
   }
   const year = parseFinancialYear(request.query.get("financialYear"), today);
   if ("error" in year) return year;
@@ -53,14 +63,14 @@ export async function getMaintenanceSpendReport(request: HttpRequest, context: I
   try {
     const showTest = await showTestParam(request);
     connection = await createRequestConnection(token);
-    const data = await loadMaintenanceSpendData(connection, params.scope, params.financialYear, showTest.value === true);
+    const data = await loadMaintenanceSpendData(connection, params.scope, params.month ?? params.financialYear, showTest.value === true);
     if ("buildingId" in params.scope && data.buildings.length === 0) {
       return { status: 404, jsonBody: { error: "Building not found" } };
     }
     return {
       status: 200,
       headers: { "Cache-Control": "no-store" },
-      jsonBody: buildMaintenanceSpend({ data, financialYear: params.financialYear, generatedAt: new Date().toISOString(), scope: params.scope }),
+      jsonBody: buildMaintenanceSpend({ data, financialYear: params.financialYear, generatedAt: new Date().toISOString(), month: params.month, scope: params.scope }),
     };
   } catch (error) {
     context.error("getMaintenanceSpendReport failed:", error instanceof Error ? error.message : error);

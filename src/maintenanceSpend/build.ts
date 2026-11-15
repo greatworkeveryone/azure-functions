@@ -14,7 +14,7 @@
 //    invoice dated in the year.
 
 import { exGstCents, fromCents, toCents } from "./gst";
-import { isInFinancialYear, type FinancialYear } from "./financialYear";
+import { isInFinancialYear, type FinancialYear, type Period } from "./financialYear";
 import { compareTrades, tradeKey, tradeLabel } from "./trades";
 import type { SqlRow } from "../db";
 import type { MaintenanceSpendBuilding, MaintenanceSpendResponse, MaintenanceSpendScope, MaintenanceSpendTotals, MaintenanceSpendTrade } from "./types";
@@ -69,9 +69,12 @@ export function buildMaintenanceSpend(input: {
   data: MaintenanceSpendData;
   financialYear: FinancialYear;
   generatedAt: string;
+  /** A calendar month to report instead of the whole year; financialYear is then the year it falls in. */
+  month?: Period;
   scope: MaintenanceSpendScope;
 }): MaintenanceSpendResponse {
   const { data, financialYear: year, scope } = input;
+  const period: Period = input.month ?? year;
   const commercial = new Map(data.buildings.map((row) => [Number(row.BuildingID), row]));
   const byBuilding = new Map<number, Map<string, Tally>>();
   const portfolio = new Map<string, Tally>();
@@ -90,7 +93,7 @@ export function buildMaintenanceSpend(input: {
       undated += 1;
       continue;
     }
-    if (!isInFinancialYear(instant, year)) continue;
+    if (!isInFinancialYear(instant, period)) continue;
     if (!invoiceDate) approvalFallbacks += 1;
 
     const label = tradeLabel(row.Category);
@@ -129,6 +132,7 @@ export function buildMaintenanceSpend(input: {
     dating: { approvalFallbacks, undated },
     financialYear: { from: year.from, label: year.label, to: year.to },
     generatedAt: input.generatedAt,
+    ...(input.month ? { month: { from: input.month.from, label: input.month.label, to: input.month.to } } : {}),
     portfolio: { ...totalsOf(portfolio.values()), buildingCount: buildings.length },
     topTrades,
   };
