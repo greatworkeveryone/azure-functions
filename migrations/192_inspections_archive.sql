@@ -1,4 +1,5 @@
 -- B2 (review 2026-10-30): inspections are archived, never deleted once relied on.
+-- Numbered 192 on 15 Nov 2026: 181 was reserved for this file (PLAN §11, 31 Oct) but 181_access_profile_connor_denmark.sql reached staging first; 182–191 belong to tenant/tr-int.
 -- Additive and idempotent (column guards; safe to run twice). No destructive statement.
 -- ArchivedAt/ArchivedById/ArchivedByName: set by deleteInspection when the inspection was ever completed,
 --   has points or has raised jobs; archived rows are hidden from lists, kept for records.

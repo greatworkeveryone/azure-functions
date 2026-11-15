@@ -298,8 +298,8 @@ describe("getInspections hides archived rows", () => {
   });
 });
 
-describe("migration 181", () => {
-  const sql = require("node:fs").readFileSync(require("node:path").join(__dirname, "../../migrations/181_inspections_archive.sql"), "utf8") as string;
+describe("migration 192", () => {
+  const sql = require("node:fs").readFileSync(require("node:path").join(__dirname, "../../migrations/192_inspections_archive.sql"), "utf8") as string;
   it("is additive: column-guarded adds and a NULL-only backfill, nothing destructive", () => {
     for (const col of ["ArchivedAt", "ArchivedById", "ArchivedByName", "FirstCompletedAt"]) {
       expect(sql).toContain(`IF COL_LENGTH(N'dbo.Inspections', N'${col}') IS NULL`);
