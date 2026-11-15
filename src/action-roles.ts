@@ -260,6 +260,11 @@ export const ACTION_ROLES = {
     routes: ["upsertAsset", "uploadAssetAttachment", "upsertLocation"],
     why: "Create and edit assets and locations, and upload their files.",
   },
+  editContractorDetails: {
+    gate: MANAGE_SERVICE_SCHEDULES_ROLES,
+    routes: ["updateContractorDetails"],
+    why: "Correct a contractor's name, contact details and ABN. Floorplan keeps myBuildings in step while it is still in use; a changed email redirects purchase orders, so each change is a ledger exception.",
+  },
   editInspections: {
     gate: [A.ADMIN, A.DIRECTOR, A.FACILITIES, A.FACILITIES_APPROVAL],
     routes: ["createInspection", "applyInspectionOps", "completeInspection", "uploadInspectionAttachment", "raiseJobsFromInspection", "tidyInspectionJobTitles"],

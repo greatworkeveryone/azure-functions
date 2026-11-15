@@ -150,7 +150,8 @@ async function getContractors(request: HttpRequest, context: InvocationContext):
     let sql = `SELECT
       ContractorID, ContractorName, ContractorCategory,
       ABN, Active, Suspended,
-      EmailAddress, PhoneNumber, MobileNumber
+      EmailAddress, PhoneNumber, MobileNumber, ContactFirstName, ContactLastName,
+      COALESCE(CONVERT(varchar(33), UpdatedAt, 126), '') AS Version
     FROM Contractors WHERE 1=1`;
     const params: SqlParam[] = [];
 
