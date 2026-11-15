@@ -27,7 +27,9 @@ import { checkRateLimit, checkSignInRateLimit } from "../rateLimit";
 import { Sentry } from "../sentry";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
-// Returns all active users. Used to populate assignment dropdowns.
+// Returns the active users for pickers and the Users page. Admins and directors are also
+// sent the pending invitees (EntraOid null, status 'pending'); the frontend's useAppUsers
+// drops those before any picker sees them, and only the Users page shows them.
 // Requires any authenticated caller.
 
 const VIEW_USERS_ROLES = [

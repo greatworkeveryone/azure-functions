@@ -85,3 +85,26 @@ describe("a role", () => {
     });
   });
 });
+
+describe("a person who has never signed in (an invitee)", () => {
+  const ALLEGRA: DirectoryUser = { ...user(21, "Allegra", "director"), entraOid: null };
+
+  it("cannot be handed a step by name: the step would never be opened (422 next_step_owner_unknown)", () => {
+    expect(refused(() => resolveNextStepOwner({ kind: "user", userId: 21 }, [...DIRECTORY, ALLEGRA], ALANA))).toMatchObject({
+      code: "next_step_owner_unknown",
+      details: { userId: 21 },
+      status: 422,
+    });
+  });
+
+  it("does not count as a member of their role", () => {
+    expect(refused(() => resolveNextStepOwner({ kind: "role", role: "director" }, [FAY, ALLEGRA], ALANA))).toMatchObject({
+      code: "next_step_owner_role_empty",
+      status: 422,
+    });
+  });
+
+  it("while a signed-in person built without the field still does", () => {
+    expect(resolveNextStepOwner({ kind: "role", role: "director" }, [DEE, ALLEGRA], ALANA).members).toEqual([DEE]);
+  });
+});

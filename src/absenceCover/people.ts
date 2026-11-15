@@ -1,9 +1,9 @@
 import { ROLES, roleLabel } from "../escalation/roles";
-import type { DirectoryUser } from "../escalation/types";
+import { hasSignedIn, type DirectoryUser } from "../escalation/types";
 import { holdsCapability } from "./eligibility";
 
-/** An invitee who has never signed in (EntraOid null) cannot cover; a directory row built without the field is taken as signed in. */
-export const hasSignedIn = (user: DirectoryUser): boolean => user.entraOid !== null;
+// An invitee who has never signed in cannot cover; the rule lives with the directory type.
+export { hasSignedIn };
 
 export interface CoverPersonDto {
   name: string;

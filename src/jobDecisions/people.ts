@@ -3,7 +3,7 @@
 // Pure: the caller passes the active directory.
 
 import { normaliseRole, roleLabel, ROLES } from "../escalation/roles";
-import type { DirectoryUser } from "../escalation/types";
+import { hasSignedIn, type DirectoryUser } from "../escalation/types";
 import { RequestError, roleNotAskable, type DecisionMakersInput } from "./request";
 import { ADMIN_DOES_NOT_DECIDE, DECISION_MAKER_ROLES } from "./roles";
 
@@ -24,9 +24,11 @@ const names = (users: readonly DirectoryUser[]): string => users.map((user) => u
  */
 export function resolveDecisionMakers(
   input: DecisionMakersInput,
-  directory: readonly DirectoryUser[],
+  everyone: readonly DirectoryUser[],
   requesterUserId: number | null,
 ): ResolvedMakers {
+  // An invitee who has never signed in could not see the question, so cannot be asked.
+  const directory = everyone.filter(hasSignedIn);
   if (input.mode === "role") {
     // The role may come from a row saved before admin could not be asked (a
     // deferred question coming back, reask.ts), not only from a request just read.
@@ -50,7 +52,7 @@ export function resolveDecisionMakers(
     else unknown.push(id);
   }
   if (unknown.length > 0) {
-    throw new RequestError("decision_maker_unknown", `These people aren't active Floorplan users, so they can't be asked: ${unknown.map((id) => `#${id}`).join(", ")}.`, 422, { userIds: unknown });
+    throw new RequestError("decision_maker_unknown", `These people aren't active Floorplan users who have signed in, so they can't be asked: ${unknown.map((id) => `#${id}`).join(", ")}.`, 422, { userIds: unknown });
   }
   if (requesterUserId !== null && people.some((user) => user.userId === requesterUserId)) {
     throw new RequestError("decision_maker_is_requester", "You can't ask yourself. Ask someone else, or a whole role.", 422, { userIds: [requesterUserId] });

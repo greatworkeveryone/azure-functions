@@ -219,3 +219,35 @@ describe("upsertJob: a new job always starts with facilities", () => {
     expect(find(/INSERT INTO Jobs/)?.params).toMatchObject({ AwaitingRole: "facilities" });
   });
 });
+
+describe("addJobEvent: the new assignee must have signed in", () => {
+  const ASSIGNEE = /FROM dbo\.AppUsers WHERE UserID = @UserID AND IsActive = 1 AND EntraOid IS NOT NULL/;
+
+  it("refuses handing the job to an invitee who has never signed in (422), before the transaction opens", async () => {
+    mockSql([{ match: ASSIGNEE, rows: [] }, ...ACCEPTS]);
+
+    const res = await event({ NewAssignee: "Allegra", NewAssigneeUserID: 21 });
+
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "assignee_not_active" });
+    expect(wroteAnything()).toBe(false);
+    expect(db.beginTransaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses an assignee id that is not a positive whole number (400) without touching the database", async () => {
+    const res = await event({ NewAssignee: "Fay", NewAssigneeUserID: "8" });
+
+    expect(res.status).toBe(400);
+    expect(db.createRequestConnection).not.toHaveBeenCalled();
+  });
+
+  it("hands the job over when they have signed in", async () => {
+    mockSql([{ match: ASSIGNEE, rows: [{ Hit: 1 }] }, ...ACCEPTS]);
+
+    const res = await event({ NewAssignee: "Fay", NewAssigneeUserID: 8 });
+
+    expect(res.status).toBe(200);
+    expect(find(ASSIGNEE)?.params).toMatchObject({ UserID: 8 });
+    expect(find(/UPDATE Jobs SET/)?.params).toMatchObject({ AssignedToUserIDMirror: 8 });
+  });
+});

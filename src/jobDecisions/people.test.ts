@@ -123,3 +123,24 @@ describe("asking everyone in a role", () => {
     expect(refused(() => resolveDecisionMakers({ mode: "role", role: "cfo" }, DIRECTORY, ALANA.userId))).toMatchObject({ code: "role_has_no_one" });
   });
 });
+
+describe("a person who has never signed in (an invitee)", () => {
+  const ALLEGRA: DirectoryUser = { ...user(21, "Allegra", "director"), entraOid: null };
+  const SIGNED_IN_DIRECTOR = user(22, "Dana", "director");
+
+  it("cannot be asked by name: the question would never be seen (422 decision_maker_unknown)", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "named", userIds: [21] }, [ALANA, ALLEGRA, SIGNED_IN_DIRECTOR], ALANA.userId))).toMatchObject({
+      code: "decision_maker_unknown",
+      details: { userIds: [21] },
+      status: 422,
+    });
+  });
+
+  it("is left out of a role, so a role with only invitees has nobody to ask", () => {
+    expect(refused(() => resolveDecisionMakers({ mode: "role", role: "director" }, [ALANA, ALLEGRA], ALANA.userId))).toMatchObject({
+      code: "role_has_no_one",
+      status: 422,
+    });
+    expect(resolveDecisionMakers({ mode: "role", role: "director" }, [ALANA, ALLEGRA, SIGNED_IN_DIRECTOR], ALANA.userId).userIds).toEqual([22]);
+  });
+});

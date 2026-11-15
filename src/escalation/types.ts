@@ -154,3 +154,7 @@ export const NOTE_MAX_CHARS = 2000;
 
 /** The name system-raised escalations carry (RaisedByName). */
 export const SYSTEM_NAME = "Floorplan";
+
+/** An invitee who has never signed in (EntraOid null) cannot be handed anything in Floorplan; a row built
+ *  without the field is taken as signed in. The frontend's useAppUsers hides the same people. */
+export const hasSignedIn = (user: DirectoryUser): boolean => user.entraOid !== null;

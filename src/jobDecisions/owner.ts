@@ -6,7 +6,7 @@
 
 import { normaliseRole, roleLabel } from "../escalation/roles";
 import type { LadderRaiser } from "../escalation/decisionRows";
-import type { DirectoryUser } from "../escalation/types";
+import { hasSignedIn, type DirectoryUser } from "../escalation/types";
 import type { NextStepOwnerInput } from "./respond";
 import { RequestError } from "./request";
 import { NEXT_STEP_OWNER_ROLES } from "./roles";
@@ -44,9 +44,11 @@ function person(user: DirectoryUser): ResolvedOwner {
  */
 export function resolveNextStepOwner(
   input: NextStepOwnerInput | null,
-  directory: readonly DirectoryUser[],
+  people: readonly DirectoryUser[],
   creator: DirectoryUser | null,
 ): ResolvedOwner {
+  // An invitee who has never signed in could not open the step, so is nobody to hand it to.
+  const directory = people.filter(hasSignedIn);
   if (input === null) {
     if (creator === null) {
       throw new RequestError(
@@ -61,7 +63,7 @@ export function resolveNextStepOwner(
   if (input.kind === "user") {
     const found = directory.find((user) => user.userId === input.userId);
     if (!found) {
-      throw new RequestError("next_step_owner_unknown", `#${input.userId} isn't an active Floorplan user, so the step can't be handed to them.`, 422, {
+      throw new RequestError("next_step_owner_unknown", `#${input.userId} isn't an active Floorplan user who has signed in, so the step can't be handed to them.`, 422, {
         userId: input.userId,
       });
     }

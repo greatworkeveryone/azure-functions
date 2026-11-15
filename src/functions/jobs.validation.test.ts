@@ -176,3 +176,42 @@ describe("upsertJob: OnchargeAmount", () => {
     expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 });
+
+describe("upsertJob: the assignee must have signed in", () => {
+  const ASSIGNEE = /FROM dbo\.AppUsers WHERE UserID = @UserID AND IsActive = 1 AND EntraOid IS NOT NULL/;
+
+  it("refuses a new job for an invitee who has never signed in (422 assignee_not_active), writing nothing", async () => {
+    routeQueries(db.executeQuery, [{ match: INSERT_JOB, rows: [{ JobID: 9 }] }, { match: ASSIGNEE, rows: [] }]);
+
+    const response = await create({ AssignedToUserID: 21 });
+
+    expect(response.status).toBe(422);
+    expect(response.jsonBody).toMatchObject({ code: "assignee_not_active", error: expect.stringMatching(/haven't signed in/) });
+    expect(wroteAnything()).toBe(false);
+  });
+
+  it("creates the job for someone active who has signed in, asking about that id", async () => {
+    routeQueries(db.executeQuery, [{ match: INSERT_JOB, rows: [{ JobID: 9 }] }, { match: ASSIGNEE, rows: [{ Hit: 1 }] }]);
+
+    const response = await create({ AssignedToUserID: 7 });
+
+    expect(response.status).toBe(200);
+    expect(paramsOf(callsMatching(db.executeQuery, ASSIGNEE)[0]).UserID).toBe(7);
+    expect(insertParams().AssignedToUserID).toBe(7);
+  });
+
+  it("does not ask when the payload names nobody", async () => {
+    await create();
+
+    expect(callsMatching(db.executeQuery, ASSIGNEE)).toHaveLength(0);
+  });
+
+  it("holds on update too", async () => {
+    routeQueries(db.executeQuery, [{ match: UPDATE_JOB, rows: [{ JobID: 9 }] }, { match: ASSIGNEE, rows: [] }]);
+
+    const response = await upsertJob(post({ JobID: 9, AssignedToUserID: 21 }), ctx);
+
+    expect(response.status).toBe(422);
+    expect(wroteAnything()).toBe(false);
+  });
+});

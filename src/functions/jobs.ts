@@ -23,6 +23,7 @@ import {
 } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
 import { checkRateLimit } from "../rateLimit";
+import { assigneeRefusal } from "../assigneeCheck";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
 import { todayInDarwin } from "../darwinDate";
 import { guardNewJob, recordDefectsOverride } from "../defectsJobGuard";
@@ -691,6 +692,13 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
     }
 
     connection = await createRequestConnection(token);
+
+    // The assignee must have signed in (the picker hides the rest; this is the check that holds).
+    // AssignedToUserID is a whole number here: validateUpsertBody refused anything else.
+    if (fields.AssignedToUserID != null) {
+      const refusal = await assigneeRefusal(connection, fields.AssignedToUserID as number);
+      if (refusal) return { status: 422, jsonBody: refusal };
+    }
 
     // Defects liability periods (sprint F1, LAUNCH-READINESS §5): new planned
     // maintenance on a covered scope is refused (409) unless a manager books it
@@ -1373,8 +1381,16 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
     }
     const isStalledBit =
       IsStalled == null ? null : IsStalled ? 1 : 0;
+    if (NewAssigneeUserID != null && (!Number.isInteger(NewAssigneeUserID) || NewAssigneeUserID <= 0)) {
+      return { status: 400, jsonBody: { error: "NewAssigneeUserID must be a positive whole number" } };
+    }
 
     connection = await createRequestConnection(token);
+    // Same rule as upsertJob: a job is handed only to someone who has signed in.
+    if (NewAssigneeUserID != null) {
+      const refusal = await assigneeRefusal(connection, NewAssigneeUserID);
+      if (refusal) return { status: 422, jsonBody: refusal };
+    }
     const roles = await rolesForRequest(request);
 
     // Everything below is one transaction: the job is read and locked, the

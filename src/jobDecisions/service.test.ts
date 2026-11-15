@@ -32,7 +32,7 @@ const NOW = new Date(Date.UTC(2026, 9, 12, 9, 0) - 9.5 * 3_600_000);
 const HOLIDAYS = new Set<string>();
 
 type Row = Record<string, unknown>;
-const user = (UserID: number, DisplayName: string, Role: string): Row => ({ DisplayName, Email: `${DisplayName.toLowerCase()}@example.com`, IsActive: true, Role, UserID });
+const user = (UserID: number, DisplayName: string, Role: string): Row => ({ DisplayName, Email: `${DisplayName.toLowerCase()}@example.com`, EntraOid: `oid-${UserID}`, IsActive: true, Role, UserID });
 const USERS = [user(3, "Cam", "accounts_manager"), user(4, "Kirstin", "accounts_manager"), user(5, "Dee", "director"), user(6, "Eli", "director"), user(9, "Alana", "accounts"), user(20, "Una", "user")];
 
 const alana: UserActor = { kind: "user", name: "Alana", role: "accounts", userId: 9 };
