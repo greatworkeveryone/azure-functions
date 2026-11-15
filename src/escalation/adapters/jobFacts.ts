@@ -1,7 +1,9 @@
 // Reads jobs as the rules in jobRules.ts see them. One query shape for every
 // job policy: the live jobs for the sweep, or a single job for a condition
-// check. "Quote requested" is stored as JobRequestedContractors rows (AddedAt is
-// the only timestamp; RequestSent is a tick with none), a quote received is a
+// check. "Quote requested" is the first 'quote_requested' JobEvents row (written
+// when the request is marked sent), else the earliest sent contractor's AddedAt
+// for ticks that predate that event; a contractor added but not sent starts no
+// clock. A quote received is a
 // Quotes row, and an invoice waiting is an incoming JobInvoices row still
 // 'pending'.
 
@@ -14,7 +16,10 @@ const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title,
     j.AssignedTo, j.AssignedToUserID, j.CreatedAt, j.StatusSince, j.AcknowledgedAt,
     j.ExpectedProgressUpdate, j.IsArchived,
     (SELECT COUNT(*) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID) AS RequestedContractors,
-    (SELECT MIN(rc.AddedAt) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID) AS FirstQuoteRequestAt,
+    COALESCE(
+      (SELECT MIN(je.CreatedAt) FROM dbo.JobEvents je WHERE je.JobID = j.JobID AND je.EventType = 'quote_requested'),
+      (SELECT MIN(rc.AddedAt) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID AND rc.RequestSent = 1)
+    ) AS FirstQuoteRequestAt,
     (SELECT COUNT(*) FROM dbo.Quotes q WHERE q.JobID = j.JobID) AS QuoteCount,
     (SELECT COUNT(*) FROM dbo.JobInvoices ji
        WHERE ji.JobID = j.JobID AND ji.Direction = 'incoming' AND ji.Status = 'pending') AS PendingInvoices,

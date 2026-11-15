@@ -164,6 +164,12 @@ describe("the job adapter", () => {
     expect(await jobAdapter.isConditionActive(conn, ref("job.manual", "abc"), NOW)).toBe(false);
   });
 
+  it("reads the quote clock from the send (quote_requested event, else a sent contractor), never from AddedAt alone", () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "jobFacts.ts"), "utf8") as string;
+    expect(src).toMatch(/EventType = 'quote_requested'/);
+    expect(src).toMatch(/rc\.RequestSent = 1/);
+  });
+
   it("treats an Admin / Accounts job as outside the contractor-flow policies, and a facilities job with the same facts as inside", async () => {
     const ref = (policyKey: string) => ({ policyKey, subjectId: "12", subjectType: "job" });
     const quoteFacts = { FirstQuoteRequestAt: new Date(NOW.getTime() - 20 * DAY), RequestedContractors: 1, Status: "Quote" };

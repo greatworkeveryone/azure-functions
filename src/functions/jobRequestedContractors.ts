@@ -12,7 +12,7 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
-import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
+import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
@@ -35,9 +35,50 @@ interface ToggleRequestedContractorSentBody {
   requestSent: boolean;
 }
 
+interface MarkRequestedContractorsSentBody {
+  jobId: number;
+  ids: number[];
+}
+
+const MAX_MARK_SENT_IDS = 50;
+
 const REQUESTED_CONTRACTOR_COLUMNS = `
   ID, JobID, ContractorID, ContractorName, AddedAt, AddedBy, RequestSent
 `;
+
+// The person pressing the button, from the verified token. Null (never a
+// client-supplied name) when the token cannot be verified; the role gate has
+// already passed by then.
+async function actorFromRequest(request: HttpRequest): Promise<string | null> {
+  const identity = await verifiedIdentityFromRequest(request).catch(() => null);
+  return identity?.name ?? null;
+}
+
+// Quote request went out: one 'quote_requested' event naming who it went to,
+// then the New → Quote move (a no-op when the job is already past New).
+// Caller owns the transaction.
+async function recordQuoteRequestSent(
+  connection: any,
+  jobId: number,
+  contractorNames: string[],
+  actor: string | null,
+): Promise<void> {
+  const text = `Quote request sent to ${contractorNames.join(", ")}`;
+  await executeQuery(
+    connection,
+    `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType)
+     VALUES (@JobID, @CreatedBy, @Text, 'quote_requested');`,
+    [
+      { name: "JobID", type: TYPES.Int, value: jobId },
+      { name: "CreatedBy", type: TYPES.NVarChar, value: actor },
+      { name: "Text", type: TYPES.NVarChar, value: text },
+    ],
+  );
+  await advanceJobStatus(connection, jobId, JobEvent.QUOTE_REQUESTED, {
+    actor,
+    note: `${text} — awaiting quotes.`,
+  });
+}
 
 // ── GET /api/getJobRequestedContractors?jobId=N ──────────────────────────────
 
@@ -111,15 +152,6 @@ async function addJobRequestedContractor(
 
     await beginTransaction(connection);
     try {
-      // Check whether this is the first contractor being requested so we can
-      // transition the job to Quote status.
-      const existingRows = await executeQuery(
-        connection,
-        "SELECT COUNT(*) AS Cnt FROM JobRequestedContractors WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: jobId }],
-      );
-      const isFirst = (existingRows[0].Cnt as number) === 0;
-
       const inserted = await executeQuery(
         connection,
         `INSERT INTO JobRequestedContractors (JobID, ContractorID, ContractorName, AddedBy)
@@ -141,24 +173,17 @@ async function addJobRequestedContractor(
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
           { name: "CreatedBy", type: TYPES.NVarChar, value: addedBy ?? null },
-          { name: "Text", type: TYPES.NVarChar, value: `Requested ${contractorName}` },
+          { name: "Text", type: TYPES.NVarChar, value: `Added ${contractorName} to the quote request` },
         ],
       );
 
-      // First contractor added → advance to Quote via the state machine.
-      // The helper no-ops if the job is already past New (handles re-fires).
-      if (isFirst) {
-        await advanceJobStatus(connection, jobId, JobEvent.QUOTE_REQUESTED, {
-          actor: addedBy ?? null,
-          note: `Requested ${contractorName} — awaiting quotes.`,
-        });
-      } else {
-        await executeQuery(
-          connection,
-          "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-          [{ name: "JobID", type: TYPES.Int, value: jobId }],
-        );
-      }
+      // Adding a contractor does not move the job: nothing has been sent yet.
+      // The job reads Quote once the request is marked sent.
+      await executeQuery(
+        connection,
+        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
 
       await commitTransaction(connection);
 
@@ -294,30 +319,148 @@ async function toggleRequestedContractorSent(
     }
 
     connection = await createRequestConnection(token);
+    const actor = await actorFromRequest(request);
 
-    const updated = await executeQuery(
-      connection,
-      `UPDATE dbo.JobRequestedContractors
-          SET RequestSent = @RequestSent
-        WHERE ID = @ID AND JobID = @JobID;
-       SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
-         FROM dbo.JobRequestedContractors
-        WHERE ID = @ID AND JobID = @JobID;`,
-      [
-        { name: "ID", type: TYPES.Int, value: id },
-        { name: "JobID", type: TYPES.Int, value: jobId },
-        { name: "RequestSent", type: TYPES.Bit, value: requestSent },
-      ],
-    );
+    await beginTransaction(connection);
+    try {
+      const before = await executeQuery(
+        connection,
+        `SELECT ContractorName, RequestSent
+           FROM dbo.JobRequestedContractors WITH (UPDLOCK, HOLDLOCK)
+          WHERE ID = @ID AND JobID = @JobID`,
+        [
+          { name: "ID", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      if (before.length === 0) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Requested contractor not found" } };
+      }
 
-    if (updated.length === 0) {
-      return { status: 404, jsonBody: { error: "Requested contractor not found" } };
+      await executeQuery(
+        connection,
+        `UPDATE dbo.JobRequestedContractors
+            SET RequestSent = @RequestSent
+          WHERE ID = @ID AND JobID = @JobID`,
+        [
+          { name: "ID", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "RequestSent", type: TYPES.Bit, value: requestSent },
+        ],
+      );
+
+      // First send moves the job; un-ticking never moves it back.
+      if (requestSent && !before[0].RequestSent) {
+        await recordQuoteRequestSent(connection, jobId, [before[0].ContractorName as string], actor);
+      }
+
+      const updated = await executeQuery(
+        connection,
+        `SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
+           FROM dbo.JobRequestedContractors
+          WHERE ID = @ID AND JobID = @JobID`,
+        [
+          { name: "ID", type: TYPES.Int, value: id },
+          { name: "JobID", type: TYPES.Int, value: jobId },
+        ],
+      );
+      await commitTransaction(connection);
+      return { status: 200, jsonBody: { requestedContractor: updated[0] } };
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
     }
-
-    return { status: 200, jsonBody: { requestedContractor: updated[0] } };
   } catch (error: any) {
     context.error("toggleRequestedContractorSent failed:", error.message);
     return errorResponse("Failed to update request status", error.message);
+  } finally {
+    if (connection) closeConnection(connection);
+  }
+}
+
+// ── POST /api/markRequestedContractorsSent ───────────────────────────────────
+// Body: { jobId, ids } (1 to 50 ids, all this job's). Marks them sent, logs ONE
+// 'quote_requested' event, and moves the job New → Quote (no-op past New).
+
+async function markRequestedContractorsSent(
+  request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  const token = extractToken(request);
+  if (!token) return unauthorizedResponse();
+
+  const denied = await requireRole(request, ACTION_ROLES.addQuoteContractor.gate);
+  if (denied) return denied;
+
+  let connection;
+  try {
+    const body = (await request.json()) as MarkRequestedContractorsSentBody;
+    const { jobId, ids } = body ?? {};
+
+    if (typeof jobId !== "number") {
+      return { status: 400, jsonBody: { error: "jobId (number) required" } };
+    }
+    if (
+      !Array.isArray(ids) ||
+      ids.length < 1 ||
+      ids.length > MAX_MARK_SENT_IDS ||
+      !ids.every((n) => Number.isInteger(n))
+    ) {
+      return { status: 400, jsonBody: { error: `ids (1 to ${MAX_MARK_SENT_IDS} integers) required` } };
+    }
+    const uniqueIds = Array.from(new Set(ids));
+
+    connection = await createRequestConnection(token);
+    const actor = await actorFromRequest(request);
+
+    await beginTransaction(connection);
+    try {
+      // Ids are integers (validated above), so the list is safe to inline.
+      const idList = uniqueIds.join(",");
+      const found = await executeQuery(
+        connection,
+        `SELECT ID, ContractorName
+           FROM dbo.JobRequestedContractors WITH (UPDLOCK, HOLDLOCK)
+          WHERE JobID = @JobID AND ID IN (${idList})
+          ORDER BY AddedAt ASC, ID ASC`,
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+      if (found.length !== uniqueIds.length) {
+        await rollbackTransaction(connection).catch(() => {});
+        return { status: 404, jsonBody: { error: "Requested contractor not found for this job" } };
+      }
+
+      await executeQuery(
+        connection,
+        `UPDATE dbo.JobRequestedContractors
+            SET RequestSent = 1
+          WHERE JobID = @JobID AND ID IN (${idList})`,
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+      await recordQuoteRequestSent(
+        connection,
+        jobId,
+        found.map((r) => r.ContractorName as string),
+        actor,
+      );
+      const rows = await executeQuery(
+        connection,
+        `SELECT ${REQUESTED_CONTRACTOR_COLUMNS}
+           FROM dbo.JobRequestedContractors
+          WHERE JobID = @JobID AND ID IN (${idList})
+          ORDER BY AddedAt ASC, ID ASC`,
+        [{ name: "JobID", type: TYPES.Int, value: jobId }],
+      );
+      await commitTransaction(connection);
+      return { status: 200, jsonBody: { requestedContractors: rows } };
+    } catch (err) {
+      await rollbackTransaction(connection).catch(() => {});
+      throw err;
+    }
+  } catch (error: any) {
+    context.error("markRequestedContractorsSent failed:", error.message);
+    return errorResponse("Failed to mark quote requests sent", error.message);
   } finally {
     if (connection) closeConnection(connection);
   }
@@ -342,4 +485,9 @@ app.http("toggleRequestedContractorSent", {
   methods: ["POST"],
   authLevel: "anonymous",
   handler: toggleRequestedContractorSent,
+});
+app.http("markRequestedContractorsSent", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  handler: markRequestedContractorsSent,
 });
