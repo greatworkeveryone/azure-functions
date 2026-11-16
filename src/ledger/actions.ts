@@ -145,6 +145,13 @@ export const LEDGER_ACTIONS = {
   "inspection.room_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
   "inspection.level_removed": { exception: false, reasonRequired: false, subjects: ["inspection"] },
 
+  // B2 (review 2026-10-30): a completed inspection is reopened (exception: it unlocks a signed-off record),
+  // then a delete either archives it (anything ever completed, with points or raised jobs) or hard-deletes
+  // an untouched empty draft. `before` / `after` hold counts and the completion stamp, not content.
+  "inspection.reopen": { exception: true, reasonRequired: false, subjects: ["inspection"] },
+  "inspection.archive": { exception: true, reasonRequired: false, subjects: ["inspection"] },
+  "inspection.delete": { exception: true, reasonRequired: false, subjects: ["inspection"] },
+
   // Tenancy archive (D4): a tenancy or a lease document leaves the register
   // without being destroyed; only an empty draft is ever hard-deleted.
   "tenancy.archive": { exception: true, reasonRequired: true, subjects: ["tenancy"] },

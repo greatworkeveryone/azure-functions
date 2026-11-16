@@ -287,4 +287,55 @@ describe("finance", () => {
     expect(result.myob.byOperation).toEqual([{ failed: 1, ok: 9, operation: "purchase.create" }]);
     expect(result.myob.byPerson).toEqual([{ failed: 1, ok: 9, person: "Ann" }]);
   });
+
+  describe("two roles and two users across usage, decisions and MYOB", () => {
+    const users = [{ id: 1, name: "Ann", role: "accounts" }, { id: 2, name: "Dee", role: "director" }];
+    const decisionRows = [{ actor: 1, name: "Ann", role: "accounts", action: "invoice.approve" }, { actor: 2, name: "Dee", role: "director", action: "po.approve" }];
+    const myobRows = [{ actor: 1, name: "Ann", purpose: "purchase.create" }, { actor: 2, name: "Dee", purpose: "purchase.create" }];
+    const val = (i: number, name: string) => paramsOf(i).find((p) => p.name === name)?.value;
+    // Fake database: each query answers from the fixtures, narrowed only by the parameters its SQL actually uses.
+    function fakeDb() {
+      query.mockImplementation(async (_c, sql, params) => {
+        const get = (name: string) => (params ?? []).find((p) => p.name === name)?.value as never;
+        const userId = get("UserId") as number | null;
+        const roles = get("Roles") ? (JSON.parse(String(get("Roles"))) as string[]) : null;
+        const text = String(sql);
+        if (/DecisionLedger/.test(text) && /GROUP BY l\.Action/.test(text)) {
+          return decisionRows.filter((r) => userId === null || r.actor === userId).map((r) => ({ Action: r.action, N: 1 }));
+        }
+        if (/DecisionLedger/.test(text)) return decisionRows.filter((r) => userId === null || r.actor === userId).map((r) => ({ ActorName: r.name, N: 1, Role: r.role }));
+        if (/MyobApiLog/.test(text) && /GROUP BY l\.Purpose/.test(text)) return myobRows.filter((r) => userId === null || r.actor === userId).map((r) => ({ Failed: 0, Ok: 1, Purpose: r.purpose }));
+        if (/MyobApiLog/.test(text)) return myobRows.filter((r) => userId === null || r.actor === userId).map((r) => ({ ActorName: r.name, Failed: 0, Ok: 1 }));
+        if (/GROUP BY x\.UserId/.test(text)) {
+          return users.filter((u) => (userId === null || u.id === userId) && (roles === null || roles.includes(u.role))).map((u) => ({ ActiveSeconds: 60, DisplayName: u.name, LastDay: "2026-10-23", Role: u.role, Sessions: 1, UserId: u.id }));
+        }
+        return [];
+      });
+    }
+
+    it("a role filter narrows people but not decisions or MYOB, and the DTO says so", async () => {
+      fakeDb();
+      const result = await loadUsageFinance(conn, period, { role: "accounts", scope: "all", userId: null });
+      expect(result.people.map((p) => p.name)).toEqual(["Ann"]);
+      expect(result.decisions.actors.map((a) => a.actor).sort()).toEqual(["Ann", "Dee"]);
+      expect(result.myob.byPerson.map((p) => p.person).sort()).toEqual(["Ann", "Dee"]);
+      expect(result.moneyPanels).toEqual({ roleFilterApplied: false, scope: "allRoles" });
+      for (let i = 0; i < query.mock.calls.length; i += 1) {
+        if (/DecisionLedger|MyobApiLog/.test(sqlOf(i))) expect(paramsOf(i).some((p) => p.name === "Roles")).toBe(false);
+      }
+    });
+
+    it("a userId narrows every panel it applies to", async () => {
+      fakeDb();
+      const result = await loadUsageFinance(conn, period, { role: null, scope: "all", userId: 2 });
+      // Dee is a director: outside the finance people list, but her money decisions still count.
+      expect(result.people).toEqual([]);
+      expect(result.decisions.actors.map((a) => a.actor)).toEqual(["Dee"]);
+      expect(result.myob.byPerson.map((p) => p.person)).toEqual(["Dee"]);
+      expect(val(query.mock.calls.findIndex((_c, i) => /MyobApiLog/.test(sqlOf(i))), "UserId")).toBe(2);
+      const ann = await loadUsageFinance(conn, period, { role: null, scope: "all", userId: 1 });
+      expect(ann.people.map((p) => p.name)).toEqual(["Ann"]);
+      expect(ann.decisions.actors.map((a) => a.actor)).toEqual(["Ann"]);
+    });
+  });
 });

@@ -19,6 +19,13 @@ export interface UsageFinanceFilter {
 export interface UsageFinanceDto {
   decisions: { actors: { actor: string; count: number; role: string | null }[]; byAction: { action: string; count: number }[] };
   modules: { moduleKey: string; people: number; seconds: number }[];
+  /**
+   * Says what the decisions and myob panels cover. Connor decided on 9 Nov 2026 that the CFO's finance view includes money
+   * decisions and MYOB calls by every role (directors, facilities managers and accounts alike), so the `role` filter
+   * narrows the people and modules panels only; these two panels honour `userId` and ignore `role`. The field is additive
+   * and always present, so a client can label the panels instead of letting a role filter imply they were narrowed.
+   */
+  moneyPanels: { roleFilterApplied: false; scope: "allRoles" };
   myob: { byOperation: { failed: number; ok: number; operation: string }[]; byPerson: { failed: number; ok: number; person: string }[] };
   people: UsagePersonDto[];
   period: { days: number; from: string; to: string };
@@ -74,6 +81,7 @@ export async function loadUsageFinance(connection: Connection, period: UsagePeri
       byAction: byAction.map((row) => ({ action: String(row.Action), count: Number(row.N) })),
     },
     modules: modules.map((row) => ({ moduleKey: String(row.ModuleKey), people: Number(row.People), seconds: Number(row.Seconds) })),
+    moneyPanels: { roleFilterApplied: false, scope: "allRoles" },
     myob: {
       byOperation: byOperation.map((row) => ({ failed: Number(row.Failed), ok: Number(row.Ok), operation: String(row.Purpose) })),
       byPerson: byPerson.map((row) => ({ failed: Number(row.Failed), ok: Number(row.Ok), person: String(row.ActorName) })),
