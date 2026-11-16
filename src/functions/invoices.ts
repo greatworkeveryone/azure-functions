@@ -56,6 +56,7 @@ import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type Refusal
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
 import { TestDataEgressError, testRecordResponse } from "../test-data";
+import { errorMessage } from "../errorMessage";
 
 // Approval limits and the director gate live in the approval-authority core
 // (src/approvalAuthority.ts, J1); ApprovalLimit rows in approval-limits-db.ts.
@@ -461,12 +462,12 @@ export async function upsertJobInvoice(
           connection,
           `INSERT INTO JobInvoices
              (JobID, InvoiceNumber, Seq, ContractorID, ContractorName, Amount, Currency, Direction,
-              Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy,
+              Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid,
               SupplierInvoiceNumber)
            OUTPUT INSERTED.JobInvoiceID
            VALUES
              (@JobID, @InvoiceNumber, @Seq, @ContractorID, @ContractorName, @Amount, @Currency, @Direction,
-              @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy,
+              @Notes, @InvoicePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy, @CreatedByOid,
               @SupplierInvoiceNumber);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
@@ -482,6 +483,7 @@ export async function upsertJobInvoice(
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+            { name: "CreatedByOid", type: TYPES.NVarChar, value: identity.oid },
             { name: "SupplierInvoiceNumber", type: TYPES.NVarChar, value: supplierNumber.value ?? null },
           ],
         );
@@ -840,6 +842,8 @@ async function approveInvoiceInTransaction(
   input: {
     actor: LedgerActor;
     approvedBy: string;
+    /** The approver's Entra oid, for the creator check. */
+    approverOid: string;
     correlationId: string;
     email: string;
     invoiceId: number;
@@ -847,14 +851,14 @@ async function approveInvoiceInTransaction(
     variance: VarianceBody | null;
   },
 ): Promise<InvoiceApprovalOutcome> {
-  const { actor, approvedBy, correlationId, email, invoiceId, userRoles } = input;
+  const { actor, approvedBy, approverOid, correlationId, email, invoiceId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Fetch invoice — need Amount for limit check. Locked until commit, so the
     // status recorded as replaced is the one that was replaced.
     const rows = await executeQuery(
       connection,
-      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber, ContractorID, CreatedBy FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
+      "SELECT JobID, InvoiceNumber, Amount, Direction, Status, ContractorName, SupplierInvoiceNumber, ContractorID, CreatedBy, CreatedByOid FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id",
       [{ name: "Id", type: TYPES.Int, value: invoiceId }],
     );
     if (rows.length === 0) {
@@ -877,7 +881,7 @@ async function approveInvoiceInTransaction(
     const stateRefusal =
       (moneyJob ? jobMoneyRefusal(moneyJob, { outgoingInvoice: invoice.Direction === "outgoing" }) : null) ??
       approvableRefusal(invoiceStatus, "invoice") ??
-      creatorRefusal(invoice.CreatedBy, { name: approvedBy, roles: userRoles }, "invoice");
+      creatorRefusal({ name: invoice.CreatedBy, oid: invoice.CreatedByOid }, { name: approvedBy, oid: approverOid, roles: userRoles }, "invoice");
     if (stateRefusal) {
       await rollbackTransaction(connection).catch(() => {});
       return { jobId, ok: false, refusal: invoiceRefusal(stateRefusal, invoiceStatus) };
@@ -1057,6 +1061,7 @@ async function approveJobInvoice(
       variance: varianceBody.value,
       actor,
       approvedBy: identity.name,
+      approverOid: identity.oid,
       correlationId,
       email: identity.email,
       invoiceId: JobInvoiceID,
@@ -1290,7 +1295,7 @@ async function directorApproveJobInvoice(
     );
     resolveActivePlannerTasks("job", jobId, ["director_approval"]).catch(
       (err: unknown) =>
-        context.warn("plannerResolve (directorApproveJobInvoice):", err instanceof Error ? err.message : String(err)),
+        context.warn("plannerResolve (directorApproveJobInvoice):", errorMessage(err)),
     );
     return { status: 200, jsonBody: { invoice: stored[0] } };
   } catch (error: any) {

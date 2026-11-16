@@ -6,7 +6,9 @@ import { parseBulkAdditions } from "../infoSheetBulk";
 import { INFO_SHEET_RATE_LIMIT, INFO_SHEET_ROLES, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { resolveLedgerActor } from "../ledger/actor";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
+import { errorMessage } from "../errorMessage";
 
 // POST /api/addInfoSheetRows (D11 re-check S2-3). A bulk add is one write: every
 // row of every section goes in under one row lock, one version check and one
@@ -25,7 +27,7 @@ export async function addInfoSheetRows(request: HttpRequest, context: Invocation
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return { status: 429, headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" } };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -56,7 +58,7 @@ export async function addInfoSheetRows(request: HttpRequest, context: Invocation
     invalidateTenantAndBuilding(tenantId, buildingId);
     return { status: 200, jsonBody: { infoSheetVersion: outcome.version, sections: outcome.sections } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("addInfoSheetRows failed:", message);
     return errorResponse("Failed to add info sheet rows", message);
   } finally {

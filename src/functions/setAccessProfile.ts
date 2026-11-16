@@ -19,6 +19,7 @@ import {
 } from "../db";
 import { LedgerValidationError, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { errorMessage } from "../errorMessage";
 
 type Parsed = { profile: AccessProfile | null; userId: number } | string;
 
@@ -86,7 +87,7 @@ export async function setAccessProfile(request: HttpRequest, context: Invocation
     };
   } catch (error: unknown) {
     if (error instanceof LedgerValidationError) return { status: 400, jsonBody: { error: error.message } };
-    context.error("setAccessProfile failed:", error instanceof Error ? error.message : String(error));
+    context.error("setAccessProfile failed:", errorMessage(error));
     return errorResponse("Could not save the access profile", error);
   } finally {
     if (connection) closeConnection(connection);

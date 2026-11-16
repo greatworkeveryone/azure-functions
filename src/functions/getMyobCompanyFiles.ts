@@ -3,6 +3,7 @@ import { AppRole, errorResponse, extractToken, requireRole, rolesForRequest, una
 import { closeConnection, createRequestConnection } from "../db";
 import { loadCompanyFilesView } from "../myob-company-files-view";
 import { isMyobController } from "../myob-controls-admin";
+import { errorMessage } from "../errorMessage";
 
 // GET /api/getMyobCompanyFiles — every MYOB company file Floorplan knows, with
 // its mode and who last changed it. Readable by cfo (and director and admin
@@ -21,7 +22,7 @@ export async function getMyobCompanyFiles(request: HttpRequest, context: Invocat
     const view = await loadCompanyFilesView(connection);
     return { jsonBody: { ...view, canChange: isMyobController(roles) }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getMyobCompanyFiles failed:", message);
     return errorResponse("Failed to load MYOB company files", message);
   } finally {

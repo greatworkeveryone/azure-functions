@@ -4,6 +4,7 @@ import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse
 import { beginTransaction, closeConnection, commitTransaction, createRequestConnection, executeQuery, rollbackTransaction } from "../db";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { errorMessage } from "../errorMessage";
 
 // ── POST /api/archiveTenancyDocument ─────────────────────────────────────────
 // Body: { TenantId, AttachmentID }. A lease document is archived, never
@@ -77,7 +78,7 @@ export async function archiveTenancyDocument(request: HttpRequest, context: Invo
     }
     return { status: 200, jsonBody: { archived: true, attachmentId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("archiveTenancyDocument failed:", message);
     return errorResponse("Archive document failed", message);
   } finally {

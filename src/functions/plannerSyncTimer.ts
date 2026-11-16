@@ -36,6 +36,7 @@ import {
   type PlannerTenantRow,
   type TriggerType,
 } from "../plannerHelpers";
+import { errorMessage } from "../errorMessage";
 
 const TENANT_TRIGGER_TYPES: TriggerType[] = [
   "lease_expiry",
@@ -208,7 +209,7 @@ export async function plannerSyncTimer(
           } catch (err: unknown) {
             context.warn(
               `plannerSyncTimer: could not remove lease tasks for unsigned tenant ${tenantId}:`,
-              err instanceof Error ? err.message : String(err),
+              errorMessage(err),
             );
           }
         }
@@ -282,7 +283,7 @@ export async function plannerSyncTimer(
               );
               created++;
             } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : String(err);
+              const message = errorMessage(err);
               context.error(
                 `plannerSyncTimer: failed to create task for tenant ${tenant.tenantId} ${triggerType} ${leadTimeDays}d:`,
                 message,
@@ -327,7 +328,7 @@ export async function plannerSyncTimer(
               );
               recreated++;
             } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : String(err);
+              const message = errorMessage(err);
               context.error(
                 `plannerSyncTimer: failed to recreate task for tenant ${tenant.tenantId}:`,
                 message,
@@ -372,7 +373,7 @@ export async function plannerSyncTimer(
               recreated++;
             }
           } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
+            const message = errorMessage(err);
             context.error(
               `plannerSyncTimer: error checking task ${plannerTaskId}:`,
               message,
@@ -479,7 +480,7 @@ export async function plannerSyncTimer(
           );
           jobCreated++;
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = errorMessage(err);
           context.error(
             `plannerSyncTimer: failed to create job task for JobID ${job.jobId}:`,
             message,
@@ -523,7 +524,7 @@ export async function plannerSyncTimer(
             jobCreated++;
           }
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = errorMessage(err);
           context.error(
             `plannerSyncTimer: error checking job task ${row.PlannerTaskId}:`,
             message,
@@ -557,7 +558,7 @@ export async function plannerSyncTimer(
           );
           jobCreated++;
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = errorMessage(err);
           context.error(
             `plannerSyncTimer: failed to recreate job task for JobID ${job.jobId}:`,
             message,
@@ -599,7 +600,7 @@ export async function plannerSyncTimer(
         });
         stalledProcessed++;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(`plannerSyncTimer: stalled_facilities failed for JobID ${jobId}:`, message);
         Sentry.captureException(err, {
           tags: { source: "planner_sync_timer", trigger: "stalled_facilities", jobId: String(jobId) },
@@ -638,7 +639,7 @@ export async function plannerSyncTimer(
         });
         awaitingProcessed++;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(`plannerSyncTimer: awaiting_accounts failed for JobID ${jobId}:`, message);
         Sentry.captureException(err, {
           tags: { source: "planner_sync_timer", trigger: "awaiting_accounts", jobId: String(jobId) },
@@ -678,7 +679,7 @@ export async function plannerSyncTimer(
         });
         awaitingFacilitiesProcessed++;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(`plannerSyncTimer: awaiting_facilities_approval failed for JobID ${jobId}:`, message);
         Sentry.captureException(err, {
           tags: { source: "planner_sync_timer", trigger: "awaiting_facilities_approval", jobId: String(jobId) },
@@ -725,7 +726,7 @@ export async function plannerSyncTimer(
         });
         directorProcessed++;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(`plannerSyncTimer: director_approval failed for JobID ${jobId}:`, message);
         Sentry.captureException(err, {
           tags: { source: "planner_sync_timer", trigger: "director_approval", jobId: String(jobId) },
@@ -765,7 +766,7 @@ export async function plannerSyncTimer(
         });
         onchargeProcessed++;
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(`plannerSyncTimer: oncharge_pending failed for JobID ${jobId}:`, message);
         Sentry.captureException(err, {
           tags: { source: "planner_sync_timer", trigger: "oncharge_pending", jobId: String(jobId) },
@@ -801,7 +802,7 @@ export async function plannerSyncTimer(
         }
         resolvedIds.push(rowId);
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         context.error(
           `plannerSyncTimer: failed to resolve overdue task ${plannerTaskId}:`,
           message,
@@ -830,7 +831,7 @@ export async function plannerSyncTimer(
 
     context.log("plannerSyncTimer: complete");
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("plannerSyncTimer: fatal:", message);
     Sentry.captureException(error, { tags: { source: "planner_sync_timer", scope: "fatal" } });
     throw error;

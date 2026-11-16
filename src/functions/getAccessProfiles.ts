@@ -8,6 +8,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { listAccessProfiles, ACCESS_MANAGE_ROLES } from "../access/store";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
+import { errorMessage } from "../errorMessage";
 
 export async function getAccessProfiles(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -20,7 +21,7 @@ export async function getAccessProfiles(request: HttpRequest, context: Invocatio
     connection = await createRequestConnection(token);
     return { status: 200, jsonBody: { profiles: await listAccessProfiles(connection) } };
   } catch (error: unknown) {
-    context.error("getAccessProfiles failed:", error instanceof Error ? error.message : String(error));
+    context.error("getAccessProfiles failed:", errorMessage(error));
     return errorResponse("Could not load access profiles", error);
   } finally {
     if (connection) closeConnection(connection);

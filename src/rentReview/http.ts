@@ -13,6 +13,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { recordApart } from "../ledger/refusals";
 import { ledgerRefusal } from "../tenancyScheduleWrite";
 import { toReviewDto } from "./dto";
+import { errorMessage } from "../errorMessage";
 
 /**
  * Who may read reviews and the lease-events feed: the roles that may read a
@@ -250,7 +251,7 @@ export function rentReviewErrorResponse(
   }
   const refusal = ledgerRefusal(error);
   if (refusal) return refusal;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   context.error(`${name} failed:`, message);
   return errorResponse(`${name} failed`, error);
 }

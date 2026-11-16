@@ -11,6 +11,7 @@ import { recordApart } from "../ledger/refusals";
 import { adminRefusal } from "../moneyRules";
 import { isDeadlockVictim, REVIEW_APPROVE_ROLES, TENANCY_EDIT_ROLES, TENANCY_VIEW_ROLES, type Caller } from "../rentReview/http";
 import { ledgerRefusal } from "../tenancyScheduleWrite";
+import { errorMessage } from "../errorMessage";
 
 /** Who may read a tenancy's lease events: whoever may read a tenancy (frontend viewLeaseEvents). */
 export const LEASE_EVENT_VIEW_ROLES: readonly AppRole[] = TENANCY_VIEW_ROLES;
@@ -159,7 +160,7 @@ export function leaseEventErrorResponse(error: unknown, context: InvocationConte
   }
   const refusal = ledgerRefusal(error);
   if (refusal) return refusal;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   context.error(`${name} failed:`, message);
   return errorResponse(`${name} failed`, error);
 }

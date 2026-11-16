@@ -293,7 +293,7 @@ export async function verifiedIdentityFromRequest(
 /**
  * The caller's bearer token claims after full verification (signature, expiry,
  * issuer, audience), or null. The money gate (src/moneyGate.ts) reads
- * `auth_time`/`iat` and `amr` from here; keep it on the same audience as
+ * `auth_time` and `amr` from here; keep it on the same audience as
  * rolesForRequest. Both token kinds carry them: an app-scoped v2 token has
  * `amr`/`auth_time` when the SPA requests the scope for the same account.
  */

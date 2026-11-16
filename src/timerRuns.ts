@@ -2,6 +2,7 @@ import type { InvocationContext, Timer } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createServiceRequestConnection, executeQuery, type SqlParam, type SqlRow } from "./db";
 import { Sentry } from "./sentry";
+import { errorMessage } from "./errorMessage";
 
 // Timers fail loudly (DL-12). Every app.timer registration hands its handler
 // to runTimer, which writes a dbo.TimerRuns row (migration 128), and when the
@@ -39,7 +40,7 @@ export type TimerCounts = Record<string, number | string | boolean | null>;
 export type TimerBody = (timer: Timer, context: InvocationContext) => Promise<TimerCounts | void>;
 
 const ERROR_MAX = 4000;
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const message = (err: unknown) => (errorMessage(err));
 
 // A fresh connection per write, never the shared singleton (DL-28).
 async function write(sql: string, params: SqlParam[], context: InvocationContext): Promise<SqlRow[] | null> {

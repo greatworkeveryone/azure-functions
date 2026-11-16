@@ -103,12 +103,12 @@ describe.each([
 ] as const)("%s keeps the typed paths' rules", (_name, handler, inserted, INSERT, attempted) => {
   const promote = (body: Record<string, unknown> = {}) => handler()(makeRequest({ Amount: 500, ContractorName: "Acme", EmailID: 42, JobID: 9, ...body }), ctx);
 
-  it("stores who added it by name, so the person who promoted it can't approve it themselves", async () => {
+  it("stores who added it from the token (name and oid), so the person who promoted it can't approve it themselves", async () => {
     mockSql([APP_USER, EMAIL, job(), inserted]);
 
     expect((await promote({ CreatedBy: "Someone Else" })).status).toBe(200);
     expect(find(INSERT)?.params.CreatedBy).toBe("Fran Manager");
-    expect(calls().flatMap((c) => Object.values(c.params))).not.toContain("fran-oid");
+    expect(find(INSERT)?.params.CreatedByOid).toBe("fran-oid");
   });
 
   it.each([[undefined], [null], [0]])("refuses an amount of %p with 422, writing nothing", async (Amount) => {

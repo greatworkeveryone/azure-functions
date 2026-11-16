@@ -38,6 +38,7 @@ import { closeConnection, createServiceRequestConnection } from "../db";
 import { resumeAwaitingIndex } from "../rentReview/indexResume";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // Exactly "true": "TRUE", "1" and "yes" do not switch anything on.
 function flagOn(name: string): boolean {
@@ -45,7 +46,7 @@ function flagOn(name: string): boolean {
 }
 
 function fail(context: InvocationContext, stage: string, error: unknown): never {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   context.error(`tenancyCpiSyncTimer: ${stage} failed: ${message}`);
   Sentry.captureException(error, {
     extra: {

@@ -5,6 +5,7 @@ import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
 import { dailyRetentionDays, purgeMode, retentionDays } from "../usage/config";
 import { MAX_PER_RUN, purgeUsage } from "../usage/purge";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: 16:30 UTC daily (an hour after the roll-up) ──────────────────────────────────
 // Usage retention (PLAN §14; src/usage/purge.ts). Deletes raw usage rows (UsageViews, UsageSessions)
@@ -39,7 +40,7 @@ export async function usagePurgeTimer(_timer: Timer, context: InvocationContext)
     }
     return { ...counts };
   } catch (error: unknown) {
-    context.error("usagePurgeTimer failed:", error instanceof Error ? error.message : String(error));
+    context.error("usagePurgeTimer failed:", errorMessage(error));
     Sentry.captureException(error, { extra: { context: "usagePurgeTimer" } });
     throw error;
   } finally {

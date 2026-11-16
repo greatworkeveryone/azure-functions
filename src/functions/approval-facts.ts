@@ -19,6 +19,7 @@ import { beginTransaction, closeConnection, commitTransaction, createRequestConn
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { requireMoneyContext } from "../moneyGate";
+import { errorMessage } from "../errorMessage";
 
 const BOUNDS: Record<string, { label: string; max: number }> = {
   director_approval_threshold: { label: "The director approval threshold", max: 1_000_000_000 },
@@ -97,7 +98,7 @@ export async function setApprovalFact(request: HttpRequest, context: InvocationC
     }
     return { status: 200, jsonBody: { factKey: key, ok: true, value } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("setApprovalFact failed:", message);
     return errorResponse("Set approval fact failed", message);
   } finally {

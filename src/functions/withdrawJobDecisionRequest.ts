@@ -29,6 +29,7 @@ import { ASK_FOR_DECISION_ROLES } from "../jobDecisions/roles";
 import { withdrawDecision } from "../jobDecisions/service";
 import { peopleByIds } from "../jobDecisions/store";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 const WITHDRAW_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
@@ -53,7 +54,7 @@ export async function withdrawJobDecisionRequest(request: HttpRequest, context: 
 
     const limit = checkRateLimit(`withdrawJobDecisionRequest:${caller.actor.userId ?? caller.actor.name}`, WITHDRAW_RATE_LIMIT);
     if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
+      return tooManyRequests(limit.retryAfterMs);
     }
 
     const withdrawn = await withdrawDecision(connection, { actor: caller.actor, roles: caller.viewer.roles }, { expectedRowVersion: rowVersion, reason, requestId });

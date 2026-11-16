@@ -20,6 +20,7 @@ import { Sentry } from "../sentry";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { settleReviewEscalations } from "./escalations";
 import { scheduleNextReview, type ScheduleNextResult } from "./generator";
+import { errorMessage } from "../errorMessage";
 
 export interface AfterDecision {
   actor: LedgerActor;
@@ -47,7 +48,7 @@ export interface NextReviewRef {
 }
 
 function report(what: string, input: AfterDecision, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   input.log(`rent review ${input.reviewId}: ${what} after the decision failed: ${message}`);
   Sentry.captureException(error, { extra: { context: `rent review after-commit: ${what}`, reviewId: input.reviewId } });
 }

@@ -17,6 +17,7 @@ import { ATTACHMENT_SHAPE, EMAIL_ATTACHMENT_SHAPE, isBlobName, WR_ATTACHMENTS_SH
 import { uploadAttachment } from "../mybuildings-client";
 import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { jobScope } from "../ledger/moneyDecisions";
@@ -71,11 +72,7 @@ async function handleUploadAttachment(request: HttpRequest, context: InvocationC
 
   const rl = checkRateLimit(`uploadAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -208,11 +205,7 @@ async function handleGetAttachments(request: HttpRequest, context: InvocationCon
   const callerOid = oidFromToken(token) ?? "unknown";
   const rl = checkRateLimit(`getAttachments:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const jobIdRaw = request.query.get("jobId");
@@ -480,11 +473,7 @@ async function listParentAttachments(
   const callerOid = oidFromToken(token) ?? "unknown";
   const rl = checkRateLimit(`listParentAttachments:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const raw = request.query.get(queryParam);
@@ -549,11 +538,7 @@ async function handleDeleteAttachment(
 
   const rl = checkRateLimit(`deleteAttachment:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -699,11 +684,7 @@ async function handleClaimEmailAttachment(
 
   const rl = checkRateLimit(`claimEmailAttachment:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -775,11 +756,7 @@ async function handleUpdateAttachmentComment(
 
   const rl = checkRateLimit(`updateAttachmentComment:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;

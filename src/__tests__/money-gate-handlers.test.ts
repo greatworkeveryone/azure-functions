@@ -64,7 +64,7 @@ afterEach(() => jest.restoreAllMocks());
 
 describe("setApprovalLimit behind the money gate", () => {
   it("refuses a request from outside the office before touching the database", async () => {
-    const { json, request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW }, "198.51.100.20");
+    const { json, request } = makeRequest({ amr: ["pwd", "mfa"], auth_time: NOW }, "198.51.100.20");
     const res = await setApprovalLimit(request, ctx);
     expect(res.status).toBe(403);
     expect(res.jsonBody).toMatchObject({ code: "money_network_required" });
@@ -73,7 +73,7 @@ describe("setApprovalLimit behind the money gate", () => {
   });
 
   it("asks for a fresh sign-in from the office when the last one is old", async () => {
-    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW - 3600 }, "203.0.113.5");
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], auth_time: NOW - 3600 }, "203.0.113.5");
     const res = await setApprovalLimit(request, ctx);
     expect(res.status).toBe(428);
     expect(res.jsonBody).toMatchObject({ code: "step_up_required", reason: "stale_sign_in" });
@@ -81,7 +81,7 @@ describe("setApprovalLimit behind the money gate", () => {
   });
 
   it("goes ahead from the office with a fresh MFA sign-in", async () => {
-    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW }, "203.0.113.5");
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], auth_time: NOW }, "203.0.113.5");
     const res = await setApprovalLimit(request, ctx);
     expect(res.status).toBe(200);
     expect(db.createRequestConnection).toHaveBeenCalled();
@@ -91,7 +91,7 @@ describe("setApprovalLimit behind the money gate", () => {
 // J6b: a director's approval of a quote is a money decision, as an invoice's is.
 describe("directorApproveQuote behind the money gate", () => {
   it("asks a director for a fresh sign-in before approving, without touching the database", async () => {
-    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW - 3600 }, "203.0.113.5", "director");
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], auth_time: NOW - 3600 }, "203.0.113.5", "director");
     const res = await directorApproveQuote(request, ctx);
     expect(res.status).toBe(428);
     expect(res.jsonBody).toMatchObject({ code: "step_up_required", reason: "stale_sign_in" });
@@ -99,7 +99,7 @@ describe("directorApproveQuote behind the money gate", () => {
   });
 
   it("refuses a director outside the office", async () => {
-    const { request } = makeRequest({ amr: ["pwd", "mfa"], iat: NOW }, "198.51.100.20", "director");
+    const { request } = makeRequest({ amr: ["pwd", "mfa"], auth_time: NOW }, "198.51.100.20", "director");
     const res = await directorApproveQuote(request, ctx);
     expect(res.status).toBe(403);
     expect(res.jsonBody).toMatchObject({ code: "money_network_required" });

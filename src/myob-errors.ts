@@ -1,3 +1,4 @@
+import { errorMessage } from "./errorMessage";
 // Errors myobRequest() throws instead of calling MYOB. Each refusal has
 // already been written to dbo.MyobApiLog as an 'error' row by the time the
 // caller sees it. Re-exported from myob-api-log.ts.
@@ -18,7 +19,7 @@ export class MyobAuditLogError extends Error {
   constructor(cause: unknown) {
     super(
       `MYOB was not called because the audit log could not be written: ${
-        cause instanceof Error ? cause.message : String(cause)
+        errorMessage(cause)
       }`,
     );
     this.name = "MyobAuditLogError";

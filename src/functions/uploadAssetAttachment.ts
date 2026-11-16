@@ -15,6 +15,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { errorResponse } from "../auth";
 import { deleteBlob, generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { bytesMatchMediaType, isAllowedContentType, MAX_SIZE_BYTES, normaliseMediaType } from "../upload-constants";
 import { ASSET_BLOB_PREFIX, EDIT_ASSETS_ROLES, attachmentRowToApi, parseQueryInt } from "../assetRegister";
 import {
@@ -38,11 +39,7 @@ export async function uploadAssetAttachment(
 
   const limited = checkRateLimit(`uploadAssetAttachment:${auth.caller.oid}`, UPLOAD_RATE_LIMIT);
   if (!limited.allowed) {
-    return {
-      headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-      status: 429,
-    };
+    return tooManyRequests(limited.retryAfterMs);
   }
 
   let form: FormData;

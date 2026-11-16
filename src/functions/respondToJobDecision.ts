@@ -53,6 +53,7 @@ import { parseRespondBody } from "../jobDecisions/respond";
 import { respondDecision } from "../jobDecisions/respondService";
 import { RESPOND_TO_DECISION_ROLES } from "../jobDecisions/roles";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 const RESPOND_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
@@ -77,7 +78,7 @@ export async function respondToJobDecision(request: HttpRequest, context: Invoca
 
     const limit = checkRateLimit(`respondToJobDecision:${caller.actor.userId ?? caller.actor.name}`, RESPOND_RATE_LIMIT);
     if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
+      return tooManyRequests(limit.retryAfterMs);
     }
 
     const answered = await respondDecision(connection, { actor: caller.actor, roles: caller.viewer.roles }, parsed);

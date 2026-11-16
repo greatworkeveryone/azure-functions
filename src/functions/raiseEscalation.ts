@@ -20,6 +20,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { closeConnection, createRequestConnection } from "../db";
 import { extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import "../escalation/adapters";
 import { requireAdapter } from "../escalation/adapters/registry";
 import { raise } from "../escalation/engine";
@@ -71,7 +72,7 @@ export async function raiseEscalation(request: HttpRequest, context: InvocationC
 
     const limit = checkRateLimit(`raiseEscalation:${caller.actor.userId ?? caller.actor.name}`, RAISE_RATE_LIMIT);
     if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
+      return tooManyRequests(limit.retryAfterMs);
     }
 
     const adapter = requireAdapter(subjectType);

@@ -20,6 +20,7 @@ import { usageFlagEnabledFor } from "../usage/flag";
 import { storeUsageBatch, userIdForOid } from "../usage/ingest";
 import { allowUsageBatch } from "../usage/rateLimit";
 import { MAX_BODY_CHARS, parseUsageBatch } from "../usage/validate";
+import { errorMessage } from "../errorMessage";
 
 const NO_CONTENT: HttpResponseInit = { status: 204 };
 
@@ -55,7 +56,7 @@ export async function postUsageEvents(request: HttpRequest, context: InvocationC
     await storeUsageBatch(connection, userId, parsed.batch, startedAt);
     return NO_CONTENT;
   } catch (error: unknown) {
-    context.error("postUsageEvents failed:", error instanceof Error ? error.message : String(error));
+    context.error("postUsageEvents failed:", errorMessage(error));
     return errorResponse("Could not record usage", error);
   } finally {
     if (connection) closeConnection(connection);

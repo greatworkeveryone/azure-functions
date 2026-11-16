@@ -38,6 +38,7 @@ import { deriveNextReviewDate, nextReviewInputFromRow, RESOLVED_REVIEW_DATES_SQL
 import { parseSteps } from "../scheduledRateStepLogic";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { ledgerRefusal, rollbackQuietly } from "../tenancyScheduleWrite";
+import { errorMessage } from "../errorMessage";
 
 interface NextReviewChange {
   buildingId: number;
@@ -179,7 +180,7 @@ export async function recomputeNextReviewDates(
   } catch (error: unknown) {
     const refusal = ledgerRefusal(error);
     if (refusal) return refusal;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("recomputeNextReviewDates failed:", message);
     return errorResponse("Failed to recompute next review dates", error);
   } finally {

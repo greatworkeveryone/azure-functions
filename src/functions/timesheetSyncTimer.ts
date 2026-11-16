@@ -2,6 +2,7 @@ import { app, InvocationContext, Timer } from "@azure/functions";
 import { createServiceConnection, closeConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: Sunday midnight (UTC) ─────────────────────────────────────
 // Reports approved timesheets not yet in MYOB. Sending them is not built.
@@ -32,7 +33,7 @@ export async function timesheetSyncTimer(
       `timesheetSyncTimer: ${pending.length} approved timesheets awaiting MYOB sync; sending is not built yet, nothing stamped`,
     );
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("timesheetSyncTimer: fatal error:", message);
     Sentry.captureException(error, { extra: { context: "timesheetSyncTimer fatal" } });
     throw error;

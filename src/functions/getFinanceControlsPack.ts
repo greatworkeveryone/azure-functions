@@ -3,6 +3,7 @@ import { AppRole, extractToken, requireRole, unauthorizedResponse, verifiedIdent
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { financeControlsSnapshot } from "../financeControlsPack";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 // Several aggregate scans per call; five a minute per person.
 const PACK_LIMIT = { limit: 5, windowMs: 60_000 };
@@ -16,7 +17,7 @@ export async function getFinanceControlsPack(request: HttpRequest, context: Invo
   if (!identity) return unauthorizedResponse();
   const rl = checkRateLimit(`financeControlsPack:${identity.oid}`, PACK_LIMIT);
   if (!rl.allowed) {
-    return { status: 429, headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" } };
+    return tooManyRequests(rl.retryAfterMs);
   }
   let connection;
   try {

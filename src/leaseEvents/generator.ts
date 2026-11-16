@@ -48,6 +48,7 @@ import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { type LeasePolicyKey, LEASE_POLICIES, OPTION_DEADLINE_WARNING_DAYS, raiseLeaseEscalation } from "./escalations";
 import { type LeaseOptions, leaseOptionsOf, optionWindowOf } from "./options";
 import { insertEvent, moveEvent } from "./store";
+import { errorMessage } from "../errorMessage";
 
 export const GENERATOR_ACTOR: LedgerActor = { kind: "system", name: "leaseEventsGeneratorTimer" };
 
@@ -378,7 +379,7 @@ export async function runLeaseEventsGenerator(run: GeneratorRun): Promise<Genera
           if (raised) report.escalationsRaised += 1;
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         report.errors.push({ message, tenantId: action.tenantId });
         run.warn(`leaseEventsGenerator: tenancy ${action.tenantId} failed: ${message}`);
         run.onError?.(error, action.tenantId);

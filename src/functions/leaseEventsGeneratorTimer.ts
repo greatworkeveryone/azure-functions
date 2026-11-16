@@ -3,6 +3,7 @@ import { closeConnection, createServiceRequestConnection } from "../db";
 import { generatorMode, maxActions, runLeaseEventsGenerator } from "../leaseEvents/generator";
 import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: daily, 02:30 UTC (12:00 in Darwin) ────────────────────────
 // The lease events generator (PLAN §3.5, §3.6; WP32, WP33; src/leaseEvents/
@@ -63,7 +64,7 @@ export async function leaseEventsGeneratorTimer(_timer: Timer, context: Invocati
       windowsOpened: report.written.open_window,
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("leaseEventsGeneratorTimer failed:", message);
     Sentry.captureException(error, { extra: { context: "leaseEventsGeneratorTimer fatal" } });
     throw error;

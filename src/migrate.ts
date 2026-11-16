@@ -3,6 +3,7 @@ import { TYPES, type Connection } from "tedious";
 import { beginTransaction, closeConnection, commitTransaction, executeBatch, executeQuery, rollbackTransaction } from "./db";
 import type { MigrationTarget } from "./migrate-cli";
 import { loadMigrations, validateMigration, type MigrationFile } from "./migrate-files";
+import { errorMessage } from "./errorMessage";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Migration runner (DL-11)
@@ -150,7 +151,7 @@ async function applyFile(connection: Connection, file: MigrationFile): Promise<v
     const kept = file.transactional
       ? "rolled back, nothing from this file was kept"
       : `NOT transactional (${file.transactionNote}): earlier batches may have committed`;
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new Error(`migrate: ${file.name} failed in ${where}; ${kept}: ${reason}`, { cause: err });
   }
 }

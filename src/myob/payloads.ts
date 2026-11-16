@@ -37,7 +37,8 @@ export interface DocumentFacts {
   supplierUid: string;
 }
 
-export const toCents = (amount: number) => Math.round(amount * 100) / 100;
+/** Rounds dollars to the nearest cent (still dollars). */
+export const roundToCents = (amount: number) => Math.round(amount * 100) / 100;
 
 export function buildServiceDocument(facts: DocumentFacts): Record<string, unknown> {
   if (facts.lines.length === 0) throw new Error("A MYOB document needs at least one line");
@@ -52,7 +53,7 @@ export function buildServiceDocument(facts: DocumentFacts): Record<string, unkno
       Account: { UID: line.accountUid },
       Description: line.description.slice(0, DESCRIPTION_MAX),
       TaxCode: { UID: line.taxCodeUid },
-      Total: toCents(line.total),
+      Total: roundToCents(line.total),
       Type: "Transaction",
     })),
     Number: facts.number,
@@ -86,7 +87,7 @@ export function comparable(document: Record<string, unknown>): ComparableDocumen
     number: String(document.Number ?? ""),
     supplierUid: uid(document.Supplier),
     taxCodeUids: transactions.map((line) => uid(line.TaxCode)),
-    total: toCents(transactions.reduce((sum, line) => sum + Number(line.Total ?? 0), 0)),
+    total: roundToCents(transactions.reduce((sum, line) => sum + Number(line.Total ?? 0), 0)),
   };
 }
 

@@ -19,6 +19,7 @@ import { requireMoneyContext } from "../moneyGate";
 import { isMyobController } from "../myob-controls-admin";
 import { ProposalError } from "./proposalErrors";
 import type { Person } from "./propose";
+import { errorMessage } from "../errorMessage";
 
 export const PROPOSER_ROLES: readonly string[] = ["accounts_manager", "facilities_manager", "cfo", "director"];
 
@@ -66,7 +67,7 @@ export async function withCaller(
   } catch (error) {
     if (error instanceof ProposalError) return { jsonBody: { error: error.message, reasons: error.reasons }, status: error.status };
     if (error instanceof LedgerValidationError) return { jsonBody: { error: error.message }, status: 400 };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${name} failed:`, message);
     return errorResponse(`${name} failed`, message);
   } finally {

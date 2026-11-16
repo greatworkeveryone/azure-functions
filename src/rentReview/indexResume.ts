@@ -30,6 +30,7 @@ import { parseCalc } from "../rentReviewCalc";
 import { workOutReview } from "./calculate";
 import { inTransaction, loadCpiRows, loadTenancyForReview, reviewForUpdate } from "./store";
 import { markIndexAvailable, saveCalc } from "./transitions";
+import { errorMessage } from "../errorMessage";
 
 export const CPI_TIMER_ACTOR: LedgerActor = { kind: "system", name: "tenancyCpiSyncTimer" };
 
@@ -166,7 +167,7 @@ export async function resumeAwaitingIndex(
       report.resumed += 1;
       invalidateTenantAndBuilding(review.tenantId, review.buildingId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       report.errors.push({ message, reviewId: review.reviewId });
       run.warn(`cpi sync: rent review ${review.reviewId} couldn't go back to in progress: ${message}`);
       Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer index resume", reviewId: review.reviewId } });
@@ -181,7 +182,7 @@ export async function resumeAwaitingIndex(
         run.warn(`cpi sync: rent review ${review.reviewId} is back in progress but wasn't calculated: ${outcome}`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       report.notCalculated.push({ reviewId: review.reviewId, why: message });
       run.warn(`cpi sync: rent review ${review.reviewId} is back in progress but its calculation failed: ${message}`);
       Sentry.captureException(error, { extra: { context: "tenancyCpiSyncTimer index resume calculate", reviewId: review.reviewId } });

@@ -5,6 +5,7 @@ import { myobApiBase } from "../myob-endpoints";
 import { parseActivityQuery } from "../myob/activity/activityInput";
 import { CALL_ROWS, loadCallRows, loadProposalRows, loadRegisteredFiles, PROPOSAL_ROWS } from "../myob/activity/activityStore";
 import { activityCsv, callView, proposalView } from "../myob/activity/activityView";
+import { errorMessage } from "../errorMessage";
 
 // GET /api/getMyobActivity?kind=proposals|calls[&file&state&from&to][&format=csv]
 // — the MYOB Activity view (SPR-M4): every proposal (what, by whom, approved by
@@ -34,7 +35,7 @@ export async function getMyobActivity(request: HttpRequest, context: InvocationC
     const truncatedBeforeFileFilter = truncated && kind === "calls" && filters.companyFileId !== null;
     return { jsonBody: { ...view, files: [...files].map(([id, name]) => ({ id, name })), kind, truncated, truncatedBeforeFileFilter }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getMyobActivity failed:", message);
     return errorResponse("Failed to load MYOB activity", message);
   } finally {

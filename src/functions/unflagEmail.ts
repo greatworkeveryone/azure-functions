@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { TYPES } from "tedious";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { errorMessage } from "../errorMessage";
 
 // ── POST /api/unflagEmail ────────────────────────────────────────────────────
 // Body: { EmailID: number }
@@ -44,7 +45,7 @@ export async function unflagEmail(request: HttpRequest, context: InvocationConte
     context.log(`unflagEmail: ${identity.name} (${identity.oid}) returned email ${emailId} to the inbox`);
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("unflagEmail failed:", message);
     return errorResponse("Un-flag failed", message);
   } finally {

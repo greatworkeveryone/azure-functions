@@ -17,6 +17,7 @@ import { blobHostFromConnectionString, uploadPublicBlob, deletePublicBlob, vacan
 import { MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 const IMAGE_CONTENT_TYPES = new Set([
   "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
@@ -137,13 +138,6 @@ export function isAllowedVacancyImageUrl(raw: string): boolean {
 const VACANCY_WRITE_LIMIT: RateLimitOpts = { limit: 60, windowMs: 60_000 };
 const VACANCY_PUBLISH_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
 
-function tooManyRequests(retryAfterMs: number): HttpResponseInit {
-  return {
-    status: 429,
-    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
-    jsonBody: { error: "Rate limit exceeded" },
-  };
-}
 
 function rowToVacancy(row: SqlRow): Record<string, unknown> {
   const heroImageUrl = (row.HeroImageUrl as string | null) ?? null;

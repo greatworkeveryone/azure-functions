@@ -27,6 +27,7 @@ import {
 import { graphSendMail } from "../graph";
 import { NOT_A_RECORD } from "../test-data";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { Sentry } from "../sentry";
 import { isAllowedContentType } from "../upload-constants";
 import type { GraphAttachment } from "../graph";
@@ -120,11 +121,7 @@ export async function handleSendFeedback(
 
   const gate = checkRateLimit(`sendFeedback:${identity.oid}`, { limit: 5, windowMs: 60_000 });
   if (!gate.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(gate.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(gate.retryAfterMs);
   }
 
   // Parsed on its own so a malformed body is the client's 400, not our 500 —

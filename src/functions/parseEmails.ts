@@ -43,10 +43,12 @@ import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { domainOf, orgEmailDomains } from "../email/sender-auth";
 import { EMAIL_SYNC_QUEUE, emailSyncQueueOutput, enqueueEmailSync, isEmailSyncMessage } from "../email/sync-queue";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
 import { type AiRefusalCode, recordExternalAiCall } from "../ai";
 import { assertSafeToddlerUrl } from "../toddlerUrl";
+import { errorMessage } from "../errorMessage";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -264,7 +266,7 @@ function toddlerConfigured(context: InvocationContext, caller: string): boolean 
   try {
     assertSafeToddlerUrl(TODDLER_URL);
   } catch (err: unknown) {
-    context.error(`${caller}: ${err instanceof Error ? err.message : String(err)} — skipping`);
+    context.error(`${caller}: ${errorMessage(err)} — skipping`);
     return false;
   }
   if (!TODDLER_SERVICE_KEY) {
@@ -301,7 +303,7 @@ export async function warmUpToddler(
     context.log(`warmUpToddler: model ready after ${Date.now() - started}ms${suffix}`);
     return true;
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     context.error(`warmUpToddler: failed after ${Date.now() - started}ms —`, message);
     return false;
   } finally {
@@ -536,7 +538,7 @@ export async function resolveSenderTrust(
   try {
     return (await isActiveContractor(token, address)) ? "known-contractor" : "unknown";
   } catch (err: unknown) {
-    context.warn("sender trust lookup failed:", err instanceof Error ? err.message : String(err));
+    context.warn("sender trust lookup failed:", errorMessage(err));
     return "unknown";
   }
 }
@@ -762,7 +764,7 @@ function logEmailReading(
       recordId: String(email.EmailID),
       recordType: "email",
     },
-    (error: unknown) => context.warn(`AI call log row for email #${email.EmailID} not written:`, error instanceof Error ? error.message : String(error)),
+    (error: unknown) => context.warn(`AI call log row for email #${email.EmailID} not written:`, errorMessage(error)),
   );
 }
 
@@ -789,7 +791,7 @@ async function parseClaimedEmail(
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
       await recordTransientError(token, email.EmailID, error).catch((e: unknown) =>
-        context.error(`failed to record error for #${email.EmailID}:`, e instanceof Error ? e.message : String(e)),
+        context.error(`failed to record error for #${email.EmailID}:`, errorMessage(e)),
       );
       context.error(`skip-sender write failed for email #${email.EmailID}:`, error.message);
       return "errored";
@@ -801,7 +803,7 @@ async function parseClaimedEmail(
     let knownJob: KnownJob | null = null;
     if (email.MatchedJobID != null) {
       knownJob = await loadKnownJob(token, email.MatchedJobID).catch((err: unknown) => {
-        context.warn(`knownJob lookup failed for job #${email.MatchedJobID}:`, err instanceof Error ? err.message : String(err));
+        context.warn(`knownJob lookup failed for job #${email.MatchedJobID}:`, errorMessage(err));
         return null;
       });
     }
@@ -841,7 +843,7 @@ async function parseClaimedEmail(
     const error = err instanceof Error ? err : new Error(String(err));
     const record = err instanceof ToddlerRejectedError ? recordPermanentError : recordTransientError;
     await record(token, email.EmailID, error).catch((e: unknown) =>
-      context.error(`failed to record error for #${email.EmailID}:`, e instanceof Error ? e.message : String(e)),
+      context.error(`failed to record error for #${email.EmailID}:`, errorMessage(e)),
     );
     if (err instanceof ToddlerRejectedError) context.warn(`email #${email.EmailID} rejected by toddler, finalised as flagged: ${error.message}`);
     context.error(`parse failed for email #${email.EmailID}:`, error.message);
@@ -883,7 +885,7 @@ export async function runParseBatch(
     } catch (err: unknown) {
       context.error(
         `runParseBatch: claim failed after ${totals.claimed} email(s)`,
-        err instanceof Error ? err.message : String(err),
+        errorMessage(err),
       );
       throw err;
     }
@@ -933,7 +935,7 @@ async function parseQueued(caller: string, context: InvocationContext, deadline:
       `${caller} done: claimed=${result.claimed}, succeeded=${result.succeeded}, flagged=${result.flagged}, errored=${result.errored}`,
     );
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     context.error(`${caller} failed:`, message);
     Sentry.captureException(err, { extra: { context: `${caller} failed` } });
     await Sentry.flush(2000);
@@ -981,7 +983,7 @@ export async function processEmailSync(message: unknown, context: InvocationCont
         closeConnection(connection);
       }
     } catch (err: unknown) {
-      context.error("processEmailSync: sync failed:", err instanceof Error ? err.message : String(err));
+      context.error("processEmailSync: sync failed:", errorMessage(err));
       Sentry.captureException(err, { extra: { context: "processEmailSync sync failed", source } });
       await Sentry.flush(2000);
       throw err;
@@ -1020,7 +1022,7 @@ export async function adminTriggerEmailParse(
     enqueueEmailSync(context, "admin");
     return { status: 202, jsonBody: { queued: true, reset } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("adminTriggerEmailParse failed:", message);
     return errorResponse("Email parse trigger failed", message);
   }
@@ -1052,11 +1054,7 @@ async function getFlaggedEmails(
   const oid = oidFromToken(token) ?? "unknown";
   const rl = checkRateLimit(`getFlaggedEmails:${oid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;

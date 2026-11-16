@@ -38,6 +38,7 @@ import { coveringPeriods, daysFromTo, defectsReminderStage, isGenerationDue, nex
 import type { LedgerActor } from "./ledger";
 import { advanceNextDue, createScheduledJob, insertRun } from "./serviceScheduleRuns";
 import { SELECT_SCHEDULE, scheduleCoverageJob, scheduleRowToApi, seriesOf, type ScheduleApi } from "./serviceSchedules";
+import { errorMessage } from "./errorMessage";
 
 export { schedulerMode, type SchedulerMode } from "./schedulerMode";
 
@@ -74,7 +75,7 @@ export interface SchedulerReport {
 
 const emptyCounts = (): RaiseCounts => ({ alreadyOpen: 0, considered: 0, raised: 0, skippedAlreadySent: 0, wouldRaise: 0 });
 
-const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const errorText = (error: unknown): string => (errorMessage(error));
 
 const RAISED_FOR_END_DATE = `SELECT TOP 1 EscalationId FROM dbo.Escalations
   WHERE SubjectType = @SubjectType AND SubjectId = @SubjectId AND PolicyKey = @PolicyKey

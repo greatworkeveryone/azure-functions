@@ -20,13 +20,14 @@ import type { NewJob } from "../comms/types";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 export async function sendTestCorrespondence(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeActor(request, ACTION_ROLES.sendEmail.gate, ACTION_ROLES.sendEmail.refused);
   if (!auth.ok) return auth.response;
   const { actor } = auth;
   const limited = checkRateLimit(`sendTestCorrespondence:${actor.oid}`, { limit: 5 });
-  if (!limited.allowed) return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many test emails, try again shortly" }, status: 429 };
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs, "Too many test emails, try again shortly");
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parsePreviewInput(body);

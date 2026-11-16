@@ -65,6 +65,18 @@ describe("renderEmail: nothing hidden, nothing tracked", () => {
     expect(html).toContain('href="mailto:a@b.co"');
   });
 
+  it("prints a link's address after words that aren't it, so the target can't be hidden", () => {
+    expect(html).toContain("our site</a> <span");
+    expect(html).toContain("(https://example.com/page?x=1)");
+    expect(html).toContain("(mailto:a@b.co)");
+  });
+
+  it("prints no address twice when the words already are it", () => {
+    const rendered = renderEmail(input("See [https://example.com/](https://example.com) or [a@b.co](mailto:a@b.co).")).html;
+    expect(rendered).not.toContain("(https://example.com)");
+    expect(rendered).not.toContain("(mailto:a@b.co)");
+  });
+
   it("drops a link that is not http, https or mailto, keeping its words", () => {
     const rendered = renderEmail(input("[click](javascript:alert(1)) and [data](data:text/html;base64,AAAA) and [rel](/path)")).html;
     expect(rendered).not.toContain("href=\"javascript");

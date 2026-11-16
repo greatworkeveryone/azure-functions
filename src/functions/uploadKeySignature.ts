@@ -18,6 +18,7 @@ import { errorResponse, extractToken, requireRole, unauthorizedResponse, verifie
 import { uploadKeyPhotoBlob } from "../blob-storage";
 import { CHECKOUT_KEYS_ROLES } from "../keyRoles";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 /** A drawn signature is a few KB; a megabyte is generous. */
 export const MAX_SIGNATURE_BYTES = 1024 * 1024;
@@ -39,11 +40,7 @@ export async function uploadKeySignature(
 
   const limited = checkRateLimit(`uploadKeySignature:${identity.oid}`, { limit: 30, windowMs: 60_000 });
   if (!limited.allowed) {
-    return {
-      headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-      status: 429,
-    };
+    return tooManyRequests(limited.retryAfterMs);
   }
 
   let connection;

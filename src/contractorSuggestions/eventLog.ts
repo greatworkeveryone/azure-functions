@@ -7,6 +7,7 @@ import { TYPES, type Connection } from "tedious";
 import { inTransaction, txOk } from "../assetRegisterSupport";
 import { executeQuery, type SqlParam } from "../db";
 import type { FeatureVector, Reason, SuggestionContextKind } from "./types";
+import { isUniqueViolation } from "../sqlErrors";
 
 export interface LogActor {
   name: string;
@@ -74,12 +75,6 @@ const SELECT_SET = `SELECT SetId, ActorOid, JobId, BuildingId, Trade, Context, F
   FROM dbo.ContractorSuggestionSets WHERE SetId = @SetId`;
 
 const SELECT_ITEMS = `SELECT ContractorId, [Rank] FROM dbo.ContractorSuggestionItems WHERE SetId = @SetId`;
-
-/** A duplicate-key error from a concurrent identical request: the choice is already on record. */
-function isDuplicateKey(error: unknown): boolean {
-  const number = (error as { number?: number } | null)?.number;
-  return number === 2601 || number === 2627;
-}
 
 /** Writes the set and its items in one transaction and returns the set's id. */
 export async function logSuggestionSet(connection: Connection, actor: LogActor, set: LoggedSet, items: readonly LoggedItem[]): Promise<number> {
@@ -149,7 +144,7 @@ export async function logOutcomes(connection: Connection, actor: LogActor, setId
         ]);
         added += Number(rows[0]?.Added ?? 0);
       } catch (error) {
-        if (!isDuplicateKey(error)) throw error;
+        if (!isUniqueViolation(error)) throw error; // a concurrent identical request: already on record
       }
     }
     return txOk(added);

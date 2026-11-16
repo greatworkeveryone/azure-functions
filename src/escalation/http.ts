@@ -17,6 +17,7 @@ import { EscalationError } from "./errors";
 import { canSee } from "./permissions";
 import { getEscalationRow, listActiveUsers } from "./store";
 import type { DirectoryUser, EscalationRow, Viewer } from "./types";
+import { errorMessage } from "../errorMessage";
 
 /** Anyone who works jobs or accounts: list, read, acknowledge, resolve, raise. */
 export const ESCALATION_ROLES = [
@@ -141,7 +142,7 @@ export function escalationErrorResponse(
   if (error instanceof LedgerValidationError) {
     return { status: 400, jsonBody: { error: error.message } };
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   context.error(`${name} failed:`, message);
   return errorResponse(`${name} failed`, error);
 }

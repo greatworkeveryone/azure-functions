@@ -19,6 +19,7 @@ import { concludeForSubject, raise } from "../escalation";
 import type { LedgerActor } from "../ledger";
 
 import { type LeasePolicyKey } from "./policies";
+import { errorMessage } from "../errorMessage";
 
 export { LEASE_POLICIES, OPTION_DEADLINE_WARNING_DAYS, type LeasePolicyKey } from "./policies";
 
@@ -51,7 +52,7 @@ export async function raiseLeaseEscalation(
     });
     return result.created;
   } catch (error) {
-    input.log(`lease events: could not raise ${input.policyKey} on ${input.target.leaseEventId}: ${error instanceof Error ? error.message : String(error)}`);
+    input.log(`lease events: could not raise ${input.policyKey} on ${input.target.leaseEventId}: ${errorMessage(error)}`);
     return false;
   }
 }
@@ -72,7 +73,7 @@ export async function concludeLeaseEscalations(
     });
     return ended.length;
   } catch (error) {
-    input.log(`lease events: could not end the escalations on ${input.leaseEventId}: ${error instanceof Error ? error.message : String(error)}`);
+    input.log(`lease events: could not end the escalations on ${input.leaseEventId}: ${errorMessage(error)}`);
     return 0;
   }
 }

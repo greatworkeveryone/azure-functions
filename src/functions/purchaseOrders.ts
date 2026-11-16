@@ -17,6 +17,7 @@ import {
 } from "../db";
 import { AppRole, extractToken, requireRole, rolesForRequest, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { resolveRecipient } from "../email-recipient";
@@ -55,13 +56,6 @@ import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/
 
 // PDF rendering is CPU-bound; one caller gets ten a minute.
 const PO_PDF_LIMIT: RateLimitOpts = { limit: 10, windowMs: 60_000 };
-function tooManyRequests(retryAfterMs: number): HttpResponseInit {
-  return {
-    status: 429,
-    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
-    jsonBody: { error: "Rate limit exceeded" },
-  };
-}
 import {
   adminRefusal,
   holdsAdmin,
@@ -78,6 +72,7 @@ import { parseMoneyField } from "../money";
 import { Sentry } from "../sentry";
 import type { LedgerActor } from "../ledger/types";
 import { testRecordResponse } from "../test-data";
+import { errorMessage } from "../errorMessage";
 
 /** A PO's amount for the approval rules (PLAN §3.8): the cap, else the estimate; null when neither is known. */
 function poAmount(row: { CostNotToExceed?: unknown; EstimatedCost?: unknown }): number | null {
@@ -1080,7 +1075,7 @@ async function sendPurchaseOrder(
       // The mail is out and unrecorded. The claim stays, so a second click is
       // refused rather than sending the PO again.
       Sentry.captureException(err, { extra: { note: "PO email sent but not recorded", purchaseOrderId: PurchaseOrderID } });
-      context.error("sendPurchaseOrder: sent but not recorded:", err instanceof Error ? err.message : String(err));
+      context.error("sendPurchaseOrder: sent but not recorded:", errorMessage(err));
       return {
         status: 500,
         jsonBody: { error: "The purchase order email was sent, but recording it failed. Do not send it again; check with the contractor." },

@@ -11,6 +11,8 @@ import {
 import { buildAuthorizeUrl } from "../myob-auth";
 import { createAuthState } from "../myob-auth-state";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
+import { errorMessage } from "../errorMessage";
 
 // Returns the MYOB authorize URL for the admin to open in a new tab. The state
 // in it is single-use, valid for 10 minutes and records which admin started
@@ -24,11 +26,7 @@ async function myobAuthStart(request: HttpRequest, _context: InvocationContext):
 
   const rl = checkRateLimit(`myobAuthStart:${oidFromToken(token) ?? "unknown"}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-      status: 429,
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const identity = await verifiedIdentityFromRequest(request);
@@ -38,7 +36,7 @@ async function myobAuthStart(request: HttpRequest, _context: InvocationContext):
     const state = await createAuthState({ name: identity.name, oid: identity.oid });
     return { jsonBody: { authorizeUrl: buildAuthorizeUrl(state) }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return errorResponse("Failed to build MYOB authorize URL", message);
   }
 }

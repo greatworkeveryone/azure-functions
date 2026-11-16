@@ -8,6 +8,7 @@ import type { AlertChannel, AlertKind, AlertResult } from "../alerts/channel";
 import type { EgressSubject } from "../test-data";
 import { normaliseRole, ROLES } from "./roles";
 import type { DirectoryUser, EscalationRow } from "./types";
+import { errorMessage } from "../errorMessage";
 
 type AlertEvent = "raise" | "reminder" | "supersede";
 
@@ -66,7 +67,7 @@ export async function deliverUrgentAlerts(
       try {
         result = await channel.send(address, { egress, kind: options.kind, route, ...copy });
       } catch (error) {
-        result = { detail: error instanceof Error ? error.message : String(error), status: "failed" };
+        result = { detail: errorMessage(error), status: "failed" };
       }
       if (result.status === "sent") {
         toldUserIds.add(user.userId);

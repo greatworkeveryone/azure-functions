@@ -21,11 +21,13 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decisionsCsvFileName, decisionsToCsv } from "../ledger/csv";
 import { buildDecisionWhere, parseDecisionFilters } from "../ledger/filters";
 import { DECISION_COLUMNS, toDecisionRow } from "../ledger/rows";
 import { showTestParam } from "../test-data";
+import { errorMessage } from "../errorMessage";
 
 const ORDER_BY_OCCURRED_AT = "ORDER BY OccurredAt DESC, LedgerId DESC";
 // NULL impact sorts last on a descending order in SQL Server.
@@ -55,11 +57,7 @@ export async function getDecisions(request: HttpRequest, context: InvocationCont
     if (!identity) return unauthorizedResponse();
     const rl = checkRateLimit(`decisionsCsv:${identity.oid}`, EXPORT_LIMIT);
     if (!rl.allowed) {
-      return {
-        status: 429,
-        headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-        jsonBody: { error: "Rate limit exceeded" },
-      };
+      return tooManyRequests(rl.retryAfterMs);
     }
   }
   const built = buildDecisionWhere(filters);
@@ -132,7 +130,7 @@ export async function getDecisions(request: HttpRequest, context: InvocationCont
       },
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getDecisions failed:", message);
     return errorResponse("Failed to fetch decisions", error);
   } finally {

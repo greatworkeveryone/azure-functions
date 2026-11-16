@@ -182,7 +182,7 @@ describe("approvals", () => {
     answer([/dbo\.Quotes/, [quote()]]);
     const [row] = await loadApprovalItems(conn, [manager], context);
     expect(row).toMatchObject({ capability: null, id: "9", move: "notice", ownerUserId: 2, type: "approval", importance: "medium" });
-    expect(row.money).toEqual({ amount: 5000, buildingId: 3, createdByName: "Fay Facilities", subject: "quote" });
+    expect(row.money).toEqual({ amount: 5000, buildingId: 3, createdByName: "Fay Facilities", createdByOid: null, subject: "quote" });
     expect(row.dueAt?.toISOString()).toBe("2026-10-27T07:30:00.000Z"); // 16 business hours after Mon 26 Oct 09:30 Darwin: Tue 17:00
     expect(row.label).toContain("Quote Q-9 from Acme awaiting approval");
   });

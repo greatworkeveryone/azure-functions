@@ -18,6 +18,7 @@ import { assertMayLeave, type EgressSubject } from "../../test-data";
 import { buildMyobDailyEmail } from "./email";
 import { lastCoveredRun, loadCfoRecipients, loadDailyFacts, MAX_CALL_ROWS } from "./store";
 import type { DailyFacts, DailyRecipient } from "./types";
+import { errorMessage } from "../../errorMessage";
 
 export type MyobDailyMode = "dry-run" | "live" | "off";
 
@@ -91,7 +92,7 @@ export interface MyobDailyReport {
 }
 
 const firstName = (name: string) => name.trim().split(/\s+/)[0] || "there";
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 300);
+const errorText = (error: unknown) => (errorMessage(error)).slice(0, 300);
 
 export async function runMyobDaily(
   connection: Connection,

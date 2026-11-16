@@ -98,6 +98,8 @@ export async function loadVarianceFacts(conn: Connection): Promise<VarianceFacts
 export interface NamedUser {
   displayName: string;
   email?: string;
+  /** Null until they first sign in. */
+  entraOid: string | null;
   role: string;
   roles: string[];
   userId: number;
@@ -107,7 +109,7 @@ export interface NamedUser {
 export async function loadNamedUser(conn: Connection, userId: number): Promise<NamedUser | null> {
   const rows = await executeQuery(
     conn,
-    `SELECT UserID, DisplayName, Email, Role FROM dbo.AppUsers WHERE UserID = @UserID AND IsActive = 1`,
+    `SELECT UserID, DisplayName, Email, EntraOid, Role FROM dbo.AppUsers WHERE UserID = @UserID AND IsActive = 1`,
     [{ name: "UserID", type: TYPES.Int, value: userId }],
   );
   const row = rows[0];
@@ -117,6 +119,7 @@ export async function loadNamedUser(conn: Connection, userId: number): Promise<N
   return {
     displayName: String(row.DisplayName ?? email ?? `User ${userId}`),
     email,
+    entraOid: typeof row.EntraOid === "string" && row.EntraOid.trim() ? row.EntraOid.trim() : null,
     role,
     roles: role ? [role] : [],
     userId: Number(row.UserID),

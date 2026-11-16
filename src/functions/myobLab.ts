@@ -8,6 +8,7 @@ import { LAB_PROBES, runLabProbe, type LabProbe } from "../myob/lab/probes";
 import { loadLabResults, recordLabResult } from "../myob/lab/results";
 import { loadLabStatus } from "../myob/lab/status";
 import type { Connection } from "tedious";
+import { errorMessage } from "../errorMessage";
 
 // Johanne's MYOB lab (plan M5): sessions on a demonstration company file that
 // isn't RP's. GET getMyobLab (cfo, director, admin, as the other MYOB views;
@@ -37,7 +38,7 @@ export async function getMyobLab(request: HttpRequest, context: InvocationContex
     const cases = LAB_CASES.map((labCase) => ({ ...labCase, result: results.get(labCase.id) ?? null }));
     return { jsonBody: { canRecord: isMyobController(roles), cases, status }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getMyobLab failed:", message);
     return errorResponse("Failed to load the MYOB lab", message);
   } finally {

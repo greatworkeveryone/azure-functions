@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { Connection, TYPES } from "tedious";
 import { executeQuery } from "./db";
+import { errorMessage } from "./errorMessage";
 
 export const SEED_FILE = join(__dirname, "..", "migrations", "seeding", "procedures.seed.json");
 
@@ -173,7 +174,7 @@ export async function runSeed(
       options.log(`  added   ${slug} (version ${action.entry.version}, ${action.entry.status})`);
     } catch (error) {
       report.failed++;
-      options.log(`  FAILED  ${slug}: ${error instanceof Error ? error.message : String(error)}`);
+      options.log(`  FAILED  ${slug}: ${errorMessage(error)}`);
     }
   }
   return report;

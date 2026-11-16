@@ -18,12 +18,13 @@ import { resolveAudience } from "../comms/broadcast/resolveAudience";
 import { MAX_RECIPIENTS_PER_JOB } from "../comms/config";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 export async function resolveBroadcastAudience(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeActor(request, ACTION_ROLES.sendBroadcast.gate);
   if (!auth.ok) return auth.response;
   const limited = checkRateLimit(`resolveBroadcastAudience:${auth.actor.oid}`, { limit: 60 });
-  if (!limited.allowed) return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many requests, try again shortly" }, status: 429 };
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs, "Too many requests, try again shortly");
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parseAudienceRequest(body);

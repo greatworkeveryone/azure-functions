@@ -28,6 +28,7 @@ import * as ledger from "../ledger";
 import type { LedgerActor } from "../ledger";
 import { parseOptionPeriods } from "../leaseOptions";
 import { rollbackQuietly } from "../tenancyScheduleWrite";
+import { errorMessage } from "../errorMessage";
 
 export const BACKFILL_ACTOR: LedgerActor = { kind: "system", name: "backfill-lease-options" };
 export const BATCH_SIZE = 50;
@@ -151,7 +152,7 @@ export async function runOptionBackfill(connection: Connection, options: { apply
     } catch (error) {
       await rollbackQuietly(connection);
       report.failed += batch.length;
-      log(`  batch ${start / BATCH_SIZE + 1} failed and was rolled back: ${error instanceof Error ? error.message : String(error)}`);
+      log(`  batch ${start / BATCH_SIZE + 1} failed and was rolled back: ${errorMessage(error)}`);
     }
   }
   log(`Filled ${report.filled}, ${report.skippedRaced} already filled by someone else, ${report.failed} failed.`);

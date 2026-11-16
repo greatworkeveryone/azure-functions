@@ -46,6 +46,7 @@ import {
   type PlannerStalledJobRow,
   type TriggerType,
 } from "./plannerHelpers";
+import { errorMessage } from "./errorMessage";
 
 type LogFn = (msg: string) => void;
 
@@ -77,7 +78,7 @@ async function recordRowError(
       ],
     );
   } catch (writeErr: unknown) {
-    const writeMsg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+    const writeMsg = errorMessage(writeErr);
     log?.(`recordRowError: failed to persist error on row ${rowId}: ${writeMsg}`);
   }
 }
@@ -175,7 +176,7 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
       try {
         task = await graphGetPlannerTask(plannerTaskId!);
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         await recordRowError(connection, rowId!, message, log);
         throw err;
       }
@@ -203,7 +204,7 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
         log?.(`reconcileTask: ${err.message} — no ${triggerType} task for ${entityType} ${entityId}`);
         return;
       }
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       await recordRowError(connection, rowId!, message, log);
       throw err;
     }
@@ -234,7 +235,7 @@ export async function reconcileTask(p: ReconcileParams): Promise<void> {
       // Nightly sweep retries the next day if anything is off.
       log?.(
         `reconcileTask: graph complete failed for ${triggerType} ${entityType} ${entityId}: ${
-          err instanceof Error ? err.message : String(err)
+          errorMessage(err)
         }`,
       );
     }
@@ -629,7 +630,7 @@ export async function syncJobActionTriggersStandalone(
       try {
         await fn();
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         log?.(`syncJobActionTriggersStandalone: ${label} failed for job ${jobId}: ${message}`);
         Sentry.captureException(err, {
           tags: {
@@ -641,7 +642,7 @@ export async function syncJobActionTriggersStandalone(
       }
     }
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log?.(`syncJobActionTriggersStandalone failed for job ${jobId}: ${message}`);
     Sentry.captureException(err, {
       tags: {

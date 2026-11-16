@@ -10,9 +10,10 @@ import { concludeForSubject, EscalationError, raise, type EscalationRow } from "
 import type { LedgerActor } from "../ledger";
 import { Sentry } from "../sentry";
 import { RATIFICATION_POLICY, SCHEDULE_CHANGE_SUBJECT } from "./types";
+import { errorMessage } from "../errorMessage";
 
 function report(what: string, requestId: string, error: unknown, log?: (message: string) => void): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   log?.(`scheduleChangeEscalation: ${what} on request ${requestId} failed: ${message}`);
   Sentry.captureException(error, { extra: { context: `schedule change escalation: ${what}`, requestId } });
 }

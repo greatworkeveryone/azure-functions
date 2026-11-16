@@ -23,6 +23,7 @@ import { AppRole, extractToken, unauthorizedResponse, errorResponse, rolesForReq
 import { LedgerValidationError, record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { requireMoneyContext } from "../moneyGate";
+import { errorMessage } from "../errorMessage";
 
 interface SetApprovalLimitBody {
   RoleName: string;
@@ -124,7 +125,7 @@ export async function setApprovalLimit(
     if (error instanceof LedgerValidationError) {
       return { status: 400, jsonBody: { error: error.message } };
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("setApprovalLimit failed:", message);
     return errorResponse("Set approval limit failed", message);
   } finally {

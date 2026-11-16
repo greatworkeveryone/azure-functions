@@ -72,6 +72,7 @@ import { runReviewEscalations, type ReviewEscalationReport } from "./escalations
 import { type RentCacheReport, writeDueRentCaches } from "./rentCache";
 import { hasNoReviewClause, type MethodSource, resolveReviewMethod, stepOnDate } from "./method";
 import { inTransaction, insertScheduledReview, markWindowOpen } from "./store";
+import { errorMessage } from "../errorMessage";
 
 export const DEFAULT_REVIEW_WINDOW_DAYS = 60;
 
@@ -506,7 +507,7 @@ export async function runReviewGenerator(run: GeneratorRun): Promise<GeneratorRe
   } else {
     const correlationId = ledger.newCorrelationId();
     const fail = (error: unknown, tenantId: number): void => {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       report.errors.push({ message, tenantId });
       run.warn(`rentReviewGenerator: tenancy ${tenantId} failed: ${message}`);
       run.onError?.(error, tenantId);

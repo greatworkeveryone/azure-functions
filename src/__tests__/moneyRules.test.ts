@@ -5,6 +5,7 @@ import {
   approvableRefusal,
   creatorRefusal,
   declineReasonRefusal,
+  isCreator,
   jobMoneyRefusal,
   purchaseOrderCostRefusal,
   purchaseOrderQuoteRefusal,
@@ -80,17 +81,29 @@ describe("separation of duties", () => {
   });
 
   it("refuses the creator as approver", () => {
-    expect(creatorRefusal("Abby Accounts", { name: "Abby Accounts", roles: ["accounts_manager"] }, "quote")).toEqual({
+    expect(creatorRefusal({ name: "Abby Accounts", oid: null }, { name: "Abby Accounts", roles: ["accounts_manager"] }, "quote")).toEqual({
       code: "creator",
       message: "You added this quote, so someone else has to approve it.",
       status: 403,
     });
-    expect(creatorRefusal("Abby Accounts", { name: "Casey Controller", roles: ["accounts_manager"] }, "invoice")).toBeNull();
+    expect(creatorRefusal({ name: "Abby Accounts", oid: null }, { name: "Casey Controller", roles: ["accounts_manager"] }, "invoice")).toBeNull();
+  });
+
+  it("matches by oid when the row and the approver both have one, whatever the names say", () => {
+    const row = { name: "Abby Accounts", oid: "OID-1" };
+    expect(creatorRefusal(row, { name: "Abby Smith", oid: "oid-1", roles: ["accounts_manager"] }, "quote")?.code).toBe("creator");
+    expect(creatorRefusal(row, { name: "Abby Accounts", oid: "oid-2", roles: ["accounts_manager"] }, "quote")).toBeNull();
+  });
+
+  it("falls back to the name when either side has no oid", () => {
+    expect(isCreator({ name: "Abby Accounts", oid: null }, { name: "abby accounts", oid: "oid-1" })).toBe(true);
+    expect(isCreator({ name: "Abby Accounts", oid: "oid-1" }, { name: "Abby Accounts", oid: null })).toBe(true);
+    expect(isCreator({ name: "Abby Accounts", oid: "  " }, { name: "Casey", oid: "oid-1" })).toBe(false);
   });
 
   it("decision 17: never blocks a director", () => {
-    expect(creatorRefusal("Dana Director", { name: "Dana Director", roles: ["director"] }, "quote")).toBeNull();
-    expect(creatorRefusal("Dana Director", { name: "Dana Director", roles: [" Director "] }, "invoice")).toBeNull();
+    expect(creatorRefusal({ name: "Dana Director", oid: null }, { name: "Dana Director", roles: ["director"] }, "quote")).toBeNull();
+    expect(creatorRefusal({ name: "Dana Director", oid: null }, { name: "Dana Director", roles: [" Director "] }, "invoice")).toBeNull();
   });
 });
 

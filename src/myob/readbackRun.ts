@@ -15,6 +15,7 @@ import { TestDataEgressError } from "../test-data";
 import { MyobRequestRefusedError, MyobWritesDisabledError } from "../myob-errors";
 import type { ProposalRow } from "./proposalRow";
 import { readBackProposal, recordReadback, selectForReadback } from "./readback";
+import { errorMessage } from "../errorMessage";
 
 export type ReadbackMode = "dry-run" | "live" | "off";
 
@@ -97,7 +98,7 @@ export async function readBackRows(
         continue;
       }
       counts.errors += 1;
-      options.log(`myob read-back: proposal #${row.proposalId} failed: ${error instanceof Error ? error.message : String(error)}`);
+      options.log(`myob read-back: proposal #${row.proposalId} failed: ${errorMessage(error)}`);
     }
   }
   return counts;

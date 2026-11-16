@@ -14,7 +14,7 @@ import { insertJob, insertRecipient, readJob, recentRecipientCount } from "./sto
 import type { CommsActor } from "./actor";
 import type { JobStatus, NewJob, NewRecipient } from "./types";
 
-export type ApprovalReason = "recent" | "size";
+export type ApprovalReason = "recent" | "size" | "typed";
 
 export interface QueuedJob {
   /** In plain words why a manager has to approve it, or null; the screen shows it as it is. */
@@ -30,13 +30,27 @@ export interface QueuedJob {
   status: JobStatus;
 }
 
-/** Whether a send needs a manager, and why: it is large itself, or this sender's last 24 hours with it are. */
-export function approvalDecision(size: number, recent: number, threshold: number): { note: string | null; reason: ApprovalReason | null } {
+/**
+ * Whether a send needs a manager, and why: it is large itself, this sender's last 24 hours with it are, or it goes
+ * to a typed address that is no record's contact (so the company mailbox can't be pointed at anyone unchecked).
+ */
+export function approvalDecision(
+  size: number,
+  recent: number,
+  threshold: number,
+  typed = 0,
+): { note: string | null; reason: ApprovalReason | null } {
   if (size > threshold) return { note: `This goes to ${size} people, which is over ${threshold}, so a manager approves it first.`, reason: "size" };
   if (recent + size > threshold) {
     return {
       note: `You have already sent to ${recent} ${recent === 1 ? "person" : "people"} in the last 24 hours. With these ${size} that is over ${threshold}, so a manager approves this one first.`,
       reason: "recent",
+    };
+  }
+  if (typed > 0) {
+    return {
+      note: `${typed === 1 ? "One address was" : `${typed} addresses were`} typed in rather than picked from a record, so a manager approves this first.`,
+      reason: "typed",
     };
   }
   return { note: null, reason: null };
@@ -107,7 +121,8 @@ export async function writeJob(
     // Counted before this job exists and under a lock, so splitting a send into many jobs only moves the same people past the line.
     // A test to oneself (kind system) is outside the count and never waits for a manager.
     const recent = job.kind === "system" ? 0 : await recentRecipientCount(connection, actor.oid);
-    const approval = job.kind === "system" ? { note: null, reason: null } : approvalDecision(job.recipients.length, recent, threshold);
+    const typed = job.recipients.filter((recipient) => recipient.recipientType === "manual").length;
+    const approval = job.kind === "system" ? { note: null, reason: null } : approvalDecision(job.recipients.length, recent, threshold, typed);
     const requiresApproval = approval.reason !== null;
     const status: JobStatus = requiresApproval ? "awaiting_approval" : "queued";
     const correspondenceId = await insertJob(connection, job, status, requiresApproval);
@@ -125,7 +140,9 @@ export async function writeJob(
           ? `${job.recipients.length} recipients`
           : approval.reason === "size"
             ? `${job.recipients.length} recipients, over ${threshold}: waits for a manager`
-            : `${job.recipients.length} recipients, ${recent} in the last 24 hours, over ${threshold}: waits for a manager`,
+            : approval.reason === "typed"
+              ? `${job.recipients.length} recipients, ${typed} typed in: waits for a manager`
+              : `${job.recipients.length} recipients, ${recent} in the last 24 hours, over ${threshold}: waits for a manager`,
         idempotencyKey,
       ),
       fromStatus: null,
@@ -169,7 +186,8 @@ async function describeEarlier(connection: Connection, correspondenceId: number,
   const waits = job.requiresApproval;
   return {
     approvalNote: waits ? decision.note ?? "This send needs a manager's approval." : null,
-    approvalReason: waits ? decision.reason ?? (job.recipientCount > threshold ? "size" : "recent") : null,
+    // Neither count explains the wait now, so it waited for a typed address.
+    approvalReason: waits ? decision.reason ?? (job.recipientCount > threshold ? "size" : "typed") : null,
     blocked: job.blockedCount,
     correspondenceId,
     queued: job.recipientCount - job.blockedCount,

@@ -7,6 +7,7 @@ import { resolveLedgerActor } from "./ledger/actor";
 import { LEDGER_MAX_SNAPSHOT_BYTES, snapshotBytes } from "./ledger/validate";
 import { draftContents, tenancyRowForLedger } from "./tenancyDraftContent";
 import { invalidateTenant } from "./tenant-register-cache";
+import { errorMessage } from "./errorMessage";
 
 // Tenancies and their lease documents are archived, never hard-deleted (D4:
 // DL-04, DL-19; database-safety rule 1). Archive is reversible, stamped
@@ -241,7 +242,7 @@ export async function deleteTenancyDraft(
     invalidateTenant(tenantId);
     return { status: 200, jsonBody: { deleted: true, tenantId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${route} failed:`, message);
     return errorResponse("Delete tenancy failed", message);
   } finally {
@@ -329,7 +330,7 @@ export async function setTenancyArchived(
     invalidateTenant(tenantId);
     return { status: 200, jsonBody: { archived: archive, tenantId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${archive ? "archiveTenant" : "unarchiveTenant"} failed:`, message);
     return errorResponse(archive ? "Archive tenancy failed" : "Restore tenancy failed", message);
   } finally {

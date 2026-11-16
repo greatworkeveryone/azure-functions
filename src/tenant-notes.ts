@@ -5,6 +5,7 @@ import { beginTransaction, closeConnection, commitTransaction, createRequestConn
 import { record } from "./ledger";
 import { resolveLedgerActor } from "./ledger/actor";
 import { invalidateTenantAndBuilding } from "./tenant-register-cache";
+import { errorMessage } from "./errorMessage";
 
 // A tenancy's notes (dbo.TenantNotes): what staff write about a tenancy, and
 // the change notes written when a lease field is edited. They are archived,
@@ -116,7 +117,7 @@ export async function setTenantNoteArchived(
     invalidateTenantAndBuilding(scope.tenantId, scope.buildingId);
     return { status: 200, jsonBody: { archived: archive, noteId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${archive ? "archive" : "unarchive"} tenant note failed:`, message);
     return errorResponse(archive ? "Archive note failed" : "Restore note failed", message);
   } finally {

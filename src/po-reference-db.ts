@@ -10,6 +10,7 @@ import {
   isChargeCode,
   poReferenceBase,
 } from "./reference-codes";
+import { errorMessage } from "./errorMessage";
 
 export interface ResolvedPoNumber {
   poNumber: string;
@@ -95,7 +96,7 @@ export async function resolvePoNumber(
   }
 
   function fallback(err: unknown): ResolvedPoNumber {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     return {
       poNumber: fallbackPoNumber,
       chargeCode,

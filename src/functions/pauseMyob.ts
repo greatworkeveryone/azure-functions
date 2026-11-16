@@ -11,6 +11,7 @@ import { LedgerValidationError } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { isMyobController, setPaused } from "../myob-controls-admin";
 import { parsePause } from "../myob-controls-input";
+import { errorMessage } from "../errorMessage";
 
 // POST /api/pauseMyob — "Pause everything": { paused, note, companyFileId? }.
 // With no file it pauses (or resumes) every company file. While paused,
@@ -43,7 +44,7 @@ export async function pauseMyob(request: HttpRequest, context: InvocationContext
     }
   } catch (error) {
     if (error instanceof LedgerValidationError) return { jsonBody: { error: error.message }, status: 400 };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("pauseMyob failed:", message);
     return errorResponse("Failed to pause MYOB", message);
   } finally {

@@ -4,6 +4,8 @@
 // output is diff-friendly and renders the same everywhere pdfkit does.
 
 import { loadPdfKit } from "./pdfLibs";
+import { todayInDarwin } from "../darwinDate";
+import { formatDisplayDate } from "../digest/format";
 
 export interface PurchaseOrderPdfInput {
   po: {
@@ -42,11 +44,12 @@ function formatCurrency(amount: number | null): string {
   }).format(amount);
 }
 
+// Darwin calendar day, dd/MM/yyyy like the app.
 function formatDate(value: Date | string | null): string {
   if (!value) return "—";
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toISOString().slice(0, 10);
+  return formatDisplayDate(todayInDarwin(d));
 }
 
 function joinNonEmpty(parts: (string | null | undefined)[], sep = " · "): string {

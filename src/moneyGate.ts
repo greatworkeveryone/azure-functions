@@ -5,13 +5,14 @@ import { clientAddress } from "./access/clientIp";
 import { verifiedRequestClaims } from "./auth";
 import { closeConnection, createServiceRequestConnection } from "./db";
 import { MONEY_GATED_ROUTES } from "./money-gated-routes";
+import { errorMessage } from "./errorMessage";
 
 // The money-action gate (beta sprint S11, decision 16). A money action — a MYOB
 // proposal, approval or update, a control change, an approval-limit change, a
 // payment mark — needs all of:
 //   1. a request from an allowed network: MONEY_ALLOWED_CIDRS (the office's
 //      static egress and the approved remote-access egress);
-//   2. a fresh sign-in: the token's auth_time (else iat) within
+//   2. a fresh sign-in: the token's auth_time within
 //      MONEY_STEP_UP_MINUTES (default 10), otherwise 428 step_up_required and
 //      the frontend re-authenticates with prompt=login;
 //   3. MFA: `amr` contains "mfa" (Entra sets it when MFA ran);
@@ -118,7 +119,9 @@ export function evaluateMoneyGate(input: GateInput): { failures: GateOutcome[]; 
   const failures: GateOutcome[] = [];
   if (!stepUpOnly(config) && !isAllowedNetwork(input.address, config)) failures.push("network_refused");
 
-  const authTime = typeof claims.auth_time === "number" ? claims.auth_time : typeof claims.iat === "number" ? claims.iat : null;
+  // auth_time only: a silent refresh mints a new iat without anyone signing in, so iat proves nothing.
+  // Entra sends auth_time only as an optional claim on the app's own token (API_TOKEN_AUDIENCE api or both).
+  const authTime = typeof claims.auth_time === "number" ? claims.auth_time : null;
   const age = authTime === null ? Infinity : nowSeconds - authTime;
   if (age > config.stepUpMinutes * 60 || age < -CLOCK_SKEW_SECONDS) failures.push("step_up_stale");
 
@@ -163,7 +166,7 @@ function raiseGateHealthOnce(summary: string): void {
       }
     })().catch((err: unknown) => {
       healthRaised = false;
-      console.warn("[money-gate] could not raise system.health:", err instanceof Error ? err.message : String(err));
+      console.warn("[money-gate] could not raise system.health:", errorMessage(err));
     });
   });
 }

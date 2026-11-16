@@ -11,6 +11,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { listAccessEvents, ACCESS_VIEW_ROLES, MAX_DAYS, MAX_EVENT_ROWS } from "../access/store";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
+import { errorMessage } from "../errorMessage";
 
 function readFilter(request: HttpRequest): { anomaliesOnly: boolean; days: number; userId: number | null } | string {
   const q = request.query;
@@ -40,7 +41,7 @@ export async function getAccessEvents(request: HttpRequest, context: InvocationC
     const events = await listAccessEvents(connection, filter);
     return { status: 200, jsonBody: { events, limit: MAX_EVENT_ROWS } };
   } catch (error: unknown) {
-    context.error("getAccessEvents failed:", error instanceof Error ? error.message : String(error));
+    context.error("getAccessEvents failed:", errorMessage(error));
     return errorResponse("Could not load access events", error);
   } finally {
     if (connection) closeConnection(connection);

@@ -12,6 +12,7 @@ import { describeAnomaly, evaluateAccess, localClock, primaryAnomaly, type Acces
 import { clientAddress, hashValue } from "./clientIp";
 import { parseStoredProfile } from "./profile";
 import { countForBurst, SAMPLE_INTERVAL_MS, shouldSampleRequest } from "./sampling";
+import { errorMessage } from "../errorMessage";
 
 // The access log (decision 15). Request handling never waits for it: the
 // note* functions copy what they need from the request synchronously and hand
@@ -98,7 +99,7 @@ export function observationFromRequest(
 function defer(observation: AccessObservation): void {
   setImmediate(() => {
     recordAccess(observation).catch((err: unknown) => {
-      console.warn("[access] could not record an access event:", err instanceof Error ? err.message : String(err));
+      console.warn("[access] could not record an access event:", errorMessage(err));
     });
   });
 }

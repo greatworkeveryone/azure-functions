@@ -21,6 +21,7 @@ import { readJob, readRecipient } from "../comms/store";
 import type { Signature } from "../comms/signature";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 function answer(job: ComposeJob, recipient: Parameters<typeof composeForRecipient>[1]) {
   const composed = composeForRecipient(job, recipient);
@@ -35,7 +36,7 @@ export async function previewCorrespondence(request: HttpRequest, context: Invoc
   if (!auth.ok) return auth.response;
   const { actor } = auth;
   const limited = checkRateLimit(`previewCorrespondence:${actor.oid}`, { limit: 60 });
-  if (!limited.allowed) return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many requests, try again shortly" }, status: 429 };
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs, "Too many requests, try again shortly");
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parsePreviewInput(body);

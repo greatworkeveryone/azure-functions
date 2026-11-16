@@ -37,6 +37,7 @@ import {
   unauthorizedResponse,
 } from "../auth";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import {
   getCachedTenantList,
   setCachedTenantList,
@@ -145,6 +146,7 @@ import {
 import { showTestParam, testFlagForCreate } from "../test-data";
 import { INFO_SHEET_RATE_LIMIT, infoSheetPositionOf, infoSheetRestoreOf, infoSheetVersionOf, writeInfoSheet } from "../infoSheetWrite";
 import { NOTE_COLUMNS, noteRowToApi } from "../tenant-notes";
+import { errorMessage } from "../errorMessage";
 
 // Decimal column precision/scale — tedious defaults Decimal to scale 0 and
 // silently truncates fractional values, so every Decimal param must pass
@@ -1188,7 +1190,7 @@ async function upsertRegisterTenant(
       ];
       resolveActivePlannerTasks("tenant", resultId, triggerTypes).catch(
         (err: unknown) =>
-          context.warn("plannerResolve (upsertRegisterTenant):", err instanceof Error ? err.message : String(err)),
+          context.warn("plannerResolve (upsertRegisterTenant):", errorMessage(err)),
       );
     }
     return {
@@ -2369,11 +2371,7 @@ async function upsertTenantIncentive(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`incentive:${caller.id}`, INCENTIVE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -2449,11 +2447,7 @@ async function deleteTenantIncentive(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`incentive:${caller.id}`, INCENTIVE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -2587,11 +2581,7 @@ async function upsertScheduledRateStep(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`step:${caller.id}`, STEP_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -2706,11 +2696,7 @@ async function deleteScheduledRateStep(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`step:${caller.id}`, STEP_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3197,11 +3183,7 @@ async function upsertCarparkScheduleGroup(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`group:${caller.id}`, GROUP_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3263,11 +3245,7 @@ async function deleteCarparkScheduleGroup(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`group:${caller.id}`, GROUP_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3330,11 +3308,7 @@ async function upsertInfoSheetSectionHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3394,11 +3368,7 @@ async function deleteInfoSheetSectionHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3451,11 +3421,7 @@ async function upsertInfoSheetRowHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3516,11 +3482,7 @@ async function deleteInfoSheetRowHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`infosheet:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3576,11 +3538,7 @@ async function upsertLeaseAdministrationHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`leaseadmin:${caller.id}`, INFO_SHEET_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3675,11 +3633,7 @@ async function upsertMiscFeeHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`miscfee:${caller.id}`, MISC_FEE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -3739,11 +3693,7 @@ async function deleteMiscFeeHandler(
   const caller = callerFromToken(token);
   const rl = checkRateLimit(`miscfee:${caller.id}`, MISC_FEE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;

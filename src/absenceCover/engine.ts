@@ -19,6 +19,7 @@ import { MAX_INACTIVE_SHARE, type CoverMode } from "./config";
 import { applyCoverAction } from "./moves/apply";
 import type { PlanEntry } from "./plan";
 import { loadLiveView } from "./view";
+import { errorMessage } from "../errorMessage";
 
 export interface RunOptions {
   accessLoggingOn: boolean;
@@ -55,7 +56,7 @@ const EMPTY: Omit<RunReport, "businessDay" | "dryRun"> = {
   aborted: null, absent: 0, alreadyHandled: 0, deferred: 0, errors: [], escalated: 0, inactivityAvailable: false, items: 0, moved: 0, notStranded: 0, raced: 0, stayed: 0, suggested: 0, wouldMove: 0,
 };
 
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const message = (error: unknown): string => (errorMessage(error));
 
 /** Whether a dry run or a suggestion run has already written this suggestion for this absence. */
 function alreadySuggested(entry: PlanEntry): boolean {

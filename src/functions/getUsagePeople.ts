@@ -13,6 +13,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { refuseUnlessAllScope } from "../usage/access";
 import { parsePeriod } from "../usage/period";
 import { loadUsagePeople } from "../usage/queries/people";
+import { errorMessage } from "../errorMessage";
 
 export async function getUsagePeople(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -31,7 +32,7 @@ export async function getUsagePeople(request: HttpRequest, context: InvocationCo
     const { days, from, to } = parsed.period;
     return { headers: { "Cache-Control": "no-store" }, jsonBody: { people, period: { days, from, to } }, status: 200 };
   } catch (error: unknown) {
-    context.error("getUsagePeople failed:", error instanceof Error ? error.message : String(error));
+    context.error("getUsagePeople failed:", errorMessage(error));
     return errorResponse("Could not load usage", error);
   } finally {
     if (connection) closeConnection(connection);

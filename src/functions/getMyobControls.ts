@@ -3,6 +3,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { AppRole, errorResponse, extractToken, requireRole, rolesForRequest, unauthorizedResponse } from "../auth";
 import { isMyobController } from "../myob-controls-admin";
 import { loadControlsView } from "../myob-controls-view";
+import { errorMessage } from "../errorMessage";
 
 // GET /api/getMyobControls — the CFO's MYOB switches for every known company
 // file, today's use against each allowance, and the master switch. Readable by
@@ -22,7 +23,7 @@ export async function getMyobControls(request: HttpRequest, context: InvocationC
     const view = await loadControlsView(connection);
     return { jsonBody: { ...view, canChange: isMyobController(roles) }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getMyobControls failed:", message);
     return errorResponse("Failed to load MYOB controls", message);
   } finally {

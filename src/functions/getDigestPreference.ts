@@ -4,6 +4,8 @@ import { AppRole } from "../auth";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { readDigestOptOut } from "../digest/preference";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
+import { errorMessage } from "../errorMessage";
 
 // ── GET /api/getDigestPreference ──────────────────────────────────────────────
 // Whether the signed-in person has switched the morning digest email off. Any
@@ -20,11 +22,7 @@ export async function getDigestPreference(request: HttpRequest, context: Invocat
 
   const limited = checkRateLimit(`digestPreference:oid:${identity.oid}`, { limit: 20, windowMs: 60_000 });
   if (!limited.allowed) {
-    return {
-      headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-      status: 429,
-    };
+    return tooManyRequests(limited.retryAfterMs);
   }
 
   let connection;
@@ -34,7 +32,7 @@ export async function getDigestPreference(request: HttpRequest, context: Invocat
     if (optOut === null) return { jsonBody: { error: "No active user for this sign-in" }, status: 404 };
     return { jsonBody: { digestOptOut: optOut }, status: 200 };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getDigestPreference failed:", message);
     return errorResponse("Failed to read the digest preference", message);
   } finally {

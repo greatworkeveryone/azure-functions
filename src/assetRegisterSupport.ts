@@ -70,9 +70,7 @@ export const badRequest = (error: string): HttpResponseInit => ({ jsonBody: { er
 export const notFound = (error: string): HttpResponseInit => ({ jsonBody: { error }, status: 404 });
 export const conflict = (error: string): HttpResponseInit => ({ jsonBody: { error }, status: 409 });
 
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+export { errorMessage } from "./errorMessage";
 
 // ── Auth prologue ────────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ import { getGraphToken } from "./graph";
 import { PLANNER_SYNC_DISABLED_MESSAGE, plannerSyncEnabled } from "./plannerFlag";
 import type { TriggerType } from "./plannerHelpers";
 import { assertMayLeave, type EgressSubject } from "./test-data";
+import { errorMessage } from "./errorMessage";
 
 // Every Graph call below is behind PLANNER_SYNC_ENABLED (see plannerFlag.ts).
 // The orchestrators (reconcilers, timer, resolveActivePlannerTasks) check it first
@@ -249,7 +250,7 @@ export async function resolveActivePlannerTasks(
           [{ name: "Id", type: TYPES.Int, value: rowId }],
         );
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         console.error(
           `resolveActivePlannerTasks: failed for task ${plannerTaskId}:`,
           message,

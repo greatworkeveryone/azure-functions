@@ -19,6 +19,7 @@ import { upsertWorkRequest } from "./workRequests";
 import { assertResolvedWithinThreshold, resolveAll } from "../sync-helpers";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Core sync logic ───────────────────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext
     const { total, syncFrom } = await runSync(token, false, context);
     context.log(`syncAllWorkRequests timer complete: ${total} WRs upserted since ${syncFrom}`);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("syncAllWorkRequests timer failed:", message);
     Sentry.captureException(error, { extra: { context: "syncAllWorkRequestsTimer failed" } });
     throw error;

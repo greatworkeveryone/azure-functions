@@ -5,6 +5,7 @@ import { beginTransaction, closeConnection, commitTransaction, createRequestConn
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
+import { errorMessage } from "../errorMessage";
 
 // ── POST /api/setTestFlag ────────────────────────────────────────────────────
 // Body { Kind, Id, IsTest, Reason }. Admin only (the frontend asks them to
@@ -147,7 +148,7 @@ export async function setTestFlag(request: HttpRequest, context: InvocationConte
     if (kind === "tenancy" && buildingId !== null) invalidateTenantAndBuilding(id, buildingId);
     return { status: 200, jsonBody: { id, isTest, kind } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("setTestFlag failed:", message);
     return errorResponse("Changing the test flag failed", message);
   } finally {

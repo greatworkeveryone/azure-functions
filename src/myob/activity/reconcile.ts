@@ -19,6 +19,7 @@ import { readBackProposal } from "../readback";
 import type { MyobReader } from "../readbackClient";
 import type { DiscrepancyField } from "../readbackCompare";
 import { acceptanceProblems } from "./acceptedBaseline";
+import { errorMessage } from "../../errorMessage";
 
 export type ReconcileStatus = "differs" | "failed" | "matched" | "missing" | "refused";
 
@@ -100,7 +101,7 @@ export async function reconcile(
       });
     } catch (error) {
       const refused = error instanceof MyobRequestRefusedError || error instanceof MyobWritesDisabledError;
-      rows.push({ ...base, message: error instanceof Error ? error.message : String(error), status: refused ? "refused" : "failed" });
+      rows.push({ ...base, message: errorMessage(error), status: refused ? "refused" : "failed" });
     }
   }
   return { rows, total };

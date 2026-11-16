@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { getMyobAuthStatus } from "../myob-auth";
+import { errorMessage } from "../errorMessage";
 
 // Returns whether MYOB is linked and when the access token expires. Used by
 // the admin page to render "Authorize" vs "Re-authorize" + expiry countdown.
@@ -18,7 +19,7 @@ async function myobAuthStatus(
     const status = await getMyobAuthStatus(token);
     return { status: 200, jsonBody: status };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return errorResponse("Failed to read MYOB auth status", message);
   }
 }

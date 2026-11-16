@@ -3,6 +3,7 @@ import { TYPES } from "tedious";
 import { closeConnection, createServiceRequestConnection, executeQuery } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: 03:30 ACST (Darwin) daily ─────────────────────────────────
 // Verifies the database ledger (which makes dbo.MyobApiLog tamper-evident)
@@ -68,7 +69,7 @@ async function ledgerVerifyTimer(
     );
     context.log("ledgerVerifyTimer: ledger verified against digest storage");
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("ledgerVerifyTimer: ledger verification failed:", message);
     Sentry.captureException(error, { extra: { context: "ledgerVerifyTimer ledger verification failed" } });
     throw error;

@@ -34,7 +34,7 @@ import { quoteAttributionColumnExists } from "../quoteAttributionColumn";
 import { formatDocNumber } from "../doc-number";
 import { isTestJob } from "../testRecords";
 import { requireMoneyContext } from "../moneyGate";
-import { amountRefusal, approvableRefusal, creatorRefusal, jobMoneyRefusal, type MoneyRefusal, refusalResponse, rejectReason, samePerson } from "../moneyRules";
+import { amountRefusal, approvableRefusal, creatorRefusal, isCreator, jobMoneyRefusal, type MoneyRefusal, refusalResponse, rejectReason } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { decideApprovalAmountEdit } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
@@ -62,6 +62,7 @@ import { recordRefusal, recordRefusalForRequest, recordRoleRefusal, type Refusal
 import type { LedgerActor } from "../ledger/types";
 import { parseMoneyField } from "../money";
 import { showTestParam, TestDataEgressError, testRecordResponse } from "../test-data";
+import { errorMessage } from "../errorMessage";
 
 // ── GET /api/getQuotes[?jobId=N][&status=pending|approved|rejected] ─────────
 
@@ -237,11 +238,11 @@ export async function upsertQuote(
           connection,
           `INSERT INTO Quotes
              (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-              Currency, Notes, QuotePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy)
+              Currency, Notes, QuotePDFBlobName, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid)
            OUTPUT INSERTED.QuoteID
            VALUES
              (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-              @Currency, @Notes, @QuotePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy);`,
+              @Currency, @Notes, @QuotePDFBlobName, @SourceEmailID, @ReceivedAt, @CreatedBy, @CreatedByOid);`,
           [
             { name: "JobID", type: TYPES.Int, value: JobID },
             { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
@@ -255,6 +256,7 @@ export async function upsertQuote(
             { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+            { name: "CreatedByOid", type: TYPES.NVarChar, value: identity.oid },
           ],
         );
         const newId = inserted[0].QuoteID as number;
@@ -579,6 +581,8 @@ async function approveQuoteInTransaction(
   input: {
     actor: LedgerActor;
     approvedBy: string;
+    /** The approver's Entra oid, for the creator check. */
+    approverOid: string;
     /** R2: the manager named, and whether the officer declared they discussed it. */
     attribution: { declared: boolean; userId: number | null };
     correlationId: string;
@@ -587,13 +591,13 @@ async function approveQuoteInTransaction(
     userRoles: string[];
   },
 ): Promise<QuoteApprovalOutcome> {
-  const { actor, approvedBy, correlationId, email, quoteId, userRoles } = input;
+  const { actor, approvedBy, approverOid, correlationId, email, quoteId, userRoles } = input;
   await beginTransaction(connection);
   try {
     // Locked until commit, so the status we record as replaced is the one we replace.
     const quoteRows = await executeQuery(
       connection,
-      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, ContractorID, CreatedBy FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id",
+      "SELECT JobID, QuoteNumber, ContractorName, Amount, ISNULL(Currency, 'AUD') AS Currency, Status, ContractorID, CreatedBy, CreatedByOid FROM Quotes WITH (UPDLOCK, HOLDLOCK) WHERE QuoteID = @Id",
       [{ name: "Id", type: TYPES.Int, value: quoteId }],
     );
     if (quoteRows.length === 0) {
@@ -609,6 +613,7 @@ async function approveQuoteInTransaction(
     const amount = Number(quote.Amount ?? 0);
     const currency = quote.Currency as string;
     const quoteStatus = (quote.Status as string | null) ?? null;
+    const creator = { name: quote.CreatedBy, oid: quote.CreatedByOid };
 
     // J3, in order: the job takes money changes; the quote is still waiting
     // for a decision; whoever added it doesn't approve it (unless a director,
@@ -618,7 +623,7 @@ async function approveQuoteInTransaction(
     const stateRefusal =
       (moneyJob ? jobMoneyRefusal(moneyJob) : null) ??
       approvableRefusal(quoteStatus, "quote") ??
-      creatorRefusal(quote.CreatedBy, { name: approvedBy, roles: userRoles }, "quote") ??
+      creatorRefusal(creator, { name: approvedBy, oid: approverOid, roles: userRoles }, "quote") ??
       (moneyJob?.hasApprovedQuote
         ? { code: "quote_already_approved", message: "This job already has an approved quote. Deselect it before approving another.", status: 409 as const }
         : null);
@@ -643,7 +648,7 @@ async function approveQuoteInTransaction(
     let attribution: Attribution | undefined;
     if (input.attribution.declared && input.attribution.userId !== null) {
       const named = await loadNamedUser(connection, input.attribution.userId);
-      if (named && samePerson(quote.CreatedBy, named.displayName)) {
+      if (named && isCreator(creator, { name: named.displayName, oid: named.entraOid })) {
         await rollbackTransaction(connection).catch(() => {});
         return {
           jobId,
@@ -840,6 +845,7 @@ async function approveQuote(
     const outcome = await approveQuoteInTransaction(connection, {
       actor,
       approvedBy,
+      approverOid: identity.oid,
       // Held off (decisions 1, 9): with the switch unset an attribution is ignored.
       attribution: attributedApprovalEnabled() ? { declared: declared === true, userId: namedId } : { declared: false, userId: null },
       correlationId,
@@ -1026,12 +1032,12 @@ export async function rejectQuote(
       try {
         await resolveActivePlannerTasks("job", outcome.jobId, ["director_approval"]);
       } catch (err: unknown) {
-        context.warn("plannerResolve (rejectQuote):", err instanceof Error ? err.message : String(err));
+        context.warn("plannerResolve (rejectQuote):", errorMessage(err));
       }
     }
     return { status: 200, jsonBody: { quote: outcome.quote } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("rejectQuote failed:", message);
     return errorResponse("Reject quote failed", message);
   } finally {
@@ -1702,11 +1708,11 @@ export async function directorApproveQuote(
 
     resolveActivePlannerTasks("job", outcome.jobId, ["director_approval"]).catch(
       (err: unknown) =>
-        context.warn("plannerResolve (directorApproveQuote):", err instanceof Error ? err.message : String(err)),
+        context.warn("plannerResolve (directorApproveQuote):", errorMessage(err)),
     );
     return { status: 200, jsonBody: { quote: outcome.quote } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("directorApproveQuote failed:", message);
     return errorResponse("Director approve quote failed", message);
   } finally {

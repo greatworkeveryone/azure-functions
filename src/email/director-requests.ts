@@ -26,6 +26,7 @@ import { recordApart, underRowLimit } from "../ledger/refusals";
 import { Sentry } from "../sentry";
 import type { LedgerActor } from "../ledger/types";
 import type { SendDirectorApprovalResult } from "./director-emails";
+import { errorMessage } from "../errorMessage";
 
 type Stage = "invoice" | "quote";
 
@@ -226,7 +227,7 @@ export async function sendDirectorRequestAfterApproval(request: DirectorRequest,
     await sendDirectorRequest(request);
     return false;
   } catch (err) {
-    warn(`Director email failed for ${request.stage} ${request.subjectId}: ${err instanceof Error ? err.message : String(err)}`);
+    warn(`Director email failed for ${request.stage} ${request.subjectId}: ${errorMessage(err)}`);
     return true;
   }
 }

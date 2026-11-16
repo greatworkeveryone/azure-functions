@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { completeMyobLink } from "../myob-link";
 import { MyobTokenCryptoError } from "../myob-token-crypto";
+import { errorMessage } from "../errorMessage";
 
 // MYOB redirects the user here after they sign in and approve the app, with
 // ?code&state&businessId. src/myob-link.ts does the work: the state must be
@@ -63,7 +64,7 @@ async function myobAuthCallback(request: HttpRequest, context: InvocationContext
       `<h1>MYOB ${outcome.relinked ? "re-linked" : "connected"}.</h1><p>Company file <code>${escapeHtml(outcome.businessId)}</code>${who}. You can close this tab and reload the admin page.</p>`,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     context.error("MYOB link failed:", message);
     // Settings problems are the admin's to fix; anything else stays in the log.
     const shown = err instanceof MyobTokenCryptoError ? message : "Nothing was linked. The details are in the function log.";

@@ -4,6 +4,7 @@ import { runAbsenceCover } from "../absenceCover/engine";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: every 30 minutes, Monday to Friday UTC ────────────────────
 // Cover while away (PLAN §13; src/absenceCover/engine.ts): finds who is away today (approved
@@ -64,7 +65,7 @@ export async function absenceCoverTimer(_timer: Timer, context: InvocationContex
       wouldMove: report.wouldMove,
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("absenceCoverTimer failed:", message);
     Sentry.captureException(error, { extra: { context: "absenceCoverTimer fatal" } });
     throw error;

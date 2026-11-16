@@ -6,6 +6,7 @@ import { runCommsQueue } from "../comms/worker";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: every minute ──────────────────────────────────────────────
 // The email send queue (EB1, src/comms/worker.ts): takes queued recipients oldest first, at most
@@ -39,7 +40,7 @@ export async function commsSendTimer(_timer: Timer, context: InvocationContext):
     context.log(`commsSendTimer: ${mode}, ${JSON.stringify(report)}`);
     return { ...report, dryRun: mode === "dry-run" };
   } catch (error: unknown) {
-    context.error("commsSendTimer failed:", error instanceof Error ? error.message : String(error));
+    context.error("commsSendTimer failed:", errorMessage(error));
     Sentry.captureException(error, { extra: { context: "commsSendTimer fatal" } });
     throw error;
   } finally {

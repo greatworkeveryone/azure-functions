@@ -5,6 +5,7 @@ import { beginTransaction, closeConnection, commitTransaction, createRequestConn
 import { record } from "./ledger";
 import { resolveLedgerActor } from "./ledger/actor";
 import { invalidateTenantAndBuilding } from "./tenant-register-cache";
+import { errorMessage } from "./errorMessage";
 
 // A tenancy's areas (TenantOccupancies) and car parks (Carparks) are archived,
 // never hard-deleted (D10; database-safety rule 1; migration 140). Archive
@@ -139,7 +140,7 @@ export async function setTenancyPartArchived(
     for (const [tenantId, buildingId] of tenancies) invalidateTenantAndBuilding(tenantId as number, buildingId);
     return { status: 200, jsonBody: ids.length === 1 && body?.[sql.idsField] === undefined ? { archived: archive, id: ids[0], kind } : { archived: archive, ids, kind } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${archive ? "archive" : "unarchive"} ${kind} failed:`, message);
     return errorResponse(archive ? `Archive ${kind} failed` : `Restore ${kind} failed`, message);
   } finally {

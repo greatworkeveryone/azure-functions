@@ -22,6 +22,7 @@ import { OWN_COVER_ROLES } from "../absenceCover/roles";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 export async function saveCoverDelegate(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -38,7 +39,7 @@ export async function saveCoverDelegate(request: HttpRequest, context: Invocatio
     const caller = await requireCoverCaller(request, connection);
     const limited = checkRateLimit(`saveCoverDelegate:${caller.userId}`, { limit: 20, windowMs: 60_000 });
     if (!limited.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many requests. Try again shortly." }, status: 429 };
+      return tooManyRequests(limited.retryAfterMs, "Too many requests. Try again shortly.");
     }
     return { jsonBody: await saveNomination(connection, caller, input, todayInDarwin()), status: 200 };
   } catch (error: unknown) {

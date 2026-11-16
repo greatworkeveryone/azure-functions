@@ -40,6 +40,7 @@ import {
   reviewConditionActive,
   shouldRaise,
 } from "./escalationRules";
+import { errorMessage } from "../errorMessage";
 
 export const REVIEW_SUBJECT = "rent_review";
 
@@ -62,7 +63,7 @@ export function approvalHeadline(change: { appliedPercent: number; currentAnnual
 }
 
 function report(what: string, reviewId: string, error: unknown, log?: (message: string) => void): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   log?.(`rentReviewEscalations: ${what} on review ${reviewId} failed: ${message}`);
   Sentry.captureException(error, { extra: { context: `rent review escalation: ${what}`, reviewId } });
   return message;
@@ -409,7 +410,7 @@ export async function runReviewEscalations(connection: Connection, run: ReviewEs
         run.log(`rentReviewEscalations: ${action.kind === "raise" ? action.policyKey : "a policy"} is switched off or missing; skipped`);
         continue;
       }
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       result.errors.push({ message, reviewId });
       run.warn(`rentReviewEscalations: review ${reviewId} failed: ${message}`);
     }

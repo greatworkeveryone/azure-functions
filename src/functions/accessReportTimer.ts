@@ -2,6 +2,7 @@ import { runTimer } from "../timerRuns";
 import { app, InvocationContext, Timer } from "@azure/functions";
 import { sendAnomalyReport } from "../access/report";
 import { Sentry } from "../sentry";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: 07:00 ACST (Darwin) daily ─────────────────────────────────
 // The daily unusual-access email to admin and the CFO (S10, decision 15), sent
@@ -25,7 +26,7 @@ export async function accessReportTimer(_timer: Timer, context: InvocationContex
         `${result.sent ? `sent to ${result.recipients}` : "nothing sent"}`,
     );
   } catch (error: unknown) {
-    context.error("accessReportTimer failed:", error instanceof Error ? error.message : String(error));
+    context.error("accessReportTimer failed:", errorMessage(error));
     Sentry.captureException(error, { extra: { context: "accessReportTimer" } });
     throw error;
   } finally {

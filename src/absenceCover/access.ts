@@ -9,6 +9,7 @@ import { resolveCaller } from "../escalation/http";
 import { normaliseRole, ROLES, teamRolesOfAll } from "../escalation/roles";
 import { coverMode, type CoverMode } from "./config";
 import { CoverError, coverError } from "./errors";
+import { errorMessage } from "../errorMessage";
 
 export interface CoverCaller {
   name: string;
@@ -41,6 +42,6 @@ export function requireLive(mode: CoverMode = coverMode()): void {
 
 export function coverErrorResponse(error: unknown, context: InvocationContext, name: string): HttpResponseInit {
   if (error instanceof CoverError) return { jsonBody: { code: error.code, error: error.message }, status: error.status };
-  context.error(`${name} failed:`, error instanceof Error ? error.message : String(error));
+  context.error(`${name} failed:`, errorMessage(error));
   return errorResponse(`${name} failed`, error);
 }

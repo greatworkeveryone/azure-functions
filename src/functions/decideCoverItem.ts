@@ -23,6 +23,7 @@ import { coverError } from "../absenceCover/errors";
 import { MANAGE_COVER_ROLES } from "../absenceCover/roles";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 export async function decideCoverItem(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -39,7 +40,7 @@ export async function decideCoverItem(request: HttpRequest, context: InvocationC
     const caller = await requireCoverCaller(request, connection);
     const limited = checkRateLimit(`decideCoverItem:${caller.userId}`, { limit: 60, windowMs: 60_000 });
     if (!limited.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many requests. Try again shortly." }, status: 429 };
+      return tooManyRequests(limited.retryAfterMs, "Too many requests. Try again shortly.");
     }
     return { jsonBody: await decide(connection, caller, input, coverMode()), status: 200 };
   } catch (error: unknown) {

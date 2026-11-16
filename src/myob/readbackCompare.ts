@@ -17,7 +17,7 @@
 // MYOB never says who changed a record, only when: the read-back says
 // "changed in MYOB", never a name.
 
-import { comparable, diffDocuments, toCents } from "./payloads";
+import { comparable, diffDocuments, roundToCents } from "./payloads";
 import { changeLabel, changeValue, recordChanges } from "./recordDiff";
 import { formatAud } from "./render";
 
@@ -94,8 +94,8 @@ function show(field: string, record: Record<string, unknown>, fallback: unknown)
 
 export function paidState(record: Record<string, unknown> | null, kind: ReadbackKind): { balanceDue: number | null; state: PaidState } {
   if (kind === "Quote" || !record || record.BalanceDueAmount === undefined || record.BalanceDueAmount === null) return { balanceDue: null, state: null };
-  const balance = toCents(Number(record.BalanceDueAmount));
-  const total = toCents(Number(record.TotalAmount ?? NaN));
+  const balance = roundToCents(Number(record.BalanceDueAmount));
+  const total = roundToCents(Number(record.TotalAmount ?? NaN));
   const settled = kind === "Bill" ? record.Status === "Closed" || balance === 0 : balance === 0 && Number.isFinite(total) && total > 0;
   if (settled) return { balanceDue: 0, state: "paid" };
   return { balanceDue: balance, state: Number.isFinite(total) && balance < total ? "part_paid" : "unpaid" };

@@ -4,6 +4,7 @@ import { proposalsForSubject } from "../myob/proposalsStore";
 import { proposalView } from "../myob/proposalView";
 import { readbackMode, readBackRows } from "../myob/readbackRun";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 // POST /api/refreshMyobRecord — { subjectType, subjectId }: read back, now, the
 // MYOB records Floorplan created for one purchase order or quote (plan M10),
@@ -28,7 +29,7 @@ export async function refreshMyobRecord(request: HttpRequest, context: Invocatio
     }
     const limit = checkRateLimit(`refreshMyobRecord:${person.oid}`, { limit: 10, windowMs: 60_000 });
     if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Too many MYOB checks; try again in a minute" }, status: 429 };
+      return tooManyRequests(limit.retryAfterMs, "Too many MYOB checks; try again in a minute");
     }
 
     const now = new Date();

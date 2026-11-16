@@ -12,6 +12,7 @@ import {
 import { LEAVE_READ_ROLES, leaveApprovers, parseLeave } from "../leavePolicy";
 import { loadPeople, peopleAudit } from "../peopleWorkflow";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 export async function createLeaveRequest(
   request: HttpRequest,
@@ -21,11 +22,7 @@ export async function createLeaveRequest(
   if (!auth.ok) return auth.response;
   const limited = checkRateLimit(`leave:${auth.caller.oid}`, { limit: 20, windowMs: 60000 });
   if (!limited.allowed)
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) },
-      jsonBody: { error: "Too many leave requests. Try again shortly." },
-    };
+    return tooManyRequests(limited.retryAfterMs, "Too many leave requests. Try again shortly.");
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   let input;

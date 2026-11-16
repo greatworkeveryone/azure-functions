@@ -11,6 +11,7 @@ import { requireMoneyContext } from "./moneyGate";
 import { LedgerValidationError, type LedgerActor } from "./ledger";
 import { resolveLedgerActor } from "./ledger/actor";
 import { isMyobController, MyobControlsError } from "./myob-controls-admin";
+import { errorMessage } from "./errorMessage";
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -60,7 +61,7 @@ export async function runControllerAction<T>(
   } catch (error) {
     if (error instanceof MyobControlsError) return { jsonBody: { error: error.message }, status: error.status };
     if (error instanceof LedgerValidationError) return { jsonBody: { error: error.message }, status: 400 };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error(`${action.name} failed:`, message);
     return errorResponse(action.failure, message);
   } finally {

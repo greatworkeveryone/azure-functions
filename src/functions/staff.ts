@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { graphGetGroupUsers, type GraphUser } from "../graph";
+import { errorMessage } from "../errorMessage";
 
 const STAFF_ROLES = [
   AppRole.ADMIN,
@@ -81,7 +82,7 @@ export async function getStaff(
         : await staffFromAppUsers(token);
     return { status: 200, jsonBody: { staff } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getStaff failed:", message);
     return errorResponse("Failed to fetch staff directory", message);
   }

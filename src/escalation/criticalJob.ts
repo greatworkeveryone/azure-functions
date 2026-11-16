@@ -12,6 +12,7 @@ import type { Connection } from "tedious";
 import { resolveLedgerActor } from "../ledger/actor";
 import { Sentry } from "../sentry";
 import { raise } from "./engine";
+import { errorMessage } from "../errorMessage";
 
 export const CRITICAL_PRIORITY = "Critical";
 export const CRITICAL_POLICY = "job.critical";
@@ -46,7 +47,7 @@ export async function raiseCriticalJobEscalation(args: CriticalJobArgs): Promise
       subjectType: "job",
     });
   } catch (error) {
-    args.log?.(`job.critical escalation for job #${args.jobId} failed: ${error instanceof Error ? error.message : String(error)}`);
+    args.log?.(`job.critical escalation for job #${args.jobId} failed: ${errorMessage(error)}`);
     Sentry.captureException(error, { extra: { jobId: args.jobId }, tags: { source: "job_critical_escalation" } });
   }
 }

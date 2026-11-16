@@ -7,6 +7,7 @@ import { AppRole } from "../auth";
 import { executeQuery, type SqlRow } from "../db";
 import { IDENTITY_ROLES, type CommsIdentity } from "./identity";
 import type { Signature } from "./signature";
+import { isUniqueViolation } from "../sqlErrors";
 
 export interface AdminIdentity extends CommsIdentity {
   archivedBy: string | null;
@@ -98,10 +99,7 @@ function valueParams(input: IdentityInput) {
 }
 
 /** True for the duplicate-key error a second live identity on the same address raises. */
-export function isDuplicateAddress(error: unknown): boolean {
-  const number = (error as { number?: number } | null)?.number;
-  return number === 2601 || number === 2627;
-}
+export const isDuplicateAddress = (error: unknown): boolean => isUniqueViolation(error);
 
 export async function insertIdentity(connection: Connection, input: IdentityInput, createdBy: string): Promise<number> {
   const [row] = await executeQuery(

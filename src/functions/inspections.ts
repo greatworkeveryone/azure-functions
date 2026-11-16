@@ -28,6 +28,7 @@ import {
 import { generateReadSasUrl, uploadBlob } from "../blob-storage";
 import { isAllowedContentType, MAX_SIZE_BYTES as MAX_ATTACHMENT_BYTES } from "../upload-constants";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { isDevOverrideEnabled } from "../jwt";
 import { buildInspectionPacket } from "../pdf/inspection-packet";
 import { loadInspectionPacketInputs } from "../pdf/inspection-packet-loader";
@@ -88,13 +89,6 @@ export function opRejectionReason(err: unknown): string {
   return "Operation could not be applied";
 }
 
-function tooManyRequests(retryAfterMs: number): HttpResponseInit {
-  return {
-    status: 429,
-    headers: { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) },
-    jsonBody: { error: "Rate limit exceeded" },
-  };
-}
 
 // Inspection authors = the field inspectors plus their managers. Includes plain
 // FACILITIES: they walk the building and create/edit/complete/merge inspections.

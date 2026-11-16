@@ -51,8 +51,4 @@ export class EscalationError extends Error {
   }
 }
 
-/** SQL Server unique-index and unique-constraint violations. */
-export function isUniqueViolation(error: unknown): boolean {
-  const number = (error as { number?: unknown } | null)?.number;
-  return number === 2601 || number === 2627;
-}
+export { isUniqueViolation } from "../sqlErrors";

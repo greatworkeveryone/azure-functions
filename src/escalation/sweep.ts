@@ -61,6 +61,7 @@ import { eventForRetry, isRetryDue, notifyTargets, type NotifyEvent, type Notify
 import { getPolicy } from "./policies";
 import { latestKey, latestTimesBySubject, listLiveEscalations, type LatestEscalationTimes } from "./store";
 import { RESOLUTION_CODES, type EscalationPolicy, type EscalationRow } from "./types";
+import { errorMessage } from "../errorMessage";
 
 export interface SweepOptions {
   dryRun: boolean;
@@ -183,7 +184,7 @@ class Run {
   }
 
   fail(what: string, error: unknown): void {
-    const message = `${what}: ${error instanceof Error ? error.message : String(error)}`;
+    const message = `${what}: ${errorMessage(error)}`;
     this.report.errors.push(message);
     this.options.warn(`escalationSweep: ${message}`);
   }

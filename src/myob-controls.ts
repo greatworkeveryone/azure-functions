@@ -17,6 +17,7 @@ import { readFileMode, type MyobFileMode } from "./myob-company-files-store";
 import { readControls, writeKey, writesToday, type ControlOperation, type ControlRow } from "./myob-controls-store";
 import type { MyobOperation } from "./myob-endpoints";
 import { MyobRequestRefusedError } from "./myob-errors";
+import { errorMessage } from "./errorMessage";
 
 const READS: ReadonlySet<MyobOperation> = new Set(["files.list", "company_file.read", "purchases.read"]);
 
@@ -51,7 +52,7 @@ export async function assertMyobControlsAllow(
       closeConnection(connection);
     }
   } catch (error) {
-    refuse(`MYOB is off for company file ${file}: its mode and controls could not be read (${error instanceof Error ? error.message : String(error)})`);
+    refuse(`MYOB is off for company file ${file}: its mode and controls could not be read (${errorMessage(error)})`);
   }
 
   if (mode === "off") refuse(`MYOB is off for company file ${file}: the CFO has not switched this file on (Entities)`);

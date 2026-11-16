@@ -3,6 +3,7 @@ import { closeConnection, createServiceRequestConnection } from "../db";
 import { generatorMode, reviewWindowDays, runReviewGenerator } from "../rentReview/generator";
 import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: daily, 02:00 UTC (11:30 in Darwin) ────────────────────────
 // The rent review generator (PLAN WP25, src/rentReview/generator.ts): keeps one
@@ -90,7 +91,7 @@ export async function tenancyReviewScheduleTimer(_timer: Timer, context: Invocat
       windowsOpened: report.windowsOpened,
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("tenancyReviewScheduleTimer failed:", message);
     Sentry.captureException(error, { extra: { context: "tenancyReviewScheduleTimer fatal" } });
     throw error;

@@ -14,6 +14,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { addDays, darwinDay } from "../usage/days";
 import { MAX_ROLLUP_DAYS, rollUpDays } from "../usage/rollup";
 import { parsePeriod } from "../usage/period";
+import { errorMessage } from "../errorMessage";
 
 export async function runUsageRollup(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -45,7 +46,7 @@ export async function runUsageRollup(request: HttpRequest, context: InvocationCo
     const counts = await rollUpDays(connection, from, to);
     return { jsonBody: { from, to, ...counts }, status: 200 };
   } catch (error: unknown) {
-    context.error("runUsageRollup failed:", error instanceof Error ? error.message : String(error));
+    context.error("runUsageRollup failed:", errorMessage(error));
     return errorResponse("Could not roll up usage", error);
   } finally {
     if (connection) closeConnection(connection);

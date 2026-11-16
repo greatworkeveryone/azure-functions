@@ -27,6 +27,7 @@ import { MYOB_HEALTH_SUBJECTS, raiseMyobHealth } from "./myob-health";
 import type { MyobActor, MyobRequestInput, MyobResponse } from "./myob-api-types";
 import { guardMyobRequest, withCompanyFileCredentials, type GuardedRequest } from "./myob-request-guard";
 import { Sentry } from "./sentry";
+import { errorMessage } from "./errorMessage";
 
 export { userActor, type MyobActor, type MyobRequestInput, type MyobResponse } from "./myob-api-types";
 
@@ -162,7 +163,7 @@ async function refuse(base: Omit<LogRow, "phase">, err: unknown, loggableBody: s
   const dryRun = err instanceof MyobRequestRefusedError && err.code === "dry_run";
   await insertOutcomeRow({
     ...base,
-    errorMessage: err instanceof Error ? err.message : String(err),
+    errorMessage: errorMessage(err),
     phase: "error",
     requestBody: dryRun ? loggableBody : null,
   });
@@ -234,7 +235,7 @@ export async function myobRequest(input: MyobRequestInput): Promise<MyobResponse
         ...base,
         attempt,
         durationMs: Date.now() - startedAt,
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: errorMessage(err),
         phase: "error",
       });
       throw err;

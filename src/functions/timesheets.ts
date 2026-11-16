@@ -18,6 +18,7 @@ import {
 } from "../auth";
 import { validateTimesheetData } from "../timesheetData";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 const TIMESHEET_UPSERT_RATE_LIMIT = { limit: 60, windowMs: 60_000 };
 const TIMESHEET_SUBMIT_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -174,11 +175,7 @@ async function upsertTimesheet(
 
   const rl = checkRateLimit(`timesheetUpsert:${callerOid}`, TIMESHEET_UPSERT_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const roles = await rolesForRequest(request);
@@ -334,11 +331,7 @@ async function submitTimesheetForApproval(
 
   const rl = checkRateLimit(`timesheetSubmit:${callerOid}`, TIMESHEET_SUBMIT_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const roles = await rolesForRequest(request);

@@ -111,6 +111,25 @@ describe("jobIdFromText — quoted history is ignored", () => {
     expect(jobIdFromText(null, body)).toBeNull();
   });
 
+  it.each([
+    ["text after a closed quote", "<blockquote>Job #12</blockquote><p>Job #5 done</p>", 5],
+    ["text after nested quotes", "<blockquote>a<blockquote>Job #12</blockquote>b</blockquote>Job #5", 5],
+    ["a stray closing tag", "</blockquote>Job #5", 5],
+    ["a quote with attributes", '<blockquote type="cite" style="x">Job #12</blockquote>Job #5', 5],
+  ])("keeps a reference outside %s", (_label, body, expected) => {
+    expect(jobIdFromText(null, body)).toBe(expected);
+  });
+
+  it.each([
+    ["unclosed opening tags", "<blockquote ".repeat(200_000)],
+    ["deeply nested quotes", `${"<blockquote>".repeat(100_000)}Job #12${"</blockquote>".repeat(100_000)}`],
+    ["unmatched opening quotes", "<blockquote>x".repeat(200_000)],
+  ])("stays fast on hostile mail: %s", (_label, body) => {
+    const started = Date.now();
+    expect(jobIdFromText(null, `Job #5 ${body}`)).toBe(5);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("keeps a reference written above the quoted history", () => {
     expect(jobIdFromText(null, "Job #5 done.\n\nOn Mon, Bob wrote:\n> Job #12")).toBe(5);
   });

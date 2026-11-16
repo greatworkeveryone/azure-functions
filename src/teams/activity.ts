@@ -11,6 +11,7 @@ import { clearGraphTokenCache, getGraphToken } from "../graph";
 import { assertMayLeave, type EgressSubject } from "../test-data";
 import { teamsAppId, teamsMode, type TeamsMode } from "./config";
 import { teamsTabLink } from "./deepLink";
+import { errorMessage } from "../errorMessage";
 
 export interface TeamsAlert {
   /** What the alert is about; a test record's is refused (D9). */
@@ -94,7 +95,7 @@ export async function sendActivityNotification(oid: string, alert: TeamsAlert, d
     try {
       token = await getToken();
     } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err), httpStatus: null, mode, status: "failed" };
+      return { error: errorMessage(err), httpStatus: null, mode, status: "failed" };
     }
     try {
       return await (deps.fetch ?? fetch)(`${GRAPH_USERS}/${encodeURIComponent(oid)}/teamwork/sendActivityNotification`, {
@@ -103,7 +104,7 @@ export async function sendActivityNotification(oid: string, alert: TeamsAlert, d
         method: "POST",
       });
     } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err), httpStatus: null, mode, retryAfterSeconds: null, status: "retry" };
+      return { error: errorMessage(err), httpStatus: null, mode, retryAfterSeconds: null, status: "retry" };
     }
   };
 

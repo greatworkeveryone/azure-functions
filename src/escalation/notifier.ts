@@ -30,6 +30,7 @@ import { alertKind, deliverUrgentAlerts, isAlertEvent, isUrgentAlert } from "./u
 import { normaliseRole, ROLES, roleLabel } from "./roles";
 import { listActiveUsers, recordNotification } from "./store";
 import { REASON_LABELS, type DirectoryUser, type EscalationRow, type ManualReason, type NotificationState } from "./types";
+import { errorMessage } from "../errorMessage";
 
 /** `egress` is what the email is about; a test record's is refused (D9). */
 export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
@@ -228,7 +229,7 @@ function linkRoute(row: EscalationRow): string | null {
 // ── Sending ──────────────────────────────────────────────────────────────────
 
 function errorText(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  return (errorMessage(error)).slice(0, 500);
 }
 
 async function sendWithRetry(

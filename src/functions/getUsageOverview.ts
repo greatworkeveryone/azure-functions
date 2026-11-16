@@ -13,6 +13,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { refuseUnlessAllScope } from "../usage/access";
 import { parsePeriod } from "../usage/period";
 import { loadUsageOverview } from "../usage/queries/overview";
+import { errorMessage } from "../errorMessage";
 
 export async function getUsageOverview(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -29,7 +30,7 @@ export async function getUsageOverview(request: HttpRequest, context: Invocation
     connection = await createRequestConnection(token);
     return { headers: { "Cache-Control": "no-store" }, jsonBody: await loadUsageOverview(connection, parsed.period), status: 200 };
   } catch (error: unknown) {
-    context.error("getUsageOverview failed:", error instanceof Error ? error.message : String(error));
+    context.error("getUsageOverview failed:", errorMessage(error));
     return errorResponse("Could not load usage", error);
   } finally {
     if (connection) closeConnection(connection);

@@ -12,6 +12,7 @@ import type { TriageEmail } from "./context";
 import { resolveRanker } from "./registry";
 import { triageEmail } from "./triage";
 import type { Ranker } from "./types";
+import { errorMessage } from "../errorMessage";
 
 export interface TriageRunSummary {
   assigned: number;
@@ -88,7 +89,7 @@ export async function runInboundTriage(connection: Connection, deps: RunDeps = {
       if (dryRun) log(`inbound triage dry run: email ${email.emailId} would be ${result.decision === "auto" ? `assigned to user ${result.chosen?.userId} (${result.rule})` : `queued for a manager (${result.rule})`}`);
     } catch (error) {
       summary.failed += 1;
-      log(`inbound triage: email ${email.emailId} failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`inbound triage: email ${email.emailId} failed: ${errorMessage(error)}`);
       Sentry.captureException(error, { extra: { context: "inbound triage failed", emailId: email.emailId } });
     }
   }

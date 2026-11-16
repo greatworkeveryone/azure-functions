@@ -4,6 +4,7 @@ import { sweepMode } from "../escalation/config";
 import { runSweep } from "../escalation/sweep";
 import { Sentry } from "../sentry";
 import { runTimer } from "../timerRuns";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: every 30 minutes ───────────────────────────────────────────
 // The escalation sweep (PLAN §3.7, src/escalation/sweep.ts): ends escalations
@@ -48,7 +49,7 @@ export async function escalationSweepTimer(_timer: Timer, context: InvocationCon
       Sentry.captureMessage(`Escalation sweep finished with ${report.errors.length} problem(s): ${report.errors[0]}`, "error");
     }
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("escalationSweepTimer failed:", message);
     Sentry.captureException(error, { tags: { source: "escalation_sweep_timer" } });
     throw error;

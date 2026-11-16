@@ -12,6 +12,7 @@ import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "
 import { refuseUnlessAllScope } from "../usage/access";
 import { fetchAiCost } from "../usage/aiCost";
 import { parsePeriod } from "../usage/period";
+import { errorMessage } from "../errorMessage";
 
 export async function getAiCost(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -27,7 +28,7 @@ export async function getAiCost(request: HttpRequest, context: InvocationContext
     return { headers: { "Cache-Control": "no-store" }, jsonBody: await fetchAiCost(parsed.period), status: 200 };
   } catch (error: unknown) {
     // Only a misconfigured TODDLER_URL (not https) gets here.
-    context.error("getAiCost failed:", error instanceof Error ? error.message : String(error));
+    context.error("getAiCost failed:", errorMessage(error));
     return errorResponse("Could not load the AI cost", error);
   }
 }

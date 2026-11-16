@@ -16,6 +16,7 @@ import { usageScopeOf } from "../usage/access";
 import { parsePeriod } from "../usage/period";
 import { loadUsageFinance, roleOfUser } from "../usage/queries/finance";
 import { isFinanceUserRole } from "../usage/scope";
+import { errorMessage } from "../errorMessage";
 
 const ROLE_NAMES: readonly string[] = Object.values(AppRole);
 
@@ -44,7 +45,7 @@ export async function getUsageFinance(request: HttpRequest, context: InvocationC
     const view = await loadUsageFinance(connection, parsed.period, { role, scope: access.scope, userId });
     return { headers: { "Cache-Control": "no-store" }, jsonBody: view, status: 200 };
   } catch (error: unknown) {
-    context.error("getUsageFinance failed:", error instanceof Error ? error.message : String(error));
+    context.error("getUsageFinance failed:", errorMessage(error));
     return errorResponse("Could not load usage", error);
   } finally {
     if (connection) closeConnection(connection);

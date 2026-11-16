@@ -4,6 +4,7 @@ import { Sentry } from "../sentry";
 import { runTimer, type TimerCounts } from "../timerRuns";
 import { usageTrackingOn } from "../usage/config";
 import { recentRollupRange, rollUpDays } from "../usage/rollup";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: 15:30 UTC daily (01:00 in Darwin, just after the Darwin day ends) ────────────
 // Usage analytics roll-up (PLAN §14; src/usage/rollup.ts): recomputes UsageDaily for the last three
@@ -25,7 +26,7 @@ export async function usageRollupTimer(_timer: Timer, context: InvocationContext
     context.log(`usageRollupTimer: ${from} to ${to}: ${counts.inserted} new, ${counts.updated} refreshed`);
     return { days: counts.days, inserted: counts.inserted, updated: counts.updated };
   } catch (error: unknown) {
-    context.error("usageRollupTimer failed:", error instanceof Error ? error.message : String(error));
+    context.error("usageRollupTimer failed:", errorMessage(error));
     Sentry.captureException(error, { extra: { context: "usageRollupTimer" } });
     throw error;
   } finally {

@@ -16,6 +16,7 @@ import { archiveNomination } from "../absenceCover/nominate";
 import { OWN_COVER_ROLES } from "../absenceCover/roles";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { inTransaction } from "../rentReview/store";
 
 export async function archiveCoverDelegate(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -36,7 +37,7 @@ export async function archiveCoverDelegate(request: HttpRequest, context: Invoca
     const caller = await requireCoverCaller(request, connection);
     const limited = checkRateLimit(`archiveCoverDelegate:${caller.userId}`, { limit: 20, windowMs: 60_000 });
     if (!limited.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many requests. Try again shortly." }, status: 429 };
+      return tooManyRequests(limited.retryAfterMs, "Too many requests. Try again shortly.");
     }
     const conn = connection;
     await inTransaction(conn, () => archiveNomination(conn, caller, coverDelegateId, rowVersion, (reason as string | null | undefined) ?? null));

@@ -13,6 +13,7 @@ import { TYPES } from "tedious";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { todayInDarwin } from "../darwinDate";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { errorMessage } from "../errorMessage";
 
 export async function previewHoldoverReset(
   request: HttpRequest,
@@ -43,7 +44,7 @@ export async function previewHoldoverReset(
     }));
     return { status: 200, jsonBody: { asOf: today, tenancies } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("previewHoldoverReset failed:", message);
     return errorResponse("Failed to list stored holdover tenancies", error);
   } finally {

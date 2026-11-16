@@ -12,6 +12,7 @@ import { LedgerValidationError } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { changeControl, isMyobController, MyobControlsError } from "../myob-controls-admin";
 import { parseControlChange } from "../myob-controls-input";
+import { errorMessage } from "../errorMessage";
 
 // POST /api/setMyobControl — the CFO changes one MYOB control for one company
 // file: { companyFileId, operation, enabled?, dryRun?, dailyCap?,
@@ -47,7 +48,7 @@ export async function setMyobControl(request: HttpRequest, context: InvocationCo
   } catch (error) {
     if (error instanceof MyobControlsError) return { jsonBody: { error: error.message }, status: error.status };
     if (error instanceof LedgerValidationError) return { jsonBody: { error: error.message }, status: 400 };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("setMyobControl failed:", message);
     return errorResponse("Failed to change the MYOB control", message);
   } finally {

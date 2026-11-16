@@ -28,6 +28,7 @@ import { consumeAuthState, type AuthStateOwner } from "./myob-auth-state";
 import { lockMyobTokens, readMyobAuthRow, saveLinkedTokens, type MyobAuthRow } from "./myob-auth-store";
 import { isMyobFileMode, type MyobFileMode } from "./myob-company-files-store";
 import { MYOB_HEALTH_SUBJECTS, raiseMyobHealth } from "./myob-health";
+import { errorMessage } from "./errorMessage";
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -145,7 +146,7 @@ export async function completeMyobLink(input: {
   try {
     tokens = await exchangeCode(input.code, actor, correlationId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return fail(error instanceof MyobScopeError ? 409 : 500, "MYOB did not link", message);
   }
 

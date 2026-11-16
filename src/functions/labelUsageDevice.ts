@@ -12,6 +12,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { callerFromToken } from "../callerFromToken";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { errorMessage } from "../errorMessage";
 
 const DEVICE_ID = /^[ds]_[A-Za-z0-9]{16,32}$/;
 const MAX_LABEL_CHARS = 80;
@@ -53,7 +54,7 @@ export async function labelUsageDevice(request: HttpRequest, context: Invocation
     if (Number(rows[0]?.Changed ?? 0) === 0) return { jsonBody: { error: "That device is not known" }, status: 404 };
     return { jsonBody: { deviceId, label: name === "" ? null : name }, status: 200 };
   } catch (error: unknown) {
-    context.error("labelUsageDevice failed:", error instanceof Error ? error.message : String(error));
+    context.error("labelUsageDevice failed:", errorMessage(error));
     return errorResponse("Could not name the device", error);
   } finally {
     if (connection) closeConnection(connection);

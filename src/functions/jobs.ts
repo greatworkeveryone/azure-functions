@@ -23,6 +23,7 @@ import {
 } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { assigneeRefusal } from "../assigneeCheck";
 import { raiseCriticalJobEscalation } from "../escalation/criticalJob";
 import { todayInDarwin } from "../darwinDate";
@@ -53,6 +54,7 @@ import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
 import { JOB_PRIORITIES } from "../jobPriorities";
 import { showTestParam, testFlagForCreate } from "../test-data";
+import { errorMessage } from "../errorMessage";
 
 // Who may edit, read and archive jobs is in the who-can-do-what table
 // (action-roles.ts: editJobs, viewJobs, archiveAnyJob). Plain "facilities"
@@ -598,11 +600,7 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
 
   const rl = checkRateLimit(`upsertJob:${identity.oid}`, JOB_WRITE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -1079,11 +1077,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
 
   const rl = checkRateLimit(`archiveJob:${identity.oid}`, JOB_ARCHIVE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const userRoles = await rolesForRequest(request);
@@ -1167,7 +1161,7 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     }
     resolveActivePlannerTasks("job", JobID, ["stalled_facilities", "awaiting_accounts", "director_approval", "job_update_due"]).catch(
       (err: unknown) =>
-        context.warn("plannerResolve (archiveJob):", err instanceof Error ? err.message : String(err)),
+        context.warn("plannerResolve (archiveJob):", errorMessage(err)),
     );
     return { status: 200, jsonBody: { archived: JobID } };
   } catch (error: any) {
@@ -1195,11 +1189,7 @@ async function unarchiveJob(request: HttpRequest, context: InvocationContext): P
 
   const rl = checkRateLimit(`unarchiveJob:${identity.oid}`, JOB_ARCHIVE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const userRoles = await rolesForRequest(request);
@@ -1308,11 +1298,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
 
   const rl = checkRateLimit(`addJobEvent:${identity.oid}`, JOB_WRITE_RATE_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -1634,13 +1620,13 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       if (ExpectedProgressDate != null) {
         resolveActivePlannerTasks("job", JobID, ["job_update_due"]).catch(
           (err: unknown) =>
-            context.warn("plannerResolve (addJobEvent):", err instanceof Error ? err.message : String(err)),
+            context.warn("plannerResolve (addJobEvent):", errorMessage(err)),
         );
       }
       if (isStalledBit === 0) {
         resolveActivePlannerTasks("job", JobID, ["stalled_facilities"]).catch(
           (err: unknown) =>
-            context.warn("plannerResolve (stalled cleared):", err instanceof Error ? err.message : String(err)),
+            context.warn("plannerResolve (stalled cleared):", errorMessage(err)),
         );
       }
       // Key off the machine-resolved role actually written to the row, not the
@@ -1650,13 +1636,13 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       if (resolvedNewAwaitingRole !== null && resolvedNewAwaitingRole !== undefined && resolvedNewAwaitingRole !== "accounts") {
         resolveActivePlannerTasks("job", JobID, ["awaiting_accounts"]).catch(
           (err: unknown) =>
-            context.warn("plannerResolve (awaiting role changed):", err instanceof Error ? err.message : String(err)),
+            context.warn("plannerResolve (awaiting role changed):", errorMessage(err)),
         );
       }
       if (NewStatus === "Done") {
         resolveActivePlannerTasks("job", JobID, ["stalled_facilities", "awaiting_accounts", "director_approval", "job_update_due"]).catch(
           (err: unknown) =>
-            context.warn("plannerResolve (job done):", err instanceof Error ? err.message : String(err)),
+            context.warn("plannerResolve (job done):", errorMessage(err)),
         );
       }
 

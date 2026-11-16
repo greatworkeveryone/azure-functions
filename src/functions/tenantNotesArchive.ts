@@ -4,6 +4,7 @@ import { ACTION_ROLES } from "../action-roles";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { ARCHIVED_NOTES_SQL, noteRowToApi, setTenantNoteArchived } from "../tenant-notes";
+import { errorMessage } from "../errorMessage";
 
 // ── POST /api/archiveTenantNote, unarchiveTenantNote ─────────────────────────
 // Body { NoteId, Reason }. Replace the hard deleteTenantNote (D11): the note
@@ -49,7 +50,7 @@ export async function getArchivedTenantNotes(request: HttpRequest, context: Invo
     const rows = await executeQuery(connection, ARCHIVED_NOTES_SQL, [{ name: "TenantId", type: TYPES.Int, value: tenantId }]);
     return { status: 200, jsonBody: { notes: rows.map(noteRowToApi) } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getArchivedTenantNotes failed:", message);
     return errorResponse("Failed to fetch archived notes", message);
   } finally {

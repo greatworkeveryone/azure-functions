@@ -12,6 +12,7 @@ import { isDeadlockVictim, RentReviewError, rentReviewErrorResponse, TENANCY_EDI
 import { ledgerRefusal } from "../tenancyScheduleWrite";
 import { toChangeDto } from "./dto";
 import { SCHEDULE_CHANGE_SUBJECT } from "./types";
+import { errorMessage } from "../errorMessage";
 
 /** Who may ask for a change: the roles that may edit a tenancy ("accounts and
  *  above"; frontend capability requestScheduleChange). The cfo passes through
@@ -149,7 +150,7 @@ export function scheduleChangeErrorResponse(error: unknown, context: InvocationC
   }
   const refusal = ledgerRefusal(error);
   if (refusal) return refusal;
-  context.error(`${name} failed:`, error instanceof Error ? error.message : String(error));
+  context.error(`${name} failed:`, errorMessage(error));
   return errorResponse(`${name} failed`, error);
 }
 

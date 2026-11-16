@@ -51,6 +51,8 @@ export interface MoneyNeed {
   amount: number | null;
   buildingId: number;
   createdByName: string | null;
+  /** Quotes.CreatedByOid (migration 182); null on older rows. */
+  createdByOid?: string | null;
   subject: "quote";
 }
 

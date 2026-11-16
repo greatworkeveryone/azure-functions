@@ -25,6 +25,7 @@ import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { decimalOf } from "./reviewTenancy";
 import { rentPerAnnumIsCache } from "./stepPlan";
 import { inTransaction } from "./store";
+import { errorMessage } from "../errorMessage";
 
 const MONEY = { precision: 20, scale: 10 } as const;
 
@@ -148,7 +149,7 @@ export async function writeDueRentCaches(connection: Connection, run: RentCacheR
         report.current += 1;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       report.errors.push({ message, reviewId });
       run.warn(`rentReviewGenerator: tenancy ${tenantId}'s rent cache failed: ${message}`);
     }

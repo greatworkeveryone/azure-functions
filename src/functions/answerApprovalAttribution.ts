@@ -40,6 +40,7 @@ import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import type { LedgerActor } from "../ledger/types";
 import { refuseMoneyChange } from "../moneyJob-db";
+import { errorMessage } from "../errorMessage";
 
 const REASON_MAX = 1000;
 const ANSWER_ROLES = [AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS, AppRole.ACCOUNTS_APPROVAL, AppRole.CFO, AppRole.DIRECTOR];
@@ -198,7 +199,7 @@ export async function answerApprovalAttribution(request: HttpRequest, context: I
     if (raised) await raised.announce();
     return { jsonBody: { answered: true, disputed: !parsed.agreed }, status: 200 };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("answerApprovalAttribution failed:", message);
     return errorResponse("Answer failed", message);
   } finally {

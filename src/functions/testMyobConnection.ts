@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/fu
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse, verifiedIdentityFromRequest } from "../auth";
 import { myobRequest, MyobRequestRefusedError, userActor } from "../myob-api-log";
 import { getValidMyobAccessToken, MyobNotLinkedError, MyobRelinkRequiredError } from "../myob-auth";
+import { errorMessage } from "../errorMessage";
 
 // Verifies the MYOB integration end-to-end by:
 //   1. Calling GET /accountright/ to list visible company files
@@ -127,7 +128,7 @@ async function testMyobConnection(
     if (error instanceof MyobNotLinkedError) return reply({ linked: false, message: "MYOB is not linked yet — click Authorize MYOB above." });
     if (error instanceof MyobRelinkRequiredError) return reply({ linked: false, message: error.message });
     if (error instanceof MyobRequestRefusedError) return reply({ message: `Refused inside Floorplan: ${error.message}` });
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("MYOB connection test failed:", message);
     return errorResponse("MYOB connection test failed", message);
   }

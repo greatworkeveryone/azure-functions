@@ -5,6 +5,8 @@ import { isMyobController } from "../myob-controls-admin";
 import { reconcile, RECONCILE_LIMIT } from "../myob/activity/reconcile";
 import { LIVE_READER } from "../myob/readbackClient";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
+import { errorMessage } from "../errorMessage";
 
 // POST /api/reconcileMyob — { companyFileId? }: for the newest 25 records
 // Floorplan sent to MYOB (the latest verified proposal per record), what
@@ -36,7 +38,7 @@ export async function reconcileMyob(request: HttpRequest, context: InvocationCon
   if (file !== null && (typeof file !== "string" || !GUID.test(file))) return { jsonBody: { error: "companyFileId must be a MYOB company file id" }, status: 400 };
   const limit = checkRateLimit(`reconcileMyob:${identity.oid}`, { limit: 3, windowMs: 60_000 });
   if (!limit.allowed) {
-    return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Checked against MYOB just now; try again in a minute" }, status: 429 };
+    return tooManyRequests(limit.retryAfterMs, "Checked against MYOB just now; try again in a minute");
   }
 
   let connection;
@@ -48,7 +50,7 @@ export async function reconcileMyob(request: HttpRequest, context: InvocationCon
     const result = await reconcile(connection, actor, { companyFileId: file ? file.toLowerCase() : null, limit: RECONCILE_LIMIT }, { now, reader: LIVE_READER });
     return { jsonBody: { ...result, canAccept: isMyobController(roles), checkedAt: now.toISOString() }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("reconcileMyob failed:", message);
     return errorResponse("Failed to check against MYOB", message);
   } finally {

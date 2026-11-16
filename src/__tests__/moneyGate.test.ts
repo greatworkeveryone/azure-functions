@@ -28,7 +28,7 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "none" })}.${encode(payload)}.sig`;
 }
 
-const FRESH_MFA = { amr: ["pwd", "mfa"], iat: NOW - 60, oid: "oid-jo" };
+const FRESH_MFA = { amr: ["pwd", "mfa"], auth_time: NOW - 60, oid: "oid-jo" };
 
 function makeRequest(claims: Record<string, unknown> | null, forwardedFor: string | null = OFFICE): HttpRequest {
   const headers: Record<string, string> = {};
@@ -107,12 +107,12 @@ describe("evaluateMoneyGate — the four conditions", () => {
     expect(run(FRESH_MFA, null).outcome).toBe("network_refused");
   });
 
-  it("2. needs a sign-in within 10 minutes, preferring auth_time over iat", () => {
-    expect(run({ ...FRESH_MFA, iat: NOW - 11 * 60 }).outcome).toBe("step_up_stale");
+  it("2. needs a sign-in (auth_time) within 10 minutes; a fresh iat alone is a silent refresh and doesn't count", () => {
+    expect(run({ ...FRESH_MFA, auth_time: NOW - 11 * 60 }).outcome).toBe("step_up_stale");
     expect(run({ ...FRESH_MFA, auth_time: NOW - 11 * 60, iat: NOW - 60 }).outcome).toBe("step_up_stale");
     expect(run({ ...FRESH_MFA, auth_time: NOW - 9 * 60, iat: NOW - 60 * 60 }).outcome).toBe("allowed");
-    expect(run({ amr: ["mfa"], oid: "x" }).outcome).toBe("step_up_stale");
-    expect(run({ ...FRESH_MFA, iat: NOW + 3600 }).outcome).toBe("step_up_stale");
+    expect(run({ amr: ["mfa"], iat: NOW - 60, oid: "x" }).outcome).toBe("step_up_stale");
+    expect(run({ ...FRESH_MFA, auth_time: NOW + 3600 }).outcome).toBe("step_up_stale");
   });
 
   it("3. needs mfa in amr", () => {
@@ -121,7 +121,7 @@ describe("evaluateMoneyGate — the four conditions", () => {
   });
 
   it("lists every failure, network first", () => {
-    expect(run({ amr: ["pwd"], iat: NOW - 3600 }, HOME).failures).toEqual(["network_refused", "step_up_stale", "step_up_mfa"]);
+    expect(run({ amr: ["pwd"], auth_time: NOW - 3600 }, HOME).failures).toEqual(["network_refused", "step_up_stale", "step_up_mfa"]);
   });
 
   it("is unauthenticated without claims", () => {
@@ -156,7 +156,7 @@ describe("requireMoneyContext — enforcing", () => {
   });
 
   it("answers 428 step_up_required for a stale sign-in", async () => {
-    const res = await requireMoneyContext(makeRequest({ ...FRESH_MFA, iat: NOW - 20 * 60 }));
+    const res = await requireMoneyContext(makeRequest({ ...FRESH_MFA, auth_time: NOW - 20 * 60 }));
     expect(res).toEqual({
       jsonBody: { code: "step_up_required", error: expect.any(String), maxAgeMinutes: 10, reason: "stale_sign_in" },
       status: 428,
@@ -214,7 +214,7 @@ describe("requireMoneyContext — warn-only (MONEY_ALLOWED_CIDRS unset)", () => 
   });
 
   it("refuses nothing but logs what would have failed", async () => {
-    expect(await requireMoneyContext(makeRequest({ amr: ["pwd"], iat: NOW - 3600, oid: "oid-jo" }, HOME))).toBeNull();
+    expect(await requireMoneyContext(makeRequest({ amr: ["pwd"], auth_time: NOW - 3600, oid: "oid-jo" }, HOME))).toBeNull();
     expect(access.noteMoneyAction.mock.calls[0][2]).toMatchObject({
       failures: ["network_refused", "step_up_stale", "step_up_mfa"],
       mode: "warn",
@@ -250,7 +250,7 @@ describe("requireMoneyContext — warn-only (MONEY_ALLOWED_CIDRS unset)", () => 
 });
 
 describe("MONEY_STEP_UP_ENFORCED", () => {
-  const STALE = { ...FRESH_MFA, iat: NOW - 20 * 60 };
+  const STALE = { ...FRESH_MFA, auth_time: NOW - 20 * 60 };
   const NO_MFA = { ...FRESH_MFA, amr: ["pwd"] };
 
   it("is on only for the exact string \"true\"", () => {
@@ -274,7 +274,7 @@ describe("MONEY_STEP_UP_ENFORCED", () => {
 
     it("never reports network_refused, even with every other condition failing", async () => {
       const config = moneyGateConfig({ MONEY_STEP_UP_ENFORCED: "true" });
-      expect(evaluateMoneyGate({ address: HOME, claims: { amr: ["pwd"], iat: NOW - 3600 }, config, nowSeconds: NOW }).failures).toEqual(["step_up_stale", "step_up_mfa"]);
+      expect(evaluateMoneyGate({ address: HOME, claims: { amr: ["pwd"], auth_time: NOW - 3600 }, config, nowSeconds: NOW }).failures).toEqual(["step_up_stale", "step_up_mfa"]);
     });
 
     it("refuses a stale sign-in with the same 428 step_up_required as enforce mode", async () => {
@@ -316,7 +316,7 @@ describe("MONEY_STEP_UP_ENFORCED", () => {
     for (const value of ["TRUE", "1", "yes", "false", ""]) {
       process.env.MONEY_STEP_UP_ENFORCED = value;
       access.noteMoneyAction.mockClear();
-      expect(await requireMoneyContext(makeRequest({ ...NO_MFA, iat: NOW - 3600 }, HOME))).toBeNull();
+      expect(await requireMoneyContext(makeRequest({ ...NO_MFA, auth_time: NOW - 3600 }, HOME))).toBeNull();
       expect(access.noteMoneyAction.mock.calls[0][2]).toMatchObject({
         failures: ["network_refused", "step_up_stale", "step_up_mfa"],
         mode: "warn",

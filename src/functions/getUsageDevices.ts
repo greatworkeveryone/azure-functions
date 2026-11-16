@@ -13,6 +13,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { refuseUnlessAllScope } from "../usage/access";
 import { parsePeriod } from "../usage/period";
 import { loadUsageDevices } from "../usage/queries/devices";
+import { errorMessage } from "../errorMessage";
 
 export async function getUsageDevices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractToken(request);
@@ -29,7 +30,7 @@ export async function getUsageDevices(request: HttpRequest, context: InvocationC
     connection = await createRequestConnection(token);
     return { headers: { "Cache-Control": "no-store" }, jsonBody: await loadUsageDevices(connection, parsed.period), status: 200 };
   } catch (error: unknown) {
-    context.error("getUsageDevices failed:", error instanceof Error ? error.message : String(error));
+    context.error("getUsageDevices failed:", errorMessage(error));
     return errorResponse("Could not load usage", error);
   } finally {
     if (connection) closeConnection(connection);

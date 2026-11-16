@@ -29,6 +29,7 @@ import { resolveLedgerActor } from "../ledger/actor";
 import { sqlDateToIso } from "../nextReviewDate";
 import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { ledgerRefusal, rollbackQuietly } from "../tenancyScheduleWrite";
+import { errorMessage } from "../errorMessage";
 
 const MAX_TENANCIES = 500;
 const REASON_MAX = 2000;
@@ -150,7 +151,7 @@ export async function applyHoldoverReset(
   } catch (error: unknown) {
     const refusal = ledgerRefusal(error);
     if (refusal) return refusal;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("applyHoldoverReset failed:", message);
     return errorResponse("Failed to reset stored holdover", error);
   } finally {

@@ -12,6 +12,7 @@ import {
 } from "../auth";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { escapeLikePattern, validateSearchQuery } from "../searchUtils";
 import { showTestParam } from "../test-data";
 
@@ -179,11 +180,7 @@ export async function search(
   if (!identity) return unauthorizedResponse();
   const rl = checkRateLimit(`search:${identity.oid}`, SEARCH_LIMIT);
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
   const roles = await rolesForRequest(request);
   const canSeeTenants = rolesPassGate(roles, TENANT_SEARCH_ROLES);

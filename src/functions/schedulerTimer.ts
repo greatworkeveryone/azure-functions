@@ -3,6 +3,7 @@ import { runTimer, type TimerCounts } from "../timerRuns";
 import { closeConnection, createServiceRequestConnection } from "../db";
 import { runFacilitiesScheduler, schedulerMaxActions, schedulerMode, type SchedulerReport } from "../facilitiesScheduler";
 import { Sentry } from "../sentry";
+import { errorMessage } from "../errorMessage";
 
 /** One flat set of counts, as lane D's runTimer records in TimerRuns. Errors
  *  are counted because a per-record failure doesn't throw: the wrap should
@@ -78,7 +79,7 @@ async function execute(context: InvocationContext, env: NodeJS.ProcessEnv): Prom
     }
     return { counts: schedulerCounts(report, mode), firstError: report.errors[0] ?? null };
   } catch (error: unknown) {
-    context.error("schedulerTimer failed:", error instanceof Error ? error.message : String(error));
+    context.error("schedulerTimer failed:", errorMessage(error));
     Sentry.captureException(error, { tags: { source: "scheduler_timer" } });
     throw error;
   } finally {

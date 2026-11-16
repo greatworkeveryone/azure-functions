@@ -24,7 +24,9 @@ import { clientAddress } from "../access/clientIp";
 import { record } from "../ledger";
 import { ledgerUserActor } from "../ledger/actor";
 import { checkRateLimit, checkSignInRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { Sentry } from "../sentry";
+import { errorMessage } from "../errorMessage";
 
 // ── GET /api/getAppUsers ──────────────────────────────────────────────────────
 // Returns the active users for pickers and the Users page. Admins and directors are also
@@ -91,7 +93,7 @@ export async function getAppUsers(
       },
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getAppUsers failed:", message);
     return errorResponse("Failed to fetch users", message);
   } finally {
@@ -147,11 +149,7 @@ export async function upsertAppUser(
 
   const rl = checkRateLimit(`upsertAppUser:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const callerRoles = await rolesForRequest(request);
@@ -382,7 +380,7 @@ export async function upsertAppUser(
 
     return { status: 201, jsonBody: { userId: newUserId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("upsertAppUser failed:", message);
     return errorResponse("Failed to upsert user", message);
   } finally {
@@ -413,11 +411,7 @@ export async function registerSelf(
   if (!rl.allowed) {
     // The bucket's kind only: never the oid, the address or the token.
     context.warn(`registerSelf refused: ${rl.bucket} sign-in limit reached`);
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const email = rawEmail.trim().toLowerCase();
@@ -529,7 +523,7 @@ export async function registerSelf(
       jsonBody: { accessHints: true, userId: inserted[0].UserID as number, role: null },
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("registerSelf failed:", message);
     return errorResponse("Failed to register user", message);
   } finally {

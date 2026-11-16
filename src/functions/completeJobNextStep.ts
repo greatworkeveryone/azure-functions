@@ -39,6 +39,7 @@ import { readId } from "../jobDecisions/request";
 import { readRowVersion, readStepNote } from "../jobDecisions/respond";
 import { COMPLETE_NEXT_STEP_ROLES } from "../jobDecisions/roles";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 const COMPLETE_RATE_LIMIT = { limit: 30, windowMs: 60_000 };
 
@@ -66,7 +67,7 @@ export async function completeJobNextStep(request: HttpRequest, context: Invocat
 
     const limit = checkRateLimit(`completeJobNextStep:${caller.actor.userId ?? caller.actor.name}`, COMPLETE_RATE_LIMIT);
     if (!limit.allowed) {
-      return { headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) }, jsonBody: { error: "Rate limit exceeded" }, status: 429 };
+      return tooManyRequests(limit.retryAfterMs);
     }
 
     const done = await completeNextStep(connection, { actor: caller.actor, roles: caller.viewer.roles }, { decisionId, note, rowVersion });

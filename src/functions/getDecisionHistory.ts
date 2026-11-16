@@ -14,6 +14,7 @@ import { closeConnection, createRequestConnection, executeQuery, SqlParam } from
 import { errorResponse, extractToken, requireRole, rolesForRequest, unauthorizedResponse } from "../auth";
 import { historyReadRoles, readableSubjectTypes } from "../ledger/historyRoles";
 import { DECISION_COLUMNS, toDecisionRow } from "../ledger/rows";
+import { errorMessage } from "../errorMessage";
 
 const HISTORY_LIMIT = 200;
 const SUBJECT_TYPE = /^[a-z][a-z0-9_]{0,31}$/;
@@ -81,7 +82,7 @@ export async function getDecisionHistory(
     );
     return { status: 200, jsonBody: { items: rows.map(toDecisionRow) } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getDecisionHistory failed:", message);
     return errorResponse("Failed to fetch decision history", error);
   } finally {

@@ -9,9 +9,10 @@ import { syncMailbox } from "../email/mail-sync";
 import { Sentry } from "../sentry";
 import { readInboundConfig } from "./config";
 import { runInboundTriage } from "./run";
+import { errorMessage } from "../errorMessage";
 
 function fail(context: InvocationContext, what: string, error: unknown): void {
-  context.error(`${what} failed:`, error instanceof Error ? error.message : String(error));
+  context.error(`${what} failed:`, errorMessage(error));
   Sentry.captureException(error, { extra: { context: what } });
 }
 

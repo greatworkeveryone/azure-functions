@@ -6,6 +6,7 @@ import type { Connection } from "tedious";
 import { closeConnection, createRequestConnection, createServiceRequestConnection } from "./db";
 import { readMyobAuthRow } from "./myob-auth-store";
 import { currentKeyVersion } from "./myob-token-crypto";
+import { errorMessage } from "./errorMessage";
 
 export interface MyobAuthStatus {
   linked: boolean;
@@ -35,7 +36,7 @@ function relinkReason(row: { TokenCiphertext: string | null; TokenKeyVersion: nu
       return `the tokens were encrypted with key version ${row.TokenKeyVersion}`;
     }
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   }
   return null;
 }

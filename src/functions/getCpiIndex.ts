@@ -28,6 +28,7 @@ import {
 } from "../auth";
 import { CPI_REGIONS, CpiRegion, isCpiPeriod } from "../cpiAbs";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { errorMessage } from "../errorMessage";
 
 // Mirrors the tenancy register's read gate: getRegisterTenants and
 // getRegisterTenant in tenancy.ts. If that list changes, change this one (a
@@ -128,7 +129,7 @@ export async function getCpiIndex(
     );
     return { status: 200, jsonBody: toResponse(region, rows) };
   } catch (error: unknown) {
-    context.error("getCpiIndex failed:", error instanceof Error ? error.message : String(error));
+    context.error("getCpiIndex failed:", errorMessage(error));
     return errorResponse("Failed to fetch CPI index", error);
   } finally {
     if (connection) closeConnection(connection);

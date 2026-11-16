@@ -27,6 +27,7 @@ import { deriveItems, type DeriveContext } from "./items";
 import { recordDigestSent } from "./sentStore";
 import { loadDigestFacts } from "./store";
 import type { DigestFacts, DigestUser } from "./types";
+import { errorMessage } from "../errorMessage";
 
 /** `egress` is what the digest names; one that names a test record is refused (D9). */
 export type SendMail = (to: string[], subject: string, body: string, egress: EgressSubject) => Promise<void>;
@@ -88,7 +89,7 @@ function emptyReport(dryRun: boolean): DigestReport {
 }
 
 function errorText(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 300);
+  return (errorMessage(error)).slice(0, 300);
 }
 
 export async function runDigest(connection: Connection, options: DigestOptions, deps: DigestDeps = defaultDeps): Promise<DigestReport> {

@@ -4,6 +4,7 @@ import { closeConnection, createRequestConnection } from "../db";
 import { isMyobController } from "../myob-controls-admin";
 import { isMappingKind } from "../myob/mappingsAdmin/mappingKinds";
 import { exportMappingsCsv, loadMappingsView } from "../myob/mappingsAdmin/mappingsView";
+import { errorMessage } from "../errorMessage";
 
 // GET /api/getMyobMappings?kind=suppliers|accounts|buildings[&format=csv] —
 // the CFO's MYOB mappings (plan M2) as a table, or as the CSV she exports and
@@ -26,7 +27,7 @@ export async function getMyobMappings(request: HttpRequest, context: InvocationC
     if (request.query.get("format") === "csv") return { jsonBody: await exportMappingsCsv(connection, kind), status: 200 };
     return { jsonBody: { ...(await loadMappingsView(connection, kind)), canChange: isMyobController(roles) }, status: 200 };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getMyobMappings failed:", message);
     return errorResponse("Failed to load the MYOB mappings", message);
   } finally {

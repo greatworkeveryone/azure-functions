@@ -5,6 +5,7 @@
 import type { Connection } from "tedious";
 import { executeQuery } from "../db";
 import type { AutoReescalate, EscalationKind, EscalationPolicy, LadderEntry, LadderToken, PolicyClock } from "./types";
+import { errorMessage } from "../errorMessage";
 
 export const POLICY_CACHE_TTL_MS = 5 * 60_000;
 
@@ -108,7 +109,7 @@ async function load(connection: Connection, nowMs: number): Promise<PolicyCache>
     } catch (error) {
       // A broken row is left out, so raising it fails loudly ("unknown policy")
       // while every other policy keeps working.
-      invalid.push(error instanceof Error ? error.message : String(error));
+      invalid.push(errorMessage(error));
       console.warn(`[escalation] ignoring a policy row: ${invalid[invalid.length - 1]}`);
     }
   }
@@ -124,7 +125,7 @@ export async function loadPolicies(connection: Connection, nowMs: number = Date.
     cache = await load(connection, nowMs);
   } catch (error) {
     if (!cache) throw error;
-    console.warn(`[escalation] could not reload policies, using the cached copy: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(`[escalation] could not reload policies, using the cached copy: ${errorMessage(error)}`);
   }
   return cache.policies;
 }

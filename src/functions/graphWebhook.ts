@@ -8,6 +8,7 @@ import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { readInboundConfig } from "../inboundTriage/config";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { runTimer } from "../timerRuns";
 
 /** Constant-time string compare. Returns false on length mismatch instead of
@@ -128,11 +129,7 @@ export async function setupGraphSubscription(
   const callerOid = oidFromToken(token) ?? "unknown";
   const rl = checkRateLimit(`setupGraphSubscription:${callerOid}`, { limit: 30, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const mailbox = incomingMailbox();

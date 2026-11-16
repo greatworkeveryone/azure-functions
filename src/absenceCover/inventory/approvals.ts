@@ -28,7 +28,7 @@ export async function loadApprovalItems(
   if (absent.length === 0 || facts === null) return [];
   const rows = await executeQuery(
     connection,
-    `SELECT q.QuoteID, q.JobID, q.QuoteNumber, q.ContractorName, q.Amount, q.CreatedAt, q.CreatedBy, j.BuildingID, j.Title, b.BuildingName
+    `SELECT q.QuoteID, q.JobID, q.QuoteNumber, q.ContractorName, q.Amount, q.CreatedAt, q.CreatedBy, q.CreatedByOid, j.BuildingID, j.Title, b.BuildingName
        FROM dbo.Quotes q
        INNER JOIN dbo.Jobs j ON j.JobID = q.JobID
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
@@ -54,7 +54,7 @@ export async function loadApprovalItems(
       isTest: false,
       label: `Quote ${quoteNumber}${row.ContractorName ? ` from ${row.ContractorName}` : ""} awaiting approval · Job #${row.JobID} · ${String(row.Title ?? "").trim()}`,
       minRole: null,
-      money: { amount, buildingId, createdByName: typeof row.CreatedBy === "string" ? row.CreatedBy : null, subject: "quote" },
+      money: { amount, buildingId, createdByName: typeof row.CreatedBy === "string" ? row.CreatedBy : null, createdByOid: typeof row.CreatedByOid === "string" ? row.CreatedByOid : null, subject: "quote" },
       move: "notice",
       ownerUserId: owner.userId,
       personal: false,

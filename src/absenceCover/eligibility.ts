@@ -55,7 +55,7 @@ function atOrAbove(role: string, minRole: string): boolean {
 function moneyRefusal(item: CoverItem, person: DirectoryUser, context: CoverContext): Ineligible | null {
   const need = item.money;
   if (!need) return null;
-  if (creatorRefusal(need.createdByName, { name: person.name, roles: [person.role] }, "quote")) return "creator";
+  if (creatorRefusal({ name: need.createdByName, oid: need.createdByOid ?? null }, { name: person.name, oid: person.entraOid, roles: [person.role] }, "quote")) return "creator";
   if (!context.moneyFacts) return "money_limit";
   const decision = canApprove(
     { email: person.email ?? undefined, roles: [person.role], userId: person.userId },

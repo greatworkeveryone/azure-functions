@@ -22,6 +22,7 @@ import { canonicalJson } from "./hash";
 import { diffDocuments, type FieldDiff } from "./payloads";
 import { KIND_OF } from "./kinds";
 import type { ProposalRow } from "./proposalsStore";
+import { errorMessage } from "../errorMessage";
 
 export { KIND_OF };
 
@@ -109,7 +110,7 @@ export async function pushApproved(myob: MyobPurchases, input: PushInput): Promi
     if (error instanceof MyobWritesDisabledError) return { kind: "refused", message: error.message, reason: "writes_disabled" };
     if (error instanceof TestDataEgressError) return { kind: "refused", message: error.message, reason: "test_record" };
     if (error instanceof MyobPurchaseError) return { kind: "failed", message: error.message };
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return {
       kind: "failed",
       message: `MYOB didn't answer clearly (${message}). The record may or may not exist in MYOB; Floorplan hasn't marked it as sent. Sending again looks it up by number first.`,

@@ -16,6 +16,7 @@ import { graphFetchEmailPages } from "../graph";
 import { upsertGraphEmails } from "../functions/emails";
 import { inboundColumnsOn, readInboundConfig } from "../inboundTriage/config";
 import { linkReplies } from "../inboundTriage/replyLink";
+import { errorMessage } from "../errorMessage";
 
 export interface SyncOptions {
   /**
@@ -112,7 +113,7 @@ export async function syncMailbox(connection: Connection, mailbox: string, optio
   for await (const page of graphFetchEmailPages(mailbox, since?.toISOString(), known)) {
     await upsertGraphEmails(connection, page.emails, inbound ? { inbound } : {});
     // A reply is linked to the send it answers once it is stored. Linking is never allowed to fail the sync.
-    if (inbound) await linkReplies(connection, page.emails.map((email) => email.internetMessageId)).catch((err: unknown) => console.error("[inbound] reply linking failed:", err instanceof Error ? err.message : String(err)));
+    if (inbound) await linkReplies(connection, page.emails.map((email) => email.internetMessageId)).catch((err: unknown) => console.error("[inbound] reply linking failed:", errorMessage(err)));
     fetched += page.emails.length;
     pages += 1;
     if (tracked && page.newestReceivedAt) {

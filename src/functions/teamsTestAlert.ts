@@ -9,6 +9,7 @@ import { NOT_A_RECORD } from "../test-data";
 import { sendActivityNotification } from "../teams/activity";
 import { teamsAlertsRoute, teamsAppId, teamsMode, workflowConfig } from "../teams/config";
 import { isSafeAppRoute } from "../teams/deepLink";
+import { errorMessage } from "../errorMessage";
 
 // ── POST /api/teamsTestAlert ─────────────────────────────────────────────────
 // Body { userId, route? = "/dashboard" }. Admin only. Sends one alert to that user through
@@ -75,7 +76,7 @@ export async function teamsTestAlert(request: HttpRequest, context: InvocationCo
     const result = await sendActivityNotification(oid, { egress: NOT_A_RECORD, route, ...text }, { log });
     return { status: 200, jsonBody: { alertsRoute, flagEnabled, mode, result, route, userId } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("teamsTestAlert failed:", message);
     return errorResponse("Sending the Teams test alert failed", message);
   } finally {

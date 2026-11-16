@@ -30,6 +30,7 @@ import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 import { resolveActivePlannerTasks } from "../planner";
 import { approveDirectorQuote, rejectQuote } from "../quote-decisions";
 import { record } from "../ledger";
@@ -45,6 +46,8 @@ import { linkDirectorReply } from "../email/director-reply-link";
 import { showTestParam } from "../test-data";
 import { escapeLikePattern } from "../searchUtils";
 import { replyDecisionMessage, replyStatesDecision } from "../email/reply-decision";
+import { errorMessage } from "../errorMessage";
+import { isUniqueViolation } from "../sqlErrors";
 
 // Server-generated email-attachment blobs land under emails/{messageId}/...
 // where {messageId} is a sanitised, URL-safe slug. Used to reject ingest /
@@ -264,11 +267,7 @@ export async function ingestEmail(
 
   const rl = checkRateLimit(`ingestEmail:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -395,11 +394,7 @@ export async function promoteEmailToQuote(
 
   const rl = checkRateLimit(`promoteEmailToQuote:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -481,18 +476,18 @@ export async function promoteEmailToQuote(
         needsAIValidation
           ? `INSERT INTO Quotes
                (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-                Notes, SourceEmailID, ReceivedAt, CreatedBy)
+                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid)
              OUTPUT INSERTED.QuoteID
              VALUES
                (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-                @Notes, @EmailID, @ReceivedAt, @CreatedBy);`
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid);`
           : `INSERT INTO Quotes
                (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-                Notes, SourceEmailID, ReceivedAt, CreatedBy, AIValidatedAt, AIValidatedBy)
+                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid, AIValidatedAt, AIValidatedBy)
              OUTPUT INSERTED.QuoteID
              VALUES
                (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-                @Notes, @EmailID, @ReceivedAt, @CreatedBy, SYSUTCDATETIME(), @AIValidatedBy);`,
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid, SYSUTCDATETIME(), @AIValidatedBy);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
           { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
@@ -504,6 +499,7 @@ export async function promoteEmailToQuote(
           { name: "EmailID", type: TYPES.Int, value: EmailID },
           { name: "ReceivedAt", type: TYPES.DateTime2, value: email.ReceivedAt ?? null },
           { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedByOid", type: TYPES.NVarChar, value: callerOid },
           ...(needsAIValidation ? [] : [{ name: "AIValidatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null }]),
         ],
       );
@@ -553,11 +549,7 @@ async function archiveEmail(
 
   const rl = checkRateLimit(`archiveEmail:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -633,11 +625,7 @@ async function flagEmailForReview(
 
   const rl = checkRateLimit(`flagEmailForReview:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -685,11 +673,7 @@ async function promoteEmailToJob(
 
   const rl = checkRateLimit(`promoteEmailToJob:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -775,11 +759,7 @@ export async function promoteEmailToInvoice(
 
   const rl = checkRateLimit(`promoteEmailToInvoice:${callerOid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   let connection;
@@ -837,9 +817,9 @@ export async function promoteEmailToInvoice(
       const inserted = await executeQuery(
         connection,
         `INSERT INTO JobInvoices
-           (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, Status)
+           (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, CreatedByOid, Status)
          OUTPUT INSERTED.JobInvoiceID
-         VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, 'pending')`,
+         VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, @CreatedByOid, 'pending')`,
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
           { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
@@ -850,6 +830,7 @@ export async function promoteEmailToInvoice(
           { name: "Description", type: TYPES.NVarChar, value: Description ?? null },
           { name: "EmailID", type: TYPES.Int, value: EmailID },
           { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
+          { name: "CreatedByOid", type: TYPES.NVarChar, value: callerOid },
         ],
       );
       const invoiceId = inserted[0].JobInvoiceID as number;
@@ -923,11 +904,7 @@ export async function promoteEmailToJobUpdate(
 
   const rl = checkRateLimit(`promoteEmailToJobUpdate:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const body = ((await request.json().catch(() => null)) ?? {}) as PromoteEmailToJobUpdateBody;
@@ -1048,7 +1025,7 @@ export async function promoteEmailToJobUpdate(
     return { status: 200, jsonBody: { eventId, jobId: JobID, newStatus } };
   } catch (error: unknown) {
     if (connection && inTransaction) await rollbackTransaction(connection).catch(() => undefined);
-    context.error("promoteEmailToJobUpdate failed:", error instanceof Error ? error.message : String(error));
+    context.error("promoteEmailToJobUpdate failed:", errorMessage(error));
     return errorResponse("Promote email to job update failed", error);
   } finally {
     if (connection) closeConnection(connection);
@@ -1143,11 +1120,7 @@ export async function recordEmailQuoteDecision(
 
   const rl = checkRateLimit(`recordEmailQuoteDecision:${identity.oid}`, { limit: 60, windowMs: 60_000 });
   if (!rl.allowed) {
-    return {
-      status: 429,
-      headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) },
-      jsonBody: { error: "Rate limit exceeded" },
-    };
+    return tooManyRequests(rl.retryAfterMs);
   }
 
   const body = ((await request.json().catch(() => null)) ?? {}) as RecordEmailQuoteDecisionBody;
@@ -1341,14 +1314,14 @@ export async function recordEmailQuoteDecision(
       try {
         await resolveActivePlannerTasks("job", outcome.jobId, ["director_approval"]);
       } catch (err: unknown) {
-        context.warn("plannerResolve (recordEmailQuoteDecision):", err instanceof Error ? err.message : String(err));
+        context.warn("plannerResolve (recordEmailQuoteDecision):", errorMessage(err));
       }
     }
 
     return { status: 200, jsonBody: { quote: outcome.quote } };
   } catch (error: unknown) {
     if (connection && inTransaction) await rollbackTransaction(connection).catch(() => undefined);
-    context.error("recordEmailQuoteDecision failed:", error instanceof Error ? error.message : String(error));
+    context.error("recordEmailQuoteDecision failed:", errorMessage(error));
     return errorResponse("Record email quote decision failed", error);
   } finally {
     if (connection) closeConnection(connection);
@@ -1414,20 +1387,12 @@ async function sendEmailReply(
 
 // ── Shared: upsert a batch of Graph emails into the DB ───────────────────────
 
-// SQL unique-index / unique-constraint violations (migration 091).
-const SQL_UNIQUE_VIOLATIONS: readonly number[] = [2601, 2627];
-
 // Column widths (migrations 008, 077). With "advance the watermark only after
 // storing", a value too long for its column would stop the mailbox at that
 // message for good, so text is cut to fit instead (DL-13).
 const SUBJECT_MAX = 500;
 const ADDRESS_MAX = 255;
 const fit = (value: string | null, max: number) => (value === null ? null : value.slice(0, max));
-
-function isUniqueViolation(err: unknown): boolean {
-  const number = (err as { number?: unknown } | null)?.number;
-  return typeof number === "number" && SQL_UNIQUE_VIOLATIONS.includes(number);
-}
 
 // `inbound` is set only when migration 176's columns are in use (INBOUND_TRIAGE_*, INBOUND_EXTRA_MAILBOXES):
 // the row then records which mailbox it came from and the reply headers. Without it the statement is

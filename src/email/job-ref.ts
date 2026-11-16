@@ -38,7 +38,9 @@ const HISTORY_CUT_RES: readonly RegExp[] = [
   /(?:^|>)[ \t]*From:/im,
   /-{2,}[ \t]*Original Message[ \t]*-{2,}/i,
 ];
-const INNER_BLOCKQUOTE_RE = /<blockquote\b[^>]*>(?:(?!<blockquote\b)[\s\S])*?<\/blockquote>/gi;
+// Tag starts only: the tag ends are found by stripBlockquotes in one pass. A regex that matched whole pairs
+// was quadratic on hostile mail ("<blockquote " repeated with no ">", or thousands of nested quotes).
+const BLOCKQUOTE_TAG_RE = /<(\/?)blockquote\b/gi;
 const QUOTED_LINE_RE = /^[ \t]*>.*$/gm;
 
 // SQL INT ceiling — anything larger is noise, not a job id.
@@ -50,14 +52,39 @@ function stripQuotedHistory(body: string): string {
     const match = re.exec(text);
     if (match) text = text.slice(0, match.index);
   }
-  // Innermost first so nested quotes unwrap fully.
-  for (let prev = ""; prev !== text; ) {
-    prev = text;
-    text = text.replace(INNER_BLOCKQUOTE_RE, "");
+  return stripBlockquotes(text).replace(QUOTED_LINE_RE, "");
+}
+
+/**
+ * Drops every closed <blockquote>…</blockquote> (nested ones with it) and cuts the text at the first one left
+ * unclosed. Linear: each tag start is visited once, and the next ">" is only searched for past the last one found.
+ */
+function stripBlockquotes(text: string): string {
+  const open: number[] = [];
+  let kept = "";
+  let keptUpTo = 0;
+  let nextGt = -1;
+  BLOCKQUOTE_TAG_RE.lastIndex = 0;
+  for (let match = BLOCKQUOTE_TAG_RE.exec(text); match; match = BLOCKQUOTE_TAG_RE.exec(text)) {
+    const start = match.index;
+    const isClose = match[1] === "/";
+    if (isClose) {
+      // Only an exact </blockquote> closes; a stray close outside any quote stays as text.
+      if (text[BLOCKQUOTE_TAG_RE.lastIndex] !== ">" || open.length === 0) continue;
+      const from = open.pop() as number;
+      if (open.length === 0) {
+        kept += text.slice(keptUpTo, from);
+        keptUpTo = BLOCKQUOTE_TAG_RE.lastIndex + 1;
+      }
+      continue;
+    }
+    if (nextGt < BLOCKQUOTE_TAG_RE.lastIndex) nextGt = text.indexOf(">", BLOCKQUOTE_TAG_RE.lastIndex);
+    // An opening tag that never ends: nothing after it can close it, so cut here.
+    if (nextGt < 0) return kept + text.slice(keptUpTo, open[0] ?? start);
+    open.push(start);
+    BLOCKQUOTE_TAG_RE.lastIndex = nextGt + 1;
   }
-  const unclosed = text.search(/<blockquote\b/i);
-  if (unclosed >= 0) text = text.slice(0, unclosed);
-  return text.replace(QUOTED_LINE_RE, "");
+  return kept + text.slice(keptUpTo, open[0] ?? text.length);
 }
 
 function firstJobId(text: string | null | undefined, patterns: readonly Pattern[]): number | null {

@@ -23,6 +23,7 @@ import { samePerson } from "../moneyRules";
 import { AppRole, errorResponse, extractToken, requireRole, unauthorizedResponse, verifiedIdentityFromRequest } from "../auth";
 import { closeConnection, createRequestConnection } from "../db";
 import { listActiveUsers } from "../escalation/store";
+import { errorMessage } from "../errorMessage";
 
 const SUBJECTS: readonly Subject[] = ["quote", "purchase_order", "invoice"];
 
@@ -69,7 +70,7 @@ export async function getApprovalCandidates(request: HttpRequest, context: Invoc
       .sort((a, b) => a.name.localeCompare(b.name) || a.userId - b.userId);
     return { status: 200, jsonBody: { candidates } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("getApprovalCandidates failed:", message);
     return errorResponse("Failed to list approvers", message);
   } finally {

@@ -24,6 +24,7 @@ import {
 } from "./db";
 import { CpiObservation, CpiRegion, CpiSeries } from "./cpiAbs";
 import { Sentry } from "./sentry";
+import { errorMessage } from "./errorMessage";
 
 // dbo.CpiIndex.IndexValue is DECIMAL(10,3). Tedious defaults a Decimal
 // parameter to scale 0 and silently truncates, so the options are not optional.
@@ -322,7 +323,7 @@ export async function syncCpiIndex(
       await rollbackTransaction(connection);
     } catch (rollbackErr) {
       logger.warn(
-        `cpi sync: rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+        `cpi sync: rollback failed: ${errorMessage(rollbackErr)}`,
       );
     }
     throw err;

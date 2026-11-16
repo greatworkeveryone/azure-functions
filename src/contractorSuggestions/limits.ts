@@ -4,14 +4,10 @@
 // (src/rateLimit.ts), and a refusal is a plain 429 the app treats as "no suggestions".
 
 import type { HttpResponseInit } from "@azure/functions";
+import { tooManyRequests as sharedTooManyRequests } from "../rateLimitResponse";
 
 export const SUGGEST_LIMIT = { limit: 30, windowMs: 60_000 } as const;
 export const OUTCOME_LIMIT = { limit: 60, windowMs: 60_000 } as const;
 
-export function tooManyRequests(retryAfterMs: number): HttpResponseInit {
-  return {
-    headers: { "Retry-After": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
-    jsonBody: { error: "Too many requests. Try again in a moment." },
-    status: 429,
-  };
-}
+export const tooManyRequests = (retryAfterMs: number): HttpResponseInit =>
+  sharedTooManyRequests(retryAfterMs, "Too many requests. Try again in a moment.");

@@ -5,7 +5,8 @@
 // signature the server composes (the identity's team signature, or the caller's own). A request that
 // carries signature text, a sender or another person's details is refused. A job waits for a manager (approveCorrespondence)
 // when it is to more recipients than COMMS_APPROVAL_THRESHOLD (default 20), or when this sender's recipients
-// across all their jobs in the last 24 hours would go over it (so splitting a send doesn't dodge it); the
+// across all their jobs in the last 24 hours would go over it (so splitting a send doesn't dodge it), or when any
+// recipient is a typed address rather than a record's contact (so the mailbox can't be aimed at anyone unchecked); the
 // answer says why in words (approvalNote). A smaller one is queued. Recipients with a missing merge field are stored blocked and named; if none can be sent
 // nothing is created. Nothing goes out here: the queue timer sends, and only when COMMS_SEND_ENABLED
 // is "true". Same roles as sending (ACTION_ROLES.sendEmail); a broadcast needs ACTION_ROLES.sendBroadcast too.
@@ -25,13 +26,14 @@ import { prepareSender } from "../comms/senderSetup";
 import type { NewJob } from "../comms/types";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
+import { tooManyRequests } from "../rateLimitResponse";
 
 export async function queueCorrespondence(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const auth = await authorizeActor(request, ACTION_ROLES.sendEmail.gate, ACTION_ROLES.sendEmail.refused);
   if (!auth.ok) return auth.response;
   const { actor } = auth;
   const limited = checkRateLimit(`queueCorrespondence:${actor.oid}`, { limit: 10 });
-  if (!limited.allowed) return { headers: { "Retry-After": String(Math.ceil(limited.retryAfterMs / 1000)) }, jsonBody: { error: "Too many sends, try again shortly" }, status: 429 };
+  if (!limited.allowed) return tooManyRequests(limited.retryAfterMs, "Too many sends, try again shortly");
   const body = await readJsonBody(request);
   if (!body) return badRequest("JSON object required");
   const input = parseQueueInput(body);

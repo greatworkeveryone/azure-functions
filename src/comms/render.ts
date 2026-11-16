@@ -44,6 +44,12 @@ export function escapeHtml(value: string): string {
 
 const SAFE_HREF = /^(https?:\/\/|mailto:)/i;
 
+/** The link's words are already its address (scheme and trailing slash aside). */
+function linkShowsTarget(text: string, href: string): boolean {
+  const bare = (value: string) => value.trim().toLowerCase().replace(/^(https?:\/\/|mailto:)/, "").replace(/\/$/, "");
+  return bare(text) === bare(href);
+}
+
 function inlineHtml(text: string): string {
   return parseInline(text)
     .map((token: InlineToken) => {
@@ -54,10 +60,13 @@ function inlineHtml(text: string): string {
           return `<em>${escapeHtml(token.text)}</em>`;
         case "code":
           return `<code style="font-family:Consolas,Menlo,monospace;font-size:13px;">${escapeHtml(token.text)}</code>`;
-        case "link":
-          return SAFE_HREF.test(token.href.trim())
-            ? `<a href="${escapeHtml(token.href.trim())}" style="color:${INK};">${escapeHtml(token.text)}</a>`
-            : escapeHtml(token.text);
+        case "link": {
+          const href = token.href.trim();
+          if (!SAFE_HREF.test(href)) return escapeHtml(token.text);
+          const anchor = `<a href="${escapeHtml(href)}" style="color:${INK};">${escapeHtml(token.text)}</a>`;
+          // Words that aren't the address get the address printed after them, so a link can't hide where it goes.
+          return linkShowsTarget(token.text, href) ? anchor : `${anchor} <span style="color:${MUTED};">(${escapeHtml(href)})</span>`;
+        }
         case "field":
           return escapeHtml(`{{${token.path}}}`);
         case "text":

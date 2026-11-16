@@ -107,18 +107,42 @@ export function samePerson(left: unknown, right: unknown): boolean {
   return key !== "" && key === nameKey(right);
 }
 
+/** Who a quote or invoice row says added it: CreatedBy, and CreatedByOid where recorded (migration 182). */
+export interface MoneyCreator {
+  name: unknown;
+  oid: unknown;
+}
+
+/** A person checked against a creator: oid when known (an AppUsers row not yet signed in has none). */
+export interface MoneyPerson {
+  name: string;
+  oid?: string | null;
+}
+
+function oidKey(oid: unknown): string | null {
+  return typeof oid === "string" && oid.trim() !== "" ? oid.trim().toLowerCase() : null;
+}
+
+/** The creator is this person: by oid when both sides have one, else by name (rows from before migration 182). */
+export function isCreator(createdBy: MoneyCreator, person: MoneyPerson): boolean {
+  const recorded = oidKey(createdBy.oid);
+  const theirs = oidKey(person.oid);
+  if (recorded !== null && theirs !== null) return recorded === theirs;
+  return samePerson(createdBy.name, person.name);
+}
+
 /**
  * Whoever added a quote or invoice doesn't approve it. Decision 17: a director
  * is never blocked by separation of duties, so a director may approve what
  * they added (and give the director approval after their own first approval).
  */
 export function creatorRefusal(
-  createdBy: unknown,
-  approver: { name: string; roles: readonly string[] },
+  createdBy: MoneyCreator,
+  approver: MoneyPerson & { roles: readonly string[] },
   subject: MoneySubject,
 ): MoneyRefusal | null {
   if (approver.roles.some((role) => role.trim().toLowerCase() === "director")) return null;
-  return samePerson(createdBy, approver.name)
+  return isCreator(createdBy, approver)
     ? refuse("creator", `You added this ${WORDS[subject]}, so someone else has to approve it.`, 403)
     : null;
 }

@@ -1,3 +1,4 @@
+import { errorMessage } from "./errorMessage";
 // cpiAbs — ABS Data API client for the Australian CPI index (WP22).
 //
 // Everything here is settled by the live check recorded in
@@ -481,7 +482,7 @@ async function requestOnce(
         })
       : new AbsCpiError(
           "network",
-          `ABS request failed: ${err instanceof Error ? err.message : String(err)}`,
+          `ABS request failed: ${errorMessage(err)}`,
           { retryable: true, cause: err },
         );
 

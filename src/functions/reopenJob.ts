@@ -16,6 +16,7 @@ import { loadJobForTransition } from "../jobTransitionFacts";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { recordRefusal, recordRoleRefusal, type RefusalTarget } from "../ledger/refusals";
+import { errorMessage } from "../errorMessage";
 
 const REOPEN_TARGET: RefusalTarget = { attempted: "job.reopen", idField: "JobID", subjectType: "job" };
 const REASON_MAX = 1000;
@@ -126,7 +127,7 @@ export async function reopenJob(request: HttpRequest, context: InvocationContext
     );
     return { status: 200, jsonBody: { job: stored[0] } };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     context.error("reopenJob failed:", message);
     return errorResponse("Reopen job failed", message);
   } finally {

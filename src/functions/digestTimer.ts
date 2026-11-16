@@ -5,6 +5,7 @@ import { digestMode } from "../digest/config";
 import { formatDigestSummary, runDigest, type DigestReport } from "../digest/run";
 import { DIGEST_CRON, digestRunDecision } from "../digest/schedule";
 import { Sentry } from "../sentry";
+import { errorMessage } from "../errorMessage";
 
 // ── Timer trigger: 07:30 Darwin, business days ────────────────────────────────
 // The morning digest (N1, src/digest/): one email per active user, only when
@@ -90,7 +91,7 @@ export async function digestTimer(_timer: Timer, context: InvocationContext): Pr
     settle(report, context);
   } catch (error: unknown) {
     if (!(error instanceof DigestProblem)) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       context.error("digestTimer failed:", message);
       Sentry.captureException(error, { tags: { source: "digest_timer" } });
     }
