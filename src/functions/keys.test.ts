@@ -175,10 +175,36 @@ describe("bulkImportKeys", () => {
     expect(valueOf(inserts()[0], "TenancyId")).toBe(4);
   });
 
+  it("reports a key number with special characters instead of importing it", async () => {
+    const res = await importKeys(await sheet([["key", "Tower", '"1"', "", "Door", ""], ["key", "Tower", "L2-01/A_b.c", "", "Door", ""]]), ctx);
+    expect(inserts()).toHaveLength(1);
+    expect(valueOf(inserts()[0], "KeyNumber")).toBe("L2-01/A_b.c");
+    expect(res.jsonBody.errors).toEqual([{ row: 2, reason: 'Key Number ""1"": Key number can only use letters, numbers and - _ . /' }]);
+  });
+
   it("rejects more than 2000 rows", async () => {
     const rows = Array.from({ length: 2001 }, (_, i) => ["key", "Tower", `K${i}`, "", "Door", ""]);
     const res = await importKeys(await sheet(rows), ctx);
     expect(res.status).toBe(400);
     expect(inserts()).toHaveLength(0);
+  });
+});
+
+describe("createKey key number", () => {
+  const create = registered("createKey");
+  const base = { BuildingId: 1, Description: "Door" };
+
+  it.each(['"1"', "K 1", "K#1", "1*"])("400s %p before touching the DB", async (KeyNumber) => {
+    const res = await create(json({ ...base, KeyNumber }), ctx);
+    expect(res.status).toBe(400);
+    expect(res.jsonBody.code).toBe("KEY_NUMBER_INVALID");
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("stores an allowed number trimmed", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => (sql.includes("INSERT INTO dbo.Keys") ? [{ Id: 5 }] : [{}]));
+    await create(json({ ...base, KeyNumber: " L2-01/A_b.c " }), ctx);
+    const insert = db.executeQuery.mock.calls.find((c: unknown[]) => String(c[1]).includes("INSERT INTO dbo.Keys"))!;
+    expect((insert[2] as { name: string; value: unknown }[]).find((p) => p.name === "KeyNumber")?.value).toBe("L2-01/A_b.c");
   });
 });

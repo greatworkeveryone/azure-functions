@@ -79,6 +79,10 @@ const CODE_SUB_TYPES = [
 ] as const;
 
 const ITEM_TYPES = ["key", "code"] as const;
+// A key number or code ID: letters, digits and - _ . / only. Mirrors
+// command-centre's KEY_NUMBER_PATTERN (src/helpers/keys.ts); this copy enforces.
+const KEY_NUMBER_PATTERN = /^[A-Za-z0-9._/-]+$/;
+const KEY_NUMBER_RULE = "Key number can only use letters, numbers and - _ . /";
 const REGISTRATIONS = ["standard", "registered"] as const;
 
 /** Text with something in it: a description of spaces is no description (createKey and updateKey). */
@@ -400,8 +404,12 @@ async function createKey(
 
     // Level is optional: a building with no configured levels (a house, a
     // single-storey site) has nothing to pick. It is stored as '' (the column is NOT NULL).
-    if (!BuildingId || !KeyNumber || !hasText(Description)) {
+    if (!BuildingId || !hasText(KeyNumber) || !hasText(Description)) {
       return { status: 400, jsonBody: { error: "BuildingId, KeyNumber, Description required" } };
+    }
+    const keyNumber = KeyNumber.trim();
+    if (!KEY_NUMBER_PATTERN.test(keyNumber)) {
+      return { status: 400, jsonBody: { error: KEY_NUMBER_RULE, code: "KEY_NUMBER_INVALID" } };
     }
 
     // D9: admins and directors may create a test key; an admin's "[TEST]" description does too.
@@ -426,7 +434,7 @@ async function createKey(
         { name: "BuildingId",      type: TYPES.Int,      value: BuildingId },
         { name: "TenancyId",       type: TYPES.Int,      value: TenancyId ?? null },
         { name: "Level",           type: TYPES.NVarChar,  value: Level ?? "" },
-        { name: "KeyNumber",       type: TYPES.NVarChar,  value: KeyNumber },
+        { name: "KeyNumber",       type: TYPES.NVarChar,  value: keyNumber },
         { name: "ItemType",        type: TYPES.NVarChar,  value: ItemType ?? "key" },
         { name: "SubType",         type: TYPES.NVarChar,  value: SubType ?? null },
         { name: "Registration",    type: TYPES.NVarChar,  value: Registration ?? "standard" },
@@ -1472,6 +1480,11 @@ async function bulkImportKeys(
 
       if (!buildingName || !keyNumber || !description) {
         errors.push({ row: rowNum, reason: "Building, Key Number, and Description are required" });
+        continue;
+      }
+
+      if (!KEY_NUMBER_PATTERN.test(keyNumber)) {
+        errors.push({ row: rowNum, reason: `Key Number "${keyNumber}": ${KEY_NUMBER_RULE}` });
         continue;
       }
 
