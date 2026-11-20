@@ -50,9 +50,12 @@ export async function loadJobPacketInputs(
 async function loadJob(connection: Connection, jobId: number): Promise<PacketJob | null> {
   const rows = await executeQuery(
     connection,
-    `SELECT JobID, Title, Description, TenantName, CreatedBy, Status,
-            CreatedAt, IsOnchargeable, ApprovedQuoteID, SourceInspectionPointId
-       FROM Jobs WHERE JobID = @JobID`,
+    `SELECT j.JobID, j.Title, j.Description, j.CreatedBy, j.Status,
+            j.CreatedAt, j.IsOnchargeable, j.ApprovedQuoteID, j.SourceInspectionPointId,
+            b.BuildingName
+       FROM Jobs j
+       LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
+      WHERE j.JobID = @JobID`,
     [{ name: "JobID", type: TYPES.Int, value: jobId }],
   );
   if (rows.length === 0) return null;
@@ -60,8 +63,7 @@ async function loadJob(connection: Connection, jobId: number): Promise<PacketJob
   return {
     id: r.JobID as number,
     title: (r.Title as string) ?? "(untitled)",
-    // BuildingName doesn't exist; TenantName is the closest equivalent
-    buildingName: (r.TenantName as string) ?? "",
+    buildingName: (r.BuildingName as string | null) ?? "",
     // RequestedBy doesn't exist; CreatedBy is the closest equivalent
     requestedBy: (r.CreatedBy as string) ?? "",
     status: (r.Status as string) ?? "",

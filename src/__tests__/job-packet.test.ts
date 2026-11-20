@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { buildJobPacket } from "../pdf/job-packet";
+import { buildJobPacket, packetDate } from "../pdf/job-packet";
 
 describe("buildJobPacket", () => {
   test("renders a non-empty PDF buffer for a minimal job (no quote/PO/invoice)", async () => {
@@ -43,5 +43,25 @@ describe("buildJobPacket", () => {
       sourcePointAttachments: [],
     });
     assert.ok(withQuote.length > withoutQuote.length, "Adding a quote should grow the PDF");
+  });
+
+  test("still builds when the building and requester are blank (an empty value used to swallow the line break)", async () => {
+    const buf = await buildJobPacket({
+      job: { id: 3, title: "T", buildingName: "", requestedBy: "", status: "New", createdDate: new Date(), oncharge: false },
+      selectedQuote: null,
+      purchaseOrder: null,
+      invoice: null,
+      jobAttachments: [],
+      sourcePointAttachments: [],
+    });
+    assert.strictEqual(buf.subarray(0, 4).toString("ascii"), "%PDF");
+  });
+});
+
+describe("packetDate", () => {
+  test("writes dd/mm/yyyy on the Darwin calendar", () => {
+    assert.strictEqual(packetDate(new Date("2026-11-20T00:00:00Z")), "20/11/2026");
+    // 20:00 UTC on the 19th is already the 20th in Darwin (UTC+9:30).
+    assert.strictEqual(packetDate(new Date("2026-11-19T20:00:00Z")), "20/11/2026");
   });
 });

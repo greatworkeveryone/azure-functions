@@ -118,7 +118,7 @@ async function renderCover(input: PacketInput): Promise<Buffer> {
     doc.fontSize(18).text(`Job Packet — #${input.job.id}`, { align: "left" });
     doc.moveDown(0.3);
     doc.fontSize(11).fillColor("#666")
-      .text(`Generated ${new Date().toISOString().slice(0, 10)}`);
+      .text(`Generated ${packetDate(new Date())}`);
     doc.moveDown();
     doc.fillColor("#000");
 
@@ -128,7 +128,7 @@ async function renderCover(input: PacketInput): Promise<Buffer> {
     keyValue(doc, "Building", input.job.buildingName);
     keyValue(doc, "Requested by", input.job.requestedBy);
     keyValue(doc, "Status", input.job.status);
-    keyValue(doc, "Created", input.job.createdDate.toISOString().slice(0, 10));
+    keyValue(doc, "Created", packetDate(input.job.createdDate));
     keyValue(doc, "On-charge", input.job.oncharge ? "Yes" : "No");
     if (input.job.description) {
       doc.moveDown(0.3);
@@ -212,9 +212,16 @@ function section(doc: PDFKit.PDFDocument, title: string) {
   doc.moveDown(0.3);
 }
 
-function keyValue(doc: PDFKit.PDFDocument, key: string, value: string) {
+/** dd/mm/yyyy on the Darwin calendar, as the app shows dates. */
+export function packetDate(date: Date): string {
+  return new Intl.DateTimeFormat("en-AU", { day: "2-digit", month: "2-digit", timeZone: "Australia/Darwin", year: "numeric" }).format(date);
+}
+
+function keyValue(doc: PDFKit.PDFDocument, key: string, value: string | null | undefined) {
   doc.fontSize(10).fillColor("#666").text(`${key}: `, { continued: true });
-  doc.fillColor("#000").text(value);
+  // An empty string ends a `continued` run without a line break, so the next row
+  // would print over this one: always give it something to write.
+  doc.fillColor("#000").text(value?.trim() ? value : "—");
 }
 
 async function appendPdfBytes(target: PdfLibDocument, bytes: Buffer | Uint8Array) {
