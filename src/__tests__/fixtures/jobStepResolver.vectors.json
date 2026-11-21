@@ -1,0 +1,1453 @@
+{
+ "_about": "Shared vectors for jobStepResolver + jobStepPresent, identical in both repos (SHA-256 pinned in both tests). Each case patches `base`; `viewers` lists what each role sees in the order of `roles`: + the one contained button, ~ an outlined button (someone else's turn first), . a plain wait naming who can act; |you means Waiting on you is true.",
+ "base": {
+  "assignee": {
+   "name": null,
+   "userId": null
+  },
+  "awaitingRole": "facilities",
+  "invoices": {
+   "approvedNotInMyob": 0,
+   "approver": null,
+   "awaitingDirector": 0,
+   "incoming": 0,
+   "pending": 0,
+   "pendingCreator": null,
+   "pendingNeedsDirector": false,
+   "rejected": 0
+  },
+  "kind": "standard",
+  "purchaseOrders": {
+   "complete": 0,
+   "notInMyob": 0,
+   "raised": 0
+  },
+  "quotes": {
+   "approved": false,
+   "approver": null,
+   "awaitingApproval": 0,
+   "awaitingDirector": 0,
+   "contractorsRequested": 0,
+   "declined": 0,
+   "pending": 0,
+   "pendingCreator": null,
+   "pendingNeedsDirector": false,
+   "requestsSent": 0
+  },
+  "status": "New"
+ },
+ "roles": [
+  "facilities",
+  "facilities_manager",
+  "accounts",
+  "accounts_manager",
+  "cfo",
+  "director",
+  "admin"
+ ],
+ "viewerCodes": [
+  "F",
+  "FM",
+  "A",
+  "AM",
+  "CFO",
+  "D",
+  "AD"
+ ],
+ "cases": [
+  {
+   "name": "new, nobody asked, unassigned",
+   "finding": "",
+   "facts": {
+    "status": "New"
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": true,
+    "verb": "Request quotes",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes"
+   ]
+  },
+  {
+   "name": "new, nobody asked, assigned to another officer",
+   "finding": "",
+   "facts": {
+    "status": "New",
+    "assignee": {
+     "name": "Terry Other",
+     "userId": 99
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": false,
+    "verb": "Request quotes",
+    "waitingOnUserId": 99,
+    "who": "Terry Other"
+   },
+   "viewers": [
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes"
+   ]
+  },
+  {
+   "name": "new, nobody asked, assigned to the facilities officer",
+   "finding": "JOB-05",
+   "facts": {
+    "status": "New",
+    "assignee": {
+     "name": "Fran Officer",
+     "userId": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": false,
+    "verb": "Request quotes",
+    "waitingOnUserId": 1,
+    "who": "Fran Officer"
+   },
+   "viewers": [
+    "+Request quotes|you",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes",
+    "~Request quotes"
+   ]
+  },
+  {
+   "name": "new, two contractors to ask, request not sent",
+   "finding": "",
+   "facts": {
+    "status": "New",
+    "quotes": {
+     "contractorsRequested": 2
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": true,
+    "verb": "Prepare quote request",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Prepare quote request",
+    "+Prepare quote request",
+    "+Prepare quote request",
+    "+Prepare quote request",
+    "+Prepare quote request",
+    "+Prepare quote request",
+    "+Prepare quote request"
+   ]
+  },
+  {
+   "name": "quote, request sent to two, nothing back, assigned to another",
+   "finding": "UXA-04",
+   "facts": {
+    "status": "Quote",
+    "assignee": {
+     "name": "Terry Other",
+     "userId": 99
+    },
+    "quotes": {
+     "contractorsRequested": 2,
+     "requestsSent": 2
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": false,
+    "verb": "Add received quote",
+    "waitingOnUserId": 99,
+    "who": "Terry Other"
+   },
+   "viewers": [
+    "~Add received quote",
+    "~Add received quote",
+    "~Add received quote",
+    "~Add received quote",
+    "~Add received quote",
+    "~Add received quote",
+    "~Add received quote"
+   ]
+  },
+  {
+   "name": "quote, request sent to two, nothing back, unassigned",
+   "finding": "",
+   "facts": {
+    "status": "Quote",
+    "quotes": {
+     "contractorsRequested": 2,
+     "requestsSent": 2
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": true,
+    "verb": "Add received quote",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Add received quote",
+    "+Add received quote",
+    "+Add received quote",
+    "+Add received quote",
+    "+Add received quote",
+    "+Add received quote",
+    "+Add received quote"
+   ]
+  },
+  {
+   "name": "quote, every quote declined, nobody left to ask",
+   "finding": "JOB-03",
+   "facts": {
+    "status": "Quote",
+    "quotes": {
+     "declined": 2
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": true,
+    "verb": "Request quotes",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), every quote declined",
+   "finding": "JOB-03",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "declined": 1,
+     "contractorsRequested": 1,
+     "requestsSent": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createQuote",
+    "jumpTarget": "quotes",
+    "step": "request_quotes",
+    "unassigned": true,
+    "verb": "Request quotes",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes",
+    "+Request quotes"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), one quote pending",
+   "finding": "UXA-07",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "pending": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuote",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "a facilities manager or accounts"
+   },
+   "viewers": [
+    ".Waiting on a facilities manager or accounts to approve the quote",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    ".Waiting on a facilities manager or accounts to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), pending, named approver is the facilities manager",
+   "finding": "JOB-05",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "pending": 1,
+     "approver": {
+      "name": "Fiona Manager",
+      "userId": 2
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuote",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": 2,
+    "who": "Fiona Manager"
+   },
+   "viewers": [
+    ".Waiting on Fiona Manager to approve the quote",
+    "+Approve quote|you",
+    "~Approve quote",
+    "~Approve quote",
+    "~Approve quote",
+    "~Approve quote",
+    ".Waiting on Fiona Manager to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), pending, added by the facilities manager",
+   "finding": "JOB-21",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "pending": 1,
+     "pendingCreator": {
+      "name": "Fiona Manager",
+      "oid": "oid-FM"
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuote",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "a facilities manager or accounts"
+   },
+   "viewers": [
+    ".Waiting on a facilities manager or accounts to approve the quote",
+    ".Waiting on another approver (you added this)",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    ".Waiting on a facilities manager or accounts to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), pending, added by the director",
+   "finding": "JOB-21",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "pending": 1,
+     "pendingCreator": {
+      "name": "Dee Director",
+      "oid": "oid-D"
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuote",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "a facilities manager or accounts"
+   },
+   "viewers": [
+    ".Waiting on a facilities manager or accounts to approve the quote",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    ".Waiting on a facilities manager or accounts to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), pending quote needs a director",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "pending": 1,
+     "pendingNeedsDirector": true
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuoteAsDirector",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "a director"
+   },
+   "viewers": [
+    ".Waiting on a director to approve the quote",
+    "+Send to director|you",
+    "+Send to director|you",
+    "+Send to director|you",
+    "+Send to director|you",
+    "+Approve quote|you",
+    ".Waiting on a director to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), quote sent to the directors",
+   "finding": "UXA-16",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "awaitingDirector": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuoteAsDirector",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "a director"
+   },
+   "viewers": [
+    ".Waiting on a director to approve the quote",
+    ".Waiting on a director to approve the quote",
+    ".Waiting on a director to approve the quote",
+    ".Waiting on a director to approve the quote",
+    ".Waiting on a director to approve the quote",
+    "+Approve quote|you",
+    ".Waiting on a director to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), routed to an accounts manager",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "awaitingApproval": 1,
+     "approver": {
+      "name": "an accounts manager",
+      "userId": null
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveQuote",
+    "jumpTarget": "quotes",
+    "step": "choose_quote",
+    "unassigned": false,
+    "verb": "Approve quote",
+    "waitingOnUserId": null,
+    "who": "an accounts manager"
+   },
+   "viewers": [
+    ".Waiting on an accounts manager to approve the quote",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    "+Approve quote|you",
+    ".Waiting on an accounts manager to approve the quote"
+   ]
+  },
+  {
+   "name": "awaiting approval (facilities), quote already approved",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "quotes": {
+     "approved": true
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createPurchaseOrder",
+    "jumpTarget": "po",
+    "step": "raise_po",
+    "unassigned": false,
+    "verb": "Raise purchase order",
+    "waitingOnUserId": null,
+    "who": "a facilities manager"
+   },
+   "viewers": [
+    ".Waiting on a facilities manager to raise the purchase order",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you"
+   ]
+  },
+  {
+   "name": "work, quote approved, no purchase order",
+   "finding": "S1-7",
+   "facts": {
+    "status": "Work",
+    "quotes": {
+     "approved": true
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createPurchaseOrder",
+    "jumpTarget": "po",
+    "step": "raise_po",
+    "unassigned": false,
+    "verb": "Raise purchase order",
+    "waitingOnUserId": null,
+    "who": "a facilities manager"
+   },
+   "viewers": [
+    ".Waiting on a facilities manager to raise the purchase order",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you",
+    "+Raise purchase order|you"
+   ]
+  },
+  {
+   "name": "work, purchase order raised, assigned to another",
+   "finding": "S1-7",
+   "facts": {
+    "status": "Work",
+    "assignee": {
+     "name": "Terry Other",
+     "userId": 99
+    },
+    "quotes": {
+     "approved": true
+    },
+    "purchaseOrders": {
+     "raised": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "completePurchaseOrder",
+    "jumpTarget": "po",
+    "step": "work_under_way",
+    "unassigned": false,
+    "verb": "Mark work complete",
+    "waitingOnUserId": 99,
+    "who": "Terry Other"
+   },
+   "viewers": [
+    "~Mark work complete",
+    "~Mark work complete",
+    ".Waiting on Terry Other to mark the work complete",
+    "~Mark work complete",
+    "~Mark work complete",
+    "~Mark work complete",
+    "~Mark work complete"
+   ]
+  },
+  {
+   "name": "work, purchase order raised, assigned to the facilities officer",
+   "finding": "S1-7",
+   "facts": {
+    "status": "Work",
+    "assignee": {
+     "name": "Fran Officer",
+     "userId": 1
+    },
+    "quotes": {
+     "approved": true
+    },
+    "purchaseOrders": {
+     "raised": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "completePurchaseOrder",
+    "jumpTarget": "po",
+    "step": "work_under_way",
+    "unassigned": false,
+    "verb": "Mark work complete",
+    "waitingOnUserId": 1,
+    "who": "Fran Officer"
+   },
+   "viewers": [
+    "+Mark work complete|you",
+    "~Mark work complete",
+    ".Waiting on Fran Officer to mark the work complete",
+    "~Mark work complete",
+    "~Mark work complete",
+    "~Mark work complete",
+    "~Mark work complete"
+   ]
+  },
+  {
+   "name": "work, purchase order raised, unassigned",
+   "finding": "S1-7",
+   "facts": {
+    "status": "Work",
+    "quotes": {
+     "approved": true
+    },
+    "purchaseOrders": {
+     "raised": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "completePurchaseOrder",
+    "jumpTarget": "po",
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Mark work complete",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Mark work complete",
+    "+Mark work complete",
+    ".Waiting on Facilities (unassigned) to mark the work complete",
+    "+Mark work complete",
+    "+Mark work complete",
+    "+Mark work complete",
+    "+Mark work complete"
+   ]
+  },
+  {
+   "name": "work, contract job, no purchase order",
+   "finding": "",
+   "facts": {
+    "status": "Work",
+    "kind": "contract"
+   },
+   "expect": {
+    "action": null,
+    "capability": "createInvoice",
+    "jumpTarget": "invoices",
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Add the invoice",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Add the invoice",
+    "+Add the invoice",
+    "+Add the invoice",
+    "+Add the invoice",
+    "+Add the invoice",
+    "+Add the invoice",
+    "+Add the invoice"
+   ]
+  },
+  {
+   "name": "work, contract job, purchase order raised",
+   "finding": "",
+   "facts": {
+    "status": "Work",
+    "kind": "contract",
+    "purchaseOrders": {
+     "raised": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "completePurchaseOrder",
+    "jumpTarget": "po",
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Mark work complete",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Mark work complete",
+    "+Mark work complete",
+    ".Waiting on Facilities (unassigned) to mark the work complete",
+    "+Mark work complete",
+    "+Mark work complete",
+    "+Mark work complete",
+    "+Mark work complete"
+   ]
+  },
+  {
+   "name": "new, contract job",
+   "finding": "",
+   "facts": {
+    "status": "New",
+    "kind": "contract"
+   },
+   "expect": {
+    "action": "startWork",
+    "capability": "editJobs",
+    "jumpTarget": null,
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Start work",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Start work",
+    "+Start work",
+    "+Start work",
+    "+Start work",
+    "+Start work",
+    "+Start work",
+    "+Start work"
+   ]
+  },
+  {
+   "name": "work, purchase order already complete (status not yet moved)",
+   "finding": "",
+   "facts": {
+    "status": "Work",
+    "quotes": {
+     "approved": true
+    },
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createInvoice",
+    "jumpTarget": "invoices",
+    "step": "get_invoice",
+    "unassigned": false,
+    "verb": "Add the invoice",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you"
+   ]
+  },
+  {
+   "name": "accounts, no invoice yet",
+   "finding": "JOB-10",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "quotes": {
+     "approved": true
+    },
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1,
+     "notInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createInvoice",
+    "jumpTarget": "invoices",
+    "step": "get_invoice",
+    "unassigned": false,
+    "verb": "Add the invoice",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you"
+   ]
+  },
+  {
+   "name": "accounts, contract job, no invoice, no purchase order",
+   "finding": "JOB-10",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "kind": "contract"
+   },
+   "expect": {
+    "action": null,
+    "capability": "createInvoice",
+    "jumpTarget": "invoices",
+    "step": "get_invoice",
+    "unassigned": false,
+    "verb": "Add the invoice",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you",
+    "+Add the invoice|you"
+   ]
+  },
+  {
+   "name": "accounts, the only invoice was rejected",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "rejected": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "createInvoice",
+    "jumpTarget": "invoices",
+    "step": "get_invoice",
+    "unassigned": false,
+    "verb": "Add corrected invoice",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you",
+    "+Add corrected invoice|you"
+   ]
+  },
+  {
+   "name": "accounts, one invoice pending",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "pending": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveInvoice",
+    "jumpTarget": "invoices",
+    "step": "approve_invoice",
+    "unassigned": false,
+    "verb": "Approve invoice",
+    "waitingOnUserId": null,
+    "who": "accounts"
+   },
+   "viewers": [
+    ".Waiting on accounts to approve the invoice",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    ".Waiting on accounts to approve the invoice"
+   ]
+  },
+  {
+   "name": "accounts, invoice pending, named approver is the accounts manager",
+   "finding": "JOB-05",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "pending": 1,
+     "approver": {
+      "name": "Anna Accounts",
+      "userId": 4
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveInvoice",
+    "jumpTarget": "invoices",
+    "step": "approve_invoice",
+    "unassigned": false,
+    "verb": "Approve invoice",
+    "waitingOnUserId": 4,
+    "who": "Anna Accounts"
+   },
+   "viewers": [
+    ".Waiting on Anna Accounts to approve the invoice",
+    "~Approve invoice",
+    "~Approve invoice",
+    "+Approve invoice|you",
+    "~Approve invoice",
+    "~Approve invoice",
+    ".Waiting on Anna Accounts to approve the invoice"
+   ]
+  },
+  {
+   "name": "accounts, invoice pending, added by the accounts officer",
+   "finding": "JOB-21",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "pending": 1,
+     "pendingCreator": {
+      "name": "Ann Officer",
+      "oid": "oid-A"
+     }
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveInvoice",
+    "jumpTarget": "invoices",
+    "step": "approve_invoice",
+    "unassigned": false,
+    "verb": "Approve invoice",
+    "waitingOnUserId": null,
+    "who": "accounts"
+   },
+   "viewers": [
+    ".Waiting on accounts to approve the invoice",
+    "+Approve invoice|you",
+    ".Waiting on another approver (you added this)",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    ".Waiting on accounts to approve the invoice"
+   ]
+  },
+  {
+   "name": "accounts, invoice pending, amount needs a director",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "pending": 1,
+     "pendingNeedsDirector": true
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveInvoice",
+    "jumpTarget": "invoices",
+    "step": "approve_invoice",
+    "unassigned": false,
+    "verb": "Approve invoice",
+    "waitingOnUserId": null,
+    "who": "accounts"
+   },
+   "viewers": [
+    ".Waiting on accounts to approve the invoice",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    "+Approve invoice|you",
+    ".Waiting on accounts to approve the invoice"
+   ]
+  },
+  {
+   "name": "accounts, first approval done, with the director",
+   "finding": "JOB-04",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "awaitingDirector": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "approveInvoiceAsDirector",
+    "jumpTarget": "invoices",
+    "step": "approve_invoice",
+    "unassigned": false,
+    "verb": "Approve as director",
+    "waitingOnUserId": null,
+    "who": "a director"
+   },
+   "viewers": [
+    ".Waiting on a director to approve the invoice",
+    ".Waiting on a director to approve the invoice",
+    ".Waiting on a director to approve the invoice",
+    ".Waiting on a director to approve the invoice",
+    ".Waiting on a director to approve the invoice",
+    "+Approve as director|you",
+    ".Waiting on a director to approve the invoice"
+   ]
+  },
+  {
+   "name": "accounts, invoice approved, not in MYOB, purchase order not in MYOB",
+   "finding": "S1-10 JOB-13",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1,
+     "notInMyob": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "approvedNotInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "markInvoiceInMyob",
+    "jumpTarget": "invoices",
+    "step": "record_myob",
+    "unassigned": false,
+    "verb": "Record invoice in MYOB",
+    "waitingOnUserId": null,
+    "who": "an accounts manager"
+   },
+   "viewers": [
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    "+Record invoice in MYOB|you",
+    "+Record invoice in MYOB|you",
+    "+Record invoice in MYOB|you",
+    ".Waiting on an accounts manager to record the invoice in MYOB"
+   ]
+  },
+  {
+   "name": "accounts, invoice approved, not in MYOB, purchase order in MYOB",
+   "finding": "S1-10 JOB-13",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1,
+     "approvedNotInMyob": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "markInvoiceInMyob",
+    "jumpTarget": "invoices",
+    "step": "record_myob",
+    "unassigned": false,
+    "verb": "Record invoice in MYOB",
+    "waitingOnUserId": null,
+    "who": "an accounts manager"
+   },
+   "viewers": [
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    ".Waiting on an accounts manager to record the invoice in MYOB",
+    "+Record invoice in MYOB|you",
+    "+Record invoice in MYOB|you",
+    "+Record invoice in MYOB|you",
+    ".Waiting on an accounts manager to record the invoice in MYOB"
+   ]
+  },
+  {
+   "name": "accounts, invoice in MYOB, purchase order not in MYOB",
+   "finding": "D3",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1,
+     "notInMyob": 1
+    },
+    "invoices": {
+     "incoming": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "markPurchaseOrderInMyob",
+    "jumpTarget": "po",
+    "step": "record_myob",
+    "unassigned": false,
+    "verb": "Record purchase order in MYOB",
+    "waitingOnUserId": null,
+    "who": "a manager"
+   },
+   "viewers": [
+    ".Waiting on a manager to record the purchase order in MYOB",
+    "+Record purchase order in MYOB|you",
+    ".Waiting on a manager to record the purchase order in MYOB",
+    "+Record purchase order in MYOB|you",
+    "+Record purchase order in MYOB|you",
+    "+Record purchase order in MYOB|you",
+    ".Waiting on a manager to record the purchase order in MYOB"
+   ]
+  },
+  {
+   "name": "accounts, everything recorded in MYOB",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "purchaseOrders": {
+     "raised": 1,
+     "complete": 1
+    },
+    "invoices": {
+     "incoming": 1
+    }
+   },
+   "expect": {
+    "action": "closeJob",
+    "capability": "editJobs",
+    "jumpTarget": null,
+    "step": "record_myob",
+    "unassigned": false,
+    "verb": "Close job",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you"
+   ]
+  },
+  {
+   "name": "accounts, contract job, invoice in MYOB, no purchase order",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "kind": "contract",
+    "invoices": {
+     "incoming": 1
+    }
+   },
+   "expect": {
+    "action": "closeJob",
+    "capability": "editJobs",
+    "jumpTarget": null,
+    "step": "record_myob",
+    "unassigned": false,
+    "verb": "Close job",
+    "waitingOnUserId": null,
+    "who": "Accounts"
+   },
+   "viewers": [
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you",
+    "+Close job|you"
+   ]
+  },
+  {
+   "name": "on hold (tenant)",
+   "finding": "",
+   "facts": {
+    "status": "Tenant",
+    "assignee": {
+     "name": "Terry Other",
+     "userId": 99
+    }
+   },
+   "expect": {
+    "action": "unblock",
+    "capability": "editJobs",
+    "jumpTarget": null,
+    "step": "on_hold",
+    "unassigned": false,
+    "verb": "Unblock job",
+    "waitingOnUserId": 99,
+    "who": "Terry Other"
+   },
+   "viewers": [
+    "~Unblock job",
+    "~Unblock job",
+    "~Unblock job",
+    "~Unblock job",
+    "~Unblock job",
+    "~Unblock job",
+    "~Unblock job"
+   ]
+  },
+  {
+   "name": "on hold (tenant), unassigned",
+   "finding": "",
+   "facts": {
+    "status": "Tenant"
+   },
+   "expect": {
+    "action": "unblock",
+    "capability": "editJobs",
+    "jumpTarget": null,
+    "step": "on_hold",
+    "unassigned": true,
+    "verb": "Unblock job",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Unblock job",
+    "+Unblock job",
+    "+Unblock job",
+    "+Unblock job",
+    "+Unblock job",
+    "+Unblock job",
+    "+Unblock job"
+   ]
+  },
+  {
+   "name": "done",
+   "finding": "",
+   "facts": {
+    "status": "Done",
+    "awaitingRole": "accounts",
+    "invoices": {
+     "incoming": 1
+    }
+   },
+   "expect": {
+    "action": "downloadPacket",
+    "capability": null,
+    "jumpTarget": null,
+    "step": "closed",
+    "unassigned": false,
+    "verb": "Download job packet",
+    "waitingOnUserId": null,
+    "who": "Nobody"
+   },
+   "viewers": [
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet"
+   ]
+  },
+  {
+   "name": "internal, new",
+   "finding": "",
+   "facts": {
+    "status": "New",
+    "kind": "internal"
+   },
+   "expect": {
+    "action": null,
+    "capability": "editJobs",
+    "jumpTarget": "done",
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Close job",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job"
+   ]
+  },
+  {
+   "name": "internal, work",
+   "finding": "",
+   "facts": {
+    "status": "Work",
+    "kind": "internal",
+    "assignee": {
+     "name": "Fran Officer",
+     "userId": 1
+    }
+   },
+   "expect": {
+    "action": null,
+    "capability": "editJobs",
+    "jumpTarget": "done",
+    "step": "work_under_way",
+    "unassigned": false,
+    "verb": "Close job",
+    "waitingOnUserId": 1,
+    "who": "Fran Officer"
+   },
+   "viewers": [
+    "+Close job|you",
+    "~Close job",
+    "~Close job",
+    "~Close job",
+    "~Close job",
+    "~Close job",
+    "~Close job"
+   ]
+  },
+  {
+   "name": "internal, stranded at awaiting approval",
+   "finding": "",
+   "facts": {
+    "status": "Awaiting Approval",
+    "awaitingRole": "accounts",
+    "kind": "internal"
+   },
+   "expect": {
+    "action": null,
+    "capability": "editJobs",
+    "jumpTarget": "done",
+    "step": "work_under_way",
+    "unassigned": true,
+    "verb": "Close job",
+    "waitingOnUserId": null,
+    "who": "Facilities"
+   },
+   "viewers": [
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job",
+    "+Close job"
+   ]
+  },
+  {
+   "name": "internal, done",
+   "finding": "",
+   "facts": {
+    "status": "Done",
+    "kind": "internal"
+   },
+   "expect": {
+    "action": "downloadPacket",
+    "capability": null,
+    "jumpTarget": null,
+    "step": "closed",
+    "unassigned": false,
+    "verb": "Download job packet",
+    "waitingOnUserId": null,
+    "who": "Nobody"
+   },
+   "viewers": [
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet",
+    "+Download job packet"
+   ]
+  }
+ ]
+}

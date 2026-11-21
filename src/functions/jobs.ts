@@ -51,6 +51,7 @@ import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTran
 import { loadJobForTransition } from "../jobTransitionFacts";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
+import { withJobSteps } from "../jobStepFacts";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
 import { JOB_PRIORITIES } from "../jobPriorities";
 import { showTestParam, testFlagForCreate } from "../test-data";
@@ -467,7 +468,7 @@ async function getJobs(request: HttpRequest, context: InvocationContext): Promis
     );
 
     const eventsByJob = await fetchEventsForJobs(connection, jobs.map((j) => j.JobID as number));
-    const payload = (await withDirectorNeeded(connection, jobs)).map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
+    const payload = (await withJobSteps(connection, await withDirectorNeeded(connection, jobs))).map((j) => ({ ...j, Events: eventsByJob[j.JobID as number] ?? [] }));
 
     // Total is only meaningful when paginating; otherwise count = payload.length.
     let total = payload.length;
@@ -571,7 +572,7 @@ async function getJob(request: HttpRequest, context: InvocationContext): Promise
     }));
     return {
       status: 200,
-      jsonBody: { job: { ...(await withDirectorNeeded(connection, rows))[0], Events: events, PlannerTasks: plannerTasks } },
+      jsonBody: { job: { ...(await withJobSteps(connection, await withDirectorNeeded(connection, rows)))[0], Events: events, PlannerTasks: plannerTasks } },
     };
   } catch (error: any) {
     context.error("getJob failed:", error.message);
@@ -1041,7 +1042,7 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
     return {
       status: 200,
       jsonBody: {
-        job: { ...(await withDirectorNeeded(connection, stored))[0], Events: events },
+        job: { ...(await withJobSteps(connection, await withDirectorNeeded(connection, stored)))[0], Events: events },
         ...(defects && defects.warnings.length > 0 ? { defectsWarnings: defects.warnings } : {}),
       },
     };
@@ -1657,7 +1658,7 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
       `SELECT ${JOB_COLUMNS} FROM Jobs WHERE JobID = @JobID`,
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
-    return { status: 200, jsonBody: { event: eventRow[0], job: (await withDirectorNeeded(connection, jobRow))[0] } };
+    return { status: 200, jsonBody: { event: eventRow[0], job: (await withJobSteps(connection, await withDirectorNeeded(connection, jobRow)))[0] } };
   } catch (error: any) {
     context.error("addJobEvent failed:", error.message);
     return errorResponse("Add event failed", error.message);
