@@ -203,6 +203,17 @@ jobs:
           host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
           test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
           curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"
+          # Deep health needs an admin app token and this job holds only the deploy identity, so it cannot
+          # call it (stale timers and pending migrations are read on Admin > System). What it can prove
+          # is that the build it just shipped is the one answering.
+          want="${{ needs.verify.outputs.build_sha }}"
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            got=$(curl --silent --max-time 20 "https://${host}/api/version" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).commit||"")}catch{console.log("")}})')
+            [ "$got" = "$want" ] && { echo "Serving build $got"; break; }
+            echo "Attempt $attempt: serving '${got}', expected '${want}'"
+            [ "$attempt" = 10 ] && { echo "::error::The deployed app is not serving build $want"; exit 1; }
+            sleep 15
+          done
 
       # Read-only, for whoever approves production: what to apply by hand first.
       - name: Pending migrations on production (dry run)
@@ -305,3 +316,14 @@ jobs:
           host=$(az resource show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --resource-type Microsoft.Web/sites --query properties.defaultHostName --output tsv)
           test -n "$host" || { echo "::error::Could not read the hostname of $APP_NAME"; exit 1; }
           curl --fail --silent --show-error --retry 10 --retry-delay 15 --retry-all-errors "https://${host}/api/health"
+          # Deep health needs an admin app token and this job holds only the deploy identity, so it cannot
+          # call it (stale timers and pending migrations are read on Admin > System). What it can prove
+          # is that the build it just shipped is the one answering.
+          want="${{ needs.verify.outputs.build_sha }}"
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            got=$(curl --silent --max-time 20 "https://${host}/api/version" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).commit||"")}catch{console.log("")}})')
+            [ "$got" = "$want" ] && { echo "Serving build $got"; break; }
+            echo "Attempt $attempt: serving '${got}', expected '${want}'"
+            [ "$attempt" = 10 ] && { echo "::error::The deployed app is not serving build $want"; exit 1; }
+            sleep 15
+          done

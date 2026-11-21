@@ -29,6 +29,9 @@ const auth = jest.requireMock("../auth") as { requireRole: jest.Mock };
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const deep = { headers: new Headers(), query: new URLSearchParams("deep=true") } as unknown as HttpRequest;
 const SAVED = { ...process.env };
+// A recent run, so the fixture is not stale however old this file gets.
+const RAN = new Date(Date.now() - 60 * 60 * 1000);
+const RAN_END = new Date(RAN.getTime() + 5000);
 
 function setAllSettings() {
   for (const entry of ENV_CONTRACT) process.env[entry.name] = "x";
@@ -45,7 +48,7 @@ beforeEach(() => {
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
     if (/FROM STRING_SPLIT/.test(sql)) {
       return [
-        { Error: null, FinishedAt: new Date("2026-10-14T03:00:05Z"), Name: "ledgerVerifyTimer", Outcome: "ok", StartedAt: new Date("2026-10-14T03:00:00Z") },
+        { Error: null, FinishedAt: RAN_END, Name: "ledgerVerifyTimer", Outcome: "ok", StartedAt: RAN },
         { Error: null, FinishedAt: null, Name: "plannerSyncTimer", Outcome: null, StartedAt: null },
       ];
     }
@@ -58,6 +61,24 @@ afterAll(() => {
 });
 
 describe("health?deep=true", () => {
+  it("is not ok when a timer is stale, and names it", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /FROM STRING_SPLIT/.test(sql)
+        ? [{ Error: null, FinishedAt: new Date("2020-01-01T00:00:05Z"), Name: "escalationSweepTimer", Outcome: "ok", StartedAt: new Date("2020-01-01T00:00:00Z") }]
+        : [{ Ok: 1 }],
+    );
+    const body = (await health(deep, ctx)).jsonBody as { ok: boolean; timers: { name: string; stale: boolean }[] };
+    expect(body.ok).toBe(false);
+    expect(body.timers[0]).toMatchObject({ name: "escalationSweepTimer", stale: true });
+  });
+
+  it("carries the switches and the staging guard, without secrets", async () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Staging";
+    const body = (await health(deep, ctx)).jsonBody as { switches: { stagingGuardActive: boolean; environment: string } };
+    expect(body.switches).toMatchObject({ environment: "Staging", stagingGuardActive: true });
+    delete process.env.AZURE_FUNCTIONS_ENVIRONMENT;
+  });
+
   it("says whether two-person role grants are on (SECA-02)", async () => {
     delete process.env.PRIVILEGED_GRANT_TWO_PERSON;
     expect(((await health(deep, ctx)).jsonBody as { privilegedGrantTwoPerson: boolean }).privilegedGrantTwoPerson).toBe(true);
@@ -144,11 +165,12 @@ describe("health?deep=true", () => {
 
   it("shows the last run of every timer, including ones that never ran", async () => {
     const body = (await health(deep, ctx)).jsonBody as { timers: { lastRun: unknown; name: string }[] };
-    expect(body.timers).toContainEqual({
-      lastRun: { error: null, finishedAt: "2026-10-14T03:00:05.000Z", outcome: "ok", startedAt: "2026-10-14T03:00:00.000Z" },
+    expect(body.timers).toContainEqual(expect.objectContaining({
+      lastRun: { error: null, finishedAt: RAN_END.toISOString(), outcome: "ok", startedAt: RAN.toISOString() },
       name: "ledgerVerifyTimer",
-    });
-    expect(body.timers).toContainEqual({ lastRun: null, name: "plannerSyncTimer" });
+      stale: false,
+    }));
+    expect(body.timers).toContainEqual(expect.objectContaining({ lastRun: null, name: "plannerSyncTimer", stale: false }));
     // One index seek per timer: ordered by StartedAt alone, which IX_TimerRuns_Name_StartedAt serves.
     const [, sql] = db.executeQuery.mock.calls.find(([, text]) => /FROM STRING_SPLIT/.test(String(text))) as [unknown, string];
     expect(sql).toMatch(/ORDER BY t\.StartedAt DESC\)/);

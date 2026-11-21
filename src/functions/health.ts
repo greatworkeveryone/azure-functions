@@ -10,6 +10,8 @@ import { isAllowedNetwork, moneyGateConfig } from "../moneyGate";
 import { checkMigrations } from "../migrate";
 import { teamsAlertsReadiness } from "../teams/config";
 import { TIMER_NAMES } from "../timerRuns";
+import { readTimer, type TimerReading } from "../health/timerStaleness";
+import { healthSwitches } from "../health/switches";
 
 // Captured once at module load so the value reflects when the worker started.
 const startedAt = new Date().toISOString();
@@ -42,12 +44,16 @@ async function lastTimerRuns(connection: Connection, context: InvocationContext)
     const rows = await executeQuery(connection, LAST_TIMER_RUNS_SQL, [
       { name: "Names", type: TYPES.NVarChar, value: TIMER_NAMES.join(",") },
     ]);
-    return rows.map((r) => ({
-      lastRun: r.StartedAt
-        ? { error: (r.Error as string | null) ?? null, finishedAt: iso(r.FinishedAt), outcome: r.Outcome as string, startedAt: iso(r.StartedAt) }
-        : null,
-      name: r.Name as string,
-    }));
+    const now = new Date();
+    return rows.map((r): TimerReading =>
+      readTimer(
+        r.Name as string,
+        r.StartedAt
+          ? { error: (r.Error as string | null) ?? null, finishedAt: iso(r.FinishedAt), outcome: r.Outcome as string, startedAt: iso(r.StartedAt) }
+          : null,
+        now,
+      ),
+    );
   } catch (err) {
     context.warn("health: timer runs unavailable:", err);
     return "unavailable" as const;
@@ -114,10 +120,10 @@ export async function health(request: HttpRequest, context: InvocationContext): 
       !forbidden.some((f) => f.severity === "error") &&
       audienceConfigProblem(process.env) === null &&
       (migrations === "unavailable" || (migrations.pending.length === 0 && migrations.changed.length === 0)) &&
-      (timers === "unavailable" || !timers.some((t) => t.lastRun?.outcome === "error"));
+      (timers === "unavailable" || !timers.some((t) => t.lastRun?.outcome === "error" || t.stale));
     return {
       status: 200,
-      jsonBody: { ...base, ok, alerts, apiTokenAudience: apiAudienceMode(process.env), db: "ok", migrations, privilegedGrantTwoPerson: twoPersonGrantEnabled(), settings: { missing, forbidden }, timers },
+      jsonBody: { ...base, ok, alerts, apiTokenAudience: apiAudienceMode(process.env), db: "ok", migrations, privilegedGrantTwoPerson: twoPersonGrantEnabled(), settings: { missing, forbidden }, switches: healthSwitches(), timers },
     };
   } catch (err) {
     // Log the full error server-side so on-call can diagnose, but never
