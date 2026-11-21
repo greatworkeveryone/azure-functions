@@ -42,9 +42,15 @@ function addedByViewer(creator: StepActor | null, viewer: StepViewer): boolean {
   return sameText(creator.name, viewer.name);
 }
 
+/** Capabilities every role that can open a job holds: a step needing one waits on a team, not on any one person. */
+const HELD_BY_EVERY_JOB_ROLE: ReadonlySet<string> = new Set(["createInvoice", "createQuote", "editJobs"]);
+
+const isTeamWide = (next: NextAction): boolean =>
+  !next.person && next.waitingOnUserId === null && next.capability !== null && HELD_BY_EVERY_JOB_ROLE.has(next.capability);
+
 function isViewerTurn(next: NextAction, viewer: StepViewer): boolean {
   // A job nobody owns is waiting on a team, not on one person: "Waiting on Facilities · unassigned".
-  if (next.unassigned) return false;
+  if (next.unassigned || isTeamWide(next)) return false;
   if (next.waitingOnUserId !== null) return next.waitingOnUserId === viewer.userId;
   // A named assignee with no user id on record (older jobs): match by name. A team is everyone who holds the capability.
   return next.person ? sameText(next.who, viewer.name) : true;
@@ -101,7 +107,7 @@ export function presentNextAction(next: NextAction, viewer: StepViewer): Present
   const onViewer = next.externalWait === null && isViewerTurn(next, viewer);
   return {
     ...base,
-    emphasis: onViewer || next.capability === null || next.unassigned ? "primary" : "secondary",
+    emphasis: onViewer || next.capability === null || next.unassigned || isTeamWide(next) ? "primary" : "secondary",
     isPassive: false,
     label: next.verb,
     onViewer: onViewer && next.action !== "downloadPacket",

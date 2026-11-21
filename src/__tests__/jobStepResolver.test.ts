@@ -26,10 +26,10 @@ const knownCapability = (capability: string): boolean => capability in ROLE_TABL
 
 /** SHA-256 of each shared file, the same in both repos. */
 const PINS: Record<string, string> = {
-  "jobStepPresent.ts": "e33106530a869450d4ffedc6973feb35635ac48f6fd9a07098e1e80da22c6f84",
+  "jobStepPresent.ts": "b1f80d5a80f5a140d0bd2f2004a75881a9bc1b6e1650432db0cd0029dd13e601",
   "jobStepResolver.ts": "29f936bd115425069f85b6d67d281d98f57fa18a0414a33d784ec46ddefd2848",
   "jobStepTypes.ts": "f3da74469efe7a4d7472b33bb26700167b1f7e1a68c9bef6b7d19d31e9910621",
-  "jobStepResolver.vectors.json": "f007984428df1cd9819fb23d33fbffab2fd84955e2928da84d54c4c763c2c22d",
+  "jobStepResolver.vectors.json": "53421e79f1d6d6e4d11111e8f7b28cf7dadc22b90f03a6e6e16b88c4dab271bd",
 };
 
 interface Expect {
@@ -94,6 +94,15 @@ describe("job step resolver: shared vectors", () => {
       for (const line of imports) expect(line).toMatch(/from "\.\/jobStep(Types|Resolver|Present)"/);
       expect(source).not.toMatch(/\brequire\(|\bDate\b|process\.|console\.|Math\.random|fetch\(/);
     }
+  });
+
+  it("treats a capability every job role holds as a team wait: nobody is told 'Waiting on you' for it", () => {
+    for (const capability of ["createInvoice", "createQuote", "editJobs"]) {
+      for (const role of VECTORS.roles) expect({ capability, role, holds: holdsCapability(role, capability) }).toEqual({ capability, holds: true, role });
+    }
+    const team = resolveJobStep(factsOf({ awaitingRole: "accounts", kind: "contract", status: "Awaiting Approval" })).nextAction;
+    expect(team.who).toBe("Accounts");
+    for (let index = 0; index < VECTORS.roles.length; index += 1) expect(presentNextAction(team, viewerOf(index)).waitLine).toBe("Waiting on Accounts");
   });
 
   it("covers every step, on hold and closed, in the matrix", () => {
