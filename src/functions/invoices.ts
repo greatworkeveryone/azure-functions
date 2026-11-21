@@ -316,7 +316,8 @@ const JOB_INVOICE_COLUMNS = `
   Amount, Currency, Direction, Notes, InvoicePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy,
   DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy,
-  MyobCreatedAt, MyobCreatedBy, CreatedAt, CreatedBy
+  MyobCreatedAt, MyobCreatedBy, CreatedAt, CreatedBy,
+  SenderCheck, SenderAddress, SenderConfirmedBy, SenderConfirmedAt
 `;
 
 // ── GET /api/getJobInvoices?jobId=N ──────────────────────────────────────────
