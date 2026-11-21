@@ -31,12 +31,38 @@ export interface ApprovalAmountBefore {
   contractorName: string | null;
   status: string | null;
   approvedAt: Date | null;
+  /** SECA-05: the other fields an approver relied on. A caller that has none of them leaves them out. */
+  currency?: string | null;
+  direction?: string | null;
+  pdfBlobName?: string | null;
+  supplierInvoiceNumber?: string | null;
 }
 
 export interface ApprovalAmountChange {
   amount?: number | null;
   contractorId?: number | null;
   contractorName?: string | null;
+  currency?: string | null;
+  direction?: string | null;
+  pdfBlobName?: string | null;
+  supplierInvoiceNumber?: string | null;
+}
+
+/** Text compared as the database stores it: blank and missing are the same. */
+function textChanged(before: string | null | undefined, after: string | null | undefined): boolean {
+  if (after === undefined) return false;
+  const clean = (value: string | null | undefined): string | null => (value == null || value.trim() === "" ? null : value.trim());
+  return clean(before) !== clean(after);
+}
+
+/** The labels of the money-relevant fields beyond amount and payee that this edit changes (SECA-05). */
+function otherMoneyChanges(before: ApprovalAmountBefore, change: ApprovalAmountChange): string[] {
+  const labels: string[] = [];
+  if (textChanged(before.currency, change.currency)) labels.push("currency");
+  if (textChanged(before.direction, change.direction)) labels.push("direction");
+  if (textChanged(before.supplierInvoiceNumber, change.supplierInvoiceNumber)) labels.push("supplier invoice number");
+  if (textChanged(before.pdfBlobName, change.pdfBlobName)) labels.push("attached PDF");
+  return labels;
 }
 
 /** The payee changed: a different contractor id, or a different name. Undefined fields are no change. */
@@ -52,12 +78,21 @@ function payeeChanged(
 export interface ApprovalAmountEffects {
   amountChanged: boolean;
   contractorChanged: boolean;
+  /** Direction changed: a different record, refused once approved (SECA-05). */
+  directionChanged: boolean;
+  /** Currency, direction, supplier invoice number or attached PDF changed (SECA-05). */
+  otherMoneyChanges: string[];
+  /** Any change an approver relied on: amount, payee or one of the others. */
+  moneyChanged: boolean;
+  /** The record had been approved (any state past pending) before this edit. */
+  wasApproved: boolean;
   /**
    * True when the edit invalidates a previous approval — the caller clears the
    * approval fields (and, for an invoice, any MYOB mark). It never moves the
    * job (J2).
    *
-   * Fires when the amount or the payee changed AND the row was in any state
+   * Fires when the amount, the payee, the currency, the direction, the
+   * supplier invoice number or the attached PDF changed AND the row was in any state
    * past "pending" (approved, awaiting director, completed, or has an
    * ApprovedAt stamp). The approver approved paying this amount to this
    * contractor; a different payee is a different decision (J3).
@@ -98,13 +133,20 @@ export function decideApprovalAmountEdit(
       }`,
     );
   }
+  const others = otherMoneyChanges(before, change);
+  if (others.length > 0) parts.push(`${others.join(", ")} changed`);
   const summary = parts.length ? parts.join("; ") : "details updated";
+  const moneyChanged = amountChanged || contractorChanged || others.length > 0;
 
   return {
     amountChanged,
+    clearApproval: moneyChanged && wasApproved,
     contractorChanged,
-    clearApproval: (amountChanged || contractorChanged) && wasApproved,
+    directionChanged: others.includes("direction"),
+    moneyChanged,
+    otherMoneyChanges: others,
     summary,
+    wasApproved,
   };
 }
 
@@ -191,4 +233,29 @@ export function decidePurchaseOrderEdit(
     clearMyobMarker: moneyChanged && inFlight && before.myobCreatedAt != null,
     summary,
   };
+}
+
+// ── SECA-05: saying what changed, in words and for the ledger ────────────────
+
+/** "amount", "amount and contractor", "currency, direction and attached PDF". */
+export function changedWords(effects: Pick<ApprovalAmountEffects, "amountChanged" | "contractorChanged" | "otherMoneyChanges">): string {
+  const words = [
+    ...(effects.amountChanged ? ["amount"] : []),
+    ...(effects.contractorChanged ? ["contractor"] : []),
+    ...effects.otherMoneyChanges,
+  ];
+  if (words.length <= 1) return words[0] ?? "details";
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/** The other changed fields as { label: { from, to } }, read from the stored row and the row as edited. */
+export function fieldChanges(
+  labels: readonly string[],
+  stored: Record<string, unknown>,
+  edited: Record<string, unknown>,
+  columns: Record<string, string>,
+): Record<string, { from: unknown; to: unknown }> {
+  return Object.fromEntries(
+    labels.filter((label) => columns[label]).map((label) => [label, { from: stored[columns[label]] ?? null, to: edited[columns[label]] ?? null }]),
+  );
 }

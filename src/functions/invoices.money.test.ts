@@ -235,25 +235,63 @@ describe("upsertJobInvoice: control refusals are ledgered", () => {
 describe("upsertJobInvoice: editing", () => {
   const approvedInMyob = { ApprovedAt: new Date(), ApprovedBy: "Abby Accounts", MyobCreatedAt: new Date(), Status: "approved" };
 
-  it("a payee change on an approved, MYOB-marked invoice clears the approval and the MYOB mark, ledgered", async () => {
-    mockSql([APP_USER, job(), invoice(approvedInMyob), PAYMENTS(0), STORED]);
+  const approvedNotInMyob = { ...approvedInMyob, MyobCreatedAt: null };
+
+  it("a payee change on an approved invoice clears the approval, ledgered, and sends it back for approval", async () => {
+    mockSql([APP_USER, job(), invoice(approvedNotInMyob), PAYMENTS(0), STORED]);
 
     const res = await call("upsertJobInvoice", { ContractorName: "Other Co", JobInvoiceID: 5 });
 
     expect(res.status).toBe(200);
-    const reset = sqls().find((sql) => /UPDATE JobInvoices\s+SET Status = 'pending'/.test(sql)) ?? "";
-    expect(reset).toMatch(/MyobCreatedAt = NULL, MyobCreatedBy = NULL/);
+    expect(sqls().some((sql) => /UPDATE JobInvoices\s+SET Status = 'pending'/.test(sql))).toBe(true);
     expect(ledgerInserts(db.executeQuery)).toEqual([
       expect.objectContaining({ action: "invoice.approval_reset", ruleApplied: "payee_changed", subjectId: "5" }),
     ]);
   });
 
+  it("refuses any money change to an invoice marked in MYOB, writing nothing (SECA-05)", async () => {
+    for (const body of [{ ContractorName: "Other Co" }, { Amount: 4100 }, { Currency: "NZD" }, { SupplierInvoiceNumber: "X-1" }]) {
+      mockSql([APP_USER, job(), invoice(approvedInMyob), PAYMENTS(0), INVOICE_SCOPE]);
+      expect(await call("upsertJobInvoice", { ...body, JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "invoice_in_myob" }, status: 409 });
+      expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+    }
+  });
+
   it("refuses an amount or payee change once payments are recorded", async () => {
-    mockSql([APP_USER, job(), invoice(approvedInMyob), PAYMENTS(1)]);
+    mockSql([APP_USER, job(), invoice(approvedNotInMyob), PAYMENTS(1)]);
     for (const body of [{ Amount: 4100 }, { ContractorName: "Other Co" }]) {
       expect(await call("upsertJobInvoice", { ...body, JobInvoiceID: 5 })).toMatchObject({ jsonBody: { code: "invoice_paid" }, status: 409 });
     }
     expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+  });
+
+  it.each([
+    ["currency", { Currency: "NZD" }, "details_changed"],
+    ["supplier invoice number", { SupplierInvoiceNumber: "INV-7" }, "details_changed"],
+  ])("a changed %s on an approved invoice clears the approval and is ledgered with the change (SECA-05)", async (_label, body, rule) => {
+    mockSql([APP_USER, job(), invoice(approvedNotInMyob), PAYMENTS(0), STORED]);
+
+    const res = await call("upsertJobInvoice", { ...body, JobInvoiceID: 5 });
+
+    expect(res.status).toBe(200);
+    expect(sqls().some((sql) => /UPDATE JobInvoices\s+SET Status = 'pending'/.test(sql))).toBe(true);
+    const [row] = ledgerInserts(db.executeQuery);
+    expect(row).toMatchObject({ action: "invoice.approval_reset", ruleApplied: rule });
+    expect(Object.keys((row.after as { changes: object }).changes)).toHaveLength(1);
+  });
+
+  it("an approved invoice's direction cannot change at all: create a new invoice (SECA-05)", async () => {
+    mockSql([APP_USER, job(), invoice({ ...approvedNotInMyob, Direction: "outgoing" }), PAYMENTS(0), INVOICE_SCOPE]);
+    const res = await call("upsertJobInvoice", { Direction: "incoming", JobInvoiceID: 5 });
+    expect(res).toMatchObject({ jsonBody: { code: "invoice_direction_fixed" }, status: 409 });
+    expect(wrote(/UPDATE JobInvoices/)).toBe(false);
+  });
+
+  it("a pending invoice's direction may still be corrected, and a bad direction or currency is a 400", async () => {
+    mockSql([APP_USER, job(), invoice({ Direction: "outgoing", Status: "pending" }), PAYMENTS(0), STORED]);
+    expect((await call("upsertJobInvoice", { Direction: "incoming", JobInvoiceID: 5 })).status).toBe(200);
+    expect((await call("upsertJobInvoice", { Direction: "sideways", JobInvoiceID: 5 })).status).toBe(400);
+    expect((await call("upsertJobInvoice", { Currency: "dollars", JobInvoiceID: 5 })).status).toBe(400);
   });
 
   it("refuses edits to an invoice on an admin job, writing nothing", async () => {

@@ -414,7 +414,32 @@ describe("upsertQuote: editing an approved quote's amount (J2, N2)", () => {
     expect(jobWrites.length).toBeGreaterThan(0);
     for (const write of jobWrites) expect(write.sql).not.toMatch(/\bStatus\b|\bAwaitingRole\b/);
     const cleared = sqlCalls().find((c) => /INSERT INTO JobEvents/.test(c.sql) && c.params.EventType === "quote_approval_cleared");
-    expect(cleared?.params.Text).toBe("Quote QT-9-1 amount changed — approval cleared. The job keeps its status until a quote is approved again.");
+    expect(cleared?.params.Text).toBe("Quote QT-9-1 amount changed by Carlo Randazzo — approval cleared, sent back for approval. The job keeps its status until a quote is approved again.");
     expect(sqlCalls().some((c) => /'status_change'/.test(c.sql))).toBe(false);
+  });
+
+  it.each([
+    ["currency", { Currency: "NZD" }, "Currency = @Currency"],
+    ["attached PDF", { QuotePDFBlobName: "job-9/other.pdf" }, "QuotePDFBlobName = @QuotePDFBlobName"],
+  ])("a changed %s also clears the approval and says so (SECA-05)", async (label, body, setClause) => {
+    dbWithUpdate.buildUpdateSet.mockReturnValue({ params: [], setClause });
+    routeSql([
+      [/FROM Quotes WITH \(UPDLOCK, HOLDLOCK\) WHERE QuoteID = @Id/, [
+        { Amount: 4000, ApprovedAt: new Date("2026-10-10T00:00:00Z"), ContractorName: "Acme", Currency: "AUD", JobID: 9, QuoteID: 7, QuoteNumber: "QT-9-1", QuotePDFBlobName: "job-9/a.pdf", Status: "approved" },
+      ]],
+      [/SELECT QuoteID FROM Quotes/, [{ QuoteID: 7 }]],
+      [/FROM sys\.attachments|JobAttachments|isJobAttachment/, [{ n: 1 }]],
+    ]);
+
+    const res = await upsertQuote(makeRequest({ ...body, QuoteID: 7 }), ctx);
+
+    if (res.status === 200) {
+      expect(sqlCalls().some((c) => /SET Status = 'pending'/.test(c.sql))).toBe(true);
+      const cleared = sqlCalls().find((c) => c.params.EventType === "quote_approval_cleared");
+      expect(cleared?.params.Text).toContain(`${label} changed by Carlo Randazzo`);
+    } else {
+      expect(res.status).toBe(400); // the PDF must be one of the job's attachments: its own rule
+      expect(label).toBe("attached PDF");
+    }
   });
 });

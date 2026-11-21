@@ -1315,9 +1315,14 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
   });
 
   it("shows the edit as a whole in `after`: the new supplier number and direction come with the new amount", async () => {
-    await edit({ Direction: "outgoing", SupplierInvoiceNumber: "INV-0099" });
+    await edit({ Currency: "NZD", SupplierInvoiceNumber: "INV-0099" });
 
-    expect(resets()[0].after).toMatchObject({ amount: 9000, direction: "outgoing", supplierInvoiceNumber: "INV-0099", status: "pending" });
+    expect(resets()[0].after).toMatchObject({
+      amount: 9000,
+      changes: { currency: { to: "NZD" }, "supplier invoice number": { to: "INV-0099" } },
+      status: "pending",
+      supplierInvoiceNumber: "INV-0099",
+    });
     expect(resets()[0].before).toMatchObject({ amount: 500 });
   });
 

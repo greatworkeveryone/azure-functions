@@ -34,7 +34,7 @@ import { advanceJobStatus } from "../jobStatusHelpers";
 import { JobEvent } from "../jobStatusMachine";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
-import { decideApprovalAmountEdit } from "../edit-effects";
+import { changedWords, decideApprovalAmountEdit, fieldChanges } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { parseSupplierInvoiceNumber } from "../supplier-invoice-number";
 import { resolveInvoiceContractor } from "../invoice-contractor";
@@ -310,6 +310,14 @@ app.http("getInvoices", { methods: ["GET"], authLevel: "anonymous", handler: get
 // Job-linked invoices — attached to a Job for accounts-team review.
 // Uses the JobInvoices table (separate from the myBuildings Invoices sync).
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Which stored column each SECA-05 label reads, for the ledger's before-and-after. */
+const INVOICE_CHANGE_COLUMNS: Record<string, string> = {
+  "attached PDF": "InvoicePDFBlobName",
+  currency: "Currency",
+  direction: "Direction",
+  "supplier invoice number": "SupplierInvoiceNumber",
+};
 
 const JOB_INVOICE_COLUMNS = `
   JobInvoiceID, JobID, InvoiceNumber, SupplierInvoiceNumber, Seq, ContractorName, ContractorID,
@@ -598,12 +606,22 @@ export async function upsertJobInvoice(
 
     const badAmount = amountRefusal(amount.value, "Amount", false);
     if (badAmount) return refusalResponse(badAmount);
+    // SECA-05: direction and currency were free text on an edit.
+    if (Direction !== undefined && Direction !== "incoming" && Direction !== "outgoing") {
+      return { status: 400, jsonBody: { error: "Direction must be incoming or outgoing." } };
+    }
+    if (Currency !== undefined && !(typeof Currency === "string" && /^[A-Z]{3}$/.test(Currency))) {
+      return { status: 400, jsonBody: { error: "Currency must be a three-letter code such as AUD." } };
+    }
 
     // An edit that carries an amount or a payee can tear down an existing
     // approval, which is a decision (PLAN §3.12): the reset and its ledger row
     // commit together or not at all. Only those edits look up who is editing.
     let actor: LedgerActor | null = null;
-    if (Amount !== undefined || ContractorID !== undefined || ContractorName !== undefined) {
+    if (
+      Amount !== undefined || ContractorID !== undefined || ContractorName !== undefined ||
+      Currency !== undefined || Direction !== undefined || InvoicePDFBlobName !== undefined || supplierNumber.value !== undefined
+    ) {
       actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
     }
@@ -617,7 +635,7 @@ export async function upsertJobInvoice(
         connection,
         `SELECT JobInvoiceID, JobID, InvoiceNumber, Amount, ContractorName, Status, ApprovedAt,
                 ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, SupplierInvoiceNumber, Direction, Currency,
-                MyobCreatedAt, ContractorID
+                MyobCreatedAt, ContractorID, InvoicePDFBlobName
            FROM JobInvoices WITH (UPDLOCK, HOLDLOCK) WHERE JobInvoiceID = @Id`,
         [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
       );
@@ -655,19 +673,61 @@ export async function upsertJobInvoice(
           approvedAt: (before.ApprovedAt as Date | null) ?? null,
           contractorId: (before.ContractorID as number | null) ?? null,
           contractorName: (before.ContractorName as string | null) ?? null,
+          currency: (before.Currency as string | null) ?? null,
+          direction: (before.Direction as string | null) ?? null,
+          pdfBlobName: (before.InvoicePDFBlobName as string | null) ?? null,
           status: (before.Status as string | null) ?? null,
+          supplierInvoiceNumber: (before.SupplierInvoiceNumber as string | null) ?? null,
         },
-        { amount: amount.value, contractorId: contractor.id, contractorName: contractor.name },
+        {
+          amount: amount.value,
+          contractorId: contractor.id,
+          contractorName: contractor.name,
+          currency: Currency,
+          direction: Direction,
+          pdfBlobName: InvoicePDFBlobName,
+          supplierInvoiceNumber: supplierNumber.value,
+        },
       );
+      // SECA-05: an invoice recorded in MYOB is in the books; nothing an approver relied
+      // on changes under it. Undo the MYOB mark first, then edit.
+      if (effects.moneyChanged && before.MyobCreatedAt != null) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.edit",
+          jobId,
+          refusal: {
+            code: "invoice_in_myob",
+            message: "This invoice is recorded in MYOB, so its amount, contractor, currency, direction, supplier invoice number and PDF can't change. Undo the MYOB mark first.",
+            status: 409,
+          },
+          state: { changed: effects.summary, status: before.Status ?? null },
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
+      }
+      // SECA-05: direction decides whether money comes in or goes out, so after approval
+      // it is a different invoice, not an edit.
+      if (effects.directionChanged && effects.wasApproved) {
+        return await refuseMoneyChange(connection, request, {
+          attempted: "invoice.edit",
+          jobId,
+          refusal: {
+            code: "invoice_direction_fixed",
+            message: "An approved invoice can't change between incoming and outgoing. Create a new invoice instead.",
+            status: 409,
+          },
+          state: { direction: before.Direction ?? null, status: before.Status ?? null },
+          subject: { id: JobInvoiceID, type: "invoice" },
+        });
+      }
       // Once money has been paid against the invoice, what it was for and who
       // it pays are facts someone acted on (J3).
-      if ((effects.amountChanged || effects.contractorChanged) && (await paymentCount(connection, JobInvoiceID)) > 0) {
+      if (effects.moneyChanged && (await paymentCount(connection, JobInvoiceID)) > 0) {
         return await refuseMoneyChange(connection, request, {
           attempted: "invoice.edit",
           jobId,
           refusal: {
             code: "invoice_paid",
-            message: "Payments are recorded against this invoice, so its amount and contractor can't change.",
+            message: "Payments are recorded against this invoice, so its amount, contractor, currency, direction, supplier invoice number and PDF can't change.",
             status: 409,
           },
           state: { amount: before.Amount ?? null, status: before.Status ?? null },
@@ -723,7 +783,7 @@ export async function upsertJobInvoice(
             WHERE JobInvoiceID = @Id`,
           [{ name: "Id", type: TYPES.Int, value: JobInvoiceID }],
         );
-        const why = effects.contractorChanged ? "payee_changed" : "amount_changed";
+        const why = effects.contractorChanged ? "payee_changed" : effects.amountChanged ? "amount_changed" : "details_changed";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID)
@@ -734,7 +794,7 @@ export async function upsertJobInvoice(
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `Invoice ${invoiceNumber} ${effects.contractorChanged ? "contractor" : "amount"} changed — approval${before.MyobCreatedAt != null ? " and MYOB mark" : ""} cleared, awaiting re-review.`,
+              value: `Invoice ${invoiceNumber} ${changedWords(effects)} changed by ${identity.name} — approval cleared, sent back for approval.`,
             },
             { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
           ],
@@ -756,7 +816,9 @@ export async function upsertJobInvoice(
           Amount: amount.value !== undefined ? amount.value : before.Amount,
           ContractorID: editedId,
           ContractorName: editedName,
+          Currency: Currency !== undefined ? Currency : before.Currency,
           Direction: Direction !== undefined ? Direction : before.Direction,
+          InvoicePDFBlobName: InvoicePDFBlobName !== undefined ? InvoicePDFBlobName : before.InvoicePDFBlobName,
           SupplierInvoiceNumber: supplierNumber.value !== undefined ? supplierNumber.value : before.SupplierInvoiceNumber,
         });
         await record(connection, {
@@ -765,6 +827,7 @@ export async function upsertJobInvoice(
           after: {
             ...invoiceFacts(edited),
             ...amountChange({ approved: before.Amount, next: edited.Amount, previous: before.Amount }),
+            ...(effects.otherMoneyChanges.length > 0 ? { changes: fieldChanges(effects.otherMoneyChanges, before, edited, INVOICE_CHANGE_COLUMNS) } : {}),
             status: "pending",
           },
           before: approvalSnapshot(known),

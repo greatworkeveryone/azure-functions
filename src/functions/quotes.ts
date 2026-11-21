@@ -36,7 +36,7 @@ import { isTestJob } from "../testRecords";
 import { requireMoneyContext } from "../moneyGate";
 import { amountRefusal, approvableRefusal, creatorRefusal, isCreator, jobMoneyRefusal, type MoneyRefusal, refusalResponse, rejectReason } from "../moneyRules";
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
-import { decideApprovalAmountEdit } from "../edit-effects";
+import { changedWords, decideApprovalAmountEdit, fieldChanges } from "../edit-effects";
 import { isJobAttachmentBlob, PDF_NOT_A_JOB_ATTACHMENT } from "../job-attachment-blob";
 import { resolveActivePlannerTasks } from "../planner";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
@@ -339,7 +339,7 @@ export async function upsertQuote(
     // approval, which is a decision (PLAN §3.12): the reset and its ledger row
     // commit together or not at all. Only those edits look up who is editing.
     let actor: LedgerActor | null = null;
-    if (Amount !== undefined || ContractorID !== undefined || ContractorName !== undefined) {
+    if (Amount !== undefined || ContractorID !== undefined || ContractorName !== undefined || Currency !== undefined || QuotePDFBlobName !== undefined) {
       actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
     }
@@ -385,9 +385,11 @@ export async function upsertQuote(
           approvedAt: (before.ApprovedAt as Date | null) ?? null,
           contractorId: (before.ContractorID as number | null) ?? null,
           contractorName: (before.ContractorName as string | null) ?? null,
+          currency: (before.Currency as string | null) ?? null,
+          pdfBlobName: (before.QuotePDFBlobName as string | null) ?? null,
           status: (before.Status as string | null) ?? null,
         },
-        { amount: amount.value, contractorId: ContractorID, contractorName: ContractorName },
+        { amount: amount.value, contractorId: ContractorID, contractorName: ContractorName, currency: Currency, pdfBlobName: QuotePDFBlobName },
       );
 
       await executeQuery(
@@ -441,7 +443,7 @@ export async function upsertQuote(
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
           ],
         );
-        const why = effects.contractorChanged ? "payee_changed" : "amount_changed";
+        const why = effects.contractorChanged ? "payee_changed" : effects.amountChanged ? "amount_changed" : "details_changed";
         await executeQuery(
           connection,
           `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID)
@@ -452,7 +454,7 @@ export async function upsertQuote(
             {
               name: "Text",
               type: TYPES.NVarChar,
-              value: `Quote ${quoteNumber} ${effects.contractorChanged ? "contractor" : "amount"} changed — approval cleared. The job keeps its status until a quote is approved again.`,
+              value: `Quote ${quoteNumber} ${changedWords(effects)} changed by ${identity.name} — approval cleared, sent back for approval. The job keeps its status until a quote is approved again.`,
             },
             { name: "EventType", type: TYPES.NVarChar, value: "quote_approval_cleared" },
             { name: "QuoteID", type: TYPES.Int, value: QuoteID },
@@ -469,6 +471,7 @@ export async function upsertQuote(
           ContractorID: ContractorID !== undefined ? ContractorID : before.ContractorID,
           ContractorName: ContractorName !== undefined ? ContractorName : before.ContractorName,
           Currency: Currency !== undefined ? Currency : before.Currency,
+          QuotePDFBlobName: QuotePDFBlobName !== undefined ? QuotePDFBlobName : before.QuotePDFBlobName,
         };
         await record(connection, {
           action: "quote.approval_reset",
@@ -476,6 +479,7 @@ export async function upsertQuote(
           after: {
             ...quoteFacts(edited),
             ...amountChange({ approved: before.Amount, next: edited.Amount, previous: before.Amount }),
+            ...(effects.otherMoneyChanges.length > 0 ? { changes: fieldChanges(effects.otherMoneyChanges, before, edited, QUOTE_CHANGE_COLUMNS) } : {}),
             status: "pending",
           },
           before: approvalSnapshot(before),
@@ -1046,6 +1050,9 @@ export async function rejectQuote(
 }
 
 // What the ledger needs to know about a quote that is about to change or go.
+/** Which stored column each SECA-05 label reads, for the ledger's before-and-after. */
+const QUOTE_CHANGE_COLUMNS: Record<string, string> = { "attached PDF": "QuotePDFBlobName", currency: "Currency" };
+
 const QUOTE_LEDGER_COLUMNS = `JobID, QuoteNumber, ContractorID, ContractorName, Amount, Currency, Status,
   ApprovedAt, ApprovedBy, DirectorApprovedAt, DirectorApprovedBy, QuotePDFBlobName`;
 
