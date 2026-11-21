@@ -463,6 +463,16 @@
     "director",
     "facilities_manager"
   ],
+  "reportProblem": [
+    "accounts",
+    "accounts_manager",
+    "admin",
+    "cfo",
+    "director",
+    "facilities",
+    "facilities_manager",
+    "user"
+  ],
   "requestScheduleChange": [
     "accounts",
     "accounts_manager",
