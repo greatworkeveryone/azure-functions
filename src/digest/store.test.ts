@@ -17,6 +17,8 @@ const NOW = new Date("2026-10-13T22:00:00Z"); // 07:30 on the 14th in Darwin
 type Call = [unknown, string, { name: string; type: unknown; value: unknown }[] | undefined];
 const calls = (): Call[] => db.executeQuery.mock.calls as Call[];
 const lastSql = (): string => calls()[calls().length - 1][1];
+const firstSql = (): string => calls()[0][1];
+const firstParam = (name: string) => calls()[0][2]?.find((p) => p.name === name);
 const lastParam = (name: string) => calls()[calls().length - 1][2]?.find((p) => p.name === name);
 
 beforeEach(() => db.executeQuery.mockReset());
@@ -74,18 +76,27 @@ describe("listDueJobs", () => {
       { AssignedToUserID: 1, BuildingName: "Tower A", ExpectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), JobID: 30, Kind: "admin", Title: "Paint stairwell" },
     ]);
     const jobs = await listDueJobs(conn, NOW);
-    expect(lastSql()).toMatch(/FROM dbo\.Jobs/);
-    expect(lastSql()).toMatch(/IsArchived = 0/);
-    expect(lastSql()).toMatch(/Status <> 'Done'/);
-    expect(lastSql()).toMatch(/AssignedToUserID IS NOT NULL/);
-    expect(lastSql()).toMatch(/j\.Kind/);
-    expect(lastSql()).toMatch(/ExpectedProgressUpdate < @Before/);
-    expect(lastSql()).not.toMatch(/CAST\s*\(\s*j?\.?ExpectedProgressUpdate/i);
+    expect(firstSql()).toMatch(/FROM dbo\.Jobs/);
+    expect(firstSql()).toMatch(/IsArchived = 0/);
+    expect(firstSql()).toMatch(/Status <> 'Done'/);
+    expect(firstSql()).toMatch(/AssignedToUserID IS NOT NULL/);
+    expect(firstSql()).toMatch(/j\.Kind/);
+    expect(firstSql()).toMatch(/ExpectedProgressUpdate < @Before/);
+    expect(firstSql()).not.toMatch(/CAST\s*\(\s*j?\.?ExpectedProgressUpdate/i);
     // 00:00 on the 15th in Darwin is 14:30 UTC on the 14th.
-    expect(lastParam("Before")).toMatchObject({ type: TYPES.DateTime2, value: new Date("2026-10-14T14:30:00Z") });
+    expect(firstParam("Before")).toMatchObject({ type: TYPES.DateTime2, value: new Date("2026-10-14T14:30:00Z") });
     expect(jobs).toEqual([
-      { assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), jobId: 30, kind: "admin", title: "Paint stairwell" },
+      { assignedToUserId: 1, buildingName: "Tower A", expectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), jobId: 30, kind: "admin", stepLabel: null, title: "Paint stairwell" },
     ]);
+  });
+
+  it("says which step each job is at, from the shared resolver", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /FROM dbo\.Jobs j/.test(sql)
+        ? [{ AssignedToUserID: 1, AssignedTo: "Fay", AwaitingRole: "facilities", BuildingName: null, ExpectedProgressUpdate: new Date("2026-10-12T20:00:00Z"), IsContract: false, IsInternal: false, JobID: 32, Status: "Work", Title: "Fix door" }]
+        : [],
+    );
+    expect((await listDueJobs(conn, NOW))[0].stepLabel).toBe("Raise purchase order");
   });
 
   it("reads a row with no kind as facilities, like the column's default", async () => {

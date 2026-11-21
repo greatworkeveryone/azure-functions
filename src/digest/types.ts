@@ -43,6 +43,8 @@ export interface DueJob {
   jobId: number;
   /** Jobs.Kind. */
   kind: string;
+  /** The step the job is at (jobStepResolver), when it could be worked out. */
+  stepLabel?: string | null;
   title: string;
 }
 

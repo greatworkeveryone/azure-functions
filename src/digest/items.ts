@@ -135,7 +135,7 @@ function dueItem(job: DueJob, todayKey: string): DigestItem | null {
   return {
     dedupeKey: `job:${job.jobId}`,
     kind: "due",
-    line: `${jobLabel(job.jobId, job.title, job.buildingName)}: ${when}`,
+    line: `${jobLabel(job.jobId, job.title, job.buildingName)}: ${when}${job.stepLabel ? ` · ${job.stepLabel}` : ""}`,
     order: job.expectedProgressUpdate.getTime(),
     path: jobPath(job.jobId),
   };
