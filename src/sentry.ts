@@ -1,5 +1,6 @@
 /* eslint-disable no-console -- bootstrap diagnostics: these run at init, before Sentry/App Insights logging is available, and log no request data */
 import * as Sentry from "@sentry/node";
+import { scrubBreadcrumb, scrubEvent } from "./sentryScrub";
 
 let initialised = false;
 
@@ -18,6 +19,9 @@ export function initSentry(): void {
   }
 
   Sentry.init({
+    beforeBreadcrumb: scrubBreadcrumb,
+    beforeSend: scrubEvent,
+    beforeSendTransaction: scrubEvent,
     dsn,
     environment: "production",
     tracesSampleRate: 0.1,
