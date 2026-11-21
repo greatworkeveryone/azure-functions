@@ -44,14 +44,15 @@ export async function createStaffReport(request: HttpRequest, context: Invocatio
       await executeQuery(
         conn,
         `INSERT INTO dbo.WorkRequests
-           (WorkRequestID, BuildingID, BuildingName, Details, Status, Priority, ContactName, Source, ReportedByOid, ReportedByName)
-         VALUES (@Id, @BuildingId, @BuildingName, @Details, N'Staff report', N'Normal', @Name, N'staff', @Oid, @Name)`,
+           (WorkRequestID, BuildingID, BuildingName, Details, StatusID, Status, Priority, ContactName, LastModifiedDate, Source, ReportedByOid, ReportedByName)
+         VALUES (@Id, @BuildingId, @BuildingName, @Details, 1, N'New', N'Normal', @Name, @Now, N'staff', @Oid, @Name)`,
         [
           { name: "Id", type: TYPES.Int, value: id },
           { name: "BuildingId", type: TYPES.Int, value: input.buildingId },
           { name: "BuildingName", type: TYPES.NVarChar, value: building[0].BuildingName },
           { name: "Details", type: TYPES.NVarChar, value: input.details },
           { name: "Name", type: TYPES.NVarChar, value: auth.caller.name },
+          { name: "Now", type: TYPES.NVarChar, value: new Date().toISOString() },
           { name: "Oid", type: TYPES.NVarChar, value: auth.caller.oid },
         ],
       );
