@@ -82,7 +82,15 @@ async function runSync(token: string, force: boolean, context: InvocationContext
 
 // ── Timer trigger — daily at 02:00 UTC ───────────────────────────────────────
 
-async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext): Promise<void> {
+// MYBUILDINGS_SYNC_ENABLED="false" turns the nightly mirror refresh off. Unlike the sweep timers it is on
+// when unset: it only rewrites the WorkRequests mirror (Floorplan's own edits live in WorkRequestOverrides)
+// and has run nightly since launch. The admin POST below is unaffected. On staging, config/stagingGuard.ts
+// refuses every non-GET call to myBuildings; this timer only reads from it.
+export async function syncAllWorkRequestsTimer(timer: Timer, context: InvocationContext): Promise<void> {
+  if (process.env.MYBUILDINGS_SYNC_ENABLED === "false") {
+    context.log("syncAllWorkRequests timer: off (MYBUILDINGS_SYNC_ENABLED=false)");
+    return;
+  }
   if (timer.isPastDue) {
     context.warn("syncAllWorkRequests timer is past due — running now");
   }

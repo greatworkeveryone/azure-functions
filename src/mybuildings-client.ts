@@ -15,6 +15,8 @@ export class MyBuildingsStagingWriteError extends Error {
 const API_URL = process.env.MYBUILDINGS_API_URL!;
 const BEARER_TOKEN = process.env.MYBUILDINGS_BEARER_TOKEN!;
 const PAGE_SIZE = 300;
+/** A runaway upstream that keeps returning full pages stops here (SECS-08), 30,000 rows. */
+export const MAX_PAGES = 100;
 
 // ── Shared fetch helper ───────────────────────────────────────────────────────
 
@@ -53,7 +55,13 @@ async function fetchAllPaged<T>(
   const allItems: T[] = [];
   let skip = 0;
   let hasMore = true;
+  let pages = 0;
   while (hasMore) {
+    if (pages >= MAX_PAGES) {
+      console.warn(`myBuildings ${basePath}: stopped after ${MAX_PAGES} pages; later rows were not read`);
+      break;
+    }
+    pages += 1;
     const queryString = params
       ? `${basePath}?${params}&skip=${skip}`
       : `${basePath}?skip=${skip}`;
