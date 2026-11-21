@@ -76,3 +76,56 @@ describe.each([
     expect((await registered(name)(form({ ...fields }, PNG, "image/svg+xml"), ctx)).status).toBe(415);
   });
 });
+
+describe("slot images are removed only after the row stops pointing at them (SECS-03, F10)", () => {
+  const OLD = "https://x.blob.core.windows.net/vacancies/1/slots/old.png";
+  const order = (fn: jest.Mock) => fn.mock.invocationCallOrder[0];
+  const updateIndex = () => db.executeQuery.mock.calls.findIndex((c: unknown[]) => /UPDATE dbo\.Vacancies/.test(String(c[1])));
+
+  it("replacing a slot image uploads and saves the new one before deleting the old", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /SELECT SlotImages/.test(sql) ? [{ SlotImages: JSON.stringify({ Front: OLD }) }] : [{ Id: 1 }],
+    );
+    await registered("uploadVacancySlotImage")(form({ slotLabel: "Front", vacancyId: "1" }, PNG), ctx);
+
+    expect(blob.deletePublicBlob).toHaveBeenCalledTimes(1);
+    expect(order(blob.uploadPublicBlob)).toBeLessThan(order(blob.deletePublicBlob));
+    expect(db.executeQuery.mock.invocationCallOrder[updateIndex()]).toBeLessThan(order(blob.deletePublicBlob));
+  });
+
+  it("keeps the old image when saving the row fails", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/SELECT SlotImages/.test(sql)) return [{ SlotImages: JSON.stringify({ Front: OLD }) }];
+      if (/UPDATE dbo\.Vacancies/.test(sql)) throw new Error("SQL unavailable");
+      return [];
+    });
+    const res = await registered("uploadVacancySlotImage")(form({ slotLabel: "Front", vacancyId: "1" }, PNG), ctx);
+
+    expect(res.status).toBe(500);
+    expect(blob.deletePublicBlob).not.toHaveBeenCalled();
+  });
+
+  it("deleting a slot image saves the row before it removes the file, and keeps the file if the save fails", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
+      if (/SELECT SlotImages/.test(sql)) return [{ SlotImages: JSON.stringify({ Front: OLD }) }];
+      if (/UPDATE dbo\.Vacancies/.test(sql)) throw new Error("SQL unavailable");
+      return [];
+    });
+    const req = { headers: new Headers(), json: async () => ({ slotLabel: "Front", vacancyId: 1 }) } as unknown as HttpRequest;
+    const res = await registered("deleteVacancySlotImage")(req, ctx);
+
+    expect(res.status).toBe(500);
+    expect(blob.deletePublicBlob).not.toHaveBeenCalled();
+  });
+
+  it("deleting a slot image removes the file once the row is saved", async () => {
+    db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
+      /SELECT SlotImages/.test(sql) ? [{ SlotImages: JSON.stringify({ Front: OLD }) }] : [{ Id: 1 }],
+    );
+    const req = { headers: new Headers(), json: async () => ({ slotLabel: "Front", vacancyId: 1 }) } as unknown as HttpRequest;
+    await registered("deleteVacancySlotImage")(req, ctx);
+
+    expect(blob.deletePublicBlob).toHaveBeenCalledTimes(1);
+    expect(db.executeQuery.mock.invocationCallOrder[updateIndex()]).toBeLessThan(order(blob.deletePublicBlob));
+  });
+});
