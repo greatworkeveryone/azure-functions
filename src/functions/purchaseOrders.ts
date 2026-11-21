@@ -486,6 +486,14 @@ export async function upsertPurchaseOrder(
     let varianceJobId = 0;
     await beginTransaction(connection);
     try {
+      // Lock order is the job first, then the purchase order, the same as creating one: the other way round
+      // lets a create and an edit on one job deadlock, and the loser sees a 500. The job is looked up unlocked
+      // only to know which one to lock.
+      const lockFirst = await executeQuery(connection, "SELECT JobID FROM PurchaseOrders WHERE PurchaseOrderID = @Id", [
+        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+      ]);
+      if (lockFirst.length > 0) await loadJobForMoney(connection, lockFirst[0].JobID as number);
+
       // Read the existing PO before mutating so we can diff for the audit
       // trail and decide whether to clear the Sent / MYOB markers. Locked until
       // commit, so the markers recorded as reset are the ones reset.

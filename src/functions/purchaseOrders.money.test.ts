@@ -208,6 +208,16 @@ describe("upsertPurchaseOrder: editing", () => {
     expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "po.markers_reset", ruleApplied: "payee_changed", subjectId: "99" })]);
   });
 
+  it("locks the job before the purchase order, the same order as creating one, so the two cannot deadlock", async () => {
+    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Work" }), { match: /SELECT JobID FROM PurchaseOrders WHERE PurchaseOrderID = @Id/, rows: [{ JobID: 9 }] }, po(), STORED]);
+    await call("upsertPurchaseOrder", { PurchaseOrderID: 99, Scope: "Repaint" });
+    const order = sqls();
+    const jobLock = order.findIndex((sql) => /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/.test(sql));
+    const poLock = order.findIndex((sql) => /FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\) WHERE PurchaseOrderID = @Id/.test(sql));
+    expect(jobLock).toBeGreaterThan(-1);
+    expect(jobLock).toBeLessThan(poLock);
+  });
+
   it.each([
     ["done", { Status: "Done" }, 409, "job_done"],
     ["archived", { IsArchived: true }, 409, "job_archived"],
