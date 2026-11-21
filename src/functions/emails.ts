@@ -944,7 +944,7 @@ function alreadyHandledResponse(status: string | null): HttpResponseInit | null 
 }
 
 // ── POST /api/promoteEmailToJobUpdate ───────────────────────────────────────
-// Body: { EmailID: number, JobID: number, Text: string, MarkWorkCompleted?: boolean }
+// Body: { EmailID: number, JobID: number, Text: string, MarkWorkCompleted?: boolean, confirmUnverifiedSender?: boolean }
 // Records a reply on an existing job as a timeline note (EventType
 // 'email_update', SourceEmailID set) and optionally fires WORK_COMPLETED:
 // pre-check nextState(current, WORK_COMPLETED) — null → 422, nothing
@@ -956,6 +956,7 @@ interface PromoteEmailToJobUpdateBody {
   JobID?: unknown;
   MarkWorkCompleted?: unknown;
   Text?: unknown;
+  confirmUnverifiedSender?: unknown;
 }
 
 export async function promoteEmailToJobUpdate(
@@ -978,7 +979,7 @@ export async function promoteEmailToJobUpdate(
   }
 
   const body = ((await request.json().catch(() => null)) ?? {}) as PromoteEmailToJobUpdateBody;
-  const { EmailID, JobID, Text, MarkWorkCompleted } = body;
+  const { EmailID, JobID, Text, MarkWorkCompleted, confirmUnverifiedSender } = body;
   if (!isValidId(EmailID) || !isValidId(JobID)) {
     return { status: 400, jsonBody: { error: "EmailID and JobID (positive integers) are required" } };
   }
@@ -1000,13 +1001,20 @@ export async function promoteEmailToJobUpdate(
 
     const emailRows = await executeQuery(
       connection,
-      "SELECT Status, MatchedJobID FROM Emails WHERE EmailID = @Id",
+      "SELECT Status, MatchedJobID, FromAddress, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id",
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     if (emailRows.length === 0) return { status: 404, jsonBody: { error: "Email not found" } };
     const handled = alreadyHandledResponse(emailRows[0].Status as string | null);
     if (handled) return handled;
     const priorJobId = emailRows[0].MatchedJobID as number | null;
+    // SECS-01: mail that cannot be tied to the sender it claims never moves a job on one click. A plain note
+    // moves nothing, so only "mark work completed" needs the promoter's say-so; who gave it is written on the note.
+    const sender = assessSender(emailRows[0], null);
+    const senderUnconfirmed = markCompleted && sender.check !== "verified";
+    if (senderUnconfirmed && confirmUnverifiedSender !== true) {
+      return { status: 422, jsonBody: senderRefusalBody(sender) };
+    }
 
     const jobRows = await executeQuery(
       connection,
@@ -1041,7 +1049,11 @@ export async function promoteEmailToJobUpdate(
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-        { name: "Text", type: TYPES.NVarChar, value: Text.trim() },
+        {
+          name: "Text",
+          type: TYPES.NVarChar,
+          value: senderUnconfirmed ? `${Text.trim()}\n\nSender not verified: ${identity.name} confirmed it had been checked another way.` : Text.trim(),
+        },
         { name: "EmailID", type: TYPES.Int, value: EmailID },
       ],
     );
