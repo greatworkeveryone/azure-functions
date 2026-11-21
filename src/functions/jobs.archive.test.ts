@@ -117,11 +117,10 @@ describe("archiveJob", () => {
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it.each([[undefined], [""], ["   "], [5]])("needs a reason (%p): 422, nothing read or written", async (Reason) => {
+  it.each([[undefined], [""], ["   "], [5]])("needs a reason (%p): 422, nothing archived", async (Reason) => {
     mockSql([APP_USER, OWNERSHIP, job(), invoices()]);
     expect(await archive({ Reason })).toMatchObject({ jsonBody: { code: "reason_required" }, status: 422 });
     expect(archived()).toBe(false);
-    expect(db.createRequestConnection).not.toHaveBeenCalled();
   });
 
   it.each([

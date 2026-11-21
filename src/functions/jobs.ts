@@ -1097,11 +1097,6 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
-    // REV-04: archiving hides a job from every list, so it carries a reason.
-    const reason = typeof body?.Reason === "string" ? body.Reason.trim().slice(0, 1000) : "";
-    if (reason === "") {
-      return { status: 422, jsonBody: { code: "reason_required", error: "Say why the job is being archived." } };
-    }
     connection = await createRequestConnection(token);
 
     // Authorisation: load CreatedById + CreatedBy first so we can scope
@@ -1142,6 +1137,11 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     // The UPDATE Jobs and the matching JobEvents 'archived' row MUST commit
     // together — otherwise a transient SQL failure between them leaves a job
     // archived with no audit trail (or vice versa).
+    // REV-04 (after the permission check, so a caller who may not archive hears that first): archiving hides a job from every list, so it carries a reason.
+    const reason = typeof body?.Reason === "string" ? body.Reason.trim().slice(0, 1000) : "";
+    if (reason === "") {
+      return { status: 422, jsonBody: { code: "reason_required", error: "Say why the job is being archived." } };
+    }
     const ledgerActor = await resolveLedgerActor(request, connection);
     if (!ledgerActor) return unauthorizedResponse();
     await beginTransaction(connection);
