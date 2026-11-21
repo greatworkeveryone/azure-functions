@@ -118,7 +118,7 @@ async function generalScope(connection: Parameters<typeof loadPeople>[0], roles:
 }
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
-function managedRoles(roles: string[]): TimesheetRole[] {
+export function managedRoles(roles: string[]): TimesheetRole[] {
   if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR) || roles.includes(AppRole.CFO)) return ["facilities", "accounts", "general"];
   const out: TimesheetRole[] = [];
   if (roles.includes(AppRole.FACILITIES_APPROVAL)) out.push("facilities");
