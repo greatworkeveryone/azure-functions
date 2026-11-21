@@ -36,8 +36,8 @@ function machinePaid(from: GuardState): GuardState | null {
 // whenever either side changes, together with the guard and the vectors.
 
 /** SHA-256 of jobTransitionGuard.ts and of the vector file, the same in both repos. */
-const GUARD_SHA256 = "6631da6145741dac0e2a6311e039ee2b43c5f290d1de34cae8f5b9f57b8c0b2f";
-const VECTORS_SHA256 = "94613aca78cc6046938ca09dc92e455aee0479999e1abccfbb32caac334127b9";
+const GUARD_SHA256 = "902173defa27fc682b1c34f3689aa69d67a4b9054ae2cf4da75845bb1518ad5d";
+const VECTORS_SHA256 = "98669761f06d9ca28fce7062fef3c54caa57ea58f5c9a96e13e51b2952699fb3";
 
 interface Vectors {
   actorRoles: Record<string, string[] | "system">;
@@ -122,7 +122,7 @@ describe("job transition guard: shared vectors", () => {
         expect(jobFacts.hasCompletePurchaseOrder || ((jobFacts.isContract || jobFacts.isInternal) && jobFacts.incomingInvoices >= 1)).toBe(true);
       }
       if (decision.to.status === "Done" && !jobFacts.isInternal) {
-        expect([jobFacts.incomingInvoices >= 1, jobFacts.incomingInvoicesAwaitingApproval, jobFacts.approvedInvoicesNotInMyob]).toEqual([true, 0, 0]);
+        expect([jobFacts.incomingInvoices >= 1, jobFacts.incomingInvoicesAwaitingApproval, jobFacts.approvedInvoicesNotInMyob, jobFacts.purchaseOrdersNotInMyob]).toEqual([true, 0, 0, 0]);
       }
       expect(["U", "SYS"]).not.toContain(actor);
     }
@@ -155,6 +155,15 @@ describe("job transition guard: shared vectors", () => {
       code: "quote_not_approved",
       reason: "Work starts once a quote is approved (or on a contract or internal job).",
     });
+  });
+
+  it("closes only when every purchase order is marked in MYOB too, and says who can mark it (D3)", () => {
+    const refused = decide("Awaiting Approval/accounts", "poNotInMyob", { kind: "manual", target: "Done" }, "AM").decision;
+    expect(refused).toMatchObject({ allowed: false, code: "purchase_order_not_in_myob" });
+    expect(refused.allowed ? "" : refused.reason).toMatch(/accounts manager, facilities manager, CFO or director/);
+    expect(decide("Awaiting Approval/accounts", "poRecorded", { kind: "manual", target: "Done" }, "AM").decision.allowed).toBe(true);
+    // An internal job has no purchase orders to wait on.
+    expect(decide("Work/facilities", "internal", { kind: "manual", target: "Done" }, "FM").decision.allowed).toBe(true);
   });
 
   it("refuses a manual move to accounts until the work is complete, and says what is missing", () => {

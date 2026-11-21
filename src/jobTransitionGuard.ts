@@ -38,6 +38,8 @@ export interface GuardFacts {
   incomingInvoicesAwaitingApproval: number;
   isContract: boolean;
   isInternal: boolean;
+  /** Purchase orders on the job (none are archived: there is no archive) not yet marked as recorded in MYOB. */
+  purchaseOrdersNotInMyob: number;
 }
 
 export type GuardActor = { kind: "user"; roles: readonly string[] } | { kind: "system" };
@@ -70,6 +72,7 @@ export type GuardRefusal =
   | "invoice_missing"
   | "invoice_not_approved"
   | "invoice_not_in_myob"
+  | "purchase_order_not_in_myob"
   | "not_done"
   | "reason_required"
   | "system_only"
@@ -99,12 +102,15 @@ const REASONS: Record<GuardRefusal, string> = {
   illegal: "A job can't move there from where it is now.",
   invoice_missing: "A job is closed against an invoice: add the contractor's invoice first.",
   invoice_not_approved: "Every contractor invoice must be fully approved before the job is closed.",
-  invoice_not_in_myob: "Every approved invoice must be marked as created in MYOB before the job is closed.",
+  invoice_not_in_myob:
+    "Every approved invoice must be marked as created in MYOB before the job is closed. An accounts manager, CFO or director can mark it.",
   invoices_not_paid: "Not every invoice on this job is paid yet.",
   no_quote: "Add the quote before sending it for approval.",
   not_done: "Only a done job can be reopened.",
+  purchase_order_not_in_myob:
+    "Every purchase order on this job must be marked as recorded in MYOB before the job is closed. An accounts manager, facilities manager, CFO or director can mark it from the purchase order.",
   work_not_complete:
-    "A job goes to accounts once the work is marked complete on its purchase order, or, on a contract or internal job with no purchase order, once the contractor's invoice is added.",
+    "A job goes to accounts once the work is marked complete on its purchase order, which a facilities officer or an accounts manager can do. On a contract or internal job with no purchase order, add the contractor's invoice instead.",
   moves_on_its_own:
     "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
   quote_not_approved: "Work starts once a quote is approved (or on a contract or internal job).",
@@ -153,6 +159,8 @@ function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {
     if (facts.incomingInvoices < 1) return refuse("invoice_missing");
     if (facts.incomingInvoicesAwaitingApproval > 0) return refuse("invoice_not_approved");
     if (facts.approvedInvoicesNotInMyob > 0) return refuse("invoice_not_in_myob");
+    // D3: finishing the work no longer waits on MYOB keying, so the close does.
+    if (facts.purchaseOrdersNotInMyob > 0) return refuse("purchase_order_not_in_myob");
   }
   // JOB-09: every other move happens by itself when the record behind it is
   // saved. By hand a person only holds, resumes, starts a contract job, or closes.
@@ -195,8 +203,8 @@ function guardInvoicesPaid(input: GuardInput): GuardDecision {
  * the work is complete (a purchase order marked complete, or an invoice on a
  * contract or internal job); into Work only with an approved quote, or on
  * a contract or internal job; into Done only when every contractor invoice is
- * fully approved and every approved invoice is marked in MYOB (internal jobs
- * excepted). Reopen: a manager, a done job and a reason; it lands back on
+ * fully approved, every approved invoice is marked in MYOB and every purchase
+ * order is marked in MYOB (internal jobs excepted). Reopen: a manager, a done job and a reason; it lands back on
  * (Awaiting Approval, accounts), or (Work, facilities) for an internal job.
  * Invoices paid: the system only, every incoming invoice paid.
  */

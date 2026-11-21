@@ -208,6 +208,14 @@ describe("addJobEvent: the transition guard", () => {
       expect(await event({ NewStatus: "Done" })).toMatchObject({ jsonBody: { code: "invoice_not_in_myob" }, status: 422 });
     });
 
+    it("D3: a purchase order not marked in MYOB: 422 purchase_order_not_in_myob, nothing written", async () => {
+      mockSql([job({ AwaitingRole: "accounts", HasApprovedQuote: 1, PurchaseOrdersNotInMyob: 1 }), invoices(invoice()), ...ACCEPTS]);
+      const res = await event({ NewStatus: "Done" });
+      expect(res).toMatchObject({ jsonBody: { code: "purchase_order_not_in_myob" }, status: 422 });
+      expect(wroteAnything()).toBe(false);
+      expect(find(JOB_LOCK)?.sql).toMatch(/PurchaseOrders p WHERE p\.JobID = j\.JobID AND p\.MyobCreatedAt IS NULL\) AS PurchaseOrdersNotInMyob/);
+    });
+
     it("every invoice approved (director included) and in MYOB: Done", async () => {
       mockSql([atAccounts, invoices(invoice(), invoice({ Amount: 30000, Status: "director_approved" }), invoice({ Status: "rejected", MyobCreatedAt: null })), ON_JOB, ...ACCEPTS]);
       const res = await event({ NewStatus: "Done", InvoiceID: 3 });

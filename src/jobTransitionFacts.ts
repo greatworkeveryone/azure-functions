@@ -69,6 +69,7 @@ export async function loadJobForTransition(connection: Connection, jobId: number
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = j.JobID AND q.Status <> 'rejected') THEN 1 ELSE 0 END AS HasQuote,
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.QuoteID = j.ApprovedQuoteID AND q.Status IN ('approved', 'completed')) THEN 1 ELSE 0 END AS HasApprovedQuote,
             CASE WHEN EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = j.JobID AND p.CompletedAt IS NOT NULL) THEN 1 ELSE 0 END AS HasCompletePurchaseOrder,
+            (SELECT COUNT(*) FROM PurchaseOrders p WHERE p.JobID = j.JobID AND p.MyobCreatedAt IS NULL) AS PurchaseOrdersNotInMyob,
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = j.JobID)
                    OR EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = j.JobID)
                    OR EXISTS (SELECT 1 FROM JobInvoices i WHERE i.JobID = j.JobID) THEN 1 ELSE 0 END AS HasMoneyRecords
@@ -98,6 +99,7 @@ export async function loadJobForTransition(connection: Connection, jobId: number
       hasQuote: Boolean(job.HasQuote),
       isContract: Boolean(job.IsContract),
       isInternal: Boolean(job.IsInternal),
+      purchaseOrdersNotInMyob: Number(job.PurchaseOrdersNotInMyob ?? 0),
     },
     hasMoneyRecords: Boolean(job.HasMoneyRecords),
     preBlock: job.PreBlockStatus == null ? null : stateOf(job.PreBlockStatus, job.PreBlockAwaitingRole),
