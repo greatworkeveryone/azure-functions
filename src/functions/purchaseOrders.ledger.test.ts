@@ -1245,16 +1245,24 @@ describe("purchase order transitions", () => {
       expect(orderOf(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBeLessThan(db.rollbackTransaction.mock.invocationCallOrder[0]);
     });
 
-    it("a PO the books don't have yet can't be completed: the same 400, recorded as a refused attempt", async () => {
+    // D3: finishing the work no longer waits on MYOB keying; the close does (jobTransitionGuard).
+    it("a PO the books don't have yet can be completed: the work finishes and the job moves on, with the ledger row", async () => {
       mockSql([APP_USER, JOB_BUILDING, po(), stored]);
 
       const res = await complete();
 
-      expect(res).toEqual({
-        jsonBody: { error: "Cannot mark complete — this purchase order has not been marked as created in MYOB yet." },
-        status: 400,
-      });
-      expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: { attempted: "po.complete" }, jobId: 42, ruleApplied: "not_created_in_myob" })]);
+      expect(res.status).toBe(200);
+      expect(ran(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBe(true);
+      expect(statusHelpers.advanceJobStatus).toHaveBeenCalledWith(expect.anything(), 42, "WORK_COMPLETED", expect.objectContaining({ purchaseOrderId: 99 }));
+      expect(rows()).toEqual([expect.objectContaining({ action: "po.complete", after: expect.objectContaining({ completed: true }), jobId: 42 })]);
+    });
+
+    it("a PO that doesn't exist on the job is a 404 and nothing is completed", async () => {
+      mockSql([APP_USER, JOB_BUILDING, { match: /FROM PurchaseOrders WITH \(UPDLOCK, HOLDLOCK\)/, rows: [] }]);
+
+      const res = await complete();
+
+      expect(res.status).toBe(404);
       expect(ran(/SET CompletedAt = SYSUTCDATETIME\(\)/)).toBe(false);
       expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
     });

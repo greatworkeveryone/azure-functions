@@ -18,10 +18,9 @@ interface PurchaseOrderGuardState {
 }
 
 /** Returns an error string if markComplete should be blocked, null if allowed. */
-function canMarkComplete(po: PurchaseOrderGuardState): string | null {
-  if (!po.MyobCreatedAt) {
-    return "Cannot mark complete — this purchase order has not been marked as created in MYOB yet.";
-  }
+function canMarkComplete(_po: PurchaseOrderGuardState): string | null {
+  // D3: finishing the work needs only that the purchase order exists. MYOB
+  // recording is checked when the job is closed (jobTransitionGuard).
   return null;
 }
 
@@ -56,19 +55,17 @@ describe("markPurchaseOrderComplete guards", () => {
     assert.strictEqual(canMarkComplete(po), null);
   });
 
-  test("is blocked when MyobCreatedAt is null", () => {
+  test("is allowed when MyobCreatedAt is null (D3: the close, not the work, waits on MYOB)", () => {
     const po: PurchaseOrderGuardState = {
       MyobCreatedAt: null,
       CompletedAt: null,
       SentAt: null,
     };
-    const result = canMarkComplete(po);
-    assert.ok(result !== null, "expected an error message");
-    assert.match(result, /MYOB/i);
+    assert.strictEqual(canMarkComplete(po), null);
   });
 
   test("is allowed even if already completed (idempotent re-mark)", () => {
-    // The handler only guards on MyobCreatedAt; re-marking complete is
+    // The handler has no state guard; re-marking complete is
     // allowed (it just overwrites CompletedAt/By with a fresh timestamp).
     const po: PurchaseOrderGuardState = {
       MyobCreatedAt: new Date(),
