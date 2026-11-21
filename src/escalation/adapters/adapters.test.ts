@@ -321,6 +321,15 @@ describe("job facts", () => {
     expect(await loadJobFacts(conn, 99)).toBeNull();
   });
 
+  // JOB-03: a job whose every quote was declined is back in the quote round, so the chaser must see no quote.
+  it("counts only quotes that are not declined, so a job with every quote declined is chased again", async () => {
+    db.executeQuery.mockResolvedValueOnce([jobRow()]);
+
+    await loadJobFacts(conn, 12);
+
+    expect(lastCall()[1]).toMatch(/FROM dbo\.Quotes q WHERE q\.JobID = j\.JobID AND q\.Status <> 'rejected'\) AS QuoteCount/);
+  });
+
   it("finds when the newest email linked to each job arrived, ignoring archived mail", async () => {
     const at = new Date("2026-10-12T00:00:00Z");
     db.executeQuery.mockResolvedValueOnce([{ JobID: 3, LatestAt: at }, { JobID: 4, LatestAt: null }]);

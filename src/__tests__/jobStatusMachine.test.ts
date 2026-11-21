@@ -507,3 +507,23 @@ describe("internal close (isInternal → Done)", () => {
     expect(canTransition(current, JobStatus.DONE, { isInternal: true })).toBe(false);
   });
 });
+
+describe("QUOTES_DECLINED (JOB-03)", () => {
+  const AA_FAC = { status: JobStatus.AWAITING_APPROVAL, awaitingRole: AwaitingRole.FACILITIES };
+
+  it("sends a job waiting on quote approval back to the quote round, and nothing else", () => {
+    expect(nextState(AA_FAC, JobEvent.QUOTES_DECLINED)).toEqual({ status: JobStatus.QUOTE, awaitingRole: AwaitingRole.FACILITIES });
+    for (const status of Object.values(JobStatus)) {
+      for (const awaitingRole of Object.values(AwaitingRole)) {
+        if (status === AA_FAC.status && awaitingRole === AA_FAC.awaitingRole) continue;
+        expect(nextState({ status, awaitingRole }, JobEvent.QUOTES_DECLINED)).toBeNull();
+      }
+    }
+  });
+
+  it("is never a manual pick", () => {
+    expect(canTransition(AA_FAC, JobStatus.QUOTE)).toBe(false);
+    expect(resolveManualTarget(AA_FAC, JobStatus.QUOTE)).toBeNull();
+    expect(allowedNextStatuses(AA_FAC)).not.toContain(JobStatus.QUOTE);
+  });
+});

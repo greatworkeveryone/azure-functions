@@ -23,11 +23,13 @@ const FACTS: LockedJob["facts"] = {
   allInvoicesPaid: false,
   approvedInvoicesNotInMyob: 0,
   hasApprovedQuote: false,
+  hasCompletePurchaseOrder: false,
   hasQuote: false,
   incomingInvoices: 0,
   incomingInvoicesAwaitingApproval: 0,
   isContract: false,
   isInternal: true,
+  purchaseOrdersNotInMyob: 0,
 };
 
 const locked = (over: Partial<LockedJob> = {}, facts: Partial<LockedJob["facts"]> = {}): LockedJob => ({

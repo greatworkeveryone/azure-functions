@@ -1512,8 +1512,9 @@ async function unmarkPurchaseOrderMyobCreated(
 
 // ── POST /api/markPurchaseOrderComplete ──────────────────────────────────────
 // Body: { id, jobId } — the actor is the verified caller, never the body.
-// Requires MyobCreatedAt to be set first. Transitions the job to
-// status='Awaiting Approval', awaitingRole='accounts'. The completion, the job
+// Needs only that the purchase order exists (D3); recording it in MYOB is
+// required before the job closes, not before the work is complete. Transitions
+// the job to status='Awaiting Approval', awaitingRole='accounts'. The completion, the job
 // move and the ledger row commit together or not at all.
 
 interface MarkPurchaseOrderCompleteBody {
@@ -1562,7 +1563,9 @@ async function markPurchaseOrderComplete(
 
     await beginTransaction(connection);
     try {
-      // Locked until commit, so the MYOB marking we check is the one we act on.
+      // Locked until commit, so the row we ledger is the one we complete. D3:
+      // finishing the work needs only that the purchase order exists (there is no
+      // archive state on purchase orders); the MYOB marking is checked at close.
       const rows = await executeQuery(
         connection,
         `SELECT ${PO_LEDGER_COLUMNS} FROM PurchaseOrders WITH (UPDLOCK, HOLDLOCK) WHERE PurchaseOrderID = @Id AND JobID = @JobID`,
@@ -1576,20 +1579,6 @@ async function markPurchaseOrderComplete(
         return { status: 404, jsonBody: { error: "Purchase order not found" } };
       }
       const po = rows[0];
-      if (!po.MyobCreatedAt) {
-        // Completing a PO the books don't have yet is a refused attempt,
-        // ledgered in a transaction of its own now that this one has rolled back.
-        await rollbackTransaction(connection).catch(() => {});
-        const error = "Cannot mark complete — this purchase order has not been marked as created in MYOB yet.";
-        await recordRefusal(
-          connection,
-          actor,
-          { id, type: "purchase_order" },
-          { attempted: "po.complete", code: "not_created_in_myob", message: error },
-          po.JobID as number,
-        );
-        return { status: 400, jsonBody: { error } };
-      }
       const poLabel = po.PONumber ?? `PO #${id}`;
 
       await executeQuery(

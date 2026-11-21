@@ -136,17 +136,31 @@ describe("addJobEvent: the transition guard", () => {
     expect(db.commitTransaction).not.toHaveBeenCalled();
   });
 
-  it("Work with an approved quote moves the job, through an update predicated on the state it read", async () => {
+  it("JOB-09: a legal edge a person doesn't make by hand (Work from approval) is 409 with a plain reason, and nothing is written", async () => {
     mockSql([job({ HasApprovedQuote: 1 }), invoices(), ...ACCEPTS]);
 
     const res = await event({ NewStatus: "Work" });
+
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toMatchObject({
+      code: "moves_on_its_own",
+      error: "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
+    });
+    expect(wroteAnything()).toBe(false);
+    expect(db.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("a hold moves the job, through an update predicated on the state it read", async () => {
+    mockSql([job({ HasApprovedQuote: 1 }), invoices(), ...ACCEPTS]);
+
+    const res = await event({ NewStatus: "Tenant" });
 
     expect(res.status).toBe(200);
     expect(find(GUARDED_UPDATE)?.params).toMatchObject({
       AwaitingRoleMirror: "facilities",
       ExpectedAwaitingRole: "facilities",
       ExpectedStatus: "Awaiting Approval",
-      Status: "Work",
+      Status: "Tenant",
     });
     expect(db.commitTransaction).toHaveBeenCalledTimes(1);
   });
@@ -154,7 +168,7 @@ describe("addJobEvent: the transition guard", () => {
   it("reads the job inside the transaction, locked, before deciding", async () => {
     mockSql([job({ HasApprovedQuote: 1 }), invoices(), ...ACCEPTS]);
 
-    await event({ NewStatus: "Work" });
+    await event({ NewStatus: "Tenant" });
 
     expect(find(JOB_LOCK)?.order).toBeGreaterThan(db.beginTransaction.mock.invocationCallOrder[0]);
   });
@@ -162,7 +176,7 @@ describe("addJobEvent: the transition guard", () => {
   it("answers 409 and keeps nothing when the job moved between the read and the write", async () => {
     mockSql([job({ HasApprovedQuote: 1 }), invoices(), { match: EVENT_INSERT, rows: [{ JobEventID: 77 }] }, { match: GUARDED_UPDATE, rows: [] }]);
 
-    const res = await event({ NewStatus: "Work" });
+    const res = await event({ NewStatus: "Tenant" });
 
     expect(res.status).toBe(409);
     expect(db.rollbackTransaction).toHaveBeenCalled();
@@ -192,6 +206,14 @@ describe("addJobEvent: the transition guard", () => {
     it("an approved invoice not marked in MYOB: 422 invoice_not_in_myob", async () => {
       mockSql([atAccounts, invoices(invoice({ MyobCreatedAt: null })), ...ACCEPTS]);
       expect(await event({ NewStatus: "Done" })).toMatchObject({ jsonBody: { code: "invoice_not_in_myob" }, status: 422 });
+    });
+
+    it("D3: a purchase order not marked in MYOB: 422 purchase_order_not_in_myob, nothing written", async () => {
+      mockSql([job({ AwaitingRole: "accounts", HasApprovedQuote: 1, PurchaseOrdersNotInMyob: 1 }), invoices(invoice()), ...ACCEPTS]);
+      const res = await event({ NewStatus: "Done" });
+      expect(res).toMatchObject({ jsonBody: { code: "purchase_order_not_in_myob" }, status: 422 });
+      expect(wroteAnything()).toBe(false);
+      expect(find(JOB_LOCK)?.sql).toMatch(/PurchaseOrders p WHERE p\.JobID = j\.JobID AND p\.MyobCreatedAt IS NULL\) AS PurchaseOrdersNotInMyob/);
     });
 
     it("every invoice approved (director included) and in MYOB: Done", async () => {

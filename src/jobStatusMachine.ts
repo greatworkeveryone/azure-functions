@@ -38,6 +38,10 @@ export enum JobEvent {
   // the job paid. Raised by the system only, never by a person; the transition
   // guard (jobTransitionGuard.ts) refuses it from anyone else.
   INVOICE_PAID = "INVOICE_PAID",
+  // System edge (audit AF1, JOB-03): the last live quote on a job was declined,
+  // so the job goes back to the quote round. Raised by the decline handler
+  // only; never offered as a manual pick.
+  QUOTES_DECLINED = "QUOTES_DECLINED",
 }
 
 export interface JobState {
@@ -63,7 +67,11 @@ const TRANSITIONS: Transition[] = [
   { from: { status: JobStatus.WORK, awaitingRole: F }, event: JobEvent.WORK_COMPLETED, to: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A } },
   { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A }, event: JobEvent.INVOICE_APPROVED, to: { status: JobStatus.DONE, awaitingRole: A } },
   { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: A }, event: JobEvent.INVOICE_PAID, to: { status: JobStatus.DONE, awaitingRole: A } },
+  { from: { status: JobStatus.AWAITING_APPROVAL, awaitingRole: F }, event: JobEvent.QUOTES_DECLINED, to: { status: JobStatus.QUOTE, awaitingRole: F } },
 ];
+
+/** The edges a person may pick by hand: every edge except the system-only QUOTES_DECLINED. */
+const MANUAL_EDGES = TRANSITIONS.filter((t) => t.event !== JobEvent.QUOTES_DECLINED);
 
 function statesEqual(a: JobState, b: JobState): boolean {
   return a.status === b.status && a.awaitingRole === b.awaitingRole;
@@ -184,7 +192,7 @@ export function canTransition(
   if (opts?.isInternal && target === JobStatus.DONE) {
     return true;
   }
-  return TRANSITIONS.some((t) => statesEqual(t.from, current) && t.to.status === target);
+  return MANUAL_EDGES.some((t) => statesEqual(t.from, current) && t.to.status === target);
 }
 
 export function allowedNextStatuses(
@@ -226,7 +234,7 @@ export function resolveManualTarget(
   if (opts?.isInternal && targetStatus === JobStatus.DONE) {
     return { status: JobStatus.DONE, awaitingRole: current.awaitingRole };
   }
-  const edge = TRANSITIONS.find(
+  const edge = MANUAL_EDGES.find(
     (t) => statesEqual(t.from, current) && t.to.status === targetStatus,
   );
   return edge?.to ?? null;

@@ -1,8 +1,12 @@
 import { approveDirectorQuote, rejectQuote } from "./quote-decisions";
 
 jest.mock("./db", () => ({ executeQuery: jest.fn() }));
+jest.mock("./jobStatusHelpers", () => ({ advanceJobStatus: jest.fn().mockResolvedValue({ advanced: true }) }));
 
 import { executeQuery } from "./db";
+import { advanceJobStatus } from "./jobStatusHelpers";
+
+const mockAdvance = advanceJobStatus as jest.MockedFunction<typeof advanceJobStatus>;
 
 const mockExecuteQuery = executeQuery as jest.MockedFunction<typeof executeQuery>;
 const connection = {} as never;
@@ -42,6 +46,7 @@ const awaiting = {
 
 beforeEach(() => {
   mockExecuteQuery.mockReset();
+  mockAdvance.mockClear();
 });
 
 describe("approveDirectorQuote", () => {
@@ -67,6 +72,24 @@ describe("approveDirectorQuote", () => {
       SourceEmailID: null,
       Text: "Director-approved 260419-QT-42-ACM-1 from Acme Plumbing",
     });
+  });
+
+  // S1-6 / N13: the director's approval is the full approval, so the job moves to Work.
+  it("advances the job with QUOTE_APPROVED in the same transaction as the approval", async () => {
+    stubQuote(awaiting);
+
+    await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7 });
+
+    expect(mockAdvance).toHaveBeenCalledTimes(1);
+    expect(mockAdvance).toHaveBeenCalledWith(connection, 42, "QUOTE_APPROVED", expect.objectContaining({ actor: "Carlo", quoteId: 7 }));
+  });
+
+  it("does not advance the job when the approval is refused", async () => {
+    stubQuote({ ...awaiting, Status: "pending" });
+
+    await approveDirectorQuote(connection, { approvedBy: "Carlo", quoteId: 7 });
+
+    expect(mockAdvance).not.toHaveBeenCalled();
   });
 
   it("marks the event 'via email reply' and stores SourceEmailID when given one", async () => {
@@ -215,6 +238,33 @@ describe("approveDirectorQuote", () => {
 
 describe("rejectQuote", () => {
   const awaitingRow = { JobID: 42, QuoteNumber: "260419-QT-42-ACM-1", Status: "awaiting_director" };
+
+  // JOB-03: declining the last quote still alive puts the job back in the quote round.
+  describe("the job after a decline", () => {
+    const withAlive = (alive: number): void => {
+      mockExecuteQuery.mockImplementation(async (_conn, sql) => {
+        if (/SELECT\s+QuoteID, JobID/i.test(sql)) return [storedQuote];
+        if (/SELECT JobID, QuoteNumber/i.test(sql)) return [awaitingRow];
+        if (/UPDATE Quotes/.test(sql)) return [{ QuoteID: 7 }];
+        if (/COUNT\(\*\) AS Alive FROM Quotes/.test(sql)) return [{ Alive: alive }];
+        return [];
+      });
+    };
+    const decline = () => rejectQuote(connection, { expectedStatuses: ["awaiting_director"], note: "Too dear", quoteId: 7, rejectedBy: "Carlo" });
+
+    it("raises QUOTES_DECLINED when no quote on the job is left alive", async () => {
+      withAlive(0);
+      await decline();
+      expect(mockAdvance).toHaveBeenCalledTimes(1);
+      expect(mockAdvance).toHaveBeenCalledWith(connection, 42, "QUOTES_DECLINED", expect.objectContaining({ actor: "Carlo" }));
+    });
+
+    it("leaves the job alone while another quote is still waiting or approved", async () => {
+      withAlive(2);
+      await decline();
+      expect(mockAdvance).not.toHaveBeenCalled();
+    });
+  });
 
   it("rejects with the note and source email in the event text", async () => {
     stubQuote(awaitingRow);

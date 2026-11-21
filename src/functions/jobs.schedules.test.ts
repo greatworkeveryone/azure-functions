@@ -68,7 +68,7 @@ function given(current: Record<string, unknown>, runs: Record<string, unknown>[]
     // D4: addJobEvent first refuses archived jobs; this one is live.
     { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
     // J2: the transition guard reads the job under lock with its money facts.
-    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasCompletePurchaseOrder: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work", ...current }] },
     { match: /FROM JobEvents|FROM Jobs WHERE JobID/, rows: [] },
   ]);
 }
@@ -83,8 +83,8 @@ it("treats on-to-invoice-approval and Done as the work being completed", () => {
 });
 
 it("completing a scheduled job's work stamps its run and moves the schedule on from the due date, not today", async () => {
-  given({ Status: "Work" }, [run()]);
-  const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval", Text: "Serviced" }), context);
+  given({ Status: "Work", IsContract: false, IsInternal: true }, [run()]);
+  const response = await addJobEvent(post({ JobID: 500, NewStatus: "Done", Text: "Serviced" }), context);
   expect(response.status).toBe(200);
   expect(paramsOf(callsMatching(db.executeQuery, STAMP_RUN)[0])).toEqual({ RunId: 7 });
   // 31 Jan anchor, monthly: after 31 Oct comes 30 Nov (from the anchor, clamped).
@@ -93,31 +93,31 @@ it("completing a scheduled job's work stamps its run and moves the schedule on f
 });
 
 it("does not move a schedule that has already moved on (idempotent)", async () => {
-  given({ Status: "Work" }, [run({ CompletedAt: at("2026-10-30"), NextDue: at("2026-11-30") })]);
-  expect((await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context)).status).toBe(200);
+  given({ Status: "Work", IsContract: false, IsInternal: true }, [run({ CompletedAt: at("2026-10-30"), NextDue: at("2026-11-30") })]);
+  expect((await addJobEvent(post({ JobID: 500, NewStatus: "Done" }), context)).status).toBe(200);
   expect(callsMatching(db.executeQuery, RUN_FOR_JOB)).toHaveLength(1);
   expect(callsMatching(db.executeQuery, STAMP_RUN)).toHaveLength(0);
   expect(callsMatching(db.executeQuery, ADVANCE)).toHaveLength(0);
 });
 
 it("still completes the job, loudly, on a database without migration 120", async () => {
-  given({ Status: "Work" }, []);
+  given({ Status: "Work", IsContract: false, IsInternal: true }, []);
   routeQueries(db.executeQuery, [
     { match: CURRENT, rows: [{ AwaitingRole: "facilities", IsContract: true, IsInternal: false, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
     { match: RUN_FOR_JOB, throws: new Error("Invalid object name 'dbo.ServiceScheduleRuns'.") },
     { match: /INSERT INTO JobEvents/, rows: [{ JobEventID: 1 }] },
     { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
-    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasCompletePurchaseOrder: 1, HasMoneyRecords: 0, IsContract: false, IsInternal: true, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
     { match: /UPDATE Jobs SET[\s\S]*OUTPUT INSERTED\.JobID/, rows: [{ JobID: 500 }] },
   ]);
-  const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);
+  const response = await addJobEvent(post({ JobID: 500, NewStatus: "Done" }), context);
   expect(response.status).toBe(200);
   expect(db.commitTransaction).toHaveBeenCalledTimes(1);
 });
 
 it("leaves jobs that didn't come from a schedule alone", async () => {
-  given({ Status: "Work" }, []);
-  expect((await addJobEvent(post({ JobID: 600, NewStatus: "Awaiting Approval" }), context)).status).toBe(200);
+  given({ Status: "Work", IsContract: false, IsInternal: true }, []);
+  expect((await addJobEvent(post({ JobID: 600, NewStatus: "Done" }), context)).status).toBe(200);
   expect(callsMatching(db.executeQuery, RUN_FOR_JOB)).toHaveLength(1);
   expect(callsMatching(db.executeQuery, ADVANCE)).toHaveLength(0);
 });

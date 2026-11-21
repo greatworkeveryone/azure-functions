@@ -193,7 +193,7 @@ describe("closeJobWhenInvoicesPaid (INVOICE_PAID, for the MYOB read-back)", () =
   const PAID = [{ invoiceId: 3, paidAt: new Date("2026-10-13T23:30:00Z") }];
 
   it("closes the job when every incoming invoice is paid, as the system, with the paid dates", async () => {
-    mockSql([JOB_BUILDING, atAccounts, { match: INVOICES, rows: [paidInvoice] }, { match: /SELECT Status, AwaitingRole FROM Jobs WHERE JobID/, rows: [{ AwaitingRole: "accounts", Status: "Awaiting Approval" }] }]);
+    mockSql([JOB_BUILDING, atAccounts, { match: INVOICES, rows: [paidInvoice] }, { match: SYSTEM_MOVE, rows: [{ JobID: 9 }] }, { match: /SELECT Status, AwaitingRole FROM Jobs WHERE JobID/, rows: [{ AwaitingRole: "accounts", Status: "Awaiting Approval" }] }]);
 
     const result = await closeJobWhenInvoicesPaid({}, 9, { paid: PAID, source: "myobReadBack" });
 

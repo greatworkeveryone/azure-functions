@@ -7,6 +7,7 @@
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { executeQuery } from "./db";
+import { isWorkCompletion, markServiceJobCompleted } from "./serviceScheduleRuns";
 import {
   AwaitingRole,
   JobEvent,
@@ -45,6 +46,8 @@ function defaultEventText(target: JobState, event: JobEvent): string {
       return "Work complete — awaiting accounts approval.";
     case JobEvent.INVOICE_APPROVED:
       return "Invoice approved — job complete.";
+    case JobEvent.QUOTES_DECLINED:
+      return "Every quote was declined — back to the quote round.";
     case JobEvent.TENANT_BLOCKED:
       return "Waiting on tenant.";
     case JobEvent.TENANT_UNBLOCKED:
@@ -87,7 +90,7 @@ export async function advanceJobStatus(
 
   const text = opts.note ?? defaultEventText(target, event);
 
-  await executeQuery(
+  const moved = await executeQuery(
     connection,
     // A real transition resets the accountability clock (WP18a): StatusSince=now
     // and any prior acknowledgement / escalation is cleared, because a fresh
@@ -102,6 +105,7 @@ export async function advanceJobStatus(
            AcknowledgedAt = NULL,
            AcknowledgedBy = NULL,
            EscalatedAt = NULL
+     OUTPUT INSERTED.JobID
      WHERE JobID = @JobID
        AND Status = @ExpectedFromStatus
        AND AwaitingRole = @ExpectedFromRole`,
@@ -113,6 +117,11 @@ export async function advanceJobStatus(
       { name: "ExpectedFromRole", type: TYPES.NVarChar, value: current.awaitingRole },
     ],
   );
+
+  // The UPDATE is predicated on the state read above. If the job moved in the
+  // meantime no row changed, and a status_change event would describe a move
+  // that never happened.
+  if (moved.length === 0) return { advanced: false, from: current, to: null };
 
   await executeQuery(
     connection,
@@ -133,6 +142,13 @@ export async function advanceJobStatus(
       { name: "InvoiceID", type: TYPES.Int, value: opts.invoiceId ?? null },
     ],
   );
+
+  // Service schedules (sprint F2): the work being done moves a scheduled
+  // job's schedule on. It happens here, wherever the money record that
+  // completes the work is saved, because the browser no longer posts statuses.
+  if (isWorkCompletion(target.status, target.awaitingRole)) {
+    await markServiceJobCompleted(connection, jobId, opts.actor ?? "system");
+  }
 
   return { advanced: true, from: current, to: target };
 }
