@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AwaitingRole, JobEvent, JobStatus, nextState, resolveManualTarget } from "../jobStatusMachine";
 import {
+  derivedState,
   flagChangeRefusal,
   guardTransition,
   isHoldOrResume,
@@ -36,8 +37,8 @@ function machinePaid(from: GuardState): GuardState | null {
 // whenever either side changes, together with the guard and the vectors.
 
 /** SHA-256 of jobTransitionGuard.ts and of the vector file, the same in both repos. */
-const GUARD_SHA256 = "902173defa27fc682b1c34f3689aa69d67a4b9054ae2cf4da75845bb1518ad5d";
-const VECTORS_SHA256 = "98669761f06d9ca28fce7062fef3c54caa57ea58f5c9a96e13e51b2952699fb3";
+const GUARD_SHA256 = "2d392b48a2e928a8b714e7315ae7f118e9f88619aadc5a68f6c48bab5739f702";
+const VECTORS_SHA256 = "41673554deb06b11ed6f7e85c478e9622e4936c2a5d29f4d2a5f5802767766e4";
 
 interface Vectors {
   actorRoles: Record<string, string[] | "system">;
@@ -46,6 +47,7 @@ interface Vectors {
   facts: Record<string, GuardFacts>;
   invoicesPaid: [string, string, string, string][];
   manual: [string, string, GuardStatus, string, string][];
+  recompute: [string, string, string, string, string][];
   reopen: [string, string, string, string, string][];
   states: Record<string, { current: GuardState; preBlock: GuardState | null }>;
 }
@@ -119,7 +121,7 @@ describe("job transition guard: shared vectors", () => {
       if (decision.to.status === "Work") expect(jobFacts.hasApprovedQuote || jobFacts.isContract || jobFacts.isInternal).toBe(true);
       if (decision.to.status === "Awaiting Approval" && decision.to.awaitingRole === "accounts" && VECTORS.states[state].current.status !== "Tenant") {
         // S1-1: a job reaches accounts because the work is done, not because someone picked the status.
-        expect(jobFacts.hasCompletePurchaseOrder || ((jobFacts.isContract || jobFacts.isInternal) && jobFacts.incomingInvoices >= 1)).toBe(true);
+        expect(jobFacts.hasCompletePurchaseOrder || jobFacts.incomingInvoices >= 1).toBe(true);
       }
       if (decision.to.status === "Done" && !jobFacts.isInternal) {
         expect([jobFacts.incomingInvoices >= 1, jobFacts.incomingInvoicesAwaitingApproval, jobFacts.approvedInvoicesNotInMyob, jobFacts.purchaseOrdersNotInMyob]).toEqual([true, 0, 0, 0]);
@@ -146,6 +148,43 @@ describe("job transition guard: shared vectors", () => {
       }
       expect(decide(state, facts, { kind: "reopen", reason: "   " }, actor).decision.allowed).toBe(false);
     }
+  });
+
+  it.each(VECTORS.recompute)("recompute: %s · %s · reason %p", (state, facts, reason, outcomes, landing) => {
+    expect(encode(VECTORS.actors.map((actor) => decide(state, facts, { kind: "recompute", reason }, actor)))).toEqual({ outcomes, to: landing });
+  });
+
+  it("recomputes a status from the records only for a manager with a reason, never into or out of Done or off a hold (REV-02)", () => {
+    for (const { actor, facts, state } of space) {
+      const decision = decide(state, facts, { kind: "recompute", reason: "Records were out of step" }, actor).decision;
+      expect(decide(state, facts, { kind: "recompute", reason: "  " }, actor).decision.allowed).toBe(false);
+      if (!decision.allowed) continue;
+      expect(["FM", "AM", "CFO", "D"]).toContain(actor);
+      const from = VECTORS.states[state].current;
+      expect(["Done", "Tenant"]).not.toContain(from.status);
+      expect(decision.to.status).not.toBe("Done");
+      expect(VECTORS.facts[facts].isInternal).toBe(false);
+      expect(decision.to).toEqual(derivedState(VECTORS.facts[facts]));
+      expect(decision.to).not.toEqual(from);
+    }
+  });
+
+  it("works out the status from the records without skipping an approval (REV-02)", () => {
+    const at = (name: string) => derivedState(VECTORS.facts[name]);
+    expect(at("bare")).toEqual({ awaitingRole: "facilities", status: "New" });
+    expect(at("requested")).toEqual({ awaitingRole: "facilities", status: "Quote" });
+    expect(at("quoted")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
+    // An invoice does not stand in for a quote nobody has approved.
+    expect(at("quotedInvoiced")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
+    expect(at("approved")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    expect(at("started")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    expect(at("contract")).toEqual({ awaitingRole: "facilities", status: "New" });
+    expect(at("contractStarted")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    // An invoice still waiting for approval is where the job lands: accounts.
+    expect(at("invoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    expect(at("worked")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    expect(at("contractInvoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    for (const name of Object.keys(VECTORS.facts)) expect(at(name).status).not.toBe("Done");
   });
 
   it("gives every refusal a sentence a person can act on", () => {

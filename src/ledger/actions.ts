@@ -74,6 +74,12 @@ export const LEDGER_ACTIONS = {
   // whose invoices are all paid is a system decision.
   "job.invoices_paid": { exception: false, reasonRequired: false, subjects: ["job"] },
   "job.reopen": { exception: true, reasonRequired: true, subjects: ["job"] },
+  // REV-02: a manager puts a job where its own records say it is, after an
+  // event was lost. An exception, with a reason; before and after carry the
+  // status, the facts the target was worked out from ride in `after`.
+  "job.status_recomputed": { exception: true, reasonRequired: true, subjects: ["job"] },
+  // REV-04: archiving takes a job out of every list, so it carries a reason.
+  "job.archive": { exception: true, reasonRequired: true, subjects: ["job"] },
   // Money-record files (D5): a file taken off a quote, purchase order or
   // invoice. The subject is the record; `before` names the file. An exception,
   // like the other removals from a money record.

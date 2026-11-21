@@ -13,6 +13,8 @@ export const AUDIT_AREAS = [
 // A positive list: a new or unclassified ledger action is never exposed to Facilities.
 export const OPERATIONAL_AUDIT_ACTIONS = [
   "job.reopen",
+  "job.status_recomputed",
+  "job.archive",
   "job.defects_override",
   "service_schedule.archive",
   "service_schedule.create",
