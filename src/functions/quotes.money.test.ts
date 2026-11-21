@@ -114,6 +114,12 @@ describe("upsertQuote: creating", () => {
     expect((await create({ Amount: 500, ContractorName: "Acme" })).status).toBe(200);
   });
 
+  it("ignores a SourceEmailID in the body: only promoting an email makes a quote email-sourced (REV-11)", async () => {
+    mockSql([APP_USER, job(), CREATED, { match: /SELECT\s+QuoteID, JobID, QuoteNumber, Seq/, rows: [{ QuoteID: 7 }] }]);
+    expect((await create({ Amount: 500, ContractorName: "Acme", SourceEmailID: 42 })).status).toBe(200);
+    expect(calls().find((c) => /INSERT INTO Quotes/.test(c.sql))?.params.SourceEmailID).toBeNull();
+  });
+
   it.each([[undefined], [null], [0]])("refuses an amount of %p with 422, writing nothing", async (Amount) => {
     mockSql([APP_USER, job(), CREATED]);
     expect(await create({ Amount })).toEqual({ jsonBody: { code: "amount_invalid", error: "Amount is required and must be more than $0." }, status: 422 });
