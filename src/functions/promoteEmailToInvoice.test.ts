@@ -40,6 +40,8 @@ const { promoteEmailToInvoice } = require("./emails") as {
   promoteEmailToInvoice: (req: HttpRequest, ctx: InvocationContext) => Promise<{ status?: number; jsonBody?: any }>;
 };
 
+// A request that names no contractor id has no address on record to check the sender against
+// (REV-05), so those requests carry the person's confirmation.
 const makeRequest = (body: unknown) =>
   ({ headers: { get: () => null }, json: jest.fn().mockResolvedValue(body), query: new URLSearchParams() }) as unknown as HttpRequest;
 const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
@@ -69,7 +71,7 @@ beforeEach(() => {
 describe("promoteEmailToInvoice — SupplierInvoiceNumber", () => {
   it("stores the extracted invoice number as the supplier's number too", async () => {
     const res = await promoteEmailToInvoice(
-      makeRequest({ EmailID: 3, JobID: 42, Amount: 100, ContractorName: "Acme", InvoiceNumber: " INV-0441 " }),
+      makeRequest({ EmailID: 3, JobID: 42, Amount: 100, ContractorName: "Acme", InvoiceNumber: " INV-0441 ", confirmUnverifiedSender: true }),
       ctx,
     );
 
@@ -82,25 +84,25 @@ describe("promoteEmailToInvoice — SupplierInvoiceNumber", () => {
 
   it("prefers an explicit SupplierInvoiceNumber", async () => {
     await promoteEmailToInvoice(
-      makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "OLD", SupplierInvoiceNumber: "INV-9" }),
+      makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "OLD", SupplierInvoiceNumber: "INV-9", confirmUnverifiedSender: true }),
       ctx,
     );
     expect(insertParams().SupplierInvoiceNumber).toBe("INV-9");
   });
 
   it("stores NULL when the email had no invoice number", async () => {
-    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42 }), ctx);
+    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, confirmUnverifiedSender: true }), ctx);
     expect(insertParams().SupplierInvoiceNumber).toBeNull();
     db.executeQuery.mockClear();
-    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "A-1" }), ctx);
+    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "A-1", confirmUnverifiedSender: true }), ctx);
     expect(insertParams().SupplierInvoiceNumber).toBe("A-1");
     db.executeQuery.mockClear();
-    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: null }), ctx);
+    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: null, confirmUnverifiedSender: true }), ctx);
     expect(insertParams().SupplierInvoiceNumber).toBeNull();
   });
 
   it("returns 400 for an over-long number before writing anything", async () => {
-    const res = await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "x".repeat(256) }), ctx);
+    const res = await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, InvoiceNumber: "x".repeat(256), confirmUnverifiedSender: true }), ctx);
     expect(res.status).toBe(400);
     expect(db.executeQuery).not.toHaveBeenCalled();
   });
@@ -159,14 +161,14 @@ describe("promoteEmailToInvoice — the contractor", () => {
   });
 
   it("leaves the id null when only a name comes, and never looks the name up", async () => {
-    await promoteEmailToInvoice(makeRequest({ Amount: 100, ContractorName: "Acme Plumbing", EmailID: 3, JobID: 42 }), ctx);
+    await promoteEmailToInvoice(makeRequest({ Amount: 100, ContractorName: "Acme Plumbing", EmailID: 3, JobID: 42, confirmUnverifiedSender: true }), ctx);
 
     expect(insertParams()).toMatchObject({ ContractorID: null, ContractorName: "Acme Plumbing" });
     expect(contractorLookups()).toHaveLength(0);
   });
 
   it("stores neither when the request names no contractor", async () => {
-    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42 }), ctx);
+    await promoteEmailToInvoice(makeRequest({ Amount: 100, EmailID: 3, JobID: 42, confirmUnverifiedSender: true }), ctx);
 
     expect(insertParams()).toMatchObject({ ContractorID: null, ContractorName: null });
     expect(contractorLookups()).toHaveLength(0);
