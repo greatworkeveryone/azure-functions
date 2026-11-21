@@ -173,7 +173,8 @@ export async function decideRoleGrant(request: HttpRequest, context: InvocationC
       );
       if (decision === "confirm") {
         const before = (grant.CurrentRole as string | null) ?? null;
-        await executeQuery(connection, `UPDATE dbo.AppUsers SET Role = @Role${isReactivation ? ", IsActive = 1" : ""} WHERE UserID = @UserID`, [
+        const ACTIVATE = isReactivation ? ", IsActive = 1" : "";
+        await executeQuery(connection, `UPDATE dbo.AppUsers SET Role = @Role${ACTIVATE} WHERE UserID = @UserID`, [
           { name: "Role", type: TYPES.NVarChar, value: requestedRole },
           { name: "UserID", type: TYPES.Int, value: targetUserId },
         ]);
