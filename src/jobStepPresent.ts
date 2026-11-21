@@ -5,13 +5,15 @@
 // when the viewer is the assignee or the named approver or, for a job nobody owns, holds the capability the step needs.
 // A viewer without that capability never gets a disabled button: they get a wait that says who can act.
 
-import type { NextAction, StepActor, StepJumpTarget, StepDirectAction } from "./jobStepTypes";
+import type { NextAction, StepActor, StepDirectAction, StepJumpTarget } from "./jobStepTypes";
 
 export interface StepViewer {
   /** Whether the viewer holds an action-roles capability (useCan on the screen, the role table in tests). */
   can: (capability: string) => boolean;
   name: string | null;
   oid: string | null;
+  /** The viewer's role names. Used only where a step waits on one role (`waitingOnRole`); absent, that check is skipped. */
+  roles?: readonly string[];
   userId: number | null;
 }
 
@@ -76,6 +78,19 @@ export function presentNextAction(next: NextAction, viewer: StepViewer): Present
       label: "Waiting on another approver (you added this)",
       onViewer: false,
       waitLine: `Waiting on ${next.who}`,
+    };
+  }
+
+  // A step that waits on one role (the purchase order: a facilities manager) is not "on you" for another role that
+  // merely holds the capability: it reads as a plain wait naming who.
+  if (holds && next.waitingOnRole && viewer.roles && !viewer.roles.includes(next.waitingOnRole)) {
+    return {
+      ...base,
+      emphasis: "secondary",
+      isPassive: true,
+      label: `Waiting on ${next.who} to ${next.task}`,
+      onViewer: false,
+      waitLine: waitLineOf(next, false),
     };
   }
 
