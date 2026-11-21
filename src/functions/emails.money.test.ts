@@ -75,8 +75,8 @@ const job = (over: Record<string, unknown> = {}): Route => ({
   rows: [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Awaiting Approval", ...over }],
 });
 const EMAIL: Route = {
-  match: /SELECT EmailID, MatchedJobID, ReceivedAt, AIClassification FROM Emails/,
-  rows: [{ AIClassification: "quote", EmailID: 42, MatchedJobID: 9, ReceivedAt: new Date("2026-10-10T00:00:00Z") }],
+  match: /SELECT EmailID, (MatchedJobID, ReceivedAt, AIClassification, )?FromAddress/,
+  rows: [{ AIClassification: "quote", EmailID: 42, FromAddress: "acme@acme.example", MatchedJobID: 9, ReceivedAt: new Date("2026-10-10T00:00:00Z"), SenderAuthenticated: true, Source: "graph" }],
 };
 const QUOTE_INSERT: Route = { match: /INSERT INTO Quotes/, rows: [{ QuoteID: 7 }] };
 const INVOICE_INSERT: Route = { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] };
@@ -157,7 +157,7 @@ describe.each([
 
 describe("promoteEmailToInvoice: an emailed invoice is a contractor's (incoming)", () => {
   it("is refused on a done job: decision 18 lets only outgoing invoices through", async () => {
-    mockSql([APP_USER, JOB_BUILDING, job({ Status: "Done" }), INVOICE_INSERT]);
+    mockSql([APP_USER, JOB_BUILDING, EMAIL, job({ Status: "Done" }), INVOICE_INSERT]);
     const res = await promoteEmailToInvoice(makeRequest({ Amount: 500, EmailID: 42, JobID: 9 }), ctx);
     expect(res).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
   });
