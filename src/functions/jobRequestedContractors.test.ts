@@ -76,6 +76,12 @@ describe("addJobRequestedContractor", () => {
     expect(sqls().some((s) => /UPDATE Jobs SET LastModifiedDate/.test(s))).toBe(true);
     expect(params(/'contractor_requested'/).Text).toBe("Added Acme to the quote request");
   });
+  it("stamps the verified name, never one from the body (SECA-07)", async () => {
+    mockSql([{ match: /OUTPUT INSERTED\.ID/, rows: [{ ID: 4 }] }, { match: /WHERE ID = @ID/, rows: [{ ID: 4 }] }]);
+    await post("addJobRequestedContractor", { addedBy: "Jo Director", contractorName: "Acme", jobId: 9 });
+    expect(params(/INSERT INTO JobRequestedContractors/).AddedBy).toBe("Fi Facilities");
+    expect(params(/'contractor_requested'/).CreatedBy).toBe("Fi Facilities");
+  });
   it("400s without a contractor name", async () => {
     expect((await post("addJobRequestedContractor", { jobId: 9 })).status).toBe(400);
   });

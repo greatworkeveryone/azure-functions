@@ -8,10 +8,16 @@ import { join } from "node:path";
 
 const FUNCTIONS_DIR = join(__dirname, "..", "functions");
 
-const IDENTITY_FIELDS = [
+const PASCAL_FIELDS = [
   "CreatedBy", "UpdatedBy", "ApprovedBy", "AttachedBy", "UploadedBy", "ClaimedBy",
   "ArchivedBy", "FlaggedBy", "RejectedBy", "CompletedBy", "ValidatedBy", "UnapprovedBy",
-  "UncompletedBy", "SentBy", "PaidBy", "DeletedBy", "UserId", "UserID", "Actor", "Approver",
+  "UncompletedBy", "AddedBy", "SentBy", "PaidBy", "DeletedBy", "UserId", "UserID", "Actor", "Approver",
+];
+// SECA-07: the camelCase spelling (addedBy) slipped past a PascalCase-only list. UserId stays
+// PascalCase only: userId is a legitimate target in a few handlers (the person acted on).
+const IDENTITY_FIELDS = [
+  ...PASCAL_FIELDS,
+  ...PASCAL_FIELDS.filter((f) => !/^User/.test(f)).map((f) => f[0].toLowerCase() + f.slice(1)),
 ].join("|");
 
 const PROPERTY_READ = new RegExp(`\\bbody\\??\\.(?:${IDENTITY_FIELDS})\\b|\\bbody\\??\\.?\\[\\s*["'\`](?:${IDENTITY_FIELDS})["'\`]\\s*\\]`);
@@ -41,5 +47,7 @@ describe("no handler takes identity from the request body", () => {
     expect(DESTRUCTURED.test("const { WorkRequestID, UpdatedBy, ...fields } = body ?? {};")).toBe(true);
     expect(DESTRUCTURED.test("const {\n  QuoteID,\n  CreatedBy,\n} = (await request.json()) as any;")).toBe(true);
     expect(DESTRUCTURED.test("const { QuoteID, Amount } = body ?? {};")).toBe(false);
+    expect(DESTRUCTURED.test("const { jobId, addedBy } = body ?? {};")).toBe(true);
+    expect(PROPERTY_READ.test("const by = body.addedBy;")).toBe(true);
   });
 });

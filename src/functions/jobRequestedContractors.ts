@@ -21,7 +21,6 @@ interface AddJobRequestedContractorBody {
   jobId: number;
   contractorId?: number;
   contractorName: string;
-  addedBy?: string;
 }
 
 interface RemoveJobRequestedContractorBody {
@@ -121,7 +120,7 @@ async function getJobRequestedContractors(
 }
 
 // ── POST /api/addJobRequestedContractor ──────────────────────────────────────
-// Body: { jobId, contractorId?, contractorName, addedBy? }
+// Body: { jobId, contractorId?, contractorName }. The actor comes from the token.
 
 async function addJobRequestedContractor(
   request: HttpRequest,
@@ -139,7 +138,8 @@ async function addJobRequestedContractor(
   let connection;
   try {
     const body = (await request.json()) as AddJobRequestedContractorBody;
-    const { jobId, contractorId, contractorName, addedBy } = body ?? {};
+    const { jobId, contractorId, contractorName } = body ?? {};
+    const addedBy = await actorFromRequest(request);
 
     if (typeof jobId !== "number") {
       return { status: 400, jsonBody: { error: "jobId (number) required" } };
