@@ -544,6 +544,11 @@ export const ACTION_ROLES = {
     routes: ["postWorkflowSignals"],
     why: "Opt-in bounded request-outcome telemetry for the verified caller; no input content or record identifiers.",
   },
+  reportProblem: {
+    gate: [A.USER],
+    routes: ["createStaffReport", "getMyStaffReports"],
+    why: "Report a problem (decision D4): any signed-in member of staff files one problem against a building, which lands in Job intake marked as staff-reported, and reads where their own reports have got to. The reporter is the verified token, never the body.",
+  },
   viewUsageAnalytics: {
     gate: [A.ADMIN, A.DIRECTOR],
     routes: ["getUsageOverview", "getUsagePeople", "getUsageDevices", "getUsageModules", "getUsageEmail", "getUsageAi", "getAiCost"],
