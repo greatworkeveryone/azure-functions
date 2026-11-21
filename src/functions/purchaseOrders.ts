@@ -68,6 +68,7 @@ import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance, type VarianceBody } from "../moneyVariance-db";
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
 import { checkPurchaseOrderSpend } from "../purchaseOrderSpend-db";
+import { contactChangeHolds, contactChangeSentence } from "../contractorContactHold";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import { Sentry } from "../sentry";
@@ -903,6 +904,8 @@ async function previewPurchaseOrder(
 
 interface SendPurchaseOrderBody {
   PurchaseOrderID?: number;
+  /** SECA-04: the sender ticked that they checked a contractor's recently changed email address. */
+  ContactChangeChecked?: boolean;
   /** R13: a PO above its approved quote goes out within the margin: { attributedToUserId, rationale, directorOverrideReason? }. */
   variance?: unknown;
   /** @deprecated ignored — identity comes from the token */
@@ -967,6 +970,7 @@ async function sendPurchaseOrder(
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
               po.EstimatedCost, po.CostNotToExceed, po.SentAt, po.SendAttemptedAt,
+              c.ContactChangedAt, c.ContactChangedBy, c.ContactConfirmedAt,
               CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -989,6 +993,28 @@ async function sendPurchaseOrder(
     const recipient = resolveRecipient(contractorRows[0]?.EmailAddress);
     if (!recipient.address) {
       return { status: 400, jsonBody: { error: "Contractor has no email address." } };
+    }
+    // SECA-04: a contractor's email or ABN changed recently and no second person has confirmed it, so
+    // the sender has to say they have checked the address before the order goes to it.
+    const contact = {
+      changedAt: (contractorRows[0].ContactChangedAt as Date | null | undefined) ?? null,
+      changedBy: (contractorRows[0].ContactChangedBy as string | null | undefined) ?? null,
+      confirmedAt: (contractorRows[0].ContactConfirmedAt as Date | null | undefined) ?? null,
+    };
+    const contactHeld = contactChangeHolds(contact);
+    if (contactHeld && body?.ContactChangeChecked !== true) {
+      const message = `${contactChangeSentence(contact)}. Check the address with the contractor, or ask an accounts manager, the CFO or a director to confirm it, before sending.`;
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: "contractor_contact_changed", message },
+        contractorRows[0].JobID as number,
+      );
+      return {
+        status: 409,
+        jsonBody: { changedAt: contact.changedAt, changedBy: contact.changedBy, code: "contractor_contact_changed", error: message, sentence: contactChangeSentence(contact) },
+      };
     }
     const pdfBlobName = contractorRows[0].PDFBlobName as string;
     const poNumber = contractorRows[0].PONumber as string | null;
@@ -1172,7 +1198,7 @@ async function sendPurchaseOrder(
       await record(connection, {
         action: "po.send",
         actor,
-        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
+        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]), ...(contactHeld ? { contactChangeChecked: true } : {}) },
         // A re-send shows the earlier send here.
         before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null, ...contractorFacts(contractorRows[0]) },
         buildingId: scope.buildingId,

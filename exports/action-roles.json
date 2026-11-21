@@ -145,6 +145,11 @@
     "facilities",
     "facilities_manager"
   ],
+  "confirmContractorContact": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
   "createInvoice": [
     "accounts",
     "accounts_manager",

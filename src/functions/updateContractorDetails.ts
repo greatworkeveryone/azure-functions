@@ -10,7 +10,9 @@
 //
 // The client sends the version it loaded (UpdatedAt as text, from getContractors); a stale one
 // is a 409 and nothing is written. Every change is a ledger exception with before and after:
-// a changed email redirects purchase orders.
+// a changed email redirects purchase orders, so a changed email or ABN also starts the SECA-04 hold:
+// a purchase order to that contractor needs the sender's tick until a second person confirms
+// (confirmContractorContact) or two business days pass.
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
@@ -59,6 +61,12 @@ export function parseContractorDetails(body: Record<string, unknown>): ParseResu
 // Staging never writes to the real myBuildings, whatever the setting says (config/stagingGuard.ts).
 const pushEnabled = () => !isStaging() && process.env.MYBUILDINGS_CONTRACTOR_PUSH !== "false";
 
+/** An email or ABN change is the one that redirects money, so it starts the SECA-04 hold (contractorContactHold.ts). */
+export function contactDetailsChanged(before: Pick<ContractorDetails, "ABN" | "EmailAddress">, after: Pick<ContractorDetails, "ABN" | "EmailAddress">): boolean {
+  const norm = (value: string | null | undefined) => (value ?? "").trim().toLowerCase();
+  return norm(before.EmailAddress) !== norm(after.EmailAddress) || norm(before.ABN) !== norm(after.ABN);
+}
+
 const SELECT_ROW = `SELECT ContractorID, ContractorName, ContactFirstName, ContactLastName, PhoneNumber, MobileNumber, EmailAddress, ABN,
   COALESCE(CONVERT(varchar(33), UpdatedAt, 126), '') AS Version
   FROM dbo.Contractors WITH (UPDLOCK, HOLDLOCK) WHERE ContractorID = @Id`;
@@ -84,14 +92,27 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
       if (!before) return txFail(notFound("That contractor isn't in Floorplan"));
       if (before.Version !== input.version) return txFail(conflict("Someone else changed this contractor. Reload to see their version."));
 
+      const contactChanged = contactDetailsChanged(before, input.details);
       const params: SqlParam[] = [idParam, ...CONTRACTOR_DETAIL_FIELDS.map((field) => ({ name: field, type: TYPES.NVarChar, value: input.details[field] }))];
       await executeQuery(
         conn,
-        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE() WHERE ContractorID=@Id`,
-        params,
+        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE()${
+          contactChanged
+            ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=@ChangedByOid, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
+            : ""
+        } WHERE ContractorID=@Id`,
+        contactChanged
+          ? [...params, { name: "ChangedBy", type: TYPES.NVarChar, value: actor.name }, { name: "ChangedByOid", type: TYPES.NVarChar, value: auth.caller.oid }]
+          : params,
       );
       const beforeDetails = Object.fromEntries(CONTRACTOR_DETAIL_FIELDS.map((field) => [field, before[field] ?? null]));
-      await record(conn, { action: "contractor.update", actor, after: input.details, before: beforeDetails, subject: { id: input.contractorId, type: "contractor" } });
+      await record(conn, {
+        action: "contractor.update",
+        actor,
+        after: contactChanged ? { ...input.details, contactHeldForSecondPerson: true } : input.details,
+        before: beforeDetails,
+        subject: { id: input.contractorId, type: "contractor" },
+      });
 
       if (pushEnabled()) {
         try {

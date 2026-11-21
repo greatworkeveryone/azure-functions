@@ -778,6 +778,12 @@ export const ACTION_ROLES = {
     routes: [],
     why: "See the users table (VIEW_USERS_ROLES, users.ts): admin and directors. Inviting and changing roles is admin only (manageUsers).",
   },
+  confirmContractorContact: {
+    gate: [A.ACCOUNTS_APPROVAL],
+    refused: [A.ADMIN],
+    routes: ["confirmContractorContact"],
+    why: "Confirm a changed contractor email or ABN as a second person: an accounts manager, the CFO or a director, never the person who changed it (SECA-04). The handler refuses admin.",
+  },
   decideRoleGrant: {
     gate: [A.ADMIN, A.DIRECTOR],
     match: "exact",

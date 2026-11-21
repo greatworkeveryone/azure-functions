@@ -322,6 +322,8 @@ export const LEDGER_ACTIONS = {
   // unusual, so it is an exception too.
   // Contractor details pushed to myBuildings (updateContractors): a changed
   // email redirects purchase orders, so the write is always an exception.
+  // SECA-04: a second person confirming a changed contractor email or ABN (migration 196).
+  "contractor.contact_confirm": { exception: true, reasonRequired: false, subjects: ["contractor"] },
   "contractor.update": { exception: true, reasonRequired: false, subjects: ["contractor"] },
   "access.anomaly": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   "access.profile_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },

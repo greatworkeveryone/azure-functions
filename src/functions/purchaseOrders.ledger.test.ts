@@ -1686,3 +1686,62 @@ describe("SECA-03 / JOB-20: who may commit spend on purchase orders", () => {
     });
   });
 });
+
+describe("SECA-04: a contractor's changed email holds the send until the sender has checked it", () => {
+  const recent = new Date(Date.now() - 3600_000);
+  const sendRow = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT c\.EmailAddress, po\.PDFBlobName/,
+    rows: [{ ContactChangedAt: recent, ContactChangedBy: "Sam Lee", ContactConfirmedAt: null, ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 800, EmailAddress: "c@example.com", EstimatedCost: 700, JobID: 42, PDFBlobName: "po/99.pdf", PONumber: "66Se261013", SentAt: null, ...over }],
+  });
+  const JOB: Route = { match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/, rows: [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: true, IsInternal: false, JobID: 42, Status: "Work" }] };
+  const stored: Route = { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] };
+  const send = (body: Record<string, unknown> = {}) => sendPurchaseOrder(makeRequest({ PurchaseOrderID: 99, ...body }), ctx);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetRateLimitForTests();
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    auth.requireRole.mockResolvedValue(null);
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    db.beginTransaction.mockResolvedValue(undefined);
+    db.commitTransaction.mockResolvedValue(undefined);
+    db.rollbackTransaction.mockResolvedValue(undefined);
+    db.createRequestConnection.mockResolvedValue({ id: "connection" });
+    graph.graphSendMail.mockResolvedValue(undefined);
+    blobs.downloadBlob.mockResolvedValue(Buffer.from("pdf"));
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([]);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it("refuses an unticked send with the sentence the dialog shows, and no mail leaves", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow(), JOB, stored]);
+
+    const res = await send();
+
+    expect(res.status).toBe(409);
+    expect(res.jsonBody).toMatchObject({ changedBy: "Sam Lee", code: "contractor_contact_changed" });
+    expect((res.jsonBody as { sentence: string }).sentence).toMatch(/^Email changed on \d+\/\d+\/\d{4} by Sam Lee$/);
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+  });
+
+  it("sends once the sender has ticked that they checked it, and the ledger says so", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow(), JOB, stored]);
+    const res = await send({ ContactChangeChecked: true });
+    expect(res.status).toBe(200);
+    expect(ledgerInserts(db.executeQuery).find((r) => r.action === "po.send")?.after).toMatchObject({ contactChangeChecked: true });
+  });
+
+  it("needs no tick once a second person has confirmed, or when nothing changed", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactConfirmedAt: new Date() }), JOB, stored]);
+    expect((await send()).status).toBe(200);
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedAt: null, ContactChangedBy: null }), JOB, stored]);
+    expect((await send()).status).toBe(200);
+  });
+
+  it("needs no tick after two business days", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedAt: new Date(Date.now() - 6 * 86400_000) }), JOB, stored]);
+    expect((await send()).status).toBe(200);
+  });
+});
+
