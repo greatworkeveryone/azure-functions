@@ -99,6 +99,9 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
           { ABN: existing[0].ABN as string | null, EmailAddress: existing[0].EmailAddress as string | null },
           { ABN: c.ABN ?? null, EmailAddress: c.EmailAddress ?? null },
         );
+        const HOLD_COLUMNS = holds
+          ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=NULL, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
+          : "";
         await executeQuery(connection,
           `UPDATE Contractors SET
            ThirdPartySystem_ContractorID=@ThirdPartyContractorID,
@@ -107,12 +110,7 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
            Suspended=@Suspended, EmailAddress=@EmailAddress,
            PhoneNumber=@PhoneNumber, MobileNumber=@MobileNumber,
            ContactFirstName=@ContactFirstName, ContactLastName=@ContactLastName,
-           LastSyncedAt=GETUTCDATE(), UpdatedAt=GETUTCDATE()${
-             holds
-               ? `, ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=NULL,
-           ContactConfirmedAt=NULL, ContactConfirmedBy=NULL`
-               : ""
-           }
+           LastSyncedAt=GETUTCDATE(), UpdatedAt=GETUTCDATE()${HOLD_COLUMNS}
            WHERE ContractorID=@ContractorID`, holds ? [...p, { name: "ChangedBy", type: TYPES.NVarChar, value: SYNC_CHANGED_BY }] : p);
         updated++;
       } else {
