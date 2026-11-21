@@ -109,26 +109,26 @@ export const FLAG_ROLES: readonly string[] = Object.freeze(["facilities_manager"
 const REASONS: Record<GuardRefusal, string> = {
   done_is_final: "This job is done. A manager can reopen it, with a reason.",
   illegal: "A job can't move there from where it is now.",
+  internal_job: "An internal job has no quotes, purchase orders or invoices to work its status out from.",
   invoice_missing: "A job is closed against an invoice: add the contractor's invoice first.",
   invoice_not_approved: "Every contractor invoice must be fully approved before the job is closed.",
   invoice_not_in_myob:
     "Every approved invoice must be marked as created in MYOB before the job is closed. An accounts manager, CFO or director can mark it.",
   invoices_not_paid: "Not every invoice on this job is paid yet.",
+  moves_on_its_own:
+    "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
   no_quote: "Add the quote before sending it for approval.",
   not_done: "Only a done job can be reopened.",
   on_hold: "This job is on hold. Resume it first, then fix its status.",
-  internal_job: "An internal job has no quotes, purchase orders or invoices to work its status out from.",
-  status_already_right: "The job's status already matches its records.",
   purchase_order_not_in_myob:
     "Every purchase order on this job must be marked as recorded in MYOB before the job is closed. An accounts manager, facilities manager, CFO or director can mark it from the purchase order.",
-  work_not_complete:
-    "A job goes to accounts once the work is marked complete on its purchase order, which a facilities officer or an accounts manager can do, or once the contractor's invoice is added.",
-  moves_on_its_own:
-    "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
   quote_not_approved: "Work starts once a quote is approved (or on a contract or internal job).",
   reason_required: "Say why the job's status is being changed.",
   role_not_permitted: "Your role can't make this change.",
+  status_already_right: "The job's status already matches its records.",
   system_only: "Only the MYOB read-back can close a job as paid.",
+  work_not_complete:
+    "A job goes to accounts once the work is marked complete on its purchase order, which a facilities officer or an accounts manager can do, or once the contractor's invoice is added.",
 };
 
 function refuse(code: GuardRefusal): GuardDecision {
@@ -164,9 +164,9 @@ function guardRecompute(input: GuardInput, reason: string): GuardDecision {
   if (current.status === "Tenant") return refuse("on_hold");
   if (facts.isInternal) return refuse("internal_job");
   if (typeof reason !== "string" || reason.trim() === "") return refuse("reason_required");
-  const to = derivedState(facts);
-  if (to.status === current.status && to.awaitingRole === current.awaitingRole) return refuse("status_already_right");
-  return { allowed: true, to };
+  const target = derivedState(facts);
+  if (target.status === current.status && target.awaitingRole === current.awaitingRole) return refuse("status_already_right");
+  return { allowed: true, to: target };
 }
 
 function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {

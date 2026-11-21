@@ -37,7 +37,7 @@ function machinePaid(from: GuardState): GuardState | null {
 // whenever either side changes, together with the guard and the vectors.
 
 /** SHA-256 of jobTransitionGuard.ts and of the vector file, the same in both repos. */
-const GUARD_SHA256 = "2d392b48a2e928a8b714e7315ae7f118e9f88619aadc5a68f6c48bab5739f702";
+const GUARD_SHA256 = "1c037e1c0dd53e9c363eaa2c1324b7e323e92c08aeb11edaf099ee643490fd1e";
 const VECTORS_SHA256 = "41673554deb06b11ed6f7e85c478e9622e4936c2a5d29f4d2a5f5802767766e4";
 
 interface Vectors {
@@ -170,21 +170,21 @@ describe("job transition guard: shared vectors", () => {
   });
 
   it("works out the status from the records without skipping an approval (REV-02)", () => {
-    const at = (name: string) => derivedState(VECTORS.facts[name]);
-    expect(at("bare")).toEqual({ awaitingRole: "facilities", status: "New" });
-    expect(at("requested")).toEqual({ awaitingRole: "facilities", status: "Quote" });
-    expect(at("quoted")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
+    const derived = (name: string) => derivedState(VECTORS.facts[name]);
+    expect(derived("bare")).toEqual({ awaitingRole: "facilities", status: "New" });
+    expect(derived("requested")).toEqual({ awaitingRole: "facilities", status: "Quote" });
+    expect(derived("quoted")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
     // An invoice does not stand in for a quote nobody has approved.
-    expect(at("quotedInvoiced")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
-    expect(at("approved")).toEqual({ awaitingRole: "facilities", status: "Work" });
-    expect(at("started")).toEqual({ awaitingRole: "facilities", status: "Work" });
-    expect(at("contract")).toEqual({ awaitingRole: "facilities", status: "New" });
-    expect(at("contractStarted")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    expect(derived("quotedInvoiced")).toEqual({ awaitingRole: "facilities", status: "Awaiting Approval" });
+    expect(derived("approved")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    expect(derived("started")).toEqual({ awaitingRole: "facilities", status: "Work" });
+    expect(derived("contract")).toEqual({ awaitingRole: "facilities", status: "New" });
+    expect(derived("contractStarted")).toEqual({ awaitingRole: "facilities", status: "Work" });
     // An invoice still waiting for approval is where the job lands: accounts.
-    expect(at("invoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
-    expect(at("worked")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
-    expect(at("contractInvoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
-    for (const name of Object.keys(VECTORS.facts)) expect(at(name).status).not.toBe("Done");
+    expect(derived("invoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    expect(derived("worked")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    expect(derived("contractInvoiced")).toEqual({ awaitingRole: "accounts", status: "Awaiting Approval" });
+    for (const name of Object.keys(VECTORS.facts)) expect(derived(name).status).not.toBe("Done");
   });
 
   it("gives every refusal a sentence a person can act on", () => {
