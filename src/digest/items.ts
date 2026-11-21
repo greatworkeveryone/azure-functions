@@ -31,6 +31,8 @@ import type { DirectoryUser } from "../escalation/types";
 import { runsContractorFlow } from "../jobKinds";
 import { jobPath, stepForSubject } from "../jobLinks";
 import { DIGEST_MAX_LINES } from "./config";
+import { obligationItems } from "./obligationItems";
+import type { LoadedObligationsLike } from "../obligations";
 import { clip, formatDisplayDate } from "./format";
 import type { DigestFacts, DigestItem, DigestItemKind, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
 
@@ -38,6 +40,8 @@ export interface DeriveContext {
   /** The approval-authority facts for a building (limits, threshold). */
   authorityFacts(buildingId: number | null): AuthorityFacts;
   now: Date;
+  /** The one list every count reads (AF6). When present, the lines for approvals, escalations and jobs come from it. */
+  obligations?: LoadedObligationsLike;
 }
 
 const LINE_MAX = 140;
@@ -188,7 +192,10 @@ function compareItems(a: DigestItem, b: DigestItem): number {
 
 /** Everything that needs this person, best first, with each job or checkout once. */
 export function deriveItems(user: DigestUser, facts: DigestFacts, ctx: DeriveContext): DigestItem[] {
-  const all = [...escalationItems(user, facts), ...approvalItems(user, facts, ctx), ...dueItems(user, facts, ctx), ...keyItems(user, facts)];
+  const fromObligations = ctx.obligations ? obligationItems(user, ctx.obligations) : null;
+  const all = fromObligations
+    ? [...fromObligations, ...keyItems(user, facts)]
+    : [...escalationItems(user, facts), ...approvalItems(user, facts, ctx), ...dueItems(user, facts, ctx), ...keyItems(user, facts)];
   const best = new Map<string, DigestItem>();
   for (const item of all) {
     const kept = best.get(item.dedupeKey);

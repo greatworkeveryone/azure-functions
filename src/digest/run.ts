@@ -26,6 +26,7 @@ import { buildDigestEmail } from "./email";
 import { deriveItems, type DeriveContext } from "./items";
 import { recordDigestSent } from "./sentStore";
 import { loadDigestFacts } from "./store";
+import { loadObligations, type LoadedObligations } from "../obligations/load";
 import type { DigestFacts, DigestUser } from "./types";
 import { errorMessage } from "../errorMessage";
 
@@ -62,6 +63,8 @@ export interface DigestReport {
 export interface DigestDeps {
   authority(connection: Connection, buildingIds: readonly (number | null)[]): Promise<DeriveContext["authorityFacts"]>;
   load(connection: Connection, now: Date): Promise<DigestFacts>;
+  /** The obligations every person's lines come from (AF6); absent: the older per-kind derivation. */
+  obligations?(connection: Connection, now: Date): Promise<LoadedObligations>;
   /** Stamps a person with the Darwin day their digest went. */
   record(connection: Connection, userId: number, darwinDay: string): Promise<void>;
   send: SendMail;
@@ -80,6 +83,7 @@ async function loadAuthority(connection: Connection, buildingIds: readonly (numb
 export const defaultDeps: DigestDeps = {
   authority: loadAuthority,
   load: loadDigestFacts,
+  obligations: loadObligations,
   record: recordDigestSent,
   send: (to, subject, body, egress) => graphSendMail(egress, to, subject, body),
 };
@@ -108,7 +112,9 @@ export async function runDigest(connection: Connection, options: DigestOptions, 
   const facts = await deps.load(connection, now);
   const buildingIds = facts.waitingApprovals.map((approval) => approval.buildingId);
   const authorityFacts = await deps.authority(connection, buildingIds);
-  const context: DeriveContext = { authorityFacts, now };
+  const obligations = deps.obligations ? await deps.obligations(connection, now) : undefined;
+  if (obligations && obligations.unavailable.length > 0) options.log(`digest: could not read ${obligations.unavailable.join(", ")}; those lines are left out today`);
+  const context: DeriveContext = { authorityFacts, now, obligations };
   const today = darwinDateKey(now);
   const dedup = dedupApplies(env);
 
