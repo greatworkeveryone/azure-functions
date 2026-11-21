@@ -52,6 +52,7 @@ import { loadJobForTransition } from "../jobTransitionFacts";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { withJobSteps } from "../jobStepFacts";
+import { notifyJobReassigned, RESTART_STALL_CLOCK_SQL } from "../jobReassignmentNotice";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
 import { JOB_PRIORITIES } from "../jobPriorities";
 import { showTestParam, testFlagForCreate } from "../test-data";
@@ -716,6 +717,8 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
     let newJobId: number;
     // The Priority the job had before this save, for the job.critical hook below.
     let previousPriority: unknown = null;
+    // Set when the save hands the job to a different person: they are emailed once it has committed.
+    let reassignment: { fromName: string | null; toUserId: number } | null = null;
 
     if (JobID === undefined) {
       // INSERT — wrap the Jobs insert and the WR-attachment re-parenting in
@@ -831,7 +834,7 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
         // so those diff/event blocks were removed.
         const previousRows = await executeQuery(
           connection,
-          `SELECT Status, AssignedTo, Kind, IsContract, IsInternal, Priority,
+          `SELECT Status, AssignedTo, Kind, IsContract, IsInternal, Priority, AssignedToUserID,
                   CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = Jobs.JobID)
                          OR EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = Jobs.JobID)
                          OR EXISTS (SELECT 1 FROM JobInvoices i WHERE i.JobID = Jobs.JobID) THEN 1 ELSE 0 END AS HasMoneyRecords
@@ -890,9 +893,15 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
           }
         }
 
+        // UXA-09: a different assignee starts the stall clock again and is told after the save commits.
+        const newOwner = fields.AssignedToUserID == null ? null : Number(fields.AssignedToUserID);
+        if (previous && newOwner !== null && newOwner !== Number(previous.AssignedToUserID ?? Number.NaN)) {
+          reassignment = { fromName: (previous.AssignedTo as string | null) ?? null, toUserId: newOwner };
+        }
+        const STALL_RESTART = reassignment ? RESTART_STALL_CLOCK_SQL : "";
         const result = await executeQuery(
           connection,
-          `UPDATE Jobs SET ${setClause}, LastModifiedDate=SYSUTCDATETIME()
+          `UPDATE Jobs SET ${setClause}${STALL_RESTART}, LastModifiedDate=SYSUTCDATETIME()
            OUTPUT INSERTED.JobID
            WHERE JobID = @JobID;`,
           params,
@@ -1012,6 +1021,17 @@ export async function upsertJob(request: HttpRequest, context: InvocationContext
       priority: fields.Priority,
       request,
     });
+
+    if (reassignment) {
+      await notifyJobReassigned(connection, {
+        byName: identity.name,
+        byOid: identity.oid,
+        fromName: reassignment.fromName,
+        jobId: newJobId,
+        log: (message) => context.warn(message),
+        toUserId: reassignment.toUserId,
+      });
+    }
 
     const stored = await executeQuery(
       connection,
