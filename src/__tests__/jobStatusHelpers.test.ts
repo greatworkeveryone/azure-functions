@@ -21,11 +21,13 @@ function collectCalls(): Call[] {
   }));
 }
 
-function stubRead(status: JobStatus | null, role: AwaitingRole = AwaitingRole.FACILITIES) {
+/** `rowChanges` false = the predicated UPDATE matched no row (the job moved since it was read). */
+function stubRead(status: JobStatus | null, role: AwaitingRole = AwaitingRole.FACILITIES, rowChanges = true) {
   mockExecuteQuery.mockImplementation(async (_conn, sql) => {
     if (/SELECT Status, AwaitingRole FROM Jobs/i.test(sql)) {
       return status == null ? [] : [{ Status: status, AwaitingRole: role }];
     }
+    if (/UPDATE Jobs[\s\S]*SET Status\s*=\s*@Status/i.test(sql)) return rowChanges ? [{ JobID: 1 }] : [];
     return [];
   });
 }
@@ -135,5 +137,42 @@ describe("advanceJobStatus", () => {
     });
 
     expect(result.advanced).toBe(false);
+  });
+
+  it("writes no status_change event when the predicated UPDATE matched no row (lane-j)", async () => {
+    stubRead(JobStatus.WORK, AwaitingRole.FACILITIES, false);
+
+    const result = await advanceJobStatus(connection, 42, JobEvent.WORK_COMPLETED, { actor: "alice" });
+
+    expect(result).toEqual({
+      advanced: false,
+      from: { status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES },
+      to: null,
+    });
+    expect(collectCalls().some((c) => /INSERT INTO JobEvents/i.test(c.sql))).toBe(false);
+    expect(collectCalls().some((c) => /ServiceScheduleRuns/i.test(c.sql))).toBe(false);
+  });
+
+  it("sends a job back to the quote round on QUOTES_DECLINED", async () => {
+    stubRead(JobStatus.AWAITING_APPROVAL, AwaitingRole.FACILITIES);
+
+    const result = await advanceJobStatus(connection, 5, JobEvent.QUOTES_DECLINED, { actor: "alice" });
+
+    expect(result.to).toEqual({ status: JobStatus.QUOTE, awaitingRole: AwaitingRole.FACILITIES });
+    const event = collectCalls().find((c) => /INSERT INTO JobEvents/i.test(c.sql));
+    expect(event!.paramsByName).toMatchObject({ NewStatus: JobStatus.QUOTE, NewAwaitingRole: AwaitingRole.FACILITIES });
+  });
+
+  // S1-1: nothing but the work being done may complete a scheduled service.
+  it("completes the scheduled service run when work is completed, and not when a quote is approved", async () => {
+    stubRead(JobStatus.WORK, AwaitingRole.FACILITIES);
+    await advanceJobStatus(connection, 42, JobEvent.WORK_COMPLETED, { actor: "alice" });
+    expect(collectCalls().some((c) => /FROM dbo\.ServiceScheduleRuns/i.test(c.sql))).toBe(true);
+
+    mockExecuteQuery.mockReset();
+    stubRead(JobStatus.AWAITING_APPROVAL, AwaitingRole.FACILITIES);
+    const approved = await advanceJobStatus(connection, 42, JobEvent.QUOTE_APPROVED, { actor: "alice" });
+    expect(approved.to).toEqual({ status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES });
+    expect(collectCalls().some((c) => /ServiceScheduleRuns/i.test(c.sql))).toBe(false);
   });
 });
