@@ -90,7 +90,9 @@ const CHUNK = 500;
 
 /** When the newest email linked to each job arrived in Floorplan (Emails.CreatedAt,
  *  our own clock, so a late-ingested message is never missed). Archived emails
- *  were dismissed by a person and don't count. */
+ *  were dismissed by a person and don't count. Only mail whose sender passed
+ *  authentication counts: a From address is spoofable, and anyone who can name
+ *  "Job #N" must not be able to restart or re-open a job's escalation. */
 export async function latestEmailArrivals(connection: Connection, jobIds: readonly number[]): Promise<Map<number, Date>> {
   const result = new Map<number, Date>();
   for (let start = 0; start < jobIds.length; start += CHUNK) {
@@ -102,6 +104,7 @@ export async function latestEmailArrivals(connection: Connection, jobIds: readon
       `SELECT e.MatchedJobID AS JobID, MAX(e.CreatedAt) AS LatestAt
        FROM dbo.Emails e
        WHERE e.MatchedJobID IN (${placeholders}) AND e.Status <> 'archived'
+         AND e.SenderAuthenticated = 1
        GROUP BY e.MatchedJobID`,
       params,
     );

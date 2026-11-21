@@ -340,6 +340,7 @@ describe("job facts", () => {
     const [, sql, params] = lastCall();
     expect(sql).toContain("e.MatchedJobID IN (@J0, @J1, @J2)");
     expect(sql).toContain("e.Status <> 'archived'");
+    expect(sql).toContain("e.SenderAuthenticated = 1");
     expect(sql).toContain("MAX(e.CreatedAt)");
     expect(params?.map((p) => p.value)).toEqual([3, 4, 5]);
   });
