@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "b15e2e7524b22662559426bae5f6158ad98e7dc7a78b4c84e349b80892cf467e";
+const PINNED_SHA256 = "304d229ec216bc5b78103296cf6f66a8f8faba3bc98d06804b92f8f2ff59ef77";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -149,7 +149,7 @@ describe("the table", () => {
 // writes its own list fails here. The exceptions are reads and syncs that are
 // not job actions.
 describe("job-action handlers read their gate from the table", () => {
-  const FILES = ["jobs", "quotes", "invoices", "purchaseOrders", "payments", "jobRequestedContractors", "reopenJob", "emails"];
+  const FILES = ["jobs", "quotes", "invoices", "purchaseOrders", "payments", "jobRequestedContractors", "reopenJob", "recomputeJobStatus", "emails"];
   // Reads, syncs and the shared inbox's own housekeeping: not job actions.
   const NOT_JOB_ACTIONS = new Set([
     "syncInvoices",

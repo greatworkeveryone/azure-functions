@@ -125,6 +125,12 @@ describe("upsertJobInvoice: creating", () => {
     expect((await call("upsertJobInvoice", { Amount: 500, JobID: 9 })).status).toBe(200);
   });
 
+  it("ignores a SourceEmailID in the body: only promoting an email makes an invoice email-sourced (REV-11)", async () => {
+    mockSql([APP_USER, job(), CREATED, STORED]);
+    expect((await call("upsertJobInvoice", { Amount: 500, JobID: 9, SourceEmailID: 42 })).status).toBe(200);
+    expect(paramsOf(/INSERT INTO JobInvoices/).SourceEmailID).toBeNull();
+  });
+
   it.each([[undefined], [null], [0]])("refuses an amount of %p", async (Amount) => {
     mockSql([APP_USER, job(), CREATED]);
     expect(await call("upsertJobInvoice", { Amount, JobID: 9 })).toMatchObject({ jsonBody: { code: "amount_invalid" }, status: 422 });

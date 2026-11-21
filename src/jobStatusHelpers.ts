@@ -30,6 +30,8 @@ export interface AdvanceJobStatusResult {
   advanced: boolean;
   from: JobState | null;
   to: JobState | null;
+  /** The job was on hold: the event moved the saved pre-hold state, so resuming lands where the records say the job now is (REV-02). */
+  heldUpdated?: boolean;
 }
 
 function defaultEventText(target: JobState, event: JobEvent): string {
@@ -57,6 +59,85 @@ function defaultEventText(target: JobState, event: JobEvent): string {
   }
 }
 
+const LEGACY_HELD_STATE: JobState = { status: JobStatus.WORK, awaitingRole: AwaitingRole.FACILITIES };
+
+async function advanceHeldJob(
+  connection: Connection,
+  jobId: number,
+  event: JobEvent,
+  opts: AdvanceJobStatusOptions,
+  current: JobState,
+): Promise<AdvanceJobStatusResult> {
+  const [row = {}] = await executeQuery(
+    connection,
+    "SELECT PreBlockStatus, PreBlockAwaitingRole FROM Jobs WHERE JobID = @JobID",
+    [{ name: "JobID", type: TYPES.Int, value: jobId }],
+  );
+  const savedStatus = (row.PreBlockStatus as JobStatus | null) ?? null;
+  const savedRole = (row.PreBlockAwaitingRole as AwaitingRole | null) ?? null;
+  const hasSaved = savedStatus != null && savedStatus !== JobStatus.TENANT && savedStatus !== JobStatus.DONE;
+  const preHold: JobState = hasSaved
+    ? { status: savedStatus, awaitingRole: savedRole ?? AwaitingRole.FACILITIES }
+    : LEGACY_HELD_STATE;
+  const target = nextState(preHold, event);
+  const touch = async () => {
+    await executeQuery(connection, "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID", [
+      { name: "JobID", type: TYPES.Int, value: jobId },
+    ]);
+  };
+  // A held job is never closed by an event: closing stays a hand move, checked by the guard.
+  if (
+    target == null ||
+    target.status === JobStatus.DONE ||
+    (target.status === preHold.status && target.awaitingRole === preHold.awaitingRole)
+  ) {
+    await touch();
+    return { advanced: false, from: current, to: null };
+  }
+  const moved = await executeQuery(
+    connection,
+    `UPDATE Jobs
+        SET PreBlockStatus = @NewStatus, PreBlockAwaitingRole = @NewRole, LastModifiedDate = SYSUTCDATETIME()
+     OUTPUT INSERTED.JobID
+      WHERE JobID = @JobID
+        AND Status = @HeldStatus
+        AND ISNULL(PreBlockStatus, '') = @OldStatus
+        AND ISNULL(PreBlockAwaitingRole, '') = @OldRole`,
+    [
+      { name: "JobID", type: TYPES.Int, value: jobId },
+      { name: "HeldStatus", type: TYPES.NVarChar, value: JobStatus.TENANT },
+      { name: "NewStatus", type: TYPES.NVarChar, value: target.status },
+      { name: "NewRole", type: TYPES.NVarChar, value: target.awaitingRole },
+      { name: "OldStatus", type: TYPES.NVarChar, value: savedStatus ?? "" },
+      { name: "OldRole", type: TYPES.NVarChar, value: savedRole ?? "" },
+    ],
+  );
+  if (moved.length === 0) return { advanced: false, from: current, to: null };
+
+  const text = `${opts.note ?? defaultEventText(target, event)} (recorded while on hold; the job returns here when resumed)`;
+  await executeQuery(
+    connection,
+    `INSERT INTO JobEvents
+       (JobID, CreatedBy, [Text], EventType, NewStatus, NewAwaitingRole,
+        PurchaseOrderID, QuoteID, InvoiceID)
+     VALUES
+       (@JobID, @CreatedBy, @Text, 'status_while_held', NULL, NULL,
+        @PurchaseOrderID, @QuoteID, @InvoiceID);`,
+    [
+      { name: "JobID", type: TYPES.Int, value: jobId },
+      { name: "CreatedBy", type: TYPES.NVarChar, value: opts.actor },
+      { name: "Text", type: TYPES.NVarChar, value: text },
+      { name: "PurchaseOrderID", type: TYPES.Int, value: opts.purchaseOrderId ?? null },
+      { name: "QuoteID", type: TYPES.Int, value: opts.quoteId ?? null },
+      { name: "InvoiceID", type: TYPES.Int, value: opts.invoiceId ?? null },
+    ],
+  );
+  if (isWorkCompletion(target.status, target.awaitingRole)) {
+    await markServiceJobCompleted(connection, jobId, opts.actor ?? "system");
+  }
+  return { advanced: false, from: current, to: null, heldUpdated: true };
+}
+
 export async function advanceJobStatus(
   connection: Connection,
   jobId: number,
@@ -74,6 +155,14 @@ export async function advanceJobStatus(
     status: rows[0].Status as JobStatus,
     awaitingRole: (rows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
   };
+
+  // REV-02: a held job (Tenant) answers no event itself, so a quote, purchase
+  // order or invoice saved during the hold used to be dropped and the resume
+  // landed on a stale state. The event is applied to the saved pre-hold state
+  // instead; resuming then lands where the records say the job now is.
+  if (current.status === JobStatus.TENANT && event !== JobEvent.TENANT_UNBLOCKED && event !== JobEvent.TENANT_BLOCKED) {
+    return advanceHeldJob(connection, jobId, event, opts, current);
+  }
 
   const target = nextState(current, event);
   if (

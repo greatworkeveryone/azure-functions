@@ -176,3 +176,72 @@ describe("advanceJobStatus", () => {
     expect(collectCalls().some((c) => /ServiceScheduleRuns/i.test(c.sql))).toBe(false);
   });
 });
+
+// REV-02: an event that arrives while a job is on hold moves the saved pre-hold
+// state, so resuming lands where the records say the job now is.
+describe("advanceJobStatus on a held job", () => {
+  const connection = {} as never;
+  let held: { status: string | null; role: string | null };
+
+  function stubHeld(status: JobStatus | null, role: AwaitingRole | null, rowChanges = true) {
+    held = { status, role };
+    mockExecuteQuery.mockImplementation(async (_conn, sql, params) => {
+      const p = Object.fromEntries((params ?? []).map((x) => [x.name, x.value]));
+      if (/SELECT Status, AwaitingRole FROM Jobs/i.test(sql)) return [{ Status: JobStatus.TENANT, AwaitingRole: AwaitingRole.FACILITIES }];
+      if (/SELECT PreBlockStatus, PreBlockAwaitingRole FROM Jobs/i.test(sql)) return [{ PreBlockStatus: held.status, PreBlockAwaitingRole: held.role }];
+      if (/SET PreBlockStatus = @NewStatus/i.test(sql)) {
+        if (!rowChanges) return [];
+        held = { status: p.NewStatus as string, role: p.NewRole as string };
+        return [{ JobID: 1 }];
+      }
+      return [];
+    });
+  }
+  const heldAt = () => `${held.status}/${held.role}`;
+  const wrote = (re: RegExp) => collectCalls().filter((c) => re.test(c.sql));
+
+  beforeEach(() => mockExecuteQuery.mockReset());
+
+  it("held at Quote: a quote added and then approved during the hold resumes at Work", async () => {
+    stubHeld(JobStatus.QUOTE, AwaitingRole.FACILITIES);
+    const received = await advanceJobStatus(connection, 5, JobEvent.QUOTE_RECEIVED, { actor: "alice", quoteId: 1 });
+    expect(received).toMatchObject({ advanced: false, heldUpdated: true });
+    expect(heldAt()).toBe("Awaiting Approval/facilities");
+    await advanceJobStatus(connection, 5, JobEvent.QUOTE_APPROVED, { actor: "alice", quoteId: 1 });
+    expect(heldAt()).toBe("Work/facilities");
+    const events = wrote(/INSERT INTO JobEvents/i);
+    expect(events).toHaveLength(2);
+    expect(events[0].sql).toMatch(/'status_while_held'/);
+    expect(events[0].paramsByName.Text).toMatch(/recorded while on hold; the job returns here when resumed/);
+    // The job itself is never moved out of Tenant.
+    expect(wrote(/SET Status\s*=\s*@Status/i)).toHaveLength(0);
+  });
+
+  it("held at Work: the purchase order completed during the hold resumes at accounts and stamps the service run", async () => {
+    stubHeld(JobStatus.WORK, AwaitingRole.FACILITIES);
+    await advanceJobStatus(connection, 5, JobEvent.WORK_COMPLETED, { actor: "alice", purchaseOrderId: 3 });
+    expect(heldAt()).toBe("Awaiting Approval/accounts");
+    expect(collectCalls().some((c) => /FROM dbo\.ServiceScheduleRuns/i.test(c.sql))).toBe(true);
+  });
+
+  it("held at accounts: an invoice approved during the hold does not close the job", async () => {
+    stubHeld(JobStatus.AWAITING_APPROVAL, AwaitingRole.ACCOUNTS);
+    const result = await advanceJobStatus(connection, 5, JobEvent.INVOICE_APPROVED, { actor: "alice", invoiceId: 4 });
+    expect(result.heldUpdated).toBeUndefined();
+    expect(heldAt()).toBe("Awaiting Approval/accounts");
+    expect(wrote(/INSERT INTO JobEvents/i)).toHaveLength(0);
+  });
+
+  it("a legacy hold with no saved state treats the job as at Work", async () => {
+    stubHeld(null, null);
+    await advanceJobStatus(connection, 5, JobEvent.WORK_COMPLETED, { actor: "alice" });
+    expect(heldAt()).toBe("Awaiting Approval/accounts");
+  });
+
+  it("writes no event when the saved state changed under it", async () => {
+    stubHeld(JobStatus.QUOTE, AwaitingRole.FACILITIES, false);
+    const result = await advanceJobStatus(connection, 5, JobEvent.QUOTE_RECEIVED, { actor: "alice" });
+    expect(result.heldUpdated).toBeUndefined();
+    expect(wrote(/INSERT INTO JobEvents/i)).toHaveLength(0);
+  });
+});

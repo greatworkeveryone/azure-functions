@@ -17,6 +17,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { isStaging } from "../config/stagingGuard";
+import { contactDetailsChanged } from "../contractorContactHold";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { authorizeWrite, badRequest, conflict, inTransaction, notFound, readJsonBody, txFail, txOk } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery, type SqlParam } from "../db";
@@ -64,10 +65,7 @@ export function parseContractorDetails(body: Record<string, unknown>): ParseResu
 const pushEnabled = () => !isStaging() && process.env.MYBUILDINGS_CONTRACTOR_PUSH !== "false";
 
 /** An email or ABN change is the one that redirects money, so it starts the SECA-04 hold (contractorContactHold.ts). */
-export function contactDetailsChanged(before: Pick<ContractorDetails, "ABN" | "EmailAddress">, after: Pick<ContractorDetails, "ABN" | "EmailAddress">): boolean {
-  const norm = (value: string | null | undefined) => (value ?? "").trim().toLowerCase();
-  return norm(before.EmailAddress) !== norm(after.EmailAddress) || norm(before.ABN) !== norm(after.ABN);
-}
+export { contactDetailsChanged };
 
 const SELECT_ROW = `SELECT ContractorID, ContractorName, ContactFirstName, ContactLastName, PhoneNumber, MobileNumber, EmailAddress, ABN,
   COALESCE(CONVERT(varchar(33), UpdatedAt, 126), '') AS Version

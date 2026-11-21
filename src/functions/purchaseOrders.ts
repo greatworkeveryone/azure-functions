@@ -73,6 +73,8 @@ import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import { Sentry } from "../sentry";
 import type { LedgerActor } from "../ledger/types";
+import type { Connection } from "tedious";
+import type { MoneyRefusal } from "../moneyRules";
 import { testRecordResponse } from "../test-data";
 import { errorMessage } from "../errorMessage";
 
@@ -484,6 +486,14 @@ export async function upsertPurchaseOrder(
     let varianceJobId = 0;
     await beginTransaction(connection);
     try {
+      // Lock order is the job first, then the purchase order, the same as creating one: the other way round
+      // lets a create and an edit on one job deadlock, and the loser sees a 500. The job is looked up unlocked
+      // only to know which one to lock.
+      const lockFirst = await executeQuery(connection, "SELECT JobID FROM PurchaseOrders WHERE PurchaseOrderID = @Id", [
+        { name: "Id", type: TYPES.Int, value: PurchaseOrderID },
+      ]);
+      if (lockFirst.length > 0) await loadJobForMoney(connection, lockFirst[0].JobID as number);
+
       // Read the existing PO before mutating so we can diff for the audit
       // trail and decide whether to clear the Sent / MYOB markers. Locked until
       // commit, so the markers recorded as reset are the ones reset.
@@ -970,7 +980,7 @@ async function sendPurchaseOrder(
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
               po.EstimatedCost, po.CostNotToExceed, po.SentAt, po.SendAttemptedAt,
-              c.ContactChangedAt, c.ContactChangedBy, c.ContactConfirmedAt,
+              c.ContactChangedAt, c.ContactChangedBy, c.ContactChangedByOid, c.ContactConfirmedAt,
               CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -1002,6 +1012,19 @@ async function sendPurchaseOrder(
       confirmedAt: (contractorRows[0].ContactConfirmedAt as Date | null | undefined) ?? null,
     };
     const contactHeld = contactChangeHolds(contact);
+    // REV-07: the person who changed the address cannot tick that they checked it.
+    const changedByOid = (contractorRows[0].ContactChangedByOid as string | null | undefined) ?? null;
+    if (contactHeld && body?.ContactChangeChecked === true && changedByOid !== null && changedByOid === identity.oid) {
+      const message = "You changed this address, so someone else has to check it. Ask an accounts manager, the CFO or a director to confirm it before sending.";
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: "contact_check_by_editor", message },
+        contractorRows[0].JobID as number,
+      );
+      return { status: 409, jsonBody: { code: "contact_check_by_editor", error: message } };
+    }
     if (contactHeld && body?.ContactChangeChecked !== true) {
       const message = `${contactChangeSentence(contact)}. Check the address with the contractor, or ask an accounts manager, the CFO or a director to confirm it, before sending.`;
       await recordRefusal(
@@ -1360,6 +1383,36 @@ async function deletePurchaseOrder(
   }
 }
 
+/**
+ * REV-03: the spend rule at the step that commits it. On a contract job (no
+ * approved quote) recording a purchase order in MYOB is the commitment, so it
+ * is checked against the marker's own authority like a send. Null when the
+ * job has an approved quote (the quote's approval carried the limit).
+ */
+async function spendCheckAtCommit(
+  connection: Connection,
+  request: HttpRequest,
+  identity: { email: string },
+  actor: LedgerActor,
+  po: { ContractorID?: unknown; CostNotToExceed?: unknown; EstimatedCost?: unknown },
+  jobId: number,
+  excludePurchaseOrderId: number,
+): Promise<{ committedAfter: number | null; refusal: MoneyRefusal | null } | null> {
+  const job = await loadJobForMoney(connection, jobId);
+  if (!job) return null;
+  const editor = { email: identity.email, roles: await rolesForRequest(request), userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined };
+  const spend = await checkPurchaseOrderSpend(connection, {
+    actor: editor,
+    excludePurchaseOrderId,
+    isTest: await isTestJob(connection, jobId),
+    job,
+    poContractorId: (po.ContractorID as number | null | undefined) ?? null,
+    stage: "send",
+    thisAmount: poAmount(po),
+  });
+  return { committedAfter: spend.committedAfter, refusal: spend.refusal };
+}
+
 // ── POST /api/markPurchaseOrderMyobCreated ───────────────────────────────────
 // Body: { id, jobId } — the actor is the verified caller, never the body.
 // Records that this PO has been entered into MYOB. Cannot be undone once
@@ -1445,6 +1498,20 @@ async function markPurchaseOrderMyobCreated(
           jobId,
         );
         return refusalResponse(adminBar);
+      }
+
+      // REV-03: recording a purchase order in MYOB is where a contract job's spend is committed.
+      const markSpend = await spendCheckAtCommit(connection, request, identity, actor, po, jobId, id);
+      if (markSpend?.refusal) {
+        await rollbackTransaction(connection).catch(() => {});
+        await recordRefusal(
+          connection,
+          actor,
+          { id, type: "purchase_order" },
+          { attempted: "po.myob_created", code: markSpend.refusal.code, message: markSpend.refusal.message, state: { amount: poAmount(po), committedAfter: markSpend.committedAfter } },
+          jobId,
+        );
+        return refusalResponse(markSpend.refusal);
       }
 
       await executeQuery(
@@ -1757,11 +1824,19 @@ async function markPurchaseOrderComplete(
         note: `${poLabel} complete — awaiting accounts approval.`,
       });
 
+      // REV-03: completing is never blocked on spend, but a purchase order nobody checked
+      // (not sent, not recorded in MYOB) that the completer could not have raised is flagged.
+      let spendUnchecked = false;
+      if (po.SentAt == null && po.MyobCreatedAt == null) {
+        const completeSpend = await spendCheckAtCommit(connection, request, identity, actor, po, jobId, id);
+        spendUnchecked = Boolean(completeSpend?.refusal);
+      }
+
       const scope = await jobScope(connection, jobId);
       await record(connection, {
         action: "po.complete",
         actor,
-        after: { completed: true, ...purchaseOrderFacts(po) },
+        after: { completed: true, ...purchaseOrderFacts(po), ...(spendUnchecked ? { spendUnchecked: true } : {}) },
         // Completing again just re-stamps; the earlier completion shows here.
         before: { completed: po.CompletedAt != null, ...contractorFacts(po) },
         buildingId: scope.buildingId,

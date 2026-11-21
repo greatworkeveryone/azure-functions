@@ -9,7 +9,7 @@ import { twoPersonGrantEnabled } from "../roleGrants";
 export interface HealthSwitches {
   digest: "dry-run" | "live" | "off";
   environment: string;
-  /** True when AZURE_FUNCTIONS_ENVIRONMENT is "Staging": email, MYOB, Teams and myBuildings writes are refused. */
+  /** True when the staging guard is on: AZURE_FUNCTIONS_ENVIRONMENT is "Staging", or a deployed app that is not exactly "Production". Email, MYOB, Teams, myBuildings, Planner and website writes are refused. */
   stagingGuardActive: boolean;
   /** Nightly myBuildings read: on unless set to "false". */
   mybuildingsSync: boolean;

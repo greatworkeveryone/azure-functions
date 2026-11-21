@@ -402,7 +402,6 @@ export async function upsertJobInvoice(
       Direction,
       Notes,
       InvoicePDFBlobName,
-      SourceEmailID,
       ReceivedAt,
       SupplierInvoiceNumber,
     } = body ?? {};
@@ -491,7 +490,8 @@ export async function upsertJobInvoice(
             { name: "Direction", type: TYPES.NVarChar, value: direction },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "InvoicePDFBlobName", type: TYPES.NVarChar, value: InvoicePDFBlobName ?? null },
-            { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
+            // REV-11: only the promote-from-email handlers say a record came from an email (they also check the sender).
+            { name: "SourceEmailID", type: TYPES.Int, value: null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "CreatedByOid", type: TYPES.NVarChar, value: identity.oid },

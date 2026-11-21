@@ -428,6 +428,12 @@ export const ACTION_ROLES = {
     routes: ["reopenJob"],
     why: "Reopen a done job with a reason (REOPEN_ROLES, J2): not admin, since reopening touches money records.",
   },
+  recomputeJobStatus: {
+    gate: [A.FACILITIES_APPROVAL, A.ACCOUNTS_APPROVAL, A.CFO, A.DIRECTOR],
+    refused: [A.ADMIN],
+    routes: ["recomputeJobStatus"],
+    why: "Put a job where its own records say it is, with a reason (REV-02): the reopen roles, not admin. Never into or out of Done.",
+  },
   requestScheduleChange: {
     gate: TENANCY_DESK,
     routes: ["requestScheduleChange", "withdrawScheduleChange"],

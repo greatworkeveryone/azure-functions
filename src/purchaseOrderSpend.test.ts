@@ -55,9 +55,13 @@ describe("contract job: the person's own limit, summed across the job (JOB-20, S
     const withAdminRow = { ...FACTS, limits: [...FACTS.limits, { limit: 1000, role: "admin" }] };
     expect(purchaseOrderSpendRefusal(base({ actor: { roles: ["admin"], userId: 9 }, isTest: true, thisAmount: 100 }), withAdminRow)).toBeNull();
   });
-  it("plain accounts may draft but not send", () => {
-    expect(code({ actor: { roles: ["accounts"], userId: 4 }, stage: "create" })).toBeNull();
+  it("plain accounts hold no authority on a contract job: refused at create (drafts included) and at send (REV-03)", () => {
+    expect(code({ actor: { roles: ["accounts"], userId: 4 }, stage: "create" })).toBe("po_not_authorised");
     expect(code({ actor: { roles: ["accounts"], userId: 4 }, stage: "send" })).toBe("po_not_authorised");
+  });
+  it("plain accounts may still draft on a job with an approved quote", () => {
+    const quote = { amount: 5000, contractorId: 3 };
+    expect(code({ actor: { roles: ["accounts"], userId: 4 }, approvedQuote: quote, stage: "create" })).toBeNull();
   });
   it("an unknown amount is not waved through on send", () => {
     expect(code({ thisAmount: null })).toBe("po_over_authority");

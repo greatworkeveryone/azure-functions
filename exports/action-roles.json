@@ -425,6 +425,12 @@
   "ratifyScheduleChange": [
     "director"
   ],
+  "recomputeJobStatus": [
+    "accounts_manager",
+    "cfo",
+    "director",
+    "facilities_manager"
+  ],
   "recordEmailOnJob": [
     "accounts_manager",
     "admin",

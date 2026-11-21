@@ -55,6 +55,38 @@ export async function requestRoleGrant(
   return Number(inserted[0]?.GrantID);
 }
 
+const STALE_MESSAGE = "This request is out of date, so it was closed. Ask for the role again if it is still needed.";
+
+/**
+ * REV-08: confirming acts on the facts as they are now, not as they were when asked. A message when the
+ * request no longer holds (the person's account was switched off, their role changed since, or the person
+ * who asked is no longer an active admin), or when it would demote the last active admin; otherwise null.
+ */
+async function staleGrantReason(connection: Connection, grant: Record<string, unknown>, isReactivation: boolean): Promise<string | null> {
+  const targetActive = !(grant.TargetActive === false || grant.TargetActive === 0);
+  if (!isReactivation && !targetActive) return STALE_MESSAGE;
+  const previous = (grant.PreviousRole as string | null) ?? "";
+  const current = (grant.CurrentRole as string | null) ?? "";
+  if (previous !== current) return STALE_MESSAGE;
+  const requester = await executeQuery(connection, "SELECT Role, IsActive FROM dbo.AppUsers WHERE EntraOid = @RequesterOid", [
+    { name: "RequesterOid", type: TYPES.NVarChar, value: grant.RequestedByOid as string },
+  ]);
+  const asker = requester[0];
+  if (!asker || asker.Role !== AppRole.ADMIN || asker.IsActive === false || asker.IsActive === 0) return STALE_MESSAGE;
+  if (previous === AppRole.ADMIN && targetActive && grant.RequestedRole !== AppRole.ADMIN) {
+    const others = await executeQuery(
+      connection,
+      "SELECT COUNT(*) AS Remaining FROM dbo.AppUsers WHERE Role = @Admin AND IsActive = 1 AND UserID <> @UserID",
+      [
+        { name: "Admin", type: TYPES.NVarChar, value: AppRole.ADMIN },
+        { name: "UserID", type: TYPES.Int, value: grant.TargetUserID as number },
+      ],
+    );
+    if (((others[0]?.Remaining as number | undefined) ?? 0) < 1) return "Cannot demote the last active admin.";
+  }
+  return null;
+}
+
 // ── POST /api/decideRoleGrant ────────────────────────────────────────────────
 // Body: { grantId, decision: "confirm" | "decline" | "withdraw" }
 
@@ -87,7 +119,7 @@ export async function decideRoleGrant(request: HttpRequest, context: InvocationC
     try {
       const rows = await executeQuery(
         connection,
-        `SELECT g.GrantID, g.TargetUserID, g.RequestedRole, g.PreviousRole, g.RequestedByOid, g.Status, u.EntraOid AS TargetOid, u.Role AS CurrentRole, u.Email AS TargetEmail
+        `SELECT g.GrantID, g.TargetUserID, g.RequestedRole, g.PreviousRole, g.RequestedByOid, g.Status, u.EntraOid AS TargetOid, u.Role AS CurrentRole, u.IsActive AS TargetActive, u.Email AS TargetEmail
            FROM dbo.PendingRoleGrants g WITH (UPDLOCK, HOLDLOCK)
            INNER JOIN dbo.AppUsers u ON u.UserID = g.TargetUserID
           WHERE g.GrantID = @GrantID`,
@@ -114,6 +146,21 @@ export async function decideRoleGrant(request: HttpRequest, context: InvocationC
       const status = decision === "confirm" ? "confirmed" : decision === "decline" ? "declined" : "withdrawn";
       const targetUserId = grant.TargetUserID as number;
       const requestedRole = grant.RequestedRole as string;
+      // A request asking for the role the person already holds is a reactivation: they stay switched off until it is confirmed.
+      const isReactivation = ((grant.PreviousRole as string | null) ?? null) === requestedRole;
+      if (decision === "confirm") {
+        const stale = await staleGrantReason(connection, grant, isReactivation);
+        if (stale) {
+          // The facts behind the request moved: close it so it cannot be confirmed later, and say so.
+          await executeQuery(
+            connection,
+            `UPDATE dbo.PendingRoleGrants SET Status = N'superseded', DecidedAt = SYSUTCDATETIME() WHERE GrantID = @GrantID AND Status = N'pending'`,
+            [{ name: "GrantID", type: TYPES.Int, value: body.grantId }],
+          );
+          await commitTransaction(connection);
+          return { status: 409, jsonBody: { code: "role_grant_stale", error: stale } };
+        }
+      }
       await executeQuery(
         connection,
         `UPDATE dbo.PendingRoleGrants SET Status = @Status, DecidedByOid = @Oid, DecidedByName = @Name, DecidedAt = SYSUTCDATETIME() WHERE GrantID = @GrantID`,
@@ -126,7 +173,8 @@ export async function decideRoleGrant(request: HttpRequest, context: InvocationC
       );
       if (decision === "confirm") {
         const before = (grant.CurrentRole as string | null) ?? null;
-        await executeQuery(connection, "UPDATE dbo.AppUsers SET Role = @Role WHERE UserID = @UserID", [
+        const ACTIVATE = isReactivation ? ", IsActive = 1" : "";
+        await executeQuery(connection, `UPDATE dbo.AppUsers SET Role = @Role${ACTIVATE} WHERE UserID = @UserID`, [
           { name: "Role", type: TYPES.NVarChar, value: requestedRole },
           { name: "UserID", type: TYPES.Int, value: targetUserId },
         ]);

@@ -170,7 +170,6 @@ export async function upsertQuote(
       Currency,
       Notes,
       QuotePDFBlobName,
-      SourceEmailID,
       ReceivedAt,
     } = body ?? {};
     const amount = parseMoneyField(Amount, "Amount");
@@ -253,7 +252,8 @@ export async function upsertQuote(
             { name: "Currency", type: TYPES.NVarChar, value: Currency ?? "AUD" },
             { name: "Notes", type: TYPES.NVarChar, value: Notes ?? null },
             { name: "QuotePDFBlobName", type: TYPES.NVarChar, value: QuotePDFBlobName ?? null },
-            { name: "SourceEmailID", type: TYPES.Int, value: SourceEmailID ?? null },
+            // REV-11: only the promote-from-email handlers say a record came from an email (they also check the sender).
+            { name: "SourceEmailID", type: TYPES.Int, value: null },
             { name: "ReceivedAt", type: TYPES.DateTime2, value: ReceivedAt ?? null },
             { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
             { name: "CreatedByOid", type: TYPES.NVarChar, value: identity.oid },

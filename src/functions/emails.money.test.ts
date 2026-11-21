@@ -51,8 +51,12 @@ type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ jsonBody?
 const { promoteEmailToInvoice, promoteEmailToQuote } = require("./emails") as { promoteEmailToInvoice: Handler; promoteEmailToQuote: Handler };
 
 type Route = { match: RegExp; rows?: Record<string, unknown>[] };
+// The contractor named by ID has the address the email came from on record; with none on record nothing is "verified" (REV-05).
+const CONTRACTOR_ADDRESS: Route = { match: /SELECT EmailAddress FROM dbo\.Contractors/, rows: [{ EmailAddress: "acme@acme.example" }] };
+const CONTRACTOR_NAME: Route = { match: /SELECT ContractorName FROM dbo\.Contractors/, rows: [{ ContractorName: "Acme" }] };
 function mockSql(routes: Route[]): void {
-  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => routes.find((r) => r.match.test(sql))?.rows ?? []);
+  const all = [...routes, CONTRACTOR_ADDRESS, CONTRACTOR_NAME];
+  db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => all.find((r) => r.match.test(sql))?.rows ?? []);
 }
 const calls = () =>
   db.executeQuery.mock.calls.map((c: unknown[], i: number) => ({
@@ -101,7 +105,7 @@ describe.each([
   ["promoteEmailToQuote", () => promoteEmailToQuote, QUOTE_INSERT, /INSERT INTO Quotes/, "quote.create"],
   ["promoteEmailToInvoice", () => promoteEmailToInvoice, INVOICE_INSERT, /INSERT INTO JobInvoices/, "invoice.create"],
 ] as const)("%s keeps the typed paths' rules", (_name, handler, inserted, INSERT, attempted) => {
-  const promote = (body: Record<string, unknown> = {}) => handler()(makeRequest({ Amount: 500, ContractorName: "Acme", EmailID: 42, JobID: 9, ...body }), ctx);
+  const promote = (body: Record<string, unknown> = {}) => handler()(makeRequest({ Amount: 500, ContractorID: 3, ContractorName: "Acme", EmailID: 42, JobID: 9, ...body }), ctx);
 
   it("stores who added it from the token (name and oid), so the person who promoted it can't approve it themselves", async () => {
     mockSql([APP_USER, EMAIL, job(), inserted]);
@@ -158,7 +162,7 @@ describe.each([
 describe("promoteEmailToInvoice: an emailed invoice is a contractor's (incoming)", () => {
   it("is refused on a done job: decision 18 lets only outgoing invoices through", async () => {
     mockSql([APP_USER, JOB_BUILDING, EMAIL, job({ Status: "Done" }), INVOICE_INSERT]);
-    const res = await promoteEmailToInvoice(makeRequest({ Amount: 500, EmailID: 42, JobID: 9 }), ctx);
+    const res = await promoteEmailToInvoice(makeRequest({ Amount: 500, ContractorID: 3, EmailID: 42, JobID: 9 }), ctx);
     expect(res).toMatchObject({ jsonBody: { code: "job_done" }, status: 409 });
   });
 });

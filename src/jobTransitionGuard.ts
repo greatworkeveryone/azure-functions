@@ -40,6 +40,10 @@ export interface GuardFacts {
   isInternal: boolean;
   /** Purchase orders on the job (none are archived: there is no archive) not yet marked as recorded in MYOB. */
   purchaseOrdersNotInMyob: number;
+  /** Contractors asked to quote (only the "recompute" request reads this; absent counts as none). */
+  requestedContractors?: number;
+  /** Work has started: any purchase order exists, or the job has already been at Work (only "recompute" reads this; absent counts as false). */
+  workStarted?: boolean;
 }
 
 export type GuardActor = { kind: "user"; roles: readonly string[] } | { kind: "system" };
@@ -50,7 +54,9 @@ export type GuardRequest =
   /** A manager reopens a done job. */
   | { kind: "reopen"; reason: string }
   /** The MYOB read-back saw every invoice paid (INVOICE_PAID). Never a person. */
-  | { kind: "invoices_paid" };
+  | { kind: "invoices_paid" }
+  /** A manager asks for the status the job's own records say (REV-02): the correction when an event was lost. */
+  | { kind: "recompute"; reason: string };
 
 export interface GuardInput {
   actor: GuardActor;
@@ -76,7 +82,10 @@ export type GuardRefusal =
   | "not_done"
   | "reason_required"
   | "system_only"
-  | "invoices_not_paid";
+  | "invoices_not_paid"
+  | "on_hold"
+  | "internal_job"
+  | "status_already_right";
 
 export type GuardDecision = { allowed: true; to: GuardState } | { allowed: false; code: GuardRefusal; reason: string };
 
@@ -100,23 +109,26 @@ export const FLAG_ROLES: readonly string[] = Object.freeze(["facilities_manager"
 const REASONS: Record<GuardRefusal, string> = {
   done_is_final: "This job is done. A manager can reopen it, with a reason.",
   illegal: "A job can't move there from where it is now.",
+  internal_job: "An internal job has no quotes, purchase orders or invoices to work its status out from.",
   invoice_missing: "A job is closed against an invoice: add the contractor's invoice first.",
   invoice_not_approved: "Every contractor invoice must be fully approved before the job is closed.",
   invoice_not_in_myob:
     "Every approved invoice must be marked as created in MYOB before the job is closed. An accounts manager, CFO or director can mark it.",
   invoices_not_paid: "Not every invoice on this job is paid yet.",
-  no_quote: "Add the quote before sending it for approval.",
-  not_done: "Only a done job can be reopened.",
-  purchase_order_not_in_myob:
-    "Every purchase order on this job must be marked as recorded in MYOB before the job is closed. An accounts manager, facilities manager, CFO or director can mark it from the purchase order.",
-  work_not_complete:
-    "A job goes to accounts once the work is marked complete on its purchase order, which a facilities officer or an accounts manager can do. On a contract or internal job with no purchase order, add the contractor's invoice instead.",
   moves_on_its_own:
     "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
+  no_quote: "Add the quote before sending it for approval.",
+  not_done: "Only a done job can be reopened.",
+  on_hold: "This job is on hold. Resume it first, then fix its status.",
+  purchase_order_not_in_myob:
+    "Every purchase order on this job must be marked as recorded in MYOB before the job is closed. An accounts manager, facilities manager, CFO or director can mark it from the purchase order.",
   quote_not_approved: "Work starts once a quote is approved (or on a contract or internal job).",
-  reason_required: "Say why the job is being reopened.",
+  reason_required: "Say why the job's status is being changed.",
   role_not_permitted: "Your role can't make this change.",
+  status_already_right: "The job's status already matches its records.",
   system_only: "Only the MYOB read-back can close a job as paid.",
+  work_not_complete:
+    "A job goes to accounts once the work is marked complete on its purchase order, which a facilities officer or an accounts manager can do, or once the contractor's invoice is added.",
 };
 
 function refuse(code: GuardRefusal): GuardDecision {
@@ -127,9 +139,34 @@ function holds(actor: GuardActor, allowed: readonly string[]): boolean {
   return actor.kind === "user" && actor.roles.some((role) => allowed.includes(role.trim().toLowerCase()));
 }
 
-/** The work-completed fact: a purchase order marked complete, or, where no purchase order is needed, the contractor's invoice on record. */
+/** The work-completed fact: a purchase order marked complete, or the contractor's invoice on record (the server moves a job to accounts on either, REV-10). */
 function workIsComplete(facts: GuardFacts): boolean {
-  return facts.hasCompletePurchaseOrder || ((facts.isContract || facts.isInternal) && facts.incomingInvoices >= 1);
+  return facts.hasCompletePurchaseOrder || facts.incomingInvoices >= 1;
+}
+
+/**
+ * Where a job's own records put it (REV-02). Never Done, and never past an
+ * approval: an invoice or quote still waiting is where the job lands.
+ */
+export function derivedState(facts: GuardFacts): GuardState {
+  const paidFor = facts.hasApprovedQuote || facts.isContract;
+  if (paidFor && workIsComplete(facts)) return { awaitingRole: "accounts", status: "Awaiting Approval" };
+  if (facts.hasApprovedQuote || (facts.isContract && facts.workStarted === true)) return { awaitingRole: "facilities", status: "Work" };
+  if (facts.hasQuote) return { awaitingRole: "facilities", status: "Awaiting Approval" };
+  if ((facts.requestedContractors ?? 0) > 0) return { awaitingRole: "facilities", status: "Quote" };
+  return { awaitingRole: "facilities", status: "New" };
+}
+
+function guardRecompute(input: GuardInput, reason: string): GuardDecision {
+  const { actor, current, facts } = input;
+  if (!holds(actor, REOPEN_ROLES)) return refuse("role_not_permitted");
+  if (current.status === "Done") return refuse("done_is_final");
+  if (current.status === "Tenant") return refuse("on_hold");
+  if (facts.isInternal) return refuse("internal_job");
+  if (typeof reason !== "string" || reason.trim() === "") return refuse("reason_required");
+  const target = derivedState(facts);
+  if (target.status === current.status && target.awaitingRole === current.awaitingRole) return refuse("status_already_right");
+  return { allowed: true, to: target };
 }
 
 function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {
@@ -206,12 +243,15 @@ function guardInvoicesPaid(input: GuardInput): GuardDecision {
  * fully approved, every approved invoice is marked in MYOB and every purchase
  * order is marked in MYOB (internal jobs excepted). Reopen: a manager, a done job and a reason; it lands back on
  * (Awaiting Approval, accounts), or (Work, facilities) for an internal job.
- * Invoices paid: the system only, every incoming invoice paid.
+ * Invoices paid: the system only, every incoming invoice paid. Recompute: a
+ * manager (the reopen roles), a live job that is not on hold or internal, and a
+ * reason; it lands on derivedState(facts) and nowhere else, never Done.
  */
 export function guardTransition(input: GuardInput): GuardDecision {
   const { request } = input;
   if (request.kind === "manual") return guardManual(input, request.target);
   if (request.kind === "reopen") return guardReopen(input, request.reason);
+  if (request.kind === "recompute") return guardRecompute(input, request.reason);
   return guardInvoicesPaid(input);
 }
 

@@ -124,8 +124,27 @@ describe.each([
     expect((await promote({ confirmUnverifiedSender: "true" })).status).toBe(422);
   });
 
-  it("has nothing to compare when the contractor has no address on record, and an authenticated sender stands", async () => {
+  // REV-05: an authenticated sender on any domain is not "verified" when there is nothing to compare it with.
+  it("asks for the confirm when the contractor has no address on record, writing nothing", async () => {
     contractorAddress = null;
-    expect((await promote()).status).toBe(200);
+    const res = await promote();
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "sender_unverified", senderCheck: "no_address" });
+    expect((res.jsonBody as { error: string }).error).toMatch(/no address on record to check/);
+    expect(wrote()).toBe(false);
+  });
+
+  it("asks for the confirm when the contractor was picked by name only", async () => {
+    const res = await promote({ ContractorID: undefined });
+    expect(res.status).toBe(422);
+    expect(res.jsonBody).toMatchObject({ code: "sender_unverified", senderCheck: "no_address" });
+    expect(wrote()).toBe(false);
+  });
+
+  it("stores that there was no address to check against, with who confirmed it", async () => {
+    contractorAddress = null;
+    const res = await promote({ confirmUnverifiedSender: true });
+    expect(res.status).toBe(200);
+    expect(params(insert)).toMatchObject({ SenderCheck: "no_address", SenderConfirmedBy: "Fran Manager" });
   });
 });

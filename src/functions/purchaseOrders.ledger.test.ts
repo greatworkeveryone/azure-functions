@@ -124,8 +124,15 @@ const APP_USER: Route = { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ U
 const JOB_BUILDING: Route = { match: /SELECT BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5 }] };
 const LEDGER_FAILS: Route = { match: /INSERT INTO dbo\.DecisionLedger/, reject: new Error("ledger unavailable") };
 
-// No approval-limit rows unless a test sets them: the spend rule (SECA-03) reads them on create and send.
-beforeEach(() => limitsDb.getCachedApprovalLimits.mockResolvedValue([]));
+// Real approval-limit rows by default (REV-03): with none, every non-director is "not eligible to spend",
+// which hid how the spend rule treats a person who has a limit.
+beforeEach(() =>
+  limitsDb.getCachedApprovalLimits.mockResolvedValue([
+    { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+    { MaxApprovalAmount: 20000, RoleName: "accounts_manager" },
+    { MaxApprovalAmount: 50000, RoleName: "cfo" },
+    { MaxApprovalAmount: null, RoleName: "director" },
+  ]));
 
 // Every money row any test here writes has the shape trend reports read (see the fixture).
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
@@ -1730,6 +1737,21 @@ describe("SECA-04: a contractor's changed email holds the send until the sender 
     const res = await send({ ContactChangeChecked: true });
     expect(res.status).toBe(200);
     expect(ledgerInserts(db.executeQuery).find((r) => r.action === "po.send")?.after).toMatchObject({ contactChangeChecked: true });
+  });
+
+  it("does not let the person who changed the address tick that they checked it (REV-07)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedByOid: "fred-oid" }), JOB, stored]);
+    const res = await send({ ContactChangeChecked: true });
+    expect(res).toMatchObject({ jsonBody: { code: "contact_check_by_editor" }, status: 409 });
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "contact_check_by_editor" })]);
+  });
+
+  it("lets someone else tick it, and a change made by the myBuildings sync (nobody's oid) can be ticked by anyone (REV-07)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedByOid: "sam-oid" }), JOB, stored]);
+    expect((await send({ ContactChangeChecked: true })).status).toBe(200);
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedBy: "myBuildings sync", ContactChangedByOid: null }), JOB, stored]);
+    expect((await send({ ContactChangeChecked: true })).status).toBe(200);
   });
 
   it("needs no tick once a second person has confirmed, or when nothing changed", async () => {

@@ -71,3 +71,33 @@ describe("myBuildings and Teams", () => {
     for (const path of ["alerts/channel.ts", "teams/activity.ts"]) expect(textOf(path)).toContain("skipOnStaging(");
   });
 });
+
+describe("Planner and WordPress (REV-06)", () => {
+  it("every Planner write helper refuses on staging before it asks for a token", () => {
+    const planner = textOf("planner.ts");
+    for (const name of ["graphCreatePlannerTask", "graphCompletePlannerTask"]) {
+      const body = planner.slice(planner.indexOf(`export async function ${name}`));
+      expect(body.indexOf("if (isStaging())")).toBeGreaterThan(-1);
+      expect(body.indexOf("if (isStaging())")).toBeLessThan(body.indexOf("getGraphToken()"));
+    }
+  });
+  it("only planner.ts writes to Graph Planner", () => {
+    expect(filesMatching(/graph\.microsoft\.com\/v1\.0\/planner/)).toEqual(["planner.ts"]);
+  });
+  it("publish and unpublish answer 409 on staging before they read WORDPRESS_API_URL or the vacancy", () => {
+    const vacancies = textOf("functions/vacancies.ts");
+    for (const handler of ["handlePublishVacancy", "handleUnpublishVacancy"]) {
+      const body = vacancies.slice(vacancies.indexOf(`async function ${handler}`));
+      expect(body.indexOf("if (isStaging()) return STAGING_NO_PUBLISH")).toBeGreaterThan(-1);
+      expect(body.indexOf("if (isStaging()) return STAGING_NO_PUBLISH")).toBeLessThan(body.indexOf("createRequestConnection"));
+    }
+  });
+  it("only vacancies.ts calls the WordPress REST API", () => {
+    expect(filesMatching(/WORDPRESS_API_URL/).filter((p) => /fetch\(/.test(textOf(p)))).toEqual(["functions/vacancies.ts"]);
+    const vacancies = textOf("functions/vacancies.ts");
+    for (const name of ["uploadImageToWp", "unpublishFromWordPress"]) {
+      const body = vacancies.slice(vacancies.indexOf(`function ${name}`));
+      expect(body.indexOf("if (isStaging())")).toBeLessThan(body.indexOf("fetch("));
+    }
+  });
+});
