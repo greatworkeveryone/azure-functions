@@ -68,6 +68,7 @@ export async function loadJobForTransition(connection: Connection, jobId: number
     `SELECT j.Status, j.AwaitingRole, j.PreBlockStatus, j.PreBlockAwaitingRole, j.IsContract, j.IsInternal, j.BuildingID,
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = j.JobID AND q.Status <> 'rejected') THEN 1 ELSE 0 END AS HasQuote,
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.QuoteID = j.ApprovedQuoteID AND q.Status IN ('approved', 'completed')) THEN 1 ELSE 0 END AS HasApprovedQuote,
+            CASE WHEN EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = j.JobID AND p.CompletedAt IS NOT NULL) THEN 1 ELSE 0 END AS HasCompletePurchaseOrder,
             CASE WHEN EXISTS (SELECT 1 FROM Quotes q WHERE q.JobID = j.JobID)
                    OR EXISTS (SELECT 1 FROM PurchaseOrders p WHERE p.JobID = j.JobID)
                    OR EXISTS (SELECT 1 FROM JobInvoices i WHERE i.JobID = j.JobID) THEN 1 ELSE 0 END AS HasMoneyRecords
@@ -93,6 +94,7 @@ export async function loadJobForTransition(connection: Connection, jobId: number
     facts: {
       ...summariseInvoices(invoiceRows, approval),
       hasApprovedQuote: Boolean(job.HasApprovedQuote),
+      hasCompletePurchaseOrder: Boolean(job.HasCompletePurchaseOrder),
       hasQuote: Boolean(job.HasQuote),
       isContract: Boolean(job.IsContract),
       isInternal: Boolean(job.IsInternal),

@@ -68,7 +68,7 @@ function given(current: Record<string, unknown>, runs: Record<string, unknown>[]
     // D4: addJobEvent first refuses archived jobs; this one is live.
     { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
     // J2: the transition guard reads the job under lock with its money facts.
-    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasCompletePurchaseOrder: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
     { match: /FROM JobEvents|FROM Jobs WHERE JobID/, rows: [] },
   ]);
 }
@@ -107,7 +107,7 @@ it("still completes the job, loudly, on a database without migration 120", async
     { match: RUN_FOR_JOB, throws: new Error("Invalid object name 'dbo.ServiceScheduleRuns'.") },
     { match: /INSERT INTO JobEvents/, rows: [{ JobEventID: 1 }] },
     { match: /SELECT CreatedBy, CreatedById, IsArchived FROM Jobs/, rows: [{ CreatedBy: "Adam", CreatedById: 1, IsArchived: false }] },
-    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
+    { match: /FROM Jobs j WITH \(UPDLOCK, HOLDLOCK\)/, rows: [{ AwaitingRole: "facilities", HasApprovedQuote: 1, HasCompletePurchaseOrder: 1, HasMoneyRecords: 0, IsContract: true, IsInternal: false, JobID: 500, PreBlockAwaitingRole: null, PreBlockStatus: null, Status: "Work" }] },
     { match: /UPDATE Jobs SET[\s\S]*OUTPUT INSERTED\.JobID/, rows: [{ JobID: 500 }] },
   ]);
   const response = await addJobEvent(post({ JobID: 500, NewStatus: "Awaiting Approval" }), context);

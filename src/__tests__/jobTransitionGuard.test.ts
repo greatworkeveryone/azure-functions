@@ -36,8 +36,8 @@ function machinePaid(from: GuardState): GuardState | null {
 // whenever either side changes, together with the guard and the vectors.
 
 /** SHA-256 of jobTransitionGuard.ts and of the vector file, the same in both repos. */
-const GUARD_SHA256 = "e977d354d28ec4e125311a2359a47fa687350170af6e86ad69a55deb88555ba0";
-const VECTORS_SHA256 = "d8295b4c6d8d73eb1df113b14b9dd6f869578728f9ea787ab645c11338168339";
+const GUARD_SHA256 = "cf770c75b1463cfc9fd7833ea84e4cba119eba96b2aa4556953d17ffcf0408ec";
+const VECTORS_SHA256 = "b4da7bbc598d8d3c1e6d2705d12c1ca9de57b60f17a2aa80c37f6d9a837b610f";
 
 interface Vectors {
   actorRoles: Record<string, string[] | "system">;
@@ -117,6 +117,10 @@ describe("job transition guard: shared vectors", () => {
       expect(VECTORS.states[state].current.status).not.toBe("Done");
       expect(decision.to).toEqual(machineTarget);
       if (decision.to.status === "Work") expect(jobFacts.hasApprovedQuote || jobFacts.isContract || jobFacts.isInternal).toBe(true);
+      if (decision.to.status === "Awaiting Approval" && decision.to.awaitingRole === "accounts" && VECTORS.states[state].current.status !== "Tenant") {
+        // S1-1: a job reaches accounts because the work is done, not because someone picked the status.
+        expect(jobFacts.hasCompletePurchaseOrder || ((jobFacts.isContract || jobFacts.isInternal) && jobFacts.incomingInvoices >= 1)).toBe(true);
+      }
       if (decision.to.status === "Done" && !jobFacts.isInternal) {
         expect([jobFacts.incomingInvoices >= 1, jobFacts.incomingInvoicesAwaitingApproval, jobFacts.approvedInvoicesNotInMyob]).toEqual([true, 0, 0]);
       }
@@ -151,6 +155,13 @@ describe("job transition guard: shared vectors", () => {
       code: "quote_not_approved",
       reason: "Work starts once a quote is approved (or on a contract or internal job).",
     });
+  });
+
+  it("refuses a manual move to accounts until the work is complete, and says what is missing", () => {
+    const refused = decide("Work/facilities", "approved", { kind: "manual", target: "Awaiting Approval" }, "FM").decision;
+    expect(refused).toMatchObject({ allowed: false, code: "work_not_complete" });
+    expect(decide("Work/facilities", "worked", { kind: "manual", target: "Awaiting Approval" }, "FM").decision.allowed).toBe(true);
+    expect(decide("Work/facilities", "contractInvoiced", { kind: "manual", target: "Awaiting Approval" }, "FM").decision.allowed).toBe(true);
   });
 
   it("offers only hold and resume from the chip and the progress note", () => {

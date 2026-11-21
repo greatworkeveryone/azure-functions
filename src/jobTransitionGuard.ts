@@ -28,6 +28,8 @@ export interface GuardFacts {
   approvedInvoicesNotInMyob: number;
   /** Jobs.ApprovedQuoteID points at a quote that is approved (or completed). */
   hasApprovedQuote: boolean;
+  /** At least one purchase order on the job is marked work complete. */
+  hasCompletePurchaseOrder: boolean;
   /** At least one quote that isn't rejected. */
   hasQuote: boolean;
   /** Incoming (contractor) invoices that aren't rejected. */
@@ -63,6 +65,7 @@ export type GuardRefusal =
   | "illegal"
   | "no_quote"
   | "quote_not_approved"
+  | "work_not_complete"
   | "invoice_missing"
   | "invoice_not_approved"
   | "invoice_not_in_myob"
@@ -99,6 +102,8 @@ const REASONS: Record<GuardRefusal, string> = {
   invoices_not_paid: "Not every invoice on this job is paid yet.",
   no_quote: "Add the quote before sending it for approval.",
   not_done: "Only a done job can be reopened.",
+  work_not_complete:
+    "A job goes to accounts once the work is marked complete on its purchase order, or, on a contract or internal job with no purchase order, once the contractor's invoice is added.",
   quote_not_approved: "Work starts once a quote is approved (or on a contract or internal job).",
   reason_required: "Say why the job is being reopened.",
   role_not_permitted: "Your role can't make this change.",
@@ -113,6 +118,11 @@ function holds(actor: GuardActor, allowed: readonly string[]): boolean {
   return actor.kind === "user" && actor.roles.some((role) => allowed.includes(role.trim().toLowerCase()));
 }
 
+/** The work-completed fact: a purchase order marked complete, or, where no purchase order is needed, the contractor's invoice on record. */
+function workIsComplete(facts: GuardFacts): boolean {
+  return facts.hasCompletePurchaseOrder || ((facts.isContract || facts.isInternal) && facts.incomingInvoices >= 1);
+}
+
 function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {
   const { actor, current, facts, machineTarget } = input;
   if (!holds(actor, JOB_EDIT_ROLES)) return refuse("role_not_permitted");
@@ -125,6 +135,16 @@ function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {
   }
   if (machineTarget.status === "Work" && !(facts.hasApprovedQuote || facts.isContract || facts.isInternal)) {
     return refuse("quote_not_approved");
+  }
+  // The job reaches accounts because the work is done, never because someone
+  // says so (S1-1). Resuming from a hold restores where the job already was.
+  if (
+    current.status !== "Tenant" &&
+    machineTarget.status === "Awaiting Approval" &&
+    machineTarget.awaitingRole === "accounts" &&
+    !workIsComplete(facts)
+  ) {
+    return refuse("work_not_complete");
   }
   if (machineTarget.status === "Done" && !facts.isInternal) {
     if (facts.incomingInvoices < 1) return refuse("invoice_missing");
@@ -157,7 +177,9 @@ function guardInvoicesPaid(input: GuardInput): GuardDecision {
  * Decides one transition. Manual picks (a person, any job-edit role): never
  * out of Done; only along an edge the machine has (a resume lands where the
  * job was held, and that landing is checked like any other); into (Awaiting Approval,
- * facilities) only with a quote; into Work only with an approved quote, or on
+ * facilities) only with a quote; into (Awaiting Approval, accounts) only once
+ * the work is complete (a purchase order marked complete, or an invoice on a
+ * contract or internal job); into Work only with an approved quote, or on
  * a contract or internal job; into Done only when every contractor invoice is
  * fully approved and every approved invoice is marked in MYOB (internal jobs
  * excepted). Reopen: a manager, a done job and a reason; it lands back on

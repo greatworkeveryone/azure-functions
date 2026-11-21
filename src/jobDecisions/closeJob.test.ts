@@ -23,6 +23,7 @@ const FACTS: LockedJob["facts"] = {
   allInvoicesPaid: false,
   approvedInvoicesNotInMyob: 0,
   hasApprovedQuote: false,
+  hasCompletePurchaseOrder: false,
   hasQuote: false,
   incomingInvoices: 0,
   incomingInvoicesAwaitingApproval: 0,
