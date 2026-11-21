@@ -14,7 +14,7 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { blobHostFromConnectionString, uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
-import { MAX_SIZE_BYTES } from "../upload-constants";
+import { imageBytesMatch, MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
@@ -616,6 +616,9 @@ async function handleUploadVacancyImage(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    if (!imageBytesMatch(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
     const { url } = await uploadPublicBlob(buffer, originalName, contentType, `${vacancyId}`);
 
     context.log(`Uploaded vacancy image: ${url}`);
@@ -861,9 +864,15 @@ async function handleUploadVacancySlotImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
+    // The bytes are checked before anything is read from or removed in storage.
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (!imageBytesMatch(file.type, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
+
     connection = await createRequestConnection(token);
 
-    // Delete existing blob for this slot if present
+    // Read the current slot image; it is removed only after the row points at its replacement.
     const existing = await executeQuery(
       connection,
       `SELECT SlotImages FROM dbo.Vacancies WHERE Id = @Id`,
@@ -874,12 +883,8 @@ async function handleUploadVacancySlotImage(
     const currentSlotImages: Record<string, string> = JSON.parse(
       (existing[0].SlotImages as string) ?? "{}",
     );
-    if (currentSlotImages[slotLabel]) {
-      const oldBlobName = extractBlobName(currentSlotImages[slotLabel]);
-      if (oldBlobName) await deletePublicBlob(oldBlobName).catch(() => undefined);
-    }
+    const oldBlobName = currentSlotImages[slotLabel] ? extractBlobName(currentSlotImages[slotLabel]) : null;
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const { url } = await uploadPublicBlob(
       buffer,
       file.name,
@@ -901,6 +906,8 @@ async function handleUploadVacancySlotImage(
         { name: "Id", type: TYPES.Int, value: vacancyId },
       ],
     );
+    // The row now points at the new image. A failed delete leaves an orphan, never a row with no file (SECS-03, F10).
+    if (oldBlobName) await deletePublicBlob(oldBlobName).catch(() => undefined);
 
     const row = await fetchVacancyRow(connection, vacancyId);
     if (!row) return { status: 404, jsonBody: { error: "Not found" } };
@@ -959,7 +966,6 @@ async function handleDeleteVacancySlotImage(
     if (!imageUrl) return { status: 404, jsonBody: { error: "No image for this slot" } };
 
     const blobName = extractBlobName(imageUrl);
-    if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
 
     delete currentSlotImages[body.slotLabel];
 
@@ -973,6 +979,8 @@ async function handleDeleteVacancySlotImage(
         { name: "Id", type: TYPES.Int, value: body.vacancyId },
       ],
     );
+    // Row first, then the file: a failed delete leaves an orphan, never a row with no file (SECS-03).
+    if (blobName) await deletePublicBlob(blobName).catch(() => undefined);
 
     const row = await fetchVacancyRow(connection, body.vacancyId);
     if (!row) return { status: 404, jsonBody: { error: "Not found" } };

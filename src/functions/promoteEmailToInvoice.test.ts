@@ -56,7 +56,13 @@ function insertParams(): Record<string, unknown> {
 beforeEach(() => {
   jest.clearAllMocks();
   db.executeQuery.mockImplementation(async (_c: unknown, sql: string) =>
-    /INSERT INTO JobInvoices/.test(sql) ? [{ JobInvoiceID: 11 }] : isJobRead(sql) ? LIVE_JOB : [],
+    /INSERT INTO JobInvoices/.test(sql)
+      ? [{ JobInvoiceID: 11 }]
+      : isJobRead(sql)
+        ? LIVE_JOB
+        : /SELECT EmailID, FromAddress/.test(sql)
+          ? [{ EmailID: 3, FromAddress: "acme@acme.example", SenderAuthenticated: true, Source: "graph" }]
+          : [],
   );
 });
 
@@ -107,12 +113,14 @@ describe("promoteEmailToInvoice — SupplierInvoiceNumber", () => {
 
 describe("promoteEmailToInvoice — the contractor", () => {
   const contractorLookups = () =>
-    db.executeQuery.mock.calls.filter((c: unknown[]) => /FROM dbo\.Contractors/.test(String(c[1])));
+    db.executeQuery.mock.calls.filter((c: unknown[]) => /SELECT ContractorName FROM dbo\.Contractors/.test(String(c[1])));
 
   beforeEach(() => {
     db.executeQuery.mockImplementation(async (_c: unknown, sql: string) => {
       if (/INSERT INTO JobInvoices/.test(sql)) return [{ JobInvoiceID: 11 }];
-      if (/FROM dbo\.Contractors WHERE ContractorID/.test(sql)) return [{ ContractorName: "Acme Pty Ltd" }];
+      if (/SELECT ContractorName FROM dbo\.Contractors WHERE ContractorID/.test(sql)) return [{ ContractorName: "Acme Pty Ltd" }];
+      if (/SELECT EmailAddress FROM dbo\.Contractors/.test(sql)) return [{ EmailAddress: "acme@acme.example" }];
+      if (/SELECT EmailID, FromAddress/.test(sql)) return [{ EmailID: 3, FromAddress: "acme@acme.example", SenderAuthenticated: true, Source: "graph" }];
       if (isJobRead(sql)) return LIVE_JOB;
       return [];
     });

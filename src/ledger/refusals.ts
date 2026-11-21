@@ -1,3 +1,4 @@
+import { roleRefusalDetail } from "../roleRefusal";
 import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { TYPES, type Connection } from "tedious";
 import {
@@ -240,7 +241,7 @@ export async function recordRoleRefusal(
   target: RefusalTarget | RefusalTarget[],
 ): Promise<void> {
   if (denied.status !== 403) return;
-  const details = (denied.jsonBody as { details?: unknown } | undefined)?.details;
+  const details = roleRefusalDetail(denied) ?? (denied.jsonBody as { details?: unknown } | undefined)?.details;
   await recordRefusalForRequest(request, token, target, {
     code: "role_not_permitted",
     message: typeof details === "string" ? details : "Your role can't make this decision",

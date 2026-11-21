@@ -4,6 +4,7 @@ import { noteAccess } from "./access/accessEvents";
 import { closeConnection, createServiceConnection, executeQuery } from "./db";
 import { acceptedAudiences } from "./apiAudience";
 import { isDevOverrideEnabled, verifyEntraToken } from "./jwt";
+import { roleForbiddenResponse } from "./roleRefusal";
 import { Sentry } from "./sentry";
 
 export enum AppRole {
@@ -31,6 +32,14 @@ export function unauthorizedResponse(): HttpResponseInit {
     jsonBody: { error: "No authorization token provided" },
   };
 }
+
+// A token that is missing, expired, forged or for another tenant: the caller is not signed in,
+// so the client signs in again (401). A valid token with too little role is 403.
+export function invalidTokenResponse(): HttpResponseInit {
+  return { status: 401, jsonBody: { error: "Your sign-in is not valid. Sign in again." } };
+}
+
+export { ROLE_REFUSAL_MESSAGE, roleForbiddenResponse, roleRefusalDetail } from "./roleRefusal";
 
 export function forbiddenResponse(detail?: string): HttpResponseInit {
   return {
@@ -219,6 +228,11 @@ function lookupRolesForOid(oid: string): Promise<string[]> {
 }
 
 export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
+  return (await resolveCaller(request)).roles;
+}
+
+/** `authenticated` is false for a missing, unverifiable or oid-less token (nothing to look roles up for). */
+async function resolveCaller(request: HttpRequest): Promise<{ authenticated: boolean; roles: string[] }> {
   // Gate the X-Dev-Roles bypass on the same conditions jwt.ts uses for
   // signature-skipping (switch on, local Development, not Azure-hosted).
   // Sharing isDevOverrideEnabled() keeps the two from drifting apart.
@@ -233,26 +247,26 @@ export async function rolesForRequest(request: HttpRequest): Promise<string[]> {
         console.warn(
           `[auth] DEV ROLE OVERRIDE active — using roles [${roles.join(", ")}] from X-Dev-Roles header`,
         );
-        return roles;
+        return { authenticated: true, roles };
       }
     }
   }
 
   const sqlToken = extractToken(request);
-  if (!sqlToken) return [];
+  if (!sqlToken) return { authenticated: false, roles: [] };
 
   // Verify signature, expiry, issuer and audience against the tenant's JWKS
   // before trusting the `oid` claim. SQL would reject a forged token at the
   // DB layer, but here we look the user up via a service connection — SQL
   // never sees this token, so we must verify it ourselves.
   const payload = await verifyEntraToken(sqlToken, acceptedAudiences());
-  if (!payload) return [];
+  if (!payload) return { authenticated: false, roles: [] };
   const oid = typeof payload.oid === "string" ? payload.oid : null;
-  if (!oid) return [];
+  if (!oid) return { authenticated: false, roles: [] };
 
   // Cached + de-duped; throws RoleLookupError on a transient lookup failure
   // rather than swallowing it into [] (which would read as a 403).
-  return lookupRolesForOid(oid);
+  return { authenticated: true, roles: await lookupRolesForOid(oid) };
 }
 
 /**
@@ -345,8 +359,9 @@ export async function requireRole(
   allowed: readonly AppRole[],
 ): Promise<HttpResponseInit | null> {
   let roles: string[];
+  let authenticated: boolean;
   try {
-    roles = await rolesForRequest(request);
+    ({ authenticated, roles } = await resolveCaller(request));
   } catch (err) {
     // The role lookup itself failed (transient DB/connection) — distinct from
     // "user has no role". Fail to a retryable 503, never a misleading 403.
@@ -360,9 +375,8 @@ export async function requireRole(
   const bearer = extractToken(request);
   noteAccess(request, bearer ? oidFromToken(bearer) : null, roles);
 
+  if (!authenticated) return invalidTokenResponse();
   if (rolesPassGate(roles, allowed)) return null;
 
-  return forbiddenResponse(
-    `Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`,
-  );
+  return roleForbiddenResponse(`Required role: ${allowed.join(" | ")}. Have: ${roles.join(", ") || "(none)"}`, request);
 }

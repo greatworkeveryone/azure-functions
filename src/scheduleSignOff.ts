@@ -6,7 +6,8 @@
 
 import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { Connection, TYPES } from "tedious";
-import { AppRole, forbiddenResponse, requireRole, rolesForRequest, serviceUnavailableResponse } from "./auth";
+import { AppRole, requireRole, rolesForRequest, serviceUnavailableResponse } from "./auth";
+import { roleForbiddenResponse } from "./roleRefusal";
 import { executeQuery, SqlRow } from "./db";
 import * as ledger from "./ledger";
 import type { LedgerActor } from "./ledger";
@@ -32,8 +33,9 @@ export async function requireSignOffRole(request: HttpRequest): Promise<HttpResp
     return serviceUnavailableResponse();
   }
   if (SIGN_OFF_ROLES.some((role) => roles.includes(role))) return null;
-  return forbiddenResponse(
+  return roleForbiddenResponse(
     `Required role: ${SIGN_OFF_ROLES.join(" | ")}. Have: ${roles.join(", ") || "(none)"}. Admin alone cannot sign a schedule off.`,
+    request,
   );
 }
 

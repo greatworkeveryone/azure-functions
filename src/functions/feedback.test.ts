@@ -51,8 +51,14 @@ import { handleSendFeedback } from "./feedback";
 
 const context = new InvocationContext();
 
+const SIGNATURES: Record<string, number[]> = {
+  "image/jpeg": [0xff, 0xd8, 0xff],
+  "image/png": [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+};
 function photo(name: string, type = "image/jpeg", bytes = 1024): File {
-  return new File([new Uint8Array(bytes)], name, { type });
+  const content = new Uint8Array(bytes);
+  content.set(SIGNATURES[type] ?? []);
+  return new File([content], name, { type });
 }
 
 /** Minimal HttpRequest stand-in — the handler only calls formData(). */
@@ -331,6 +337,13 @@ describe("handleSendFeedback", () => {
     const svgForm = validForm();
     svgForm.append("photo0", photo("x.svg", "image/svg+xml"));
     expect((await handleSendFeedback(requestWith(svgForm), context)).status).toBe(400);
+  });
+
+  it("rejects a photo whose bytes are not the image it says it is", async () => {
+    const form = validForm();
+    form.append("photo0", new File([new TextEncoder().encode("<html>not a picture</html>")], "x.jpg", { type: "image/jpeg" }));
+
+    expect((await handleSendFeedback(requestWith(form), context)).status).toBe(400);
   });
 
   it("returns 429 when the rate limit is exceeded", async () => {

@@ -4,7 +4,7 @@ import { closeConnection, createRequestConnection, executeQuery } from "../db";
 import { AppRole, extractToken, errorResponse, requireRole, unauthorizedResponse } from "../auth";
 import { uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl, vacanciesBlobNameFromUrl } from "../blob-storage";
 import { isBlobName, VACANCY_SHAPE } from "../blob-names";
-import { MAX_SIZE_BYTES } from "../upload-constants";
+import { imageBytesMatch, MAX_SIZE_BYTES } from "../upload-constants";
 import { clearBuildingsCache } from "./getBuildings";
 
 const IMAGE_CONTENT_TYPES = new Set([
@@ -53,6 +53,11 @@ async function handleUploadBuildingHeroImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (!imageBytesMatch(file.type, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
+
     connection = await createRequestConnection(token);
 
     // Read before upload; keep the old image live until its replacement is saved.
@@ -64,7 +69,6 @@ async function handleUploadBuildingHeroImage(
     if (!existing.length) return { status: 404, jsonBody: { error: "Building not found" } };
     const oldBlobName = existing[0].HeroImageUrl ? extractHeroBlobName(existing[0].HeroImageUrl as string, buildingId) : null;
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const { blobName, url } = await uploadPublicBlob(
       buffer,
       file.name,

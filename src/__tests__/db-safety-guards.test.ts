@@ -76,7 +76,8 @@ describe("the migration scan, on crafted text", () => {
 // grandfathered pending the money-controls review (LAUNCH-READINESS WP42);
 // a new file or a higher count fails until someone reviews it and edits this.
 const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: number; deleteOther?: number }> = {
-  "src/blob-storage.ts": { deleteBlob: 1 },
+  // The two definitions: deleteBlob and deletePublicBlob (SECS-03: the guard now sees both).
+  "src/blob-storage.ts": { deleteBlob: 2 },
   "src/functions/attachments.ts": { deleteBlob: 1, deleteFrom: 2 },
   // REVIEWED (B2, 31 Oct 2026): deleteInspection hard-deletes only an untouched empty draft (never completed, no points,
   // no raised jobs, re-read under UPDLOCK/HOLDLOCK) and writes inspection.delete; anything else is archived (m181) and ledgered.
@@ -100,7 +101,13 @@ const DELETE_ALLOWLIST: Record<string, { deleteBlob?: number; deleteFrom?: numbe
   // tenancy delete moved to src/tenancy-records.ts and is reviewed below.
   // Removes only the blob this same request just uploaded, when the database insert that follows it fails.
   "src/functions/uploadAssetAttachment.ts": { deleteBlob: 1 },
-  "src/functions/vacancies.ts": { deleteFrom: 1 },
+  // REVIEWED (SECS-03, 21 Nov 2026): deleteBlob counts deletePublicBlob. Four call sites, each after the row no longer points at the file:
+  // deleteVacancy (after the row delete), deleteVacancyImage and deleteVacancySlotImage (after the row update), and the slot
+  // upload (the OLD slot image, after the row points at the new one; F10). A failed delete leaves an orphan, never a row with no file.
+  "src/functions/vacancies.ts": { deleteBlob: 4, deleteFrom: 1 },
+  // REVIEWED (SECS-03, 21 Nov 2026): three call sites. Two remove the hero image after the row update committed (the old one on replace,
+  // the current one on delete). One removes the image this same request just uploaded, only when a fresh read proves the row does not reference it.
+  "src/functions/buildingGallery.ts": { deleteBlob: 3 },
   // REVIEWED (UA1, 24 Oct 2026): the usage purge. Three deletes, all opt-in (USAGE_PURGE_ENABLED), selected positively and in
   // batches: raw UsageViews past retention whose person-day is rolled up after the day ended and after the session's last
   // heartbeat, then UsageSessions past retention with no views left whose day is rolled up, then a person's UsageDaily totals go only as whole days older than USAGE_DAILY_RETENTION_DAYS (default 730, never below the raw days),
@@ -148,7 +155,7 @@ const DELETE_OTHER = /(?<!(?:\bON|\bOF|\bFOR|\bAFTER|,)\s*)\bDELETE\s+(?!FROM\b)
 
 function hardDeletes(text: string) {
   return {
-    deleteBlob: count(text, /deleteBlob\(/g),
+    deleteBlob: count(text, /\bdelete(?:Public)?Blob\(/g),
     deleteFrom: count(text, /DELETE\s+FROM/gi),
     deleteOther: count(text, DELETE_OTHER),
   };
@@ -175,6 +182,7 @@ describe("the source scan, on crafted text", () => {
     expect(hardDeletes("`DELETE dbo.Jobs WHERE JobID = @Id`").deleteOther).toBe(1);
     expect(hardDeletes("`DELETE r\n   FROM InspectionRooms r WHERE r.Id = @Id`").deleteOther).toBe(1);
     expect(hardDeletes("`DELETE FROM Jobs WHERE JobID = @Id`")).toEqual({ deleteBlob: 0, deleteFrom: 1, deleteOther: 0 });
+    expect(hardDeletes("await deletePublicBlob(name); await deleteBlob(other);").deleteBlob).toBe(2);
     expect(hardDeletes("ON DELETE CASCADE; INSTEAD OF UPDATE, DELETE AS BEGIN").deleteOther).toBe(0);
   });
 });

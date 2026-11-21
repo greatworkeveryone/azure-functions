@@ -17,6 +17,7 @@ export const QUOTE_COLUMNS = `
   Amount, Currency, Notes, QuotePDFBlobName, SourceEmailID, ReceivedAt,
   Status, ApprovedAt, ApprovedBy, AIValidatedAt, AIValidatedBy,
   CreatedAt, CreatedBy,
+  SenderCheck, SenderAddress, SenderConfirmedBy, SenderConfirmedAt,
   DirectorApprovedAt, DirectorApprovedBy, DirectorEmailSentAt, DirectorEmailSentTo, DirectorEmailSentBy
 `;
 

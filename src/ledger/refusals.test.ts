@@ -1,4 +1,5 @@
 /// <reference types="jest" />
+import { roleForbiddenResponse } from "../roleRefusal";
 import type { HttpRequest } from "@azure/functions";
 import type { Connection } from "tedious";
 import { ledgerInserts } from "../__tests__/fixtures/ledgerCalls";
@@ -433,6 +434,18 @@ describe("recordRoleRefusal", () => {
         reason: "Required role: accounts_manager. Have: facilities",
         ruleApplied: "role_not_permitted",
       }),
+    ]);
+  });
+
+  it("records the detail of a role refusal whose body no longer carries it", async () => {
+    jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const denied = roleForbiddenResponse("Required role: accounts_manager. Have: facilities");
+    expect(JSON.stringify(denied.jsonBody)).not.toMatch(/accounts_manager/);
+
+    await recordRoleRefusal(request, "the-token", denied, target);
+
+    expect(ledgerInserts(db.executeQuery)).toEqual([
+      expect.objectContaining({ reason: "Required role: accounts_manager. Have: facilities", ruleApplied: "role_not_permitted" }),
     ]);
   });
 

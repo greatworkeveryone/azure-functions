@@ -28,6 +28,7 @@ import { incomingMailbox, mailboxConfigError } from "../email/mailbox";
 import { resolveInvoiceContractor } from "../invoice-contractor";
 import { emailSyncQueueOutput, enqueueEmailSync } from "../email/sync-queue";
 import { advanceJobStatus } from "../jobStatusHelpers";
+import { assessSender, contractorAddressOf, senderRecordParams, senderRefusalBody } from "../email/sender-check";
 import { AwaitingRole, JobEvent, JobStatus, nextState, type JobState } from "../jobStatusMachine";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
@@ -400,7 +401,7 @@ export async function promoteEmailToQuote(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Notes } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Notes, confirmUnverifiedSender } = body ?? {};
     if (typeof EmailID !== "number") {
       return { status: 400, jsonBody: { error: "EmailID (number) required" } };
     }
@@ -418,12 +419,17 @@ export async function promoteEmailToQuote(
 
     const emailRows = await executeQuery(
       connection,
-      `SELECT EmailID, MatchedJobID, ReceivedAt, AIClassification FROM Emails WHERE EmailID = @Id`,
+      `SELECT EmailID, MatchedJobID, ReceivedAt, AIClassification, FromAddress, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id`,
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     const email = emailRows[0];
     if (!email) {
       return { status: 404, jsonBody: { error: "Email not found" } };
+    }
+    // SECS-02: mail that cannot be tied to the contractor needs the promoter's say-so, kept on the quote.
+    const sender = assessSender(email, await contractorAddressOf(connection, typeof ContractorID === "number" ? ContractorID : null));
+    if (sender.check !== "verified" && confirmUnverifiedSender !== true) {
+      return { status: 422, jsonBody: senderRefusalBody(sender) };
     }
     // JobID from the request body takes precedence; fall back to MatchedJobID on the email row.
     const jobId = (typeof JobID === "number" ? JobID : null) ?? (email.MatchedJobID as number | null);
@@ -476,18 +482,22 @@ export async function promoteEmailToQuote(
         needsAIValidation
           ? `INSERT INTO Quotes
                (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid)
+                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid,
+                SenderCheck, SenderAddress, SenderConfirmedBy, SenderConfirmedAt)
              OUTPUT INSERTED.QuoteID
              VALUES
                (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid);`
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid,
+                @SenderCheck, @SenderAddress, @SenderConfirmedBy, @SenderConfirmedAt);`
           : `INSERT INTO Quotes
                (JobID, QuoteNumber, Seq, ContractorID, ContractorName, Amount,
-                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid, AIValidatedAt, AIValidatedBy)
+                Notes, SourceEmailID, ReceivedAt, CreatedBy, CreatedByOid, AIValidatedAt, AIValidatedBy,
+                SenderCheck, SenderAddress, SenderConfirmedBy, SenderConfirmedAt)
              OUTPUT INSERTED.QuoteID
              VALUES
                (@JobID, @QuoteNumber, @Seq, @ContractorID, @ContractorName, @Amount,
-                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid, SYSUTCDATETIME(), @AIValidatedBy);`,
+                @Notes, @EmailID, @ReceivedAt, @CreatedBy, @CreatedByOid, SYSUTCDATETIME(), @AIValidatedBy,
+                @SenderCheck, @SenderAddress, @SenderConfirmedBy, @SenderConfirmedAt);`,
         [
           { name: "JobID", type: TYPES.Int, value: jobId },
           { name: "QuoteNumber", type: TYPES.NVarChar, value: quoteNumber },
@@ -500,6 +510,7 @@ export async function promoteEmailToQuote(
           { name: "ReceivedAt", type: TYPES.DateTime2, value: email.ReceivedAt ?? null },
           { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
           { name: "CreatedByOid", type: TYPES.NVarChar, value: callerOid },
+          ...senderRecordParams(sender, CreatedBy),
           ...(needsAIValidation ? [] : [{ name: "AIValidatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null }]),
         ],
       );
@@ -787,7 +798,7 @@ export async function promoteEmailToInvoice(
   let connection;
   try {
     const body = (await request.json()) as any;
-    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber } = body ?? {};
+    const { EmailID, JobID, Amount: rawAmount, ContractorID, ContractorName, Description, InvoiceNumber, SupplierInvoiceNumber, confirmUnverifiedSender } = body ?? {};
     if (typeof EmailID !== "number" || typeof JobID !== "number") {
       return {
         status: 400,
@@ -814,6 +825,18 @@ export async function promoteEmailToInvoice(
     const contractor = await resolveInvoiceContractor(connection, { ContractorID, ContractorName });
     if (!contractor.ok) return { status: 400, jsonBody: { error: contractor.error } };
 
+    // SECS-02: mail that cannot be tied to the contractor needs the promoter's say-so, kept on the invoice.
+    const senderRows = await executeQuery(
+      connection,
+      `SELECT EmailID, FromAddress, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id`,
+      [{ name: "Id", type: TYPES.Int, value: EmailID }],
+    );
+    if (!senderRows[0]) return { status: 404, jsonBody: { error: "Email not found" } };
+    const sender = assessSender(senderRows[0], await contractorAddressOf(connection, contractor.id as number | null));
+    if (sender.check !== "verified" && confirmUnverifiedSender !== true) {
+      return { status: 422, jsonBody: senderRefusalBody(sender) };
+    }
+
     // J3: the invoice and the email flip commit together, on a job read under
     // lock that still takes money records. An emailed invoice is a
     // contractor's (incoming), so a done job needs its reopen (decision 18
@@ -839,9 +862,11 @@ export async function promoteEmailToInvoice(
       const inserted = await executeQuery(
         connection,
         `INSERT INTO JobInvoices
-           (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, CreatedByOid, Status)
+           (JobID, Amount, ContractorID, ContractorName, InvoiceNumber, SupplierInvoiceNumber, Notes, SourceEmailID, CreatedBy, CreatedByOid, Status,
+            SenderCheck, SenderAddress, SenderConfirmedBy, SenderConfirmedAt)
          OUTPUT INSERTED.JobInvoiceID
-         VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, @CreatedByOid, 'pending')`,
+         VALUES (@JobID, @Amount, @ContractorID, @ContractorName, @InvoiceNumber, @SupplierInvoiceNumber, @Description, @EmailID, @CreatedBy, @CreatedByOid, 'pending',
+                 @SenderCheck, @SenderAddress, @SenderConfirmedBy, @SenderConfirmedAt)`,
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
           { name: "Amount", type: TYPES.Decimal, value: Amount ?? null },
@@ -853,6 +878,7 @@ export async function promoteEmailToInvoice(
           { name: "EmailID", type: TYPES.Int, value: EmailID },
           { name: "CreatedBy", type: TYPES.NVarChar, value: CreatedBy ?? null },
           { name: "CreatedByOid", type: TYPES.NVarChar, value: callerOid },
+          ...senderRecordParams(sender, CreatedBy),
         ],
       );
       const invoiceId = inserted[0].JobInvoiceID as number;

@@ -1,6 +1,7 @@
 /// <reference types="jest" />
 import { HttpRequest } from "@azure/functions";
 import { AppRole, clearRoleCache, requireRole, rolesForRequest } from "./auth";
+import { roleRefusalDetail } from "./roleRefusal";
 import { devOverrideMisconfigured, isDevOverrideEnabled } from "./jwt";
 
 // Mock the DB module so tests don't need a real SQL connection.
@@ -303,6 +304,54 @@ describe("requireRole", () => {
     const result = await requireRole(req, [AppRole.USER]);
 
     expect(result?.status).toBe(403);
+  });
+});
+
+// A caller who is not signed in is 401 (the client signs in again); a signed-in caller with too
+// little role is 403, and the body never says which roles the route wanted.
+describe("requireRole — 401 for a bad token, a plain 403 for a short role", () => {
+  const realToken = () => makeRequest({ authorization: `Bearer ${makeJwt({ oid: "oid-401" })}` });
+  const signedOut = () => {
+    process.env.DEV_ROLE_OVERRIDE_ENABLED = "false";
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Production";
+  };
+
+  it.each([
+    ["no token", makeRequest()],
+    ["a token that is not a JWT", makeRequest({ authorization: "Bearer not-a-token" })],
+    ["a forged unsigned JWT", makeRequest({ authorization: `Bearer ${makeJwt({ oid: "oid-forged" })}` })],
+  ])("answers 401 for %s", async (_label, req) => {
+    signedOut();
+    const result = await requireRole(req, [AppRole.USER]);
+
+    expect(result?.status).toBe(401);
+    expect(db.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("answers 403 for a signed-in caller without the role, and the body does not list roles", async () => {
+    db.executeQuery.mockResolvedValue([{ Role: "facilities" }]);
+
+    const result = await requireRole(realToken(), [AppRole.ACCOUNTS_APPROVAL, AppRole.DIRECTOR]);
+
+    expect(result?.status).toBe(403);
+    expect(result?.jsonBody).toEqual({ error: "Your role can't do this." });
+    expect(JSON.stringify(result?.jsonBody)).not.toMatch(/accounts_manager|director|facilities|Required|Have/);
+  });
+
+  it("keeps what the route needed and what the caller has for the log and the refusal ledger", async () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    db.executeQuery.mockResolvedValue([{ Role: "facilities" }]);
+
+    const result = await requireRole(realToken(), [AppRole.ACCOUNTS_APPROVAL]);
+
+    expect(roleRefusalDetail(result!)).toBe("Required role: accounts_manager. Have: facilities");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Required role: accounts_manager. Have: facilities"));
+    warn.mockRestore();
+  });
+
+  it("answers 403, not 401, for a valid token whose user has no role yet", async () => {
+    db.executeQuery.mockResolvedValue([]);
+    expect((await requireRole(realToken(), [AppRole.USER]))?.status).toBe(403);
   });
 });
 

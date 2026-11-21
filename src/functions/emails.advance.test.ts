@@ -47,7 +47,10 @@ const ctx = { error: jest.fn(), log: jest.fn(), warn: jest.fn() } as unknown as 
 const MONEY_JOB = /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/;
 const ROUTES: { match: RegExp; rows: Record<string, unknown>[] }[] = [
   { match: MONEY_JOB, rows: [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Quote" }] },
-  { match: /SELECT EmailID, MatchedJobID/, rows: [{ AIClassification: "quote", EmailID: 42, MatchedJobID: 9, ReceivedAt: new Date("2026-10-10T00:00:00Z") }] },
+  {
+    match: /SELECT EmailID, (MatchedJobID, ReceivedAt, AIClassification, )?FromAddress/,
+    rows: [{ AIClassification: "quote", EmailID: 42, FromAddress: "acme@acme.example", MatchedJobID: 9, ReceivedAt: new Date("2026-10-10T00:00:00Z"), SenderAuthenticated: true, Source: "graph" }],
+  },
   { match: /INSERT INTO Quotes/, rows: [{ QuoteID: 7 }] },
   { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] },
 ];
