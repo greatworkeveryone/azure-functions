@@ -7,6 +7,8 @@
 import { TYPES } from "tedious";
 import type { Connection } from "tedious";
 import { executeQuery, type SqlRow } from "./db";
+import { advanceJobStatus } from "./jobStatusHelpers";
+import { JobEvent } from "./jobStatusMachine";
 import { loadJobForMoney } from "./moneyJob-db";
 import { declineReasonRefusal, jobMoneyRefusal } from "./moneyRules";
 
@@ -161,6 +163,14 @@ export async function approveDirectorQuote(
     ],
   );
 
+  // The director's approval is the full approval: the job moves to Work, as it
+  // does when an approver inside the limit approves (S1-6, 13 Oct N13).
+  await advanceJobStatus(connection, jobId, JobEvent.QUOTE_APPROVED, {
+    actor: approvedBy,
+    quoteId,
+    note: `Quote ${quoteNumber} approved by a director — ready for PO.`,
+  });
+
   return { ok: true, jobId, quote: await loadQuote(connection, quoteId) };
 }
 
@@ -226,6 +236,18 @@ export async function rejectQuote(
     "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
     [{ name: "JobID", type: TYPES.Int, value: jobId }],
   );
+
+  // JOB-03: declining the last quote still alive puts the job back in the quote
+  // round (the machine ignores it unless the job is waiting on quote approval),
+  // so the chaser runs again and the screen asks for a quote instead of an approval.
+  const alive = await executeQuery(
+    connection,
+    "SELECT COUNT(*) AS Alive FROM Quotes WHERE JobID = @JobID AND Status <> 'rejected'",
+    [{ name: "JobID", type: TYPES.Int, value: jobId }],
+  );
+  if (Number(alive[0]?.Alive ?? 1) === 0) {
+    await advanceJobStatus(connection, jobId, JobEvent.QUOTES_DECLINED, { actor: rejectedBy, quoteId });
+  }
 
   return { ok: true, jobId, previousStatus: status, quote: await loadQuote(connection, quoteId) };
 }

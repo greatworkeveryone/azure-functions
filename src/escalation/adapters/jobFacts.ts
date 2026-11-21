@@ -20,7 +20,7 @@ const JOB_FACTS_SELECT = `SELECT j.JobID, j.BuildingID, b.BuildingName, j.Title,
       (SELECT MIN(je.CreatedAt) FROM dbo.JobEvents je WHERE je.JobID = j.JobID AND je.EventType = 'quote_requested'),
       (SELECT MIN(rc.AddedAt) FROM dbo.JobRequestedContractors rc WHERE rc.JobID = j.JobID AND rc.RequestSent = 1)
     ) AS FirstQuoteRequestAt,
-    (SELECT COUNT(*) FROM dbo.Quotes q WHERE q.JobID = j.JobID) AS QuoteCount,
+    (SELECT COUNT(*) FROM dbo.Quotes q WHERE q.JobID = j.JobID AND q.Status <> 'rejected') AS QuoteCount,
     (SELECT COUNT(*) FROM dbo.JobInvoices ji
        WHERE ji.JobID = j.JobID AND ji.Direction = 'incoming' AND ji.Status = 'pending') AS PendingInvoices,
     (SELECT MIN(COALESCE(ji.ReceivedAt, ji.CreatedAt)) FROM dbo.JobInvoices ji
