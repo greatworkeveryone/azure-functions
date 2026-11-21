@@ -624,6 +624,12 @@ export const ACTION_ROLES = {
     routes: ["upsertFeatureFlag"],
     why: "Change who sees a feature (Admin > Features): admin only (Connor, 2 Nov 2026). Directors keep viewing the matrix (viewAdmin).",
   },
+  manageEscalationPolicies: {
+    gate: [A.ADMIN],
+    match: "exact",
+    routes: ["getEscalationPolicies", "setEscalationPolicy"],
+    why: "List every escalation policy and switch one on or off (Admin > System): admin only, ledgered with who and when (AF11).",
+  },
   viewAllEscalations: {
     gate: [A.DIRECTOR],
     routes: [],

@@ -24,6 +24,7 @@ export type LedgerSubjectType =
   | "email"
   | "defects_period"
   | "escalation"
+  | "escalation_policy"
   | "incentive"
   | "inspection"
   | "invoice"

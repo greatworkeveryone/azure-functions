@@ -291,6 +291,8 @@ export const LEDGER_ACTIONS = {
   // exception: a person decided the escalation was not needed.
   "escalation.acknowledge": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.auto_resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
+  // AF11: an admin switching an escalation policy on or off (Admin > System).
+  "escalation.policy_switch": { exception: true, reasonRequired: false, subjects: ["escalation_policy"] },
   "escalation.raise": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.resolve": { exception: false, reasonRequired: false, subjects: ["escalation"] },
   "escalation.supersede": { exception: false, reasonRequired: false, subjects: ["escalation"] },
