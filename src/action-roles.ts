@@ -778,6 +778,12 @@ export const ACTION_ROLES = {
     routes: [],
     why: "See the users table (VIEW_USERS_ROLES, users.ts): admin and directors. Inviting and changing roles is admin only (manageUsers).",
   },
+  decideRoleGrant: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    match: "exact",
+    routes: ["decideRoleGrant"],
+    why: "Confirm, decline or withdraw a pending grant of director, cfo or admin (SECA-02, D5). The handler also refuses the person who asked and the person being granted.",
+  },
   manageUsers: {
     gate: [A.ADMIN],
     match: "exact",

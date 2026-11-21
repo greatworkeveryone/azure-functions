@@ -180,6 +180,10 @@
     "director",
     "facilities_manager"
   ],
+  "decideRoleGrant": [
+    "admin",
+    "director"
+  ],
   "deleteAnyInspection": [
     "admin",
     "director",

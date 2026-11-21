@@ -58,6 +58,14 @@ afterAll(() => {
 });
 
 describe("health?deep=true", () => {
+  it("says whether two-person role grants are on (SECA-02)", async () => {
+    delete process.env.PRIVILEGED_GRANT_TWO_PERSON;
+    expect(((await health(deep, ctx)).jsonBody as { privilegedGrantTwoPerson: boolean }).privilegedGrantTwoPerson).toBe(true);
+    process.env.PRIVILEGED_GRANT_TWO_PERSON = "false";
+    expect(((await health(deep, ctx)).jsonBody as { privilegedGrantTwoPerson: boolean }).privilegedGrantTwoPerson).toBe(false);
+    delete process.env.PRIVILEGED_GRANT_TWO_PERSON;
+  });
+
   it("reports the active API token audience mode", async () => {
     process.env.API_TOKEN_AUDIENCE = "both";
     const body = (await health(deep, ctx)).jsonBody as { apiTokenAudience: string; ok: boolean };

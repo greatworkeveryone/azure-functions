@@ -94,6 +94,11 @@ export const LEDGER_ACTIONS = {
   // Raised later by the manager who was named (WP20).
   "quote.attribution_disputed": { exception: true, reasonRequired: true, subjects: ["quote"] },
   "user.role_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  // SECA-02 / D5: a grant of director, cfo or admin waits for a second person (migration 195).
+  "user.role_grant_requested": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  "user.role_grant_confirmed": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  "user.role_grant_declined": { exception: true, reasonRequired: false, subjects: ["app_user"] },
+  "user.role_grant_withdrawn": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   // Deactivating or reactivating an account changes who can sign in, so it is recorded like a role change.
   "user.activation_change": { exception: true, reasonRequired: false, subjects: ["app_user"] },
   // R13 variance margin and the Admin facts beside the limits (WP43a-2). A rise
