@@ -31,7 +31,7 @@
 
 import type { Connection } from "tedious";
 import { businessDayStart, darwinDateKey, holidaysFromEnv, parseHolidays } from "./businessTime";
-import { MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig, sweepMaxActions } from "./config";
+import { MAX_NOTIFICATION_ATTEMPTS, missingNotificationConfig, sweepMaxActions, sweepSince, sweepSinceProblem } from "./config";
 import { autoResolve, escalateFurther, hasNextLevel, raise, SWEEP_ACTOR } from "./engine";
 import type { AutoResolveInput, EscalateFurtherInput, EscalateFurtherResult, RaiseInput, RaiseResult } from "./engine";
 import { EscalationError } from "./errors";
@@ -53,6 +53,8 @@ import {
   type SweepJobPolicy,
 } from "./adapters/jobRules";
 import { countExhaustedNotifications, SYSTEM_SUBJECTS } from "./adapters/system";
+import { listUnsignedSchedules, type UnsignedSchedule } from "./adapters/tenancyFacts";
+import { APPROVAL_POLICIES } from "./approvals/policies";
 import { DECISION_PENDING_POLICY, isNextStepRow } from "./decisionRows";
 import { dueDeferrals, type DueDeferral } from "../jobDecisions/decisionsStore";
 import { reaskDeferral, type ReaskOptions, type ReaskResult } from "../jobDecisions/reask";
@@ -89,6 +91,8 @@ export interface SweepReport {
   scheduledReminders: number;
   /** Conditions a person already dealt with, so not raised again. */
   skippedAsHandled: number;
+  /** Conditions (and acknowledged rows) whose clock started before ESCALATION_SWEEP_SINCE: never chased by the sweep. */
+  skippedBeforeSince: number;
   superseded: number;
   /** The run stopped early at its action limit. */
   truncated: boolean;
@@ -108,6 +112,8 @@ export interface SweepDeps {
   /** R2/R13: attributions nobody has answered. Optional, so a sweep built without it skips the step. */
   listUnansweredAttributions?(connection: Connection): Promise<{ attributedToUserId: number; ref: AttributionRef }[]>;
   loadLiveJobFacts(connection: Connection): Promise<JobFacts[]>;
+  /** Unsigned schedules near a review date. Optional, so a sweep built without it skips the step. */
+  listUnsignedSchedules?(connection: Connection): Promise<UnsignedSchedule[]>;
   notifyTargets(connection: Connection, row: EscalationRow, event: NotifyEvent, options: NotifyOptions): Promise<NotifyOutcome>;
   raise(connection: Connection, input: RaiseInput): Promise<RaiseResult>;
   reaskDeferral(connection: Connection, deferral: DueDeferral, options: ReaskOptions): Promise<ReaskResult>;
@@ -125,6 +131,7 @@ export const defaultSweepDeps: SweepDeps = {
   listDueDeferrals: dueDeferrals,
   listLiveEscalations,
   listUnansweredAttributions,
+  listUnsignedSchedules,
   loadLiveJobFacts,
   notifyTargets,
   raise,
@@ -167,6 +174,7 @@ class Run {
       reminded: 0,
       scheduledReminders: 0,
       skippedAsHandled: 0,
+      skippedBeforeSince: 0,
       superseded: 0,
       truncated: false,
     };
@@ -248,23 +256,38 @@ async function endClearedConditions(run: Run): Promise<void> {
 // ── 2. SLA breaches ──────────────────────────────────────────────────────────
 
 async function moveUpOverdue(run: Run): Promise<void> {
+  const since = sweepSince(run.env);
   for (const row of await run.deps.listLiveEscalations(run.connection)) {
-    if (row.status !== "open" || row.dueAt === null || row.dueAt.getTime() > run.now.getTime()) continue;
+    if (row.dueAt === null || row.dueAt.getTime() > run.now.getTime()) continue;
+    // An acknowledged row has a follow-up clock (acknowledge sets DueAt): when it passes, the level is asked again.
+    // A row acknowledged before the follow-up clock existed has a DueAt that is no later than its acknowledgement
+    // (or none), and is left alone, as is anything acknowledged before ESCALATION_SWEEP_SINCE.
+    const followUp = row.status === "acknowledged";
+    if (row.status !== "open" && !followUp) continue;
+    if (followUp) {
+      if (row.acknowledgedAt === null || row.dueAt.getTime() <= row.acknowledgedAt.getTime()) continue;
+      if (since && row.acknowledgedAt.getTime() < since.getTime()) {
+        run.report.skippedBeforeSince += 1;
+        continue;
+      }
+    }
     const policy = await run.deps.getPolicy(run.connection, row.policyKey, run.now.getTime());
     if (!policy || policy.autoReescalate === "no") continue;
 
     // "yes" moves up while there is a level above; at the top, and for
-    // reminder / nudge policies, it repeats the level with a fresh clock.
+    // reminder / nudge policies, it repeats the level with a fresh clock. A
+    // follow-up on an acknowledged row always repeats the level first: the person who
+    // took it is asked again, and only the next breach moves it up.
     let mode: "next_level" | "same_level" = "same_level";
     try {
-      if (policy.autoReescalate === "yes" && (await run.deps.hasNextLevel(run.connection, row, run.now))) mode = "next_level";
+      if (!followUp && policy.autoReescalate === "yes" && (await run.deps.hasNextLevel(run.connection, row, run.now))) mode = "next_level";
     } catch (error) {
       run.fail(`planning escalation #${row.escalationId}`, error);
       continue;
     }
     if (!run.take()) return;
 
-    const label = mode === "next_level" ? "move up" : "remind";
+    const label = mode === "next_level" ? "move up" : followUp ? "follow up" : "remind";
     if (run.options.dryRun) {
       run.options.log(`escalationSweep: would ${label} #${row.escalationId} ${row.policyKey} on ${row.subjectType} ${row.subjectId} (due ${row.dueAt.toISOString()})`);
       if (mode === "next_level") run.report.superseded += 1;
@@ -280,7 +303,7 @@ async function moveUpOverdue(run: Run): Promise<void> {
         mode,
         notify: run.notifyOptions(),
         now: run.now,
-        onlyIfOpen: true,
+        onlyIfOpen: !followUp,
       });
       if (mode === "next_level") run.report.superseded += 1;
       else run.report.reminded += 1;
@@ -359,6 +382,13 @@ interface Candidate {
 const priorityRank = (job: JobFacts): number => PRIORITY_RANK[job.priority ?? ""] ?? 2;
 
 async function raiseForJobs(run: Run): Promise<void> {
+  const problem = sweepSinceProblem(run.env);
+  if (problem) {
+    // Fail closed: an unreadable floor must not mean "no floor", or the first live run chases every old job.
+    run.options.warn(`escalationSweep: ${problem}; no job policy is raised until it is fixed`);
+    return;
+  }
+  const since = sweepSince(run.env);
   const policies = new Map<string, EscalationPolicy>();
   for (const key of SWEEP_JOB_POLICIES) {
     const policy = await run.deps.getPolicy(run.connection, key, run.now.getTime());
@@ -384,6 +414,11 @@ async function raiseForJobs(run: Run): Promise<void> {
 
       const last = latest.get(latestKey(String(job.jobId), policyKey));
       const epoch = conditionEpoch(policyKey, job);
+      // Nothing whose clock started before the floor is raised, and nothing with no clock can be shown to be after it.
+      if (since && (!epoch || epoch.getTime() < since.getTime())) {
+        run.report.skippedBeforeSince += 1;
+        continue;
+      }
       if (last && epoch && last.lastCreatedAt.getTime() >= epoch.getTime()) {
         // A person (or an earlier run) already dealt with this stretch of the condition.
         if (policyKey === "job.stalled_unacknowledged") handledStalled.push(job);
@@ -472,6 +507,64 @@ async function raiseAttributionNotices(run: Run): Promise<void> {
         subjectId,
         subjectType: ATTRIBUTION_SUBJECT_TYPE,
         userTargets: [attributedToUserId],
+      });
+      if (result.created) run.report.raised += 1;
+    });
+  }
+}
+
+// ── 3c. Unsigned tenancy schedules (LOOP-11) ─────────────────────────────────
+
+/**
+ * A tenancy whose schedule is unsigned while a review date is near or past is raised to the accounts manager,
+ * then the CFO, under tenancy.schedule_unsigned (seeded inactive). Same rules as the job policies: nothing
+ * whose clock started before ESCALATION_SWEEP_SINCE, nothing a person already closed for this stretch.
+ */
+async function raiseUnsignedSchedules(run: Run): Promise<void> {
+  const list = run.deps.listUnsignedSchedules;
+  if (!list) return;
+  const policyKey = APPROVAL_POLICIES.scheduleUnsigned;
+  const policy = await run.deps.getPolicy(run.connection, policyKey, run.now.getTime());
+  if (!policy?.active) {
+    if (run.options.dryRun) run.options.log(`escalationSweep: ${policyKey} ${policy ? "is switched off (Active = 0)" : "has no row in dbo.EscalationPolicies"}, so it is skipped`);
+    return;
+  }
+  const problem = sweepSinceProblem(run.env);
+  if (problem) return; // raiseForJobs has already said so
+  const since = sweepSince(run.env);
+  const unsigned = await list(run.connection);
+  if (unsigned.length === 0) return;
+  const latest = await run.deps.latestTimesBySubject(run.connection, "tenancy");
+  const live = new Set((await run.deps.listLiveEscalations(run.connection)).map(rowKey));
+  for (const { since: clock, tenantId } of unsigned) {
+    const subjectId = String(tenantId);
+    if (live.has(rowKey({ policyKey, subjectId, subjectType: "tenancy" }))) continue;
+    if (since && clock.getTime() < since.getTime()) {
+      run.report.skippedBeforeSince += 1;
+      continue;
+    }
+    const last = latest.get(latestKey(subjectId, policyKey));
+    if (last && last.lastCreatedAt.getTime() >= clock.getTime()) {
+      run.report.skippedAsHandled += 1;
+      continue;
+    }
+    if (!run.take()) return;
+    if (run.options.dryRun) {
+      run.options.log(`escalationSweep: would raise ${policyKey} on tenancy ${tenantId}`);
+      run.report.raised += 1;
+      continue;
+    }
+    await run.attempt(`raising ${policyKey} on tenancy ${tenantId}`, async () => {
+      const result = await run.deps.raise(run.connection, {
+        actor: SWEEP_ACTOR,
+        context: { since: clock.toISOString() },
+        headline: "Schedule not signed off, review date near",
+        notify: run.notifyOptions(),
+        now: run.now,
+        policyKey,
+        skipConditionCheck: true,
+        subjectId,
+        subjectType: "tenancy",
       });
       if (result.created) run.report.raised += 1;
     });
@@ -628,6 +721,7 @@ export async function runSweep(
     ["asking deferred decisions again", reaskDeferred],
     ["raising for jobs", raiseForJobs],
     ["raising attribution notices", raiseAttributionNotices],
+    ["raising unsigned schedules", raiseUnsignedSchedules],
     ["restarting on follow-up emails", restartOnFollowUps],
     ["retrying notifications", retryNotifications],
     ["checking health", checkHealth],
@@ -649,7 +743,7 @@ export async function runSweep(
   options.log(
     `escalationSweep: ${options.dryRun ? "DRY RUN (nothing written), would" : "done,"} raised=${r.raised} superseded=${r.superseded} reminded=${r.reminded} ` +
       `scheduledReminders=${r.scheduledReminders} reasked=${r.reasked} autoResolved=${r.autoResolved} followUps=${r.followUps} notificationsRetried=${r.notificationsRetried} ` +
-      `healthRaised=${r.healthRaised} healthResolved=${r.healthResolved} skippedAsHandled=${r.skippedAsHandled} ` +
+      `healthRaised=${r.healthRaised} healthResolved=${r.healthResolved} skippedAsHandled=${r.skippedAsHandled} skippedBeforeSince=${r.skippedBeforeSince} ` +
       `errors=${r.errors.length}${r.truncated ? " (stopped at the action limit; the rest waits for the next run)" : ""}`,
   );
   return r;

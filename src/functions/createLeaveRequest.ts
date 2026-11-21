@@ -11,6 +11,9 @@ import {
 } from "../assetRegisterSupport";
 import { LEAVE_READ_ROLES, leaveApprovers, parseLeave } from "../leavePolicy";
 import { loadPeople, peopleAudit } from "../peopleWorkflow";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { raiseApproval } from "../escalation/approvals/raise";
+import { ledgerUserActor } from "../ledger/actor";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
@@ -35,11 +38,13 @@ export async function createLeaveRequest(
   try {
     connection = await createRequestConnection(auth.token);
     const conn = connection;
+    const held: { asked?: { approvers: { id: number; name: string }[]; requesterId: number; requesterName: string; requesterRole: string } } = {};
     const result = await inTransaction(conn, async () => {
       const data = await loadPeople(conn, true),
         self = data.staff.find((person) => person.oid === auth.caller.oid);
       if (!self) return txFail({ status: 403, jsonBody: { error: "An active staff record is required" } });
-      if (!leaveApprovers(self, data.staff, data.links).length)
+      const approvers = leaveApprovers(self, data.staff, data.links);
+      if (!approvers.length)
         return txFail(
           conflict("No active approver is available. Ask the CFO to check reporting relationships."),
         );
@@ -72,9 +77,32 @@ export async function createLeaveRequest(
         userId: self.id,
         reportingRevision: data.revision,
       });
+      held.asked = {
+        approvers: approvers.map(({ id, name }) => ({ id, name })),
+        requesterId: self.id,
+        requesterName: self.name,
+        requesterRole: self.role,
+      };
       return txOk({ saved: true, id: row.RequestId });
     });
-    return result.ok ? { status: 201, jsonBody: result.value } : result.response;
+    if (!result.ok) return result.response;
+    // Once the request has committed, the approvers are told and chased through the escalation engine. A policy that
+    // is switched off, or a failed send, never undoes the request: the response says whether anyone was told.
+    const made = held.asked;
+    let notified = false;
+    if (made) {
+      const row = await raiseApproval(conn, {
+        actor: ledgerUserActor({ name: made.requesterName, roles: [made.requesterRole], userId: made.requesterId }),
+        headline: "Leave request waiting for a decision",
+        log: (message) => context.warn(message),
+        policyKey: APPROVAL_POLICIES.leave,
+        subjectId: String(result.value.id),
+        subjectType: APPROVAL_SUBJECTS.leave,
+        userTargets: made.approvers.map((approver) => approver.id),
+      });
+      notified = row?.notificationState === "sent";
+    }
+    return { status: 201, jsonBody: { ...result.value, approvers: made?.approvers.map((approver) => approver.name) ?? [], notified } };
   } catch (error) {
     context.error("Leave creation failed", error);
     return { status: 500, jsonBody: { error: "Could not submit leave request" } };

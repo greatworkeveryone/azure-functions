@@ -11,6 +11,9 @@
 //   ESCALATION_SWEEP_ENABLED     "true" lets the sweep write; anything else and it does nothing
 //   ESCALATION_SWEEP_DRY_RUN     "true" logs what the sweep would do and writes nothing
 //   ESCALATION_SWEEP_MAX_ACTIONS most writes one run makes (default 100)
+//   ESCALATION_SWEEP_SINCE       an ISO date (YYYY-MM-DD, Darwin): the sweep never raises for, and never
+//                                follows up, anything whose clock started before it. Unset = no floor.
+//                                Set it before the first live run so old jobs are not all chased at once.
 
 import { getFacilitiesManagerEmails } from "../plannerHelpers";
 import { ROLES } from "./roles";
@@ -57,4 +60,25 @@ export const DEFAULT_SWEEP_MAX_ACTIONS = 100;
 export function sweepMaxActions(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number((env.ESCALATION_SWEEP_MAX_ACTIONS ?? "").trim());
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_SWEEP_MAX_ACTIONS;
+}
+
+/** True when the sweep is writing, so the promises the screens make (a reminder, a move up) are kept. In dry run
+ *  and when off nothing is chased. */
+export function chasingOn(env: NodeJS.ProcessEnv = process.env): boolean {
+  return sweepMode(env) === "live";
+}
+
+/** ESCALATION_SWEEP_SINCE as the start of that day in Darwin (UTC+9:30, no daylight saving), or null when it is unset.
+ *  An unreadable value is treated as unset by this function; `sweepSinceProblem` says so for the log. */
+export function sweepSince(env: NodeJS.ProcessEnv = process.env): Date | null {
+  const raw = (env.ESCALATION_SWEEP_SINCE ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const at = new Date(`${raw}T00:00:00+09:30`);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+/** A message when ESCALATION_SWEEP_SINCE is set to something that is not a date, so it is not silently ignored. */
+export function sweepSinceProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = (env.ESCALATION_SWEEP_SINCE ?? "").trim();
+  return raw !== "" && sweepSince(env) === null ? `ESCALATION_SWEEP_SINCE "${raw}" is not a YYYY-MM-DD date, so there is no floor` : null;
 }

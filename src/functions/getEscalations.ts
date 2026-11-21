@@ -26,6 +26,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { closeConnection, createRequestConnection } from "../db";
 import { extractToken, requireRole, unauthorizedResponse } from "../auth";
+import { chasingOn } from "../escalation/config";
 import { toDto } from "../escalation/dto";
 import { getAdapter } from "../escalation/adapters/registry";
 import "../escalation/adapters";
@@ -132,7 +133,8 @@ export async function getEscalations(request: HttpRequest, context: InvocationCo
       .map((row) => toDto(row, caller!.viewer, now, directory));
     return {
       status: 200,
-      jsonBody: { items, page: pagination.page, pageSize: pagination.active ? pagination.pageSize : items.length, total },
+      // `chasing`: whether the sweep is live, so the screens may promise a reminder or a move up only when it is true.
+      jsonBody: { chasing: chasingOn(), items, page: pagination.page, pageSize: pagination.active ? pagination.pageSize : items.length, total },
     };
   } catch (error: unknown) {
     return escalationErrorResponse(error, context, "getEscalations", caller ?? undefined, directory);

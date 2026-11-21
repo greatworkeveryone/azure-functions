@@ -19,6 +19,9 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TYPES } from "tedious";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval } from "../escalation/approvals/raise";
+import { resolveLedgerActor } from "../ledger/actor";
 import { errorResponse, extractToken, requireRole, serviceUnavailableResponse, unauthorizedResponse, userInfoFromToken } from "../auth";
 import { outsideAudienceResponse, readCallerRoles, storedAudience } from "../procedureAccess";
 import { canReadProcedure } from "../procedureAudience";
@@ -140,6 +143,22 @@ export async function saveProcedureDraft(request: HttpRequest, context: Invocati
         status: 409,
         jsonBody: { current: { updatedAt }, error: "This draft was saved by someone else, or published, since you opened it. Reload to see it as it is now." },
       };
+    }
+    if (outcome?.ApprovalRequestCleared === true) {
+      // The edit withdrew the request for approval, so the escalation that was chasing it ends with it.
+      const editor = await resolveLedgerActor(request, connection).catch(() => null);
+      if (editor) {
+        await concludeApproval(connection, {
+          actor: editor,
+          code: "withdrawn",
+          log: (message) => context.warn(message),
+          note: "The draft was edited, so the request for approval was withdrawn",
+          policyKeys: [APPROVAL_POLICIES.procedure],
+          subjectId: slug,
+          subjectType: APPROVAL_SUBJECTS.procedure,
+          withdrawn: true,
+        });
+      }
     }
     return { status: 200, jsonBody: { approvalRequestCleared: outcome?.ApprovalRequestCleared === true, ok: true, updatedAt } };
   } catch (error: any) {

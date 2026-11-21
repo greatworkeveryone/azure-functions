@@ -251,9 +251,9 @@ describe("acting on an escalation", () => {
     expect(availableActions(FAY, claimed).withdraw).toBe(false);
   });
 
-  it("an authority escalation can't be resolved from here", () => {
+  it("an authority escalation can't be resolved or acknowledged from here: an approval is decided (AF5, LOOP-02)", () => {
     const authority = row({ kind: "authority", targetRole: "accounts_manager" });
-    expect(availableActions(CAM, authority)).toEqual({ acknowledge: true, escalateFurther: true, resolve: false, withdraw: false });
+    expect(availableActions(CAM, authority)).toEqual({ acknowledge: false, escalateFurther: true, resolve: false, withdraw: false });
   });
 
   it("a closed escalation offers nothing", () => {

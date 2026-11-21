@@ -36,15 +36,23 @@ export interface JobFacts {
   expectedProgressUpdate: Date | null;
   /** When the first contractor was requested for a quote (JobRequestedContractors.AddedAt). */
   firstQuoteRequestAt: Date | null;
+  /** Incoming invoices stage 1 approved that wait for a director (JobInvoices.DirectorRequiredAt set). */
+  invoicesAwaitingDirector: number;
   isArchived: boolean;
+  /** Jobs.IsStalled: a person flagged it stalled. */
+  isFlaggedStalled: boolean;
   jobId: number;
   /** Jobs.Kind; which sweep policies apply to the job follows from it. */
   kind: string;
+  /** When stage 1 sent the oldest such invoice to the directors. */
+  oldestDirectorRequiredAt: Date | null;
   /** Incoming invoices still 'pending', and when the oldest arrived. */
   oldestPendingInvoiceAt: Date | null;
   pendingInvoices: number;
   priority: string | null;
   quoteCount: number;
+  /** Quotes in awaiting_director: over the approvers' limits, waiting on a director. */
+  quotesAwaitingDirector: number;
   requestedContractors: number;
   status: string;
   statusSince: Date | null;
@@ -103,6 +111,32 @@ export function isPastDue(job: JobFacts, now: Date): boolean {
   return darwinDateKey(job.expectedProgressUpdate) < darwinDateKey(now);
 }
 
+export const APPROVAL_WAIT_DAYS = 2;
+
+/** The moment a director-tier approval started waiting: the earliest of the invoices sent to the directors and,
+ *  for a quote (which carries no decision time of its own), when the job entered Awaiting Approval. */
+export function approvalWaitingSince(job: JobFacts): Date | null {
+  const times: Date[] = [];
+  if (job.invoicesAwaitingDirector > 0 && job.oldestDirectorRequiredAt) times.push(job.oldestDirectorRequiredAt);
+  if (job.quotesAwaitingDirector > 0) times.push(job.statusSince ?? job.createdAt);
+  return times.length === 0 ? null : new Date(Math.min(...times.map((time) => time.getTime())));
+}
+
+/** A quote or invoice has waited two business days for a director (JOB-07). */
+export function isApprovalWaiting(job: JobFacts, now: Date, holidays: Holidays): boolean {
+  if (!isLiveJob(job)) return false;
+  const since = approvalWaitingSince(job);
+  return since !== null && addBusinessHours(since, businessDaysToHours(APPROVAL_WAIT_DAYS), holidays).getTime() <= now.getTime();
+}
+
+/** A job on hold (the Tenant status) or flagged stalled is overdue when its next-update date has passed (Darwin);
+ *  with no date it is overdue once the stall threshold for its priority has passed since the hold began (JOB-08). */
+export function isHoldOverdue(job: JobFacts, now: Date, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!isLiveJob(job) || (job.status !== "Tenant" && !job.isFlaggedStalled)) return false;
+  if (job.expectedProgressUpdate) return darwinDateKey(job.expectedProgressUpdate) < darwinDateKey(now);
+  return now.getTime() - stallClockStart(job).getTime() > stallThresholdDays(job, env) * DAY_MS;
+}
+
 export const isCriticalJob = (job: JobFacts): boolean => isLiveJob(job) && job.priority === "Critical";
 
 /** The sweep's job policies, in the order they are evaluated. */
@@ -112,6 +146,8 @@ export const SWEEP_JOB_POLICIES = [
   "job.quote_not_back",
   "job.invoice_waiting",
   "job.past_due",
+  "job.approval_waiting",
+  "job.hold_overdue",
 ] as const;
 export type SweepJobPolicy = (typeof SWEEP_JOB_POLICIES)[number];
 
@@ -131,6 +167,8 @@ export const POLICY_JOB_KINDS: Readonly<Record<SweepJobPolicy, readonly string[]
   "job.quote_not_back": CONTRACTOR_FLOW_KINDS,
   "job.invoice_waiting": CONTRACTOR_FLOW_KINDS,
   "job.past_due": CONTRACTOR_FLOW_KINDS,
+  "job.approval_waiting": CONTRACTOR_FLOW_KINDS,
+  "job.hold_overdue": CONTRACTOR_FLOW_KINDS,
 };
 
 /** Whether a policy applies to a job of this kind. job.critical and the manual
@@ -160,6 +198,10 @@ export function jobConditionActive(policyKey: string, job: JobFacts, context: Ru
       return isInvoiceWaiting(job, context.now, context.holidays);
     case "job.past_due":
       return isPastDue(job, context.now);
+    case "job.approval_waiting":
+      return isApprovalWaiting(job, context.now, context.holidays);
+    case "job.hold_overdue":
+      return isHoldOverdue(job, context.now, context.env);
     case "job.critical":
       return isCriticalJob(job);
     // Raised by a person (or the write path): it lasts while the job is live.
@@ -187,6 +229,10 @@ export function conditionEpoch(policyKey: SweepJobPolicy, job: JobFacts): Date |
       return job.oldestPendingInvoiceAt;
     case "job.past_due":
       return job.expectedProgressUpdate;
+    case "job.approval_waiting":
+      return approvalWaitingSince(job);
+    case "job.hold_overdue":
+      return job.expectedProgressUpdate ?? stallClockStart(job);
   }
 }
 
@@ -211,6 +257,10 @@ export function jobHeadline(policyKey: string, job: JobFacts, now: Date): string
         : "Invoice waiting for a decision";
     case "job.past_due":
       return job.expectedProgressUpdate ? `Past due: the next update was due ${formatDate(job.expectedProgressUpdate)}` : "Past due";
+    case "job.approval_waiting":
+      return "Waiting for a director's decision";
+    case "job.hold_overdue":
+      return job.expectedProgressUpdate ? `On hold: the next update was due ${formatDate(job.expectedProgressUpdate)}` : "On hold or stalled with no update";
     case "job.critical":
       return "Critical job: needs attention now";
     default:

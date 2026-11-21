@@ -13,6 +13,7 @@ import { LEASE_EVENT_STATES, type LeaseEventState } from "../../leaseEventMachin
 import { LEASE_POLICIES, OPTION_DEADLINE_WARNING_DAYS } from "../../leaseEvents/policies";
 import { sqlDateToIso } from "../../nextReviewDate";
 import { normaliseRole, ROLES } from "../roles";
+import { APPROVAL_POLICIES } from "../approvals/policies";
 import type { EscalationAdapter } from "./registry";
 
 const VIEW_ROLES: ReadonlySet<string> = new Set([ROLES.accounts, ROLES.accountsManager, ROLES.admin, ROLES.cfo, ROLES.director]);
@@ -113,5 +114,5 @@ export const leaseEventAdapter: EscalationAdapter = {
   visibleTo: (viewer) => viewer.roles.some((role) => VIEW_ROLES.has(normaliseRole(role))),
 
   // The renewal referral ends with the directors' outcome, never by hand.
-  withdrawable: (escalation) => escalation.policyKey !== LEASE_POLICIES.renewal,
+  withdrawable: (escalation) => escalation.policyKey !== LEASE_POLICIES.renewal && escalation.policyKey !== APPROVAL_POLICIES.optionApproval,
 };

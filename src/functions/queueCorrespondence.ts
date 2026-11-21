@@ -24,6 +24,9 @@ import { applyResolutions, checkRecipients, isBlocked, writeJob } from "../comms
 import { parseQueueInput } from "../comms/request";
 import { prepareSender } from "../comms/senderSetup";
 import type { NewJob } from "../comms/types";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { raiseApproval } from "../escalation/approvals/raise";
+import { ledgerUserActor } from "../ledger/actor";
 import { closeConnection, createRequestConnection } from "../db";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
@@ -67,7 +70,21 @@ export async function queueCorrespondence(request: HttpRequest, context: Invocat
     }
     const user = await findUserByOid(connection, actor.oid);
     const queued = await writeJob(connection, job, checked, actor, user?.userId ?? null, approvalThreshold(), input.value.idempotencyKey);
-    return { headers: noStore, jsonBody: { ...queued, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.approvalReason !== null }, status: queued.repeated ? 200 : 201 };
+    // A send held for approval is put to an approver (the sender's manager, then a director) and chased, through the
+    // escalation engine; whether anyone was actually told comes back to the screen. Never part of the queueing itself.
+    let approverTold = false;
+    if (queued.status === "awaiting_approval" && !queued.repeated) {
+      const row = await raiseApproval(connection, {
+        actor: ledgerUserActor({ name: actor.name, roles: actor.roles, userId: user?.userId ?? null }),
+        headline: "Send waiting for approval",
+        log: (message) => context.warn(message),
+        policyKey: APPROVAL_POLICIES.broadcast,
+        subjectId: String(queued.correspondenceId),
+        subjectType: APPROVAL_SUBJECTS.broadcast,
+      });
+      approverTold = row?.notificationState === "sent";
+    }
+    return { headers: noStore, jsonBody: { ...queued, approverTold, duplicatesDropped: input.value.duplicatesDropped, requiresApproval: queued.approvalReason !== null }, status: queued.repeated ? 200 : 201 };
   } catch (error) {
     context.error("queueCorrespondence failed:", error instanceof Error ? error.message : error);
     return errorResponse("Could not queue the email", error);

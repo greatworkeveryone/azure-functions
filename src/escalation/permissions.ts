@@ -110,7 +110,8 @@ export function availableActions(viewer: Viewer, row: EscalationRow): ActionAvai
   // refuses to acknowledge, resolve or withdraw either from here, and so do the buttons.
   const domainEnds = isDecisionRow(row) || isNextStepRow(row);
   return {
-    acknowledge: live && row.status === "open" && !domainEnds && canAct(viewer, row),
+    // An approval (authority) is decided on the record, never acknowledged: nothing would be parked on a claim.
+    acknowledge: live && row.status === "open" && !domainEnds && row.kind === "attention" && canAct(viewer, row),
     escalateFurther: live && canEscalateFurther(viewer, row),
     // Authority escalations end with the decision on the subject.
     resolve: live && row.kind === "attention" && !domainEnds && canAct(viewer, row),

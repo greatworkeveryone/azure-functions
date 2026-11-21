@@ -460,9 +460,24 @@ export interface AcknowledgeInput {
   now?: Date;
 }
 
-/** The target claims it: sets the person, stops SLA re-escalation for this level,
- *  clears the subject's escalated flag. Acknowledging twice as the same person is
- *  a no-op; someone else's claim is a conflict. */
+/** How long an acknowledgement holds before the sweep asks again, when the policy gives no hours of its own:
+ *  two business days. */
+export const ACKNOWLEDGE_FOLLOW_UP_BUSINESS_HOURS = 16;
+
+/** The follow-up moment for a row acknowledged at `now`: the policy's first stated SLA on its own clock, else two
+ *  business days. Null when the policy is gone: nothing is promised then. */
+export async function followUpDueAt(connection: Connection, row: Pick<EscalationRow, "policyKey">, now: Date): Promise<Date | null> {
+  const policy = await getPolicy(connection, row.policyKey, now.getTime());
+  if (!policy || policy.autoReescalate === "no") return null;
+  const stated = policy.ladder.find((entry) => typeof entry.slaHours === "number" && entry.slaHours > 0)?.slaHours;
+  const hours = stated ?? ACKNOWLEDGE_FOLLOW_UP_BUSINESS_HOURS;
+  return addClockHours(stated === undefined ? "business" : policy.clock, now, hours, holidaysFromEnv());
+}
+
+/** The target claims it: sets the person and clears the subject's escalated flag. Acknowledging does not park it
+ *  for good: it sets a follow-up date, and when that passes the sweep asks the level again (and only then, at the
+ *  next breach, moves it up). An approval or decision (authority) is answered, never acknowledged. Acknowledging
+ *  twice as the same person is a no-op; someone else's claim is a conflict. */
 export async function acknowledge(connection: Connection, input: AcknowledgeInput): Promise<EscalationRow> {
   const now = input.now ?? new Date();
   await inTransaction(connection, async () => {
@@ -481,12 +496,17 @@ export async function acknowledge(connection: Connection, input: AcknowledgeInpu
     if (isNextStepRow(row)) {
       throw new EscalationError("bad_request", "A next step is done, not acknowledged. Open the job and mark it done.", { current: row });
     }
+    if (row.kind === "authority") {
+      throw new EscalationError("bad_request", "An approval is decided, not acknowledged. Open it and approve or decline it.", { current: row });
+    }
     const adapter = requireAdapter(row.subjectType);
+    const followUp = await followUpDueAt(connection, row, now);
 
     await applyChanges(connection, row, {
       AcknowledgedAt: now,
       AcknowledgedByName: actorName(input.actor),
       AcknowledgedByUserId: actorUserId(input.actor),
+      DueAt: followUp,
       Status: "acknowledged",
       TargetUserId: actorUserId(input.actor) ?? row.targetUserId,
     });
