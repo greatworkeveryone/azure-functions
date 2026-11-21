@@ -18,6 +18,8 @@ import { guardMyobRequest } from "../myob-request-guard";
 import { sendActivityNotification } from "../teams/activity";
 import { NOT_A_RECORD } from "../test-data";
 import { isStaging, skipOnStaging } from "./stagingGuard";
+import { graphCompletePlannerTask, graphCreatePlannerTask } from "../planner";
+import { unpublishFromWordPress } from "../functions/vacancies";
 
 const fetchMock = jest.fn();
 const saved = { ...process.env };
@@ -37,9 +39,18 @@ afterAll(() => {
 });
 
 describe("isStaging", () => {
-  it("is true only for exactly Staging", () => {
+  it("on a developer machine (no WEBSITE_INSTANCE_ID) is true only for exactly Staging", () => {
     expect(isStaging({ AZURE_FUNCTIONS_ENVIRONMENT: "Staging" })).toBe(true);
     for (const value of ["Production", "Development", "staging", undefined]) expect(isStaging({ AZURE_FUNCTIONS_ENVIRONMENT: value })).toBe(false);
+  });
+  // REV-06: fails safe. On a deployed Function App only an exact "Production" turns the guard off.
+  it("on a deployed app is off only for exactly Production: Staging, a misspelling or no value all guard", () => {
+    const deployed = { WEBSITE_INSTANCE_ID: "abc123" };
+    expect(isStaging({ ...deployed, AZURE_FUNCTIONS_ENVIRONMENT: "Production" })).toBe(false);
+    for (const value of ["Staging", "staging", "Prod", "production", "Development", "", undefined]) {
+      expect(isStaging({ ...deployed, AZURE_FUNCTIONS_ENVIRONMENT: value })).toBe(true);
+    }
+    expect(isStaging({ ...deployed })).toBe(true);
   });
   it("skipOnStaging logs and says skip only on staging", () => {
     const log = jest.fn();
@@ -75,6 +86,28 @@ describe("on staging: outbound email makes no network call", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 202 }));
     await createGraphSender(fetchMock as unknown as typeof fetch, async () => "tok").sendDraft("n@example.test", "draft-1");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("on staging: Planner and the public website are not written (REV-06)", () => {
+  const task = { assigneeIds: [], bucketId: "b", description: "d", dueDate: "2026-12-01", egress: NOT_A_RECORD, planId: "p", title: "t" };
+  it("creating and completing a Planner task fail closed without a network call", async () => {
+    process.env.PLANNER_SYNC_ENABLED = "true";
+    await expect(graphCreatePlannerTask(task)).rejects.toThrow(/staging: Planner not written/);
+    await expect(graphCompletePlannerTask("task-1", "etag")).rejects.toThrow(/staging: Planner not written/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("a settings copy of production still cannot reach Planner when the environment is unset on a deployed app", async () => {
+    process.env.AZURE_FUNCTIONS_ENVIRONMENT = "";
+    process.env.WEBSITE_INSTANCE_ID = "abc123";
+    process.env.PLANNER_SYNC_ENABLED = "true";
+    await expect(graphCreatePlannerTask(task)).rejects.toThrow(/staging/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("taking a post down from WordPress fails closed without a network call", async () => {
+    process.env.WORDPRESS_API_URL = "https://site.example/wp-json";
+    await expect(unpublishFromWordPress(12)).rejects.toThrow(/staging/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

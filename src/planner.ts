@@ -5,6 +5,7 @@ import { PLANNER_SYNC_DISABLED_MESSAGE, plannerSyncEnabled } from "./plannerFlag
 import type { TriggerType } from "./plannerHelpers";
 import { assertMayLeave, type EgressSubject } from "./test-data";
 import { errorMessage } from "./errorMessage";
+import { isStaging } from "./config/stagingGuard";
 
 // Every Graph call below is behind PLANNER_SYNC_ENABLED (see plannerFlag.ts).
 // The orchestrators (reconcilers, timer, resolveActivePlannerTasks) check it first
@@ -104,6 +105,7 @@ export interface CreatePlannerTaskParams {
 export async function graphCreatePlannerTask(
   params: CreatePlannerTaskParams,
 ): Promise<string> {
+  if (isStaging()) throw new Error("staging: Planner not written");
   requirePlannerSyncEnabled("graphCreatePlannerTask");
   assertMayLeave("planner", params.egress);
   const token = await getGraphToken();
@@ -185,6 +187,7 @@ export async function graphCompletePlannerTask(
   taskId: string,
   etag: string,
 ): Promise<void> {
+  if (isStaging()) throw new Error("staging: Planner not written");
   requirePlannerSyncEnabled("graphCompletePlannerTask");
   const token = await getGraphToken();
   const resp = await fetch(

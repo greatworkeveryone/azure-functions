@@ -18,6 +18,10 @@ import { imageBytesMatch, MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
+import { isStaging } from "../config/stagingGuard";
+
+// REV-06: staging holds a copy of production's data, including live WordPress post ids; it never touches the website.
+const STAGING_NO_PUBLISH = { status: 409, jsonBody: { error: "Staging does not publish to the website." } };
 
 const IMAGE_CONTENT_TYPES = new Set([
   "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
@@ -1011,6 +1015,7 @@ async function uploadImageToWp(
   imageUrl: string,
   context?: InvocationContext,
 ): Promise<number | null> {
+  if (isStaging()) throw new Error("staging: the website is not changed");
   // Outside the catch below: a test vacancy's refusal must not read as "skip this image".
   assertMayLeave("wordpress", egress);
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
@@ -1046,6 +1051,7 @@ async function uploadImageToWp(
 }
 
 export async function unpublishFromWordPress(wpPostId: number): Promise<void> {
+  if (isStaging()) throw new Error("staging: the website is not changed");
   const wpBase = process.env.WORDPRESS_API_URL ?? "";
   const resp = await fetch(`${wpBase}/wp/v2/tenancy/${wpPostId}`, {
     method: "POST",
@@ -1074,6 +1080,7 @@ async function handlePublishVacancy(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  if (isStaging()) return STAGING_NO_PUBLISH;
   // Tighter limit than other writes because each call issues N outbound WP
   // requests (uploadImageToWp loops over every image) — keep blast radius low.
   const rl = checkRateLimit(`publishVacancy:${identity.oid}`, VACANCY_PUBLISH_LIMIT);
@@ -1214,6 +1221,7 @@ async function handleUnpublishVacancy(
 
   const identity = await verifiedIdentityFromRequest(request);
   if (!identity) return unauthorizedResponse();
+  if (isStaging()) return STAGING_NO_PUBLISH;
   const rl = checkRateLimit(`unpublishVacancy:${identity.oid}`, VACANCY_WRITE_LIMIT);
   if (!rl.allowed) return tooManyRequests(rl.retryAfterMs);
 
