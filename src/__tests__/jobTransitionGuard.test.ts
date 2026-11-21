@@ -36,8 +36,8 @@ function machinePaid(from: GuardState): GuardState | null {
 // whenever either side changes, together with the guard and the vectors.
 
 /** SHA-256 of jobTransitionGuard.ts and of the vector file, the same in both repos. */
-const GUARD_SHA256 = "cf770c75b1463cfc9fd7833ea84e4cba119eba96b2aa4556953d17ffcf0408ec";
-const VECTORS_SHA256 = "b4da7bbc598d8d3c1e6d2705d12c1ca9de57b60f17a2aa80c37f6d9a837b610f";
+const GUARD_SHA256 = "6631da6145741dac0e2a6311e039ee2b43c5f290d1de34cae8f5b9f57b8c0b2f";
+const VECTORS_SHA256 = "94613aca78cc6046938ca09dc92e455aee0479999e1abccfbb32caac334127b9";
 
 interface Vectors {
   actorRoles: Record<string, string[] | "system">;
@@ -160,8 +160,39 @@ describe("job transition guard: shared vectors", () => {
   it("refuses a manual move to accounts until the work is complete, and says what is missing", () => {
     const refused = decide("Work/facilities", "approved", { kind: "manual", target: "Awaiting Approval" }, "FM").decision;
     expect(refused).toMatchObject({ allowed: false, code: "work_not_complete" });
-    expect(decide("Work/facilities", "worked", { kind: "manual", target: "Awaiting Approval" }, "FM").decision.allowed).toBe(true);
-    expect(decide("Work/facilities", "contractInvoiced", { kind: "manual", target: "Awaiting Approval" }, "FM").decision.allowed).toBe(true);
+    // Once the work is complete the move still isn't a hand move: it happens when the record is saved (JOB-09).
+    expect(decide("Work/facilities", "worked", { kind: "manual", target: "Awaiting Approval" }, "FM").decision).toMatchObject({ code: "moves_on_its_own" });
+    expect(decide("Work/facilities", "contractInvoiced", { kind: "manual", target: "Awaiting Approval" }, "FM").decision).toMatchObject({ code: "moves_on_its_own" });
+  });
+
+  it("lets a person move a job by hand only to hold, resume, start a contract job, or close (JOB-09)", () => {
+    for (const { actor, facts, state, target } of space) {
+      const { decision } = decide(state, facts, { kind: "manual", target }, actor);
+      if (!decision.allowed) continue;
+      const from = VECTORS.states[state].current.status;
+      const byHand = target === "Tenant" || target === "Done" || (target === "Work" && (from === "Tenant" || from === "New"));
+      expect(byHand).toBe(true);
+    }
+  });
+
+  it("refuses every other edge by hand with a plain reason, whoever asks and whatever the facts", () => {
+    for (const [state, target] of [
+      ["New/facilities", "Quote"],
+      ["Quote/facilities", "Awaiting Approval"],
+      ["Awaiting Approval/facilities", "Work"],
+      ["Work/facilities", "Awaiting Approval"],
+    ] as const) {
+      for (const facts of ["approved", "worked", "contractInvoiced", "quoted"]) {
+        const decision = decide(state, facts, { kind: "manual", target }, "D").decision;
+        if (!decision.allowed) expect(["moves_on_its_own", "no_quote", "quote_not_approved", "work_not_complete", "illegal"]).toContain(decision.code);
+      }
+    }
+    expect(decide("New/facilities", "quoted", { kind: "manual", target: "Quote" }, "FM").decision).toEqual({
+      allowed: false,
+      code: "moves_on_its_own",
+      reason:
+        "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
+    });
   });
 
   it("offers only hold and resume from the chip and the progress note", () => {

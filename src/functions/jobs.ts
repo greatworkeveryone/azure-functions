@@ -1442,7 +1442,8 @@ export async function addJobEvent(request: HttpRequest, context: InvocationConte
           if (!decision.allowed) {
             await rollbackTransaction(connection).catch(() => {});
             return {
-              status: decision.code === "role_not_permitted" ? 403 : 422,
+              // 409: the move is a legal edge, but it isn't one a person makes by hand (JOB-09).
+              status: decision.code === "role_not_permitted" ? 403 : decision.code === "moves_on_its_own" ? 409 : 422,
               jsonBody: { code: decision.code, error: decision.reason, from: currentState.status, to: NewStatus },
             };
           }

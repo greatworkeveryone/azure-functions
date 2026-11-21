@@ -66,6 +66,7 @@ export type GuardRefusal =
   | "no_quote"
   | "quote_not_approved"
   | "work_not_complete"
+  | "moves_on_its_own"
   | "invoice_missing"
   | "invoice_not_approved"
   | "invoice_not_in_myob"
@@ -104,6 +105,8 @@ const REASONS: Record<GuardRefusal, string> = {
   not_done: "Only a done job can be reopened.",
   work_not_complete:
     "A job goes to accounts once the work is marked complete on its purchase order, or, on a contract or internal job with no purchase order, once the contractor's invoice is added.",
+  moves_on_its_own:
+    "That move happens by itself when the quote, purchase order or invoice is saved. By hand you can only put a job on hold, resume it, start work on a contract job or close it.",
   quote_not_approved: "Work starts once a quote is approved (or on a contract or internal job).",
   reason_required: "Say why the job is being reopened.",
   role_not_permitted: "Your role can't make this change.",
@@ -151,7 +154,16 @@ function guardManual(input: GuardInput, target: GuardStatus): GuardDecision {
     if (facts.incomingInvoicesAwaitingApproval > 0) return refuse("invoice_not_approved");
     if (facts.approvedInvoicesNotInMyob > 0) return refuse("invoice_not_in_myob");
   }
+  // JOB-09: every other move happens by itself when the record behind it is
+  // saved. By hand a person only holds, resumes, starts a contract job, or closes.
+  if (!isHandMove(current, target)) return refuse("moves_on_its_own");
   return { allowed: true, to: machineTarget };
+}
+
+/** Hold, resume, start work on a contract job (the machine offers it only for one), close. */
+function isHandMove(current: GuardState, target: GuardStatus): boolean {
+  if (target === "Tenant" || target === "Done") return true;
+  return target === "Work" && (current.status === "Tenant" || current.status === "New");
 }
 
 function guardReopen(input: GuardInput, reason: string): GuardDecision {
@@ -176,7 +188,9 @@ function guardInvoicesPaid(input: GuardInput): GuardDecision {
 /**
  * Decides one transition. Manual picks (a person, any job-edit role): never
  * out of Done; only along an edge the machine has (a resume lands where the
- * job was held, and that landing is checked like any other); into (Awaiting Approval,
+ * job was held, and that landing is checked like any other); and only the four
+ * moves a person makes by hand (hold, resume, start work on a contract job,
+ * close), since every other edge moves by itself when its record is saved; into (Awaiting Approval,
  * facilities) only with a quote; into (Awaiting Approval, accounts) only once
  * the work is complete (a purchase order marked complete, or an invoice on a
  * contract or internal job); into Work only with an approved quote, or on
