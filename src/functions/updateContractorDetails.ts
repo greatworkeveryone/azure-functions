@@ -94,7 +94,7 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
 
       const contactChanged = contactDetailsChanged(before, input.details);
       const params: SqlParam[] = [idParam, ...CONTRACTOR_DETAIL_FIELDS.map((field) => ({ name: field, type: TYPES.NVarChar, value: input.details[field] }))];
-      const holdColumns = contactChanged
+      const HOLD_COLUMNS = contactChanged
         ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=@ChangedByOid, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
         : "";
       const holdParams: SqlParam[] = contactChanged
@@ -102,7 +102,7 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
         : [];
       await executeQuery(
         conn,
-        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE()${holdColumns} WHERE ContractorID=@Id`,
+        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE()${HOLD_COLUMNS} WHERE ContractorID=@Id`,
         [...params, ...holdParams],
       );
       const beforeDetails = Object.fromEntries(CONTRACTOR_DETAIL_FIELDS.map((field) => [field, before[field] ?? null]));
