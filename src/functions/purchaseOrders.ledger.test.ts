@@ -124,6 +124,9 @@ const APP_USER: Route = { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ U
 const JOB_BUILDING: Route = { match: /SELECT BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5 }] };
 const LEDGER_FAILS: Route = { match: /INSERT INTO dbo\.DecisionLedger/, reject: new Error("ledger unavailable") };
 
+// No approval-limit rows unless a test sets them: the spend rule (SECA-03) reads them on create and send.
+beforeEach(() => limitsDb.getCachedApprovalLimits.mockResolvedValue([]));
+
 // Every money row any test here writes has the shape trend reports read (see the fixture).
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
 
@@ -1555,4 +1558,131 @@ describe("R13: a purchase order above its approved quote, within the margin", ()
 
 it("wrote every purchase order money code in this file, each checked against the shape trend reports read", () => {
   moneyShape.expectEveryCodeWritten("po.");
+});
+
+describe("SECA-03 / JOB-20: who may commit spend on purchase orders", () => {
+  const JOB = (over: Record<string, unknown> = {}): Route => ({
+    match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/,
+    rows: [{ BuildingID: 5, HasApprovedQuote: 0, IsArchived: false, IsContract: true, IsInternal: false, JobID: 42, Status: "Work", ...over }],
+  });
+  const QUOTE_JOB = JOB({ HasApprovedQuote: 1, IsContract: false });
+  const APPROVED_QUOTE: Route = { match: /SELECT q\.Amount(, q\.QuoteID)? FROM Jobs j INNER JOIN Quotes q/, rows: [{ Amount: 10000, QuoteID: 70 }] };
+  const QUOTE_CONTRACTOR = (id: number): Route => ({ match: /SELECT q\.ContractorID FROM Jobs j/, rows: [{ ContractorID: id }] });
+  const OTHERS = (committed: number): Route => ({ match: /SELECT ISNULL\(SUM\(/, rows: [{ Committed: committed }] });
+  const VARIANCE_FACTS: Route = { match: /FROM dbo\.ApprovalFacts/, rows: [{ FactKey: "po_variance_margin_percent", FactValue: 10 }, { FactKey: "po_variance_cap", FactValue: 1000 }] };
+  const INSERT: Route = { match: /INSERT INTO PurchaseOrders/, rows: [{ PurchaseOrderID: 99 }] };
+  const base = [APP_USER, JOB_BUILDING, { match: /MAX\(Seq\)/, rows: [{ NextSeq: 7 }] }, INSERT, { match: /FROM PurchaseOrders WHERE PurchaseOrderID/, rows: [{ PurchaseOrderID: 99 }] }];
+  const create = (over: Record<string, unknown> = {}) =>
+    upsertPurchaseOrder(makeRequest({ ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 8000, EstimatedCost: 7000, JobID: 42, ...over }), ctx);
+  const rows = () => ledgerInserts(db.executeQuery);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetRateLimitForTests();
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    auth.requireRole.mockResolvedValue(null);
+    auth.verifiedIdentityFromRequest.mockResolvedValue(CALLER);
+    auth.rolesForRequest.mockResolvedValue(["facilities_manager"]);
+    db.beginTransaction.mockResolvedValue(undefined);
+    db.commitTransaction.mockResolvedValue(undefined);
+    db.rollbackTransaction.mockResolvedValue(undefined);
+    db.createRequestConnection.mockResolvedValue({ id: "connection" });
+    graph.graphSendMail.mockResolvedValue(undefined);
+    blobs.downloadBlob.mockResolvedValue(Buffer.from("pdf"));
+    statusHelpers.advanceJobStatus.mockResolvedValue(undefined);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+      { MaxApprovalAmount: 50000, RoleName: "cfo" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  describe("creating on a contract job (no quote)", () => {
+    it("a $90,000 order from a $20,000 manager is refused with the figure, ledgered, and nothing is written", async () => {
+      mockSql([...base, JOB(), OTHERS(0)]);
+
+      const res = await create({ CostNotToExceed: 90000 });
+
+      expect(res.status).toBe(403);
+      expect(res.jsonBody).toMatchObject({ code: "po_over_authority" });
+      expect((res.jsonBody as { error: string }).error).toContain("$90,000");
+      expect(ran(/INSERT INTO PurchaseOrders/)).toBe(false);
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "po_over_authority" })]);
+    });
+
+    it("three orders that each fit the limit are refused once together they pass it", async () => {
+      mockSql([...base, JOB(), OTHERS(16000)]);
+      expect((await create({ CostNotToExceed: 8000 })).jsonBody).toMatchObject({ code: "po_over_authority" });
+      expect(ran(/INSERT INTO PurchaseOrders/)).toBe(false);
+    });
+
+    it("an order within the limit is created", async () => {
+      mockSql([...base, JOB(), OTHERS(5000)]);
+      expect((await create({ CostNotToExceed: 8000 })).status).toBe(200);
+    });
+
+    it("a director commits above any limit", async () => {
+      auth.rolesForRequest.mockResolvedValue(["director"]);
+      mockSql([...base, JOB(), OTHERS(0)]);
+      expect((await create({ CostNotToExceed: 90000 })).status).toBe(200);
+    });
+  });
+
+  describe("creating on a job with an approved quote", () => {
+    it("refuses a contractor other than the quoted one", async () => {
+      mockSql([...base, QUOTE_JOB, APPROVED_QUOTE, QUOTE_CONTRACTOR(8), OTHERS(0)]);
+      const res = await create({ ContractorID: 3, CostNotToExceed: 5000 });
+      expect(res.jsonBody).toMatchObject({ code: "po_contractor_not_quoted" });
+      expect(ran(/INSERT INTO PurchaseOrders/)).toBe(false);
+    });
+
+    it("refuses an order that takes the job's orders past the quote and the margin, with the figures", async () => {
+      mockSql([...base, QUOTE_JOB, APPROVED_QUOTE, QUOTE_CONTRACTOR(3), OTHERS(9000), VARIANCE_FACTS]);
+      const res = await create({ CostNotToExceed: 3000, variance: { rationale: "more work", attributedToUserId: 30 } });
+      expect(res.jsonBody).toMatchObject({ code: "variance_over_margin", originalApprovedAmount: 10000 });
+      expect(ran(/INSERT INTO PurchaseOrders/)).toBe(false);
+    });
+
+    it("an order inside the quote is created with no variance questions", async () => {
+      mockSql([...base, QUOTE_JOB, APPROVED_QUOTE, QUOTE_CONTRACTOR(3), OTHERS(2000)]);
+      expect((await create({ CostNotToExceed: 5000 })).status).toBe(200);
+    });
+  });
+
+  describe("sending", () => {
+    const sendRow = (over: Record<string, unknown> = {}): Route => ({
+      match: /SELECT c\.EmailAddress, po\.PDFBlobName/,
+      rows: [{ ContractorID: 3, ContractorName: "Acme", CostNotToExceed: 8000, EmailAddress: "c@example.com", EstimatedCost: 7000, JobID: 42, PDFBlobName: "po/99.pdf", PONumber: "66Se261013", SentAt: null, ...over }],
+    });
+    const send = () => sendPurchaseOrder(makeRequest({ PurchaseOrderID: 99 }), ctx);
+
+    it("refuses to send on a contract job when the job's orders pass the sender's limit, before any mail leaves", async () => {
+      mockSql([APP_USER, JOB_BUILDING, sendRow(), JOB(), OTHERS(16000)]);
+
+      const res = await send();
+
+      expect(res.jsonBody).toMatchObject({ code: "po_over_authority" });
+      expect(graph.graphSendMail).not.toHaveBeenCalled();
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.send" }), ruleApplied: "po_over_authority" })]);
+    });
+
+    it("refuses to send to a contractor other than the quoted one", async () => {
+      mockSql([APP_USER, JOB_BUILDING, sendRow(), QUOTE_JOB, APPROVED_QUOTE, QUOTE_CONTRACTOR(8), OTHERS(0)]);
+      expect((await send()).jsonBody).toMatchObject({ code: "po_contractor_not_quoted" });
+      expect(graph.graphSendMail).not.toHaveBeenCalled();
+    });
+
+    it("measures the quote variance on the job's orders together, not this one alone", async () => {
+      mockSql([APP_USER, JOB_BUILDING, sendRow({ CostNotToExceed: 3000 }), QUOTE_JOB, APPROVED_QUOTE, QUOTE_CONTRACTOR(3), OTHERS(9000), VARIANCE_FACTS]);
+      expect((await send()).jsonBody).toMatchObject({ code: "variance_over_margin" });
+      expect(graph.graphSendMail).not.toHaveBeenCalled();
+    });
+
+    it("sends when everything fits", async () => {
+      mockSql([APP_USER, JOB_BUILDING, sendRow(), JOB(), OTHERS(2000), { match: /SELECT\s+PurchaseOrderID, JobID, PONumber, Seq/, rows: [{ PurchaseOrderID: 99 }] }]);
+      expect((await send()).status).toBe(200);
+      expect(graph.graphSendMail).toHaveBeenCalled();
+    });
+  });
 });
