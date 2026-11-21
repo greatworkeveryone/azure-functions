@@ -94,16 +94,16 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
 
       const contactChanged = contactDetailsChanged(before, input.details);
       const params: SqlParam[] = [idParam, ...CONTRACTOR_DETAIL_FIELDS.map((field) => ({ name: field, type: TYPES.NVarChar, value: input.details[field] }))];
+      const holdColumns = contactChanged
+        ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=@ChangedByOid, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
+        : "";
+      const holdParams: SqlParam[] = contactChanged
+        ? [{ name: "ChangedBy", type: TYPES.NVarChar, value: actor.name }, { name: "ChangedByOid", type: TYPES.NVarChar, value: auth.caller.oid }]
+        : [];
       await executeQuery(
         conn,
-        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE()${
-          contactChanged
-            ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=@ChangedByOid, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
-            : ""
-        } WHERE ContractorID=@Id`,
-        contactChanged
-          ? [...params, { name: "ChangedBy", type: TYPES.NVarChar, value: actor.name }, { name: "ChangedByOid", type: TYPES.NVarChar, value: auth.caller.oid }]
-          : params,
+        `UPDATE dbo.Contractors SET ${CONTRACTOR_DETAIL_FIELDS.map((field) => `${field}=@${field}`).join(", ")}, UpdatedAt=GETUTCDATE()${holdColumns} WHERE ContractorID=@Id`,
+        [...params, ...holdParams],
       );
       const beforeDetails = Object.fromEntries(CONTRACTOR_DETAIL_FIELDS.map((field) => [field, before[field] ?? null]));
       await record(conn, {
