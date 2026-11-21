@@ -48,6 +48,8 @@ export async function closeJobWhenInvoicesPaid(
     request: { kind: "invoices_paid" },
   });
   if (!decision.allowed) return { closed: false, code: decision.code };
+  // JOB-17 / D3: a person cannot close a job with a purchase order not recorded in MYOB, so the read-back cannot either.
+  if (locked.facts.purchaseOrdersNotInMyob > 0) return { closed: false, code: "purchase_order_not_in_myob" };
 
   const when = input.paid.map((entry) => `invoice ${entry.invoiceId} paid ${ddmmyyyy(entry.paidAt)}`).join(", ");
   const moved = await advanceJobStatus(connection, jobId, JobEvent.INVOICE_PAID, {

@@ -272,6 +272,10 @@ describe("items due today or overdue", () => {
     expect(lines(USERS.facilities, facts({ dueJobs: [dueJob({ buildingName: null })] }))[0]).toBe("Job #30 · Paint stairwell: update due today");
   });
 
+  it("names the step the job is at when it is known", () => {
+    expect(lines(USERS.facilities, facts({ dueJobs: [dueJob({ stepLabel: "Work under way" })] }))[0]).toBe("Job #30 · Paint stairwell · Tower A: update due today · Work under way");
+  });
+
   it("puts the most overdue first", () => {
     const f = facts({ dueJobs: [dueJob({ jobId: 1, expectedProgressUpdate: TODAY_START }), dueJob({ jobId: 2, expectedProgressUpdate: YESTERDAY })] });
     expect(paths(USERS.facilities, f)).toEqual(["/jobs?jobId=2", "/jobs?jobId=1"]);

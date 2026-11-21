@@ -14,6 +14,7 @@ import { darwinDateKey } from "../escalation/businessTime";
 import { normaliseRole } from "../escalation/roles";
 import { listLiveEscalations } from "../escalation/store";
 import { jobKindOf } from "../jobKinds";
+import { withJobSteps } from "../jobStepFacts";
 import { darwinNextDayStartUtc, parseDarwinDate } from "../ledger/darwinTime";
 import { loadTestSubjectKeys } from "../test-data";
 import type { DigestFacts, DigestUser, DueJob, OverdueKey, WaitingApproval } from "./types";
@@ -113,7 +114,8 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
   const before = darwinNextDayStartUtc(today);
   const rows = await executeQuery(
     connection,
-    `SELECT TOP (1000) j.JobID, j.Title, j.Kind, j.AssignedToUserID, j.ExpectedProgressUpdate, b.BuildingName
+    `SELECT TOP (1000) j.JobID, j.Title, j.Kind, j.AssignedToUserID, j.AssignedTo, j.ExpectedProgressUpdate, b.BuildingName,
+            j.Status, j.AwaitingRole, j.IsContract, j.IsInternal, j.ApprovedQuoteID
        FROM dbo.Jobs j
        LEFT JOIN dbo.Buildings b ON b.BuildingID = j.BuildingID
       WHERE j.IsArchived = 0
@@ -124,12 +126,15 @@ export async function listDueJobs(connection: Connection, now: Date): Promise<Du
       ORDER BY j.ExpectedProgressUpdate, j.JobID`,
     [{ name: "Before", options: { scale: 3 }, type: TYPES.DateTime2, value: before }],
   );
-  return rows.map((row) => ({
+  // The step each job is at, from the same resolver every screen reads, so a digest line says what the job says.
+  const stepped = await withJobSteps(connection, rows);
+  return stepped.map((row) => ({
     assignedToUserId: Number(row.AssignedToUserID),
     buildingName: asText(row.BuildingName),
     expectedProgressUpdate: asDate(row.ExpectedProgressUpdate),
     jobId: Number(row.JobID),
     kind: jobKindOf(row.Kind),
+    stepLabel: (row.Step as { label?: string } | undefined)?.label ?? null,
     title: asText(row.Title) ?? `Job #${row.JobID}`,
   }));
 }
