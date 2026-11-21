@@ -224,6 +224,14 @@ describe("closeJobWhenInvoicesPaid (INVOICE_PAID, for the MYOB read-back)", () =
     expect(ledgerInserts(db.executeQuery)).toEqual([]);
   });
 
+  it("does nothing while a purchase order is not recorded in MYOB (JOB-17), as for a person", async () => {
+    mockSql([JOB_BUILDING, job({ Status: "Awaiting Approval", PurchaseOrdersNotInMyob: 1 }), { match: INVOICES, rows: [paidInvoice] }]);
+
+    expect(await closeJobWhenInvoicesPaid({}, 9, { paid: PAID, source: "myobReadBack" })).toEqual({ closed: false, code: "purchase_order_not_in_myob" });
+    expect(find(SYSTEM_MOVE)).toBeUndefined();
+    expect(ledgerInserts(db.executeQuery)).toEqual([]);
+  });
+
   it("does nothing for a job that isn't waiting on accounts", async () => {
     mockSql([JOB_BUILDING, job({ AwaitingRole: "facilities", Status: "Work" }), { match: INVOICES, rows: [paidInvoice] }]);
     expect(await closeJobWhenInvoicesPaid({}, 9, { paid: PAID, source: "myobReadBack" })).toEqual({ closed: false, code: "illegal" });
