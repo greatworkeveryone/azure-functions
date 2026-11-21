@@ -49,6 +49,12 @@ import {
 } from "../jobStatusMachine";
 import { flagChangeRefusal, guardTransition, type GuardStatus } from "../jobTransitionGuard";
 import { loadJobForTransition } from "../jobTransitionFacts";
+import { JOB_HAS_LIVE_MONEY, liveMoneyMessage, liveMoneyOutstanding } from "../jobArchiveMoney";
+import { adminRefusal, holdsAdmin } from "../moneyRules";
+import { isTestJob } from "../testRecords";
+import { record } from "../ledger";
+import { resolveLedgerActor } from "../ledger/actor";
+import { recordRefusal } from "../ledger/refusals";
 import { eventTypeRefusal, linkedIdsInvalid, linkedRecordRefusal } from "../jobEventRules";
 import { DIRECTOR_NEEDED_COLUMNS, withDirectorNeeded } from "../directorNeeded";
 import { ADMIN_KIND, JOB_KINDS } from "../jobKinds";
@@ -140,7 +146,7 @@ const JOB_WRITE_COLUMNS = [
 type JobColumn = (typeof JOB_WRITE_COLUMNS)[number];
 
 type UpsertJobBody = { JobID?: number } & Partial<Record<JobColumn, unknown>>;
-interface ArchiveJobBody { JobID: number }
+interface ArchiveJobBody { JobID: number; Reason?: unknown }
 interface UnarchiveJobBody { JobID: number }
 interface AddJobEventBody {
   JobID: number;
@@ -1091,6 +1097,11 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     if (!JobID || typeof JobID !== "number") {
       return { status: 400, jsonBody: { error: "JobID (number) is required" } };
     }
+    // REV-04: archiving hides a job from every list, so it carries a reason.
+    const reason = typeof body?.Reason === "string" ? body.Reason.trim().slice(0, 1000) : "";
+    if (reason === "") {
+      return { status: 422, jsonBody: { code: "reason_required", error: "Say why the job is being archived." } };
+    }
     connection = await createRequestConnection(token);
 
     // Authorisation: load CreatedById + CreatedBy first so we can scope
@@ -1131,8 +1142,34 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
     // The UPDATE Jobs and the matching JobEvents 'archived' row MUST commit
     // together — otherwise a transient SQL failure between them leaves a job
     // archived with no audit trail (or vice versa).
+    const ledgerActor = await resolveLedgerActor(request, connection);
+    if (!ledgerActor) return unauthorizedResponse();
     await beginTransaction(connection);
     try {
+      // REV-04: read under lock. A job with live money is not archived, and admin
+      // alone does not archive one with money records on it unless it is test data.
+      const locked = await loadJobForTransition(connection, JobID);
+      if (locked) {
+        const refusal = locked.hasMoneyRecords
+          ? adminRefusal(userRoles, holdsAdmin(userRoles) && (await isTestJob(connection, JobID)))
+          : null;
+        const outstanding = liveMoneyOutstanding(locked.facts);
+        const blocked = refusal
+          ? { code: refusal.code, message: refusal.message, status: refusal.status }
+          : outstanding.length > 0
+            ? { code: JOB_HAS_LIVE_MONEY, message: liveMoneyMessage(outstanding), status: 422 }
+            : null;
+        if (blocked) {
+          await rollbackTransaction(connection).catch(() => {});
+          await recordRefusal(connection, ledgerActor, { id: JobID, type: "job" }, {
+            attempted: "job.archive",
+            code: blocked.code,
+            message: blocked.message,
+            state: { outstanding, status: locked.current.status },
+          }, JobID);
+          return { status: blocked.status, jsonBody: { code: blocked.code, error: blocked.message, outstanding } };
+        }
+      }
       await executeQuery(
         connection,
         `UPDATE Jobs SET IsArchived = 1, ArchivedAt = SYSUTCDATETIME(),
@@ -1151,9 +1188,19 @@ async function archiveJob(request: HttpRequest, context: InvocationContext): Pro
         [
           { name: "JobID", type: TYPES.Int, value: JobID },
           { name: "CreatedBy", type: TYPES.NVarChar, value: caller.name },
-          { name: "Text", type: TYPES.NVarChar, value: "Job archived" },
+          { name: "Text", type: TYPES.NVarChar, value: `Job archived: ${reason}` },
         ],
       );
+      await record(connection, {
+        action: "job.archive",
+        actor: ledgerActor,
+        after: { isArchived: true },
+        before: { isArchived: false, status: locked?.current.status ?? null },
+        buildingId: locked?.buildingId ?? null,
+        jobId: JobID,
+        reason,
+        subject: { id: JobID, type: "job" },
+      });
       await commitTransaction(connection);
     } catch (err) {
       await rollbackTransaction(connection).catch(() => {});
