@@ -141,6 +141,23 @@ describe("a stale timesheet save", () => {
     expect(update[2]?.find((p) => p.name === "Revision")?.value).toBe(3);
   });
 
+  // REV-12: a client on the old frontend sends no revision at all.
+  it("accepts a save with no revision while the stored week is still at revision 1", async () => {
+    query.mockResolvedValueOnce([{ ...existing, Revision: 1 }]).mockResolvedValueOnce([{ TimesheetID: 7 }]).mockResolvedValueOnce([{ TimesheetID: 7, Revision: 2 }]);
+    const res = await post("upsertTimesheet", { weekStart: "2026-11-16", data: DATA });
+    expect(res!.status).toBe(200);
+    const update = query.mock.calls.find(([, sql]) => sql.includes("UPDATE dbo.Timesheets"))!;
+    expect(update[2]?.find((p) => p.name === "Revision")?.value).toBe(1);
+  });
+
+  it("answers 409 to a save with no revision once the stored week has moved past revision 1", async () => {
+    query.mockResolvedValueOnce([existing]).mockResolvedValueOnce([{ TimesheetID: 7, Revision: 3 }]);
+    const res = await post("upsertTimesheet", { weekStart: "2026-11-16", data: DATA });
+    expect(res!.status).toBe(409);
+    expect(((res as { jsonBody: unknown }).jsonBody as { code: string }).code).toBe("stale_timesheet");
+    expect(sqls().some((sql) => /UPDATE/.test(sql))).toBe(false);
+  });
+
   it("answers 409 when another save lands between the check and the write", async () => {
     query.mockResolvedValueOnce([existing]).mockResolvedValueOnce([]).mockResolvedValueOnce([{ TimesheetID: 7, Revision: 4 }]);
     expect((await save(3))!.status).toBe(409);

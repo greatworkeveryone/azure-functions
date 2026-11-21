@@ -328,7 +328,13 @@ async function upsertTimesheet(
           ))[0],
         },
       });
-      if (typeof revision !== "number" || revision !== Number(row.Revision)) return staleResponse();
+      // REV-12: a client from before revisions existed sends none (undefined; null is a new client that
+      // loaded no sheet). Its save is accepted only while the stored week is still at revision 1, which no
+      // one has changed since the sheet was first written, so it cannot overwrite someone else's work.
+      const unversioned = revision === undefined;
+      if (unversioned && Number(row.Revision) === 1) context.log("upsertTimesheet: save without a revision accepted (old client)");
+      const loadedRevision = unversioned ? 1 : revision;
+      if (typeof loadedRevision !== "number" || loadedRevision !== Number(row.Revision)) return staleResponse();
 
       // Update — role is already stored in the row, not needed here. The revision is checked
       // again in the WHERE so two saves racing past the check cannot both land.
@@ -342,7 +348,7 @@ async function upsertTimesheet(
           { name: "Data",        type: TYPES.NVarChar, value: JSON.stringify(data) },
           { name: "UpdatedBy",   type: TYPES.NVarChar, value: callerOid },
           { name: "TimesheetID", type: TYPES.Int,      value: row.TimesheetID },
-          { name: "Revision",    type: TYPES.Int,      value: revision },
+          { name: "Revision",    type: TYPES.Int,      value: loadedRevision },
         ],
       );
       if (!written || written.length === 0) return staleResponse();
