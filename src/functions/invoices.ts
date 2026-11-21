@@ -30,6 +30,8 @@ import { ACTION_ROLES } from "../action-roles";
 import { requireMoneyContext } from "../moneyGate";
 import { formatDocNumber, nameToAcronym } from "../doc-number";
 import { resolveActivePlannerTasks } from "../planner";
+import { advanceJobStatus } from "../jobStatusHelpers";
+import { JobEvent } from "../jobStatusMachine";
 import { syncJobActionTriggersStandalone } from "../jobPlannerSync";
 import { MAX_LIST_ROWS, paginationSqlSuffix, parsePagination } from "../pagination";
 import { decideApprovalAmountEdit } from "../edit-effects";
@@ -502,6 +504,16 @@ export async function upsertJobInvoice(
             { name: "InvoiceID", type: TYPES.Int, value: newId },
           ],
         );
+        // A contractor's invoice on record means the work is done: a job at Work
+        // moves to accounts here, in the invoice's own transaction, so the browser
+        // never has to write the status (S1-5, JOB-09). A no-op from any other state.
+        if (direction === "incoming") {
+          await advanceJobStatus(connection, JobID, JobEvent.WORK_COMPLETED, {
+            actor: identity.name,
+            invoiceId: newId,
+            note: "Invoice received — awaiting accounts review.",
+          });
+        }
         if (raiser) {
           await record(connection, {
             action: "invoice.raised_after_close",
@@ -972,10 +984,18 @@ async function approveInvoiceInTransaction(
         { name: "InvoiceID", type: TYPES.Int, value: invoiceId },
       ],
     );
-    // No auto-status-transition on invoice approval — the job stays where it
-    // is. Users mark the job Done themselves once they've actually closed it
-    // out (typically after the invoice is created in MYOB). Touch
-    // LastModifiedDate so the activity feed reflects the approval.
+    // Approving never closes the job (a person does that, once the MYOB steps
+    // are done), but an approved contractor invoice proves the work is done: a
+    // job still at Work moves to accounts. A no-op where it already is. A routed
+    // invoice (awaiting someone further up) is not yet approved, so it waits.
+    if (newStatus === "approved" && invoice.Direction !== "outgoing") {
+      await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
+        actor: approvedBy,
+        invoiceId,
+        note: "Invoice approved — work complete, with accounts.",
+      });
+    }
+    // Touch LastModifiedDate so the activity feed reflects the approval.
     await executeQuery(
       connection,
       "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
@@ -1261,10 +1281,17 @@ async function directorApproveJobInvoice(
           { name: "InvoiceID", type: TYPES.Int, value: JobInvoiceID },
         ],
       );
-      // No auto-status-transition on director approval — the job stays where it
-      // is. A person decides when the job is actually done (typically after
-      // marking the invoice created in MYOB). Touch LastModifiedDate so the
-      // activity feed reflects the approval.
+      // Director approval never closes the job either, but it is the full
+      // approval of a contractor invoice, so a job still at Work moves to
+      // accounts (S1-6). A no-op where it already is.
+      if (invoice.Direction !== "outgoing") {
+        await advanceJobStatus(connection, jobId, JobEvent.WORK_COMPLETED, {
+          actor: identity.name,
+          invoiceId: JobInvoiceID,
+          note: "Invoice approved by a director — work complete, with accounts.",
+        });
+      }
+      // Touch LastModifiedDate so the activity feed reflects the approval.
       await executeQuery(
         connection,
         "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",

@@ -38,6 +38,7 @@ jest.mock("../auth", () => {
 jest.mock("../approval-limits-db", () => ({ getCachedApprovalLimits: jest.fn() }));
 jest.mock("../approvalAttributionNotice", () => ({ raiseAttributionNotice: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../planner", () => ({ resolveActivePlannerTasks: jest.fn().mockResolvedValue(undefined) }));
+jest.mock("../jobStatusHelpers", () => ({ advanceJobStatus: jest.fn().mockResolvedValue({ advanced: true }) }));
 jest.mock("../jobPlannerSync", () => ({ syncJobActionTriggersStandalone: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../email/director-emails", () => ({ sendDirectorApprovalEmail: jest.fn() }));
 jest.mock("../sentry", () => ({ Sentry: { captureException: jest.fn(), captureMessage: jest.fn() } }));
@@ -58,6 +59,7 @@ const db = require("../db") as {
 };
 const limitsDb = require("../approval-limits-db") as { getCachedApprovalLimits: jest.Mock };
 const planner = require("../planner") as { resolveActivePlannerTasks: jest.Mock };
+const { advanceJobStatus } = require("../jobStatusHelpers") as { advanceJobStatus: jest.Mock };
 const plannerSync = require("../jobPlannerSync") as { syncJobActionTriggersStandalone: jest.Mock };
 const directorEmails = require("../email/director-emails") as { sendDirectorApprovalEmail: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
@@ -1880,4 +1882,74 @@ describe("resendDirectorInvoiceEmail", () => {
 
 it("wrote every invoice money code in this file, each checked against the shape trend reports read", () => {
   moneyShape.expectEveryCodeWritten("invoice.");
+});
+
+// S1-5 / S1-6: the server moves the job when the money record is saved, in the
+// record's own transaction, so the browser writes no status.
+describe("the job moves on with a contractor's invoice", () => {
+  const LIVE: Route = {
+    match: /SELECT j\.JobID, j\.Status, j\.IsInternal, j\.IsArchived/,
+    rows: [{ BuildingID: 5, HasApprovedQuote: 1, IsArchived: false, IsContract: false, IsInternal: false, JobID: 9, Status: "Work" }],
+  };
+  const INSERTED: Route = { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] };
+  const added = (direction?: string) =>
+    upsertJobInvoice(makeRequest({ Amount: 750, ContractorName: "Acme", Direction: direction, JobID: 9, SupplierInvoiceNumber: "INV-0042" }), ctx);
+
+  it("adding an incoming invoice advances WORK_COMPLETED before the transaction commits", async () => {
+    mockSql([APP_USER, LIVE, INSERTED, STORED]);
+
+    expect((await added()).status).toBe(200);
+
+    expect(advanceJobStatus).toHaveBeenCalledTimes(1);
+    expect(advanceJobStatus).toHaveBeenCalledWith({ id: "connection" }, 9, "WORK_COMPLETED", expect.objectContaining({ actor: "Casey Controller", invoiceId: 5 }));
+    expect(advanceJobStatus.mock.invocationCallOrder[0]).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("an on-charge (outgoing) invoice moves nothing", async () => {
+    mockSql([APP_USER, LIVE, INSERTED, STORED]);
+
+    expect((await added("outgoing")).status).toBe(200);
+
+    expect(advanceJobStatus).not.toHaveBeenCalled();
+  });
+
+  it("a full approval advances WORK_COMPLETED, so an invoice approved while the job is at Work still reaches accounts", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow(), STORED]);
+
+    expect((await approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx)).status).toBe(200);
+
+    expect(advanceJobStatus).toHaveBeenCalledWith({ id: "connection" }, 9, "WORK_COMPLETED", expect.objectContaining({ invoiceId: 5 }));
+    expect(advanceJobStatus.mock.invocationCallOrder[0]).toBeLessThan(db.commitTransaction.mock.invocationCallOrder[0]);
+  });
+
+  it("an approval that is routed on to someone senior moves nothing yet", async () => {
+    auth.rolesForRequest.mockResolvedValue(["accounts"]);
+    limitsDb.getCachedApprovalLimits.mockResolvedValue([
+      { MaxApprovalAmount: 100, RoleName: "accounts" },
+      { MaxApprovalAmount: 1000, RoleName: "accounts_manager" },
+      { MaxApprovalAmount: null, RoleName: "director" },
+    ]);
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 800 }), STORED]);
+
+    await approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+
+    expect(advanceJobStatus).not.toHaveBeenCalled();
+  });
+
+  it("an on-charge invoice's approval moves nothing", async () => {
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Direction: "outgoing" }), STORED]);
+
+    await approveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+
+    expect(advanceJobStatus).not.toHaveBeenCalled();
+  });
+
+  it("the director's approval advances WORK_COMPLETED too", async () => {
+    auth.rolesForRequest.mockResolvedValue(["director"]);
+    mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 5000, Status: "approved" }), STORED]);
+
+    expect((await directorApproveJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx)).status).toBe(200);
+
+    expect(advanceJobStatus).toHaveBeenCalledWith({ id: "connection" }, 9, "WORK_COMPLETED", expect.objectContaining({ actor: "Casey Controller", invoiceId: 5 }));
+  });
 });

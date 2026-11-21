@@ -505,6 +505,28 @@ export async function promoteEmailToQuote(
       );
       const newQuoteId = inserted[0].QuoteID as number;
 
+      // Same as a typed-in quote (upsertQuote): the history entry, and the job
+      // moving on to quote approval, commit with the quote (S1-5, 13 Oct L6).
+      const amountLabel = typeof Amount === "number" ? ` · $${Amount.toLocaleString()}` : "";
+      const contractorLabel = ContractorName ? ` · ${ContractorName}` : "";
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, QuoteID, SourceEmailID)
+         VALUES (@JobID, @CreatedBy, @Text, 'quote_added', @QuoteID, @EmailID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: jobId },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+          { name: "Text", type: TYPES.NVarChar, value: `Added quote ${quoteNumber}${contractorLabel}${amountLabel} from an email` },
+          { name: "QuoteID", type: TYPES.Int, value: newQuoteId },
+          { name: "EmailID", type: TYPES.Int, value: EmailID },
+        ],
+      );
+      await advanceJobStatus(connection, jobId, JobEvent.QUOTE_RECEIVED, {
+        actor: identity.name,
+        quoteId: newQuoteId,
+        note: `Quote ${quoteNumber} received — awaiting approval.`,
+      });
+
       await executeQuery(
         connection,
         `UPDATE Emails SET Status = 'promoted', ProcessedAt = SYSUTCDATETIME()
@@ -834,6 +856,28 @@ export async function promoteEmailToInvoice(
         ],
       );
       const invoiceId = inserted[0].JobInvoiceID as number;
+
+      // Same as a typed-in invoice (upsertJobInvoice): the history entry, and
+      // the job at Work moving on to accounts, commit with the invoice (S1-5, 13 Oct L16).
+      const amountLabel = typeof Amount === "number" ? ` · $${Amount.toLocaleString()}` : "";
+      const contractorLabel = contractor.name ? ` · ${contractor.name}` : "";
+      await executeQuery(
+        connection,
+        `INSERT INTO JobEvents (JobID, CreatedBy, [Text], EventType, InvoiceID, SourceEmailID)
+         VALUES (@JobID, @CreatedBy, @Text, 'invoice_added', @InvoiceID, @EmailID);`,
+        [
+          { name: "JobID", type: TYPES.Int, value: JobID },
+          { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
+          { name: "Text", type: TYPES.NVarChar, value: `Added invoice${contractorLabel}${amountLabel} from an email` },
+          { name: "InvoiceID", type: TYPES.Int, value: invoiceId },
+          { name: "EmailID", type: TYPES.Int, value: EmailID },
+        ],
+      );
+      await advanceJobStatus(connection, JobID, JobEvent.WORK_COMPLETED, {
+        actor: identity.name,
+        invoiceId,
+        note: "Invoice received — awaiting accounts review.",
+      });
 
       await executeQuery(
         connection,
