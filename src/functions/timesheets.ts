@@ -703,13 +703,13 @@ async function getTimesheetUsers(
 
     const params: SqlParam[] = [];
     const subjects = managed.includes("general") ? await generalScope(connection, roles, identity.oid) : [];
-    const scope = timesheetScopeSql(managed, subjects, params, "Scope");
+    const SCOPE_SQL = timesheetScopeSql(managed, subjects, params, "Scope");
 
     const rows = await executeQuery(
       connection,
       `SELECT DISTINCT UserID, UserDisplayName, Role
        FROM dbo.Timesheets
-       WHERE ${scope}
+       WHERE ${SCOPE_SQL}
        ORDER BY UserDisplayName ASC`,
       params,
     );
