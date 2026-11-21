@@ -1162,19 +1162,23 @@ async function deletePurchaseOrder(
         return { status: 404, jsonBody: { error: "Purchase order not found" } };
       }
       const po = rows[0];
-      if (po.SentAt || po.CompletedAt) {
+      if (po.SentAt || po.CompletedAt || po.MyobCreatedAt) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.
         await rollbackTransaction(connection).catch(() => {});
         const sent = Boolean(po.SentAt);
+        const completed = Boolean(po.CompletedAt);
+        // N5: a PO already recorded in MYOB exists in the books; deleting it here would leave MYOB holding an order Floorplan has lost.
         const error = sent
           ? "Cannot delete a purchase order that has been sent."
-          : "Cannot delete a purchase order that has been marked complete.";
+          : completed
+            ? "Cannot delete a purchase order that has been marked complete."
+            : "Cannot delete a purchase order that has been recorded in MYOB. It is in the books, so it stays on the job.";
         await recordRefusal(
           connection,
           actor,
           { id: PurchaseOrderID, type: "purchase_order" },
-          { attempted: "po.delete", code: sent ? "po_sent" : "po_completed", message: error },
+          { attempted: "po.delete", code: sent ? "po_sent" : completed ? "po_completed" : "po_in_myob", message: error },
           po.JobID as number,
         );
         return { status: 400, jsonBody: { error } };

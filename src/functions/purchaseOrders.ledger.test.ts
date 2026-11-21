@@ -1011,6 +1011,18 @@ describe("purchase order transitions", () => {
       expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
     });
 
+    it("a PO recorded in MYOB is protected even when unsent and not complete (N5)", async () => {
+      mockSql([APP_USER, JOB_BUILDING, po({ MyobCreatedAt: new Date("2026-10-05T00:00:00Z"), MyobCreatedBy: "Abby" })]);
+
+      const res = await remove();
+
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { error: string }).error).toMatch(/recorded in MYOB/);
+      expect(rows()).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "po_in_myob" })]);
+      expect(ran(/DELETE FROM PurchaseOrders/)).toBe(false);
+      expect(blobs.deleteBlob).not.toHaveBeenCalled();
+    });
+
     it("404s an unknown PO, writing nothing", async () => {
       mockSql([APP_USER, JOB_BUILDING]);
 
