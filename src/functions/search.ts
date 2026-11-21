@@ -10,6 +10,7 @@ import {
   unauthorizedResponse,
   verifiedIdentityFromRequest,
 } from "../auth";
+import { ACTION_ROLES } from "../action-roles";
 import { closeConnection, createRequestConnection, executeQuery, SqlRow } from "../db";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
@@ -185,6 +186,8 @@ export async function search(
   const roles = await rolesForRequest(request);
   const canSeeTenants = rolesPassGate(roles, TENANT_SEARCH_ROLES);
   const canSeeKeys = rolesPassGate(roles, KEY_SEARCH_ROLES);
+  // Same gate as getJobs: a role that cannot open the job list gets no job titles here (SECA-13).
+  const canSeeJobs = rolesPassGate(roles, ACTION_ROLES.viewJobs.gate);
 
   const validated = validateSearchQuery(request.query.get("q") ?? undefined);
   if (!validated.ok) {
@@ -211,7 +214,7 @@ export async function search(
     conn = await createRequestConnection(token);
     // tedious connections handle one request at a time; run sequentially.
     const tenants = canSeeTenants ? await queryTenants(conn, params) : [];
-    const jobs = await queryJobs(conn, params);
+    const jobs = canSeeJobs ? await queryJobs(conn, params) : [];
     const keys = canSeeKeys ? await queryKeys(conn, params) : [];
     const buildings = await queryBuildings(conn, params);
     return {

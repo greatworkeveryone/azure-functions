@@ -195,7 +195,7 @@ describe("rejectJobInvoice", () => {
       storedInvoice,
     ]);
 
-    const res = await HANDLERS.rejectJobInvoice(makeRequest({ JobInvoiceID: 5, RejectedBy: "Someone Else" }), ctx);
+    const res = await HANDLERS.rejectJobInvoice(makeRequest({ JobInvoiceID: 5, Reason: "Not ours", RejectedBy: "Someone Else" }), ctx);
 
     expect(res.status).toBe(200);
     expect(callMatching(/INSERT INTO JobEvents/)?.params.CreatedBy).toBe("Johanne CFO");

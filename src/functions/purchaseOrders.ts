@@ -67,6 +67,8 @@ import {
 import { loadJobForMoney, refuseMoneyChange } from "../moneyJob-db";
 import { checkVariance, readVarianceBody, recordVariance, type RecordedVariance, type VarianceBody } from "../moneyVariance-db";
 import { raiseAttributionNotice } from "../approvalAttributionNotice";
+import { checkPurchaseOrderSpend } from "../purchaseOrderSpend-db";
+import { contactChangeHolds, contactChangeSentence } from "../contractorContactHold";
 import { isTestJob } from "../testRecords";
 import { parseMoneyField } from "../money";
 import { Sentry } from "../sentry";
@@ -226,6 +228,8 @@ export async function upsertPurchaseOrder(
       }
       const badCost = purchaseOrderCostRefusal(EstimatedCost, CostNotToExceed, true);
       if (badCost) return refusalResponse(badCost);
+      const createVarianceBody = readVarianceBody(body?.variance);
+      if (!createVarianceBody.ok) return { status: 400, jsonBody: { error: createVarianceBody.error } };
 
       const actor = await resolveLedgerActor(request, connection);
       if (!actor) return unauthorizedResponse();
@@ -253,6 +257,49 @@ export async function upsertPurchaseOrder(
             JobID,
           );
           return refusalResponse(gateRefusal);
+        }
+
+        // SECA-03 / JOB-20: the creator's spending authority, the quoted contractor,
+        // and the job's purchase orders taken together (purchaseOrderSpend.ts).
+        const createEditor = { email: identity.email, roles: await rolesForRequest(request), userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined };
+        const createAmount = poAmount({ CostNotToExceed, EstimatedCost });
+        const spend = await checkPurchaseOrderSpend(connection, {
+          actor: createEditor,
+          excludePurchaseOrderId: null,
+          isTest: await isTestJob(connection, JobID),
+          job: moneyJob,
+          poContractorId: typeof ContractorID === "number" ? ContractorID : null,
+          stage: "create",
+          thisAmount: createAmount,
+        });
+        if (spend.refusal) {
+          return await refuseMoneyChange(connection, request, {
+            attempted: "po.create",
+            jobId: JobID,
+            refusal: spend.refusal,
+            state: { amount: createAmount, committedAfter: spend.committedAfter },
+            subject: { id: JobID, type: "job" },
+          });
+        }
+        const createVariance = moneyJob.hasApprovedQuote
+          ? await checkVariance(connection, {
+              accepted: { purchaseOrderId: 0 },
+              body: createVarianceBody.value as VarianceBody | null,
+              buildingId: moneyJob.buildingId,
+              editor: createEditor,
+              jobId: JobID,
+              newAmount: spend.committedAfter,
+              subject: "purchase_order",
+            })
+          : null;
+        if (createVariance?.decision.kind === "refused") {
+          return await refuseMoneyChange(connection, request, {
+            attempted: "po.create",
+            jobId: JobID,
+            refusal: createVariance.decision.refusal,
+            state: { committedAfter: spend.committedAfter, originalApprovedAmount: createVariance.originalAmount },
+            subject: { id: JobID, type: "job" },
+          });
         }
 
         const acronym =
@@ -356,7 +403,23 @@ export async function upsertPurchaseOrder(
           subject: { id: newId, type: "purchase_order" },
         });
 
+        let createdVariance: RecordedVariance | null = null;
+        if (createVariance && (createVariance.decision.kind === "within_tolerance" || createVariance.decision.kind === "director_override")) {
+          createdVariance = await recordVariance(connection, {
+            actor,
+            after: purchaseOrderFacts({ ContractorID: ContractorID ?? null, ContractorName: ContractorName ?? null, CostNotToExceed: CostNotToExceed ?? null, EstimatedCost: EstimatedCost ?? null, PONumber: poNumber }),
+            before: contractorFacts({ ContractorID: ContractorID ?? null, ContractorName: ContractorName ?? null }),
+            decision: createVariance.decision,
+            jobId: JobID,
+            previousAmount: createVariance.originalAmount,
+            quoteId: createVariance.quoteId,
+            scope,
+            subject: { id: newId, type: "purchase_order" },
+          });
+        }
+
         await commitTransaction(connection);
+        await noticeVariance(connection, actor, JobID, createdVariance);
 
         const stored = await executeQuery(
           connection,
@@ -465,14 +528,38 @@ export async function upsertPurchaseOrder(
       const costRises =
         (EstimatedCost !== undefined || CostNotToExceed !== undefined) &&
         (editedAmount === null || previousAmount === null || Math.round(editedAmount * 100) > Math.round(previousAmount * 100));
+      // SECA-03 / JOB-20: a new payee or a higher cost is checked like a new order.
+      const editEditor = { email: identity.email, roles: await rolesForRequest(request), userId: actor?.kind === "user" ? (actor.userId ?? undefined) : undefined };
+      let otherCommitted = 0;
+      if (moneyJob && (costRises || ContractorID !== undefined)) {
+        const spend = await checkPurchaseOrderSpend(connection, {
+          actor: editEditor,
+          excludePurchaseOrderId: PurchaseOrderID,
+          isTest: await isTestJob(connection, jobId),
+          job: moneyJob,
+          poContractorId: ContractorID !== undefined ? ContractorID : ((before.ContractorID as number | null) ?? null),
+          stage: "create",
+          thisAmount: editedAmount,
+        });
+        otherCommitted = spend.otherCommitted;
+        if (spend.refusal) {
+          return await refuseMoneyChange(connection, request, {
+            attempted: "po.edit",
+            jobId,
+            refusal: spend.refusal,
+            state: { amount: editedAmount, committedAfter: spend.committedAfter },
+            subject: { id: PurchaseOrderID, type: "purchase_order" },
+          });
+        }
+      }
       const variance = costRises
         ? await checkVariance(connection, {
             accepted: { purchaseOrderId: PurchaseOrderID },
             body: varianceBody.value as VarianceBody | null,
             buildingId: moneyJob?.buildingId ?? null,
-            editor: { email: identity.email, roles: await rolesForRequest(request), userId: actor?.kind === "user" ? (actor.userId ?? undefined) : undefined },
+            editor: editEditor,
             jobId,
-            newAmount: editedAmount,
+            newAmount: editedAmount === null ? null : Math.round((editedAmount + otherCommitted) * 100) / 100,
             subject: "purchase_order",
           })
         : null;
@@ -817,6 +904,8 @@ async function previewPurchaseOrder(
 
 interface SendPurchaseOrderBody {
   PurchaseOrderID?: number;
+  /** SECA-04: the sender ticked that they checked a contractor's recently changed email address. */
+  ContactChangeChecked?: boolean;
   /** R13: a PO above its approved quote goes out within the margin: { attributedToUserId, rationale, directorOverrideReason? }. */
   variance?: unknown;
   /** @deprecated ignored — identity comes from the token */
@@ -881,6 +970,7 @@ async function sendPurchaseOrder(
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
               po.EstimatedCost, po.CostNotToExceed, po.SentAt, po.SendAttemptedAt,
+              c.ContactChangedAt, c.ContactChangedBy, c.ContactConfirmedAt,
               CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -903,6 +993,28 @@ async function sendPurchaseOrder(
     const recipient = resolveRecipient(contractorRows[0]?.EmailAddress);
     if (!recipient.address) {
       return { status: 400, jsonBody: { error: "Contractor has no email address." } };
+    }
+    // SECA-04: a contractor's email or ABN changed recently and no second person has confirmed it, so
+    // the sender has to say they have checked the address before the order goes to it.
+    const contact = {
+      changedAt: (contractorRows[0].ContactChangedAt as Date | null | undefined) ?? null,
+      changedBy: (contractorRows[0].ContactChangedBy as string | null | undefined) ?? null,
+      confirmedAt: (contractorRows[0].ContactConfirmedAt as Date | null | undefined) ?? null,
+    };
+    const contactHeld = contactChangeHolds(contact);
+    if (contactHeld && body?.ContactChangeChecked !== true) {
+      const message = `${contactChangeSentence(contact)}. Check the address with the contractor, or ask an accounts manager, the CFO or a director to confirm it, before sending.`;
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: "contractor_contact_changed", message },
+        contractorRows[0].JobID as number,
+      );
+      return {
+        status: 409,
+        jsonBody: { changedAt: contact.changedAt, changedBy: contact.changedBy, code: "contractor_contact_changed", error: message, sentence: contactChangeSentence(contact) },
+      };
     }
     const pdfBlobName = contractorRows[0].PDFBlobName as string;
     const poNumber = contractorRows[0].PONumber as string | null;
@@ -935,13 +1047,37 @@ async function sendPurchaseOrder(
     // R13: a PO above its approved quote goes out only within the margin (or up
     // to an amount already accepted on it), before any email leaves.
     const sendJobId = contractorRows[0].JobID as number;
+    const sendEditor = { email: identity.email, roles: await rolesForRequest(request), userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined };
+    // SECA-03 / JOB-20: the sender's spending authority, the quoted contractor, and every
+    // purchase order on the job taken together, before any email leaves.
+    const spend = sendJob
+      ? await checkPurchaseOrderSpend(connection, {
+          actor: sendEditor,
+          excludePurchaseOrderId: PurchaseOrderID,
+          isTest: false,
+          job: sendJob,
+          poContractorId: (contractorRows[0].ContractorID as number | null | undefined) ?? null,
+          stage: "send",
+          thisAmount: poAmount(contractorRows[0]),
+        })
+      : null;
+    if (spend?.refusal) {
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: spend.refusal.code, message: spend.refusal.message, state: { amount: poAmount(contractorRows[0]), committedAfter: spend.committedAfter } },
+        sendJobId,
+      );
+      return refusalResponse(spend.refusal);
+    }
     const variance = await checkVariance(connection, {
       accepted: { purchaseOrderId: PurchaseOrderID },
       body: varianceBody.value as VarianceBody | null,
       buildingId: sendJob?.buildingId ?? null,
-      editor: { email: identity.email, roles: await rolesForRequest(request), userId: actor.kind === "user" ? (actor.userId ?? undefined) : undefined },
+      editor: sendEditor,
       jobId: sendJobId,
-      newAmount: poAmount(contractorRows[0]),
+      newAmount: spend?.committedAfter ?? poAmount(contractorRows[0]),
       subject: "purchase_order",
     });
     if (variance.decision.kind === "refused") {
@@ -1062,7 +1198,7 @@ async function sendPurchaseOrder(
       await record(connection, {
         action: "po.send",
         actor,
-        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]) },
+        after: { sent: true, ...purchaseOrderFacts(contractorRows[0]), ...(contactHeld ? { contactChangeChecked: true } : {}) },
         // A re-send shows the earlier send here.
         before: { sentAt: previousSentAt ? new Date(previousSentAt).toISOString() : null, ...contractorFacts(contractorRows[0]) },
         buildingId: scope.buildingId,
@@ -1162,19 +1298,23 @@ async function deletePurchaseOrder(
         return { status: 404, jsonBody: { error: "Purchase order not found" } };
       }
       const po = rows[0];
-      if (po.SentAt || po.CompletedAt) {
+      if (po.SentAt || po.CompletedAt || po.MyobCreatedAt) {
         // A refused attempt, ledgered in a transaction of its own now that this
         // one has rolled back.
         await rollbackTransaction(connection).catch(() => {});
         const sent = Boolean(po.SentAt);
+        const completed = Boolean(po.CompletedAt);
+        // N5: a PO already recorded in MYOB exists in the books; deleting it here would leave MYOB holding an order Floorplan has lost.
         const error = sent
           ? "Cannot delete a purchase order that has been sent."
-          : "Cannot delete a purchase order that has been marked complete.";
+          : completed
+            ? "Cannot delete a purchase order that has been marked complete."
+            : "Cannot delete a purchase order that has been recorded in MYOB. It is in the books, so it stays on the job.";
         await recordRefusal(
           connection,
           actor,
           { id: PurchaseOrderID, type: "purchase_order" },
-          { attempted: "po.delete", code: sent ? "po_sent" : "po_completed", message: error },
+          { attempted: "po.delete", code: sent ? "po_sent" : completed ? "po_completed" : "po_in_myob", message: error },
           po.JobID as number,
         );
         return { status: 400, jsonBody: { error } };

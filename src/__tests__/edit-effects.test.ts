@@ -303,3 +303,34 @@ describe("decidePurchaseOrderEdit", () => {
     });
   });
 });
+
+describe("SECA-05: the other money fields an approver relied on", () => {
+  const APPROVED = {
+    amount: 1000, approvedAt: new Date(), contractorId: 3, contractorName: "Acme", currency: "AUD",
+    direction: "outgoing", pdfBlobName: "job-1/a.pdf", status: "approved", supplierInvoiceNumber: "S-1",
+  };
+  it.each([
+    ["currency", { currency: "NZD" }],
+    ["direction", { direction: "incoming" }],
+    ["supplier invoice number", { supplierInvoiceNumber: "S-2" }],
+    ["attached PDF", { pdfBlobName: "job-1/b.pdf" }],
+  ])("a changed %s clears an approval", (label, change) => {
+    const effects = decideApprovalAmountEdit(APPROVED, change);
+    expect(effects.otherMoneyChanges).toEqual([label]);
+    expect(effects.clearApproval).toBe(true);
+    expect(effects.summary).toContain(label);
+  });
+  it("sending the same values back, or blank for missing, changes nothing", () => {
+    expect(decideApprovalAmountEdit(APPROVED, { currency: "AUD", direction: "outgoing", pdfBlobName: "job-1/a.pdf", supplierInvoiceNumber: " S-1 " }).moneyChanged).toBe(false);
+    expect(decideApprovalAmountEdit({ ...APPROVED, supplierInvoiceNumber: null }, { supplierInvoiceNumber: "" }).moneyChanged).toBe(false);
+  });
+  it("a pending record is not reset (nothing to tear down), but still reports the change", () => {
+    const effects = decideApprovalAmountEdit({ ...APPROVED, approvedAt: null, status: "pending" }, { currency: "NZD" });
+    expect(effects.clearApproval).toBe(false);
+    expect(effects.moneyChanged).toBe(true);
+    expect(effects.wasApproved).toBe(false);
+  });
+  it("names a direction change so the handler can refuse it after approval", () => {
+    expect(decideApprovalAmountEdit(APPROVED, { direction: "incoming" }).directionChanged).toBe(true);
+  });
+});

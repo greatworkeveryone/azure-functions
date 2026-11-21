@@ -412,9 +412,9 @@ export const ACTION_ROLES = {
     why: `Record a payment and mark it paid; ${ADMIN_TEST_ONLY}.`,
   },
   rejectInvoice: {
-    gate: [A.ACCOUNTS_APPROVAL],
+    gate: roles(SUBJECT_ELIGIBLE_ROLES.invoice),
     routes: ["rejectJobInvoice"],
-    why: "Reject an invoice.",
+    why: "Reject an invoice, with a reason. Whoever may approve an invoice may reject it (JOB-06): the approval-authority core's eligible roles, the same list as approveInvoice.",
   },
   rejectScheduleChange: {
     gate: [A.DIRECTOR],
@@ -777,6 +777,18 @@ export const ACTION_ROLES = {
     gate: [A.ADMIN, A.DIRECTOR],
     routes: [],
     why: "See the users table (VIEW_USERS_ROLES, users.ts): admin and directors. Inviting and changing roles is admin only (manageUsers).",
+  },
+  confirmContractorContact: {
+    gate: [A.ACCOUNTS_APPROVAL],
+    refused: [A.ADMIN],
+    routes: ["confirmContractorContact"],
+    why: "Confirm a changed contractor email or ABN as a second person: an accounts manager, the CFO or a director, never the person who changed it (SECA-04). The handler refuses admin.",
+  },
+  decideRoleGrant: {
+    gate: [A.ADMIN, A.DIRECTOR],
+    match: "exact",
+    routes: ["decideRoleGrant"],
+    why: "Confirm, decline or withdraw a pending grant of director, cfo or admin (SECA-02, D5). The handler also refuses the person who asked and the person being granted.",
   },
   manageUsers: {
     gate: [A.ADMIN],

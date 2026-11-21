@@ -145,6 +145,11 @@
     "facilities",
     "facilities_manager"
   ],
+  "confirmContractorContact": [
+    "accounts_manager",
+    "cfo",
+    "director"
+  ],
   "createInvoice": [
     "accounts",
     "accounts_manager",
@@ -179,6 +184,10 @@
     "admin",
     "director",
     "facilities_manager"
+  ],
+  "decideRoleGrant": [
+    "admin",
+    "director"
   ],
   "deleteAnyInspection": [
     "admin",
@@ -446,10 +455,12 @@
     "user"
   ],
   "rejectInvoice": [
+    "accounts",
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "rejectOptionNotice": [
     "director"

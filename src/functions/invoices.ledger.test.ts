@@ -529,7 +529,7 @@ describe("directorApproveJobInvoice", () => {
 });
 
 describe("rejectJobInvoice", () => {
-  const reject = () => rejectJobInvoice(makeRequest({ JobInvoiceID: 5 }), ctx);
+  const reject = (extra: Record<string, unknown> = { Reason: "Wrong amount" }) => rejectJobInvoice(makeRequest({ JobInvoiceID: 5, ...extra }), ctx);
 
   it("writes one invoice.reject row, from whatever the invoice was to rejected", async () => {
     mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Status: "awaiting_approval" }), STORED]);
@@ -645,14 +645,19 @@ describe("rejectJobInvoice", () => {
       expect(ran(/SET Status = 'rejected'/)).toBe(false);
     });
 
-    it("an approved invoice below the director gate is final, not waiting: no reason needed", async () => {
+    it("an approved invoice below the director gate is final, but still needs a reason (JOB-06)", async () => {
       auth.rolesForRequest.mockResolvedValue(["director"]);
       mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 500, Status: "approved" }), STORED]);
 
+      expect((await reject({})).status).toBe(422);
+      expect(ran(/SET Status = 'rejected'/)).toBe(false);
+
+      db.executeQuery.mockClear();
+      mockSql([APP_USER, JOB_BUILDING, invoiceRow({ Amount: 500, Status: "approved" }), STORED]);
       const res = await reject();
 
       expect(res.status).toBe(200);
-      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.reject", reason: null });
+      expect(ledgerInserts(db.executeQuery)[0]).toMatchObject({ action: "invoice.reject", reason: "Wrong amount" });
     });
   });
 
@@ -1310,9 +1315,14 @@ describe("upsertJobInvoice: an amount edit that tears down an approval", () => {
   });
 
   it("shows the edit as a whole in `after`: the new supplier number and direction come with the new amount", async () => {
-    await edit({ Direction: "outgoing", SupplierInvoiceNumber: "INV-0099" });
+    await edit({ Currency: "NZD", SupplierInvoiceNumber: "INV-0099" });
 
-    expect(resets()[0].after).toMatchObject({ amount: 9000, direction: "outgoing", supplierInvoiceNumber: "INV-0099", status: "pending" });
+    expect(resets()[0].after).toMatchObject({
+      amount: 9000,
+      changes: { currency: { to: "NZD" }, "supplier invoice number": { to: "INV-0099" } },
+      status: "pending",
+      supplierInvoiceNumber: "INV-0099",
+    });
     expect(resets()[0].before).toMatchObject({ amount: 500 });
   });
 

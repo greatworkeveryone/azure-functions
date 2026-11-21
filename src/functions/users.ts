@@ -20,6 +20,8 @@ import {
   verifiedRequestClaims,
 } from "../auth";
 import { ACTION_ROLES } from "../action-roles";
+import { needsSecondPerson } from "../roleGrants";
+import { requestRoleGrant } from "./roleGrants";
 import { noteSignIn } from "../access/accessEvents";
 import { clientAddress } from "../access/clientIp";
 import { record } from "../ledger";
@@ -59,6 +61,8 @@ export async function getAppUsers(
   const canManage =
     callerRoles.includes(AppRole.ADMIN) || callerRoles.includes(AppRole.DIRECTOR);
 
+  const callerOid = canManage ? ((await verifiedIdentityFromRequest(request).catch(() => null))?.oid ?? "") : "";
+
   let connection;
   try {
     connection = await createRequestConnection(token);
@@ -66,11 +70,16 @@ export async function getAppUsers(
     const rows = canManage
       ? await executeQuery(
           connection,
-          `SELECT UserID, DisplayName, Email, Role, InvitedAt,
-                  CASE WHEN EntraOid IS NULL THEN 'pending' ELSE 'active' END AS Status
-           FROM dbo.AppUsers
-           WHERE IsActive = 1
-           ORDER BY Status DESC, DisplayName ASC`,
+          `SELECT u.UserID, u.DisplayName, u.Email, u.Role, u.InvitedAt,
+                  CASE WHEN u.EntraOid IS NULL THEN 'pending' ELSE 'active' END AS Status,
+                  g.GrantID, g.RequestedRole, g.RequestedByName, g.RequestedAt,
+                  CASE WHEN g.RequestedByOid = @CallerOid THEN 1 ELSE 0 END AS RequestedByMe,
+                  CASE WHEN u.EntraOid IS NOT NULL AND u.EntraOid = @CallerOid THEN 1 ELSE 0 END AS IsMe
+           FROM dbo.AppUsers u
+           LEFT JOIN dbo.PendingRoleGrants g ON g.TargetUserID = u.UserID AND g.Status = N'pending'
+           WHERE u.IsActive = 1
+           ORDER BY Status DESC, u.DisplayName ASC`,
+          [{ name: "CallerOid", type: TYPES.NVarChar, value: callerOid }],
         )
       : await executeQuery(
           connection,
@@ -90,6 +99,17 @@ export async function getAppUsers(
           role: (r.Role as string | null) ?? null,
           status: canManage ? (r.Status as "active" | "pending") : "active",
           invitedAt: canManage ? ((r.InvitedAt as string | null) ?? null) : null,
+          pendingGrant:
+            canManage && r.GrantID != null
+              ? {
+                  canConfirm: !r.RequestedByMe && !r.IsMe,
+                  grantId: r.GrantID as number,
+                  requestedAt: (r.RequestedAt as string | null) ?? null,
+                  requestedByMe: Boolean(r.RequestedByMe),
+                  requestedByName: r.RequestedByName as string,
+                  role: r.RequestedRole as string,
+                }
+              : null,
         })),
       },
     };
@@ -225,13 +245,16 @@ export async function upsertAppUser(
       }
 
       // An omitted role leaves the role as it is; an explicit null clears it.
-      const newRole = role === undefined ? oldRole : role;
+      const requestedRole = role === undefined ? oldRole : role;
+      // SECA-02 / D5: a move to director, cfo or admin waits for a second person; until then the person keeps the role they have.
+      const grantPending = needsSecondPerson(oldRole, requestedRole);
+      const newRole = grantPending ? oldRole : requestedRole;
       // An edit that omits isActive leaves the account as it is; defaulting to
       // true here used to reactivate a deactivated account on every role change.
       const newActive = isActive ?? oldActive;
 
       // Never leave the app without an active admin.
-      if (oldRole === AppRole.ADMIN && oldActive && (!newActive || newRole !== AppRole.ADMIN)) {
+      if (oldRole === AppRole.ADMIN && oldActive && (!newActive || requestedRole !== AppRole.ADMIN)) {
         const others = await executeQuery(
           connection,
           `SELECT COUNT(*) AS Remaining FROM dbo.AppUsers
@@ -248,6 +271,7 @@ export async function upsertAppUser(
 
       // The role or activation change, its UserRoleAudit row and its ledger rows
       // commit or roll back together: no ledger row, no decision.
+      let pendingGrantId: number | null = null;
       await beginTransaction(connection);
       try {
         await executeQuery(
@@ -262,6 +286,17 @@ export async function upsertAppUser(
             { name: "IsActive", type: TYPES.Bit,      value: newActive },
           ],
         );
+
+        if (grantPending && requestedRole) {
+          pendingGrantId = await requestRoleGrant(connection, {
+            actor: ledgerActor,
+            callerName: callerDisplayName,
+            callerOid,
+            previousRole: oldRole,
+            requestedRole,
+            targetUserId: userId,
+          });
+        }
 
         // Write audit and ledger rows only if role actually changed.
         if (newRole !== oldRole) {
@@ -304,7 +339,9 @@ export async function upsertAppUser(
         throw err;
       }
 
-      return { status: 200, jsonBody: { userId } };
+      return pendingGrantId === null
+        ? { status: 200, jsonBody: { userId } }
+        : { status: 202, jsonBody: { pendingGrant: { grantId: pendingGrantId, role: requestedRole }, userId } };
     }
 
     // INSERT path — pre-invite (no OID until the user logs in via registerSelf).
@@ -334,6 +371,10 @@ export async function upsertAppUser(
     // The invite, its UserRoleAudit row and its ledger row commit or roll back
     // together: no ledger row, no decision.
     let newUserId: number;
+    // SECA-02 / D5: an invite that names director, cfo or admin starts with no role, and the role waits for a second person.
+    const inviteGrantPending = needsSecondPerson(null, role);
+    const invitedRole = inviteGrantPending ? null : (role ?? null);
+    let invitedGrantId: number | null = null;
     await beginTransaction(connection);
     try {
       const inserted = await executeQuery(
@@ -344,14 +385,25 @@ export async function upsertAppUser(
         [
           { name: "DisplayName",  type: TYPES.NVarChar, value: displayName },
           { name: "Email",        type: TYPES.NVarChar, value: email },
-          { name: "Role",         type: TYPES.NVarChar, value: role ?? null },
+          { name: "Role",         type: TYPES.NVarChar, value: invitedRole },
           { name: "InvitedByOid", type: TYPES.NVarChar, value: callerOid },
         ],
       );
       newUserId = inserted[0].UserID as number;
 
+      if (inviteGrantPending && role) {
+        invitedGrantId = await requestRoleGrant(connection, {
+          actor: ledgerActor,
+          callerName: callerDisplayName,
+          callerOid,
+          previousRole: null,
+          requestedRole: role,
+          targetUserId: newUserId,
+        });
+      }
+
       // Audit log for the initial role assignment.
-      if (role) {
+      if (invitedRole) {
         await executeQuery(
           connection,
           `INSERT INTO dbo.UserRoleAudit
@@ -363,13 +415,13 @@ export async function upsertAppUser(
             { name: "ChangedByDisplayName",  type: TYPES.NVarChar, value: callerDisplayName },
             { name: "TargetUserID",          type: TYPES.Int,      value: newUserId },
             { name: "TargetEmail",           type: TYPES.NVarChar, value: email },
-            { name: "NewRole",               type: TYPES.NVarChar, value: role },
+            { name: "NewRole",               type: TYPES.NVarChar, value: invitedRole },
           ],
         );
         await record(connection, {
           action: "user.role_change",
           actor: ledgerActor,
-          after: { role },
+          after: { role: invitedRole },
           before: { role: null },
           subject: { id: newUserId, type: "app_user" },
         });
@@ -380,7 +432,9 @@ export async function upsertAppUser(
       throw err;
     }
 
-    return { status: 201, jsonBody: { userId: newUserId } };
+    return invitedGrantId === null
+      ? { status: 201, jsonBody: { userId: newUserId } }
+      : { status: 202, jsonBody: { pendingGrant: { grantId: invitedGrantId, role }, userId: newUserId } };
   } catch (error: unknown) {
     const message = errorMessage(error);
     context.error("upsertAppUser failed:", message);

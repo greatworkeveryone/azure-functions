@@ -1,3 +1,4 @@
+import { twoPersonGrantEnabled } from "../roleGrants";
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { clientAddress, forwardedSummary } from "../access/clientIp";
 import { TYPES, type Connection } from "tedious";
@@ -116,7 +117,7 @@ export async function health(request: HttpRequest, context: InvocationContext): 
       (timers === "unavailable" || !timers.some((t) => t.lastRun?.outcome === "error"));
     return {
       status: 200,
-      jsonBody: { ...base, ok, alerts, apiTokenAudience: apiAudienceMode(process.env), db: "ok", migrations, settings: { missing, forbidden }, timers },
+      jsonBody: { ...base, ok, alerts, apiTokenAudience: apiAudienceMode(process.env), db: "ok", migrations, privilegedGrantTwoPerson: twoPersonGrantEnabled(), settings: { missing, forbidden }, timers },
     };
   } catch (err) {
     // Log the full error server-side so on-call can diagnose, but never

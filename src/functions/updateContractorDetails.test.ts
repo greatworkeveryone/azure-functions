@@ -92,3 +92,16 @@ it("saves in Floorplan alone once the myBuildings push is switched off", async (
   expect(push).not.toHaveBeenCalled();
   expect(commitTransaction).toHaveBeenCalledTimes(1);
 });
+
+it("an email change starts the hold on purchase orders to that contractor, and is ledgered (SECA-04)", async () => {
+  await updateContractorDetails(request(), context);
+  const sql = updates()[0]?.[1] as string;
+  expect(sql).toMatch(/ContactChangedAt=SYSUTCDATETIME\(\)/);
+  expect(sql).toMatch(/ContactConfirmedAt=NULL, ContactConfirmedBy=NULL/);
+  expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ after: expect.objectContaining({ contactHeldForSecondPerson: true }) }));
+});
+
+it("a change that leaves the email and ABN alone does not start it", async () => {
+  await updateContractorDetails(request({ EmailAddress: "old@arjays.test" }), context);
+  expect(updates()[0]?.[1] as string).not.toMatch(/ContactChangedAt/);
+});

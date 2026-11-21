@@ -12,7 +12,7 @@ import { AppRole } from "../auth";
 export {};
 
 const EXPORT = join(__dirname, "..", "..", "exports", "action-roles.json");
-const PINNED_SHA256 = "73aaca06a1cf99bc5603e591d86b2e7eb9332892983fff281017629c5f65f692";
+const PINNED_SHA256 = "978cbef360aec8bfafa547621e5430003e905f008341787492b5e835973c1c14";
 const entries = Object.entries(ACTION_ROLES) as [string, ActionRoles][];
 
 describe("the export", () => {
@@ -84,6 +84,12 @@ describe("the table", () => {
     expect([...ACTION_ROLES.respondToDecision.routes]).toEqual(["respondToJobDecision"]);
     expect(ACTION_ROLES.completeAnyNextStep.match).toBe("exact");
     expect(rolesFor(ACTION_ROLES.completeAnyNextStep)).not.toContain(AppRole.FACILITIES);
+  });
+
+  it("lets every role that can approve an invoice reject it (JOB-06)", () => {
+    const approvers = rolesFor(ACTION_ROLES.approveInvoice);
+    expect(approvers).toEqual(expect.arrayContaining([AppRole.ACCOUNTS, AppRole.FACILITIES_APPROVAL]));
+    for (const role of approvers) expect(rolesFor(ACTION_ROLES.rejectInvoice)).toContain(role);
   });
 
   it("lets a director alone decide a schedule change, and the tenancy desk ask for and withdraw one (WP26c, J4b)", () => {

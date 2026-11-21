@@ -177,7 +177,7 @@ describe("editing who an invoice is from", () => {
   it("reads the invoice's contractor id under the lock, with the rest", async () => {
     await edit({ Notes: "x" });
 
-    expect(callMatching(/SELECT JobInvoiceID, JobID, InvoiceNumber, Amount/)!.sql).toMatch(/ContractorID\s+FROM JobInvoices WITH \(UPDLOCK, HOLDLOCK\)/);
+    expect(callMatching(/SELECT JobInvoiceID, JobID, InvoiceNumber, Amount/)!.sql).toMatch(/ContractorID, InvoicePDFBlobName\s+FROM JobInvoices WITH \(UPDLOCK, HOLDLOCK\)/);
   });
 
   it("sets the id the request gives, and the contractor's own name when none comes", async () => {
