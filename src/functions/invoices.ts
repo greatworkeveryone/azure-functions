@@ -1641,7 +1641,8 @@ async function rejectJobInvoice(
       }
 
       // J6: a stage-1 invoice whose amount needs a director is waiting on one;
-      // turning it down then is a decline, and needs its reason.
+      // turning it down then is a decline. JOB-06: every rejection needs its reason,
+      // because the person who raised the invoice is told it and has to correct it.
       let waitsOnDirector = false;
       if (current === "approved") {
         const { buildingId } = await jobScope(connection, jobId);
@@ -1654,7 +1655,7 @@ async function rejectJobInvoice(
         waitsOnDirector = authority.directorRequired;
       }
       const asDirector = waitsOnDirector && actor.kind === "user" && actor.role === AppRole.DIRECTOR;
-      const reasonMissing = declineReasonRefusal(waitsOnDirector, reason, "invoice");
+      const reasonMissing = declineReasonRefusal(true, reason, "invoice");
       if (reasonMissing) {
         await rollbackTransaction(connection).catch(() => {});
         await recordRefusal(

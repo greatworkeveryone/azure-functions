@@ -362,7 +362,7 @@ describe("undoDirectorApproveJobInvoice", () => {
 describe("rejectJobInvoice", () => {
   it("rejects a pending invoice", async () => {
     mockSql([APP_USER, JOB_BUILDING, invoice(), PAYMENTS(0), STORED]);
-    expect((await call("rejectJobInvoice", { JobInvoiceID: 5 })).status).toBe(200);
+    expect((await call("rejectJobInvoice", { JobInvoiceID: 5, Reason: "Not ours" })).status).toBe(200);
   });
 
   it.each([

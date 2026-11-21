@@ -446,10 +446,12 @@
     "user"
   ],
   "rejectInvoice": [
+    "accounts",
     "accounts_manager",
     "admin",
     "cfo",
-    "director"
+    "director",
+    "facilities_manager"
   ],
   "rejectOptionNotice": [
     "director"

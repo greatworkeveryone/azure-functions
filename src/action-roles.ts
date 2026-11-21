@@ -412,9 +412,9 @@ export const ACTION_ROLES = {
     why: `Record a payment and mark it paid; ${ADMIN_TEST_ONLY}.`,
   },
   rejectInvoice: {
-    gate: [A.ACCOUNTS_APPROVAL],
+    gate: roles(SUBJECT_ELIGIBLE_ROLES.invoice),
     routes: ["rejectJobInvoice"],
-    why: "Reject an invoice.",
+    why: "Reject an invoice, with a reason. Whoever may approve an invoice may reject it (JOB-06): the approval-authority core's eligible roles, the same list as approveInvoice.",
   },
   rejectScheduleChange: {
     gate: [A.DIRECTOR],
