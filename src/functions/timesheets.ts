@@ -17,6 +17,16 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { validateTimesheetData } from "../timesheetData";
+import {
+  canApproveGeneralSheet,
+  generalApproverFor,
+  generalSubjectsFor,
+  opensEveryGeneralSheet,
+  timesheetScopeSql,
+  type PeopleSnapshot,
+  type TimesheetGroup,
+} from "../timesheetGeneral";
+import { loadPeople } from "../peopleWorkflow";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
 
@@ -33,10 +43,11 @@ const TIMESHEET_COLUMNS = `
   ReadyForApproval, ReadyForApprovalDate,
   Approved, ApprovedDate, ApprovedBy, ApprovedByName,
   SentToMyobDate,
-  CreatedOn, CreatedBy, UpdatedOn, UpdatedBy
+  CreatedOn, CreatedBy, UpdatedOn, UpdatedBy, Revision
 `;
 
-interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string; role?: string }
+/** `revision` is the Revision of the sheet the client loaded; null means it loaded none. */
+interface UpsertTimesheetBody { weekStart: string; data: unknown; userId?: string; userDisplayName?: string; role?: string; revision?: number | null }
 interface SubmitTimesheetBody { timesheetId: number; submit: boolean }
 interface ApproveTimesheetBody { timesheetId: number; approve: boolean }
 
@@ -46,19 +57,58 @@ const FACILITIES_ROLES = [AppRole.FACILITIES, AppRole.FACILITIES_APPROVAL] as co
 const ACCOUNTS_ROLES  = [AppRole.ACCOUNTS,   AppRole.ACCOUNTS_APPROVAL]   as const;
 const APPROVAL_ROLES  = [AppRole.CFO, AppRole.DIRECTOR, AppRole.FACILITIES_APPROVAL, AppRole.ACCOUNTS_APPROVAL] as const;
 
-type TimesheetRole = "facilities" | "accounts";
+type TimesheetRole = TimesheetGroup;
 
 /** Map the caller's Entra roles to the timesheet role group they belong to. */
 function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
   if (roles.includes(AppRole.ADMIN)) return null; // admin handled separately
   if (roles.some((r) => (FACILITIES_ROLES as readonly string[]).includes(r))) return "facilities";
   if (roles.some((r) => (ACCOUNTS_ROLES  as readonly string[]).includes(r))) return "accounts";
+  // Everyone else with an access role (plain staff, directors, the CFO) keeps hours in the general group.
+  if (roles.some((r) => r.trim() !== "")) return "general";
   return null;
+}
+
+/** People and reporting links, or none when they cannot be read: then only the open roles may approve a general sheet. */
+async function peopleOrNone(connection: Parameters<typeof loadPeople>[0]): Promise<PeopleSnapshot> {
+  try {
+    return await loadPeople(connection);
+  } catch {
+    return { links: [], staff: [] };
+  }
+}
+
+/** May the caller act on this sheet as its manager? Facilities and accounts follow role groups; general follows the reporting line. */
+async function canManageSheet(
+  connection: Parameters<typeof loadPeople>[0],
+  roles: string[],
+  callerOid: string,
+  sheetRole: string | null | undefined,
+  subjectOid: string,
+): Promise<boolean> {
+  if (sheetRole !== "general") return canManageRole(roles, sheetRole);
+  if (roles.includes(AppRole.ADMIN) || opensEveryGeneralSheet(roles)) return true;
+  return canApproveGeneralSheet(callerOid, roles, subjectOid, await peopleOrNone(connection));
+}
+
+/** The groups a manager's list covers: general is added for accounts managers, who approve it when nobody is named. */
+function scopeGroups(roles: string[]): TimesheetRole[] {
+  const groups = managedRoles(roles);
+  if (roles.includes(AppRole.ACCOUNTS_APPROVAL) && !groups.includes("general")) groups.push("general");
+  return groups;
+}
+
+/** Which general sheets a list may include: all of them, or the listed people's. */
+async function generalScope(connection: Parameters<typeof loadPeople>[0], roles: string[], callerOid: string): Promise<readonly string[] | "all"> {
+  if (roles.includes(AppRole.ADMIN) || opensEveryGeneralSheet(roles)) return "all";
+  if (!roles.includes(AppRole.ACCOUNTS_APPROVAL)) return [];
+  const people = await peopleOrNone(connection);
+  return generalSubjectsFor(callerOid, roles, people, (role) => timesheetRoleFromClaims([role]) === "general");
 }
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
 function managedRoles(roles: string[]): TimesheetRole[] {
-  if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR) || roles.includes(AppRole.CFO)) return ["facilities", "accounts"];
+  if (roles.includes(AppRole.ADMIN) || roles.includes(AppRole.DIRECTOR) || roles.includes(AppRole.CFO)) return ["facilities", "accounts", "general"];
   const out: TimesheetRole[] = [];
   if (roles.includes(AppRole.FACILITIES_APPROVAL)) out.push("facilities");
   if (roles.includes(AppRole.ACCOUNTS_APPROVAL))  out.push("accounts");
@@ -110,8 +160,7 @@ async function getTimesheet(
   }
 
   if (!isOwnData) {
-    const managed = managedRoles(roles);
-    if (managed.length === 0) {
+    if (scopeGroups(roles).length === 0) {
       return forbiddenResponse("No managed role group");
     }
   }
@@ -124,7 +173,7 @@ async function getTimesheet(
       SELECT TimesheetID, UserID, UserDisplayName, WeekStartDate, Role, Data,
              ReadyForApproval, ReadyForApprovalDate, Approved, ApprovedDate,
              ApprovedBy, ApprovedByName, SentToMyobDate,
-             CreatedOn, CreatedBy, UpdatedOn, UpdatedBy
+             CreatedOn, CreatedBy, UpdatedOn, UpdatedBy, Revision
       FROM dbo.Timesheets
       WHERE UserID = @UserID AND WeekStartDate = @WeekStartDate
     `;
@@ -135,13 +184,17 @@ async function getTimesheet(
 
     // If manager, enforce their managed role scope
     if (!isOwnData && !roles.includes(AppRole.ADMIN)) {
-      const managed = managedRoles(roles);
-      sql += ` AND Role IN (${managed.map((_, i) => `@Role${i}`).join(", ")})`;
-      managed.forEach((r, i) => params.push({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
+      const subjects = await generalScope(connection, roles, callerOid);
+      sql += ` AND ${timesheetScopeSql(scopeGroups(roles), subjects, params, "Scope")}`;
     }
 
     const rows = await executeQuery(connection, sql, params);
-    return { status: 200, jsonBody: { timesheet: rows[0] ?? null } };
+    // A plain member of staff is told who approves their hours, or that nobody is named.
+    let approver = null;
+    if (isOwnData && timesheetRoleFromClaims(roles) === "general") {
+      approver = generalApproverFor(callerOid, await peopleOrNone(connection));
+    }
+    return { status: 200, jsonBody: { approver, timesheet: rows[0] ?? null } };
   } catch (error: any) {
     context.error("getTimesheet failed:", error.message);
     return errorResponse("Failed to fetch timesheet", error.message);
@@ -183,7 +236,7 @@ async function upsertTimesheet(
   let connection;
   try {
     const body = (await request.json()) as UpsertTimesheetBody;
-    const { weekStart, data, userId, role: bodyRole } = body ?? {};
+    const { weekStart, data, userId, role: bodyRole, revision } = body ?? {};
 
     if (!weekStart || !data) {
       return { status: 400, jsonBody: { error: "weekStart and data are required" } };
@@ -203,7 +256,7 @@ async function upsertTimesheet(
 
     // Determine the role for this timesheet row — claims are authoritative for
     // non-admin users; admins supply an explicit role in the body.
-    const validRoles: TimesheetRole[] = ["facilities", "accounts"];
+    const validRoles: TimesheetRole[] = ["facilities", "accounts", "general"];
     const suppliedRole: TimesheetRole | null =
       bodyRole && (validRoles as string[]).includes(bodyRole) ? bodyRole as TimesheetRole : null;
 
@@ -226,7 +279,7 @@ async function upsertTimesheet(
       targetDisplayName = ((subject[0].DisplayName as string | null) ?? "").trim() || targetUserId;
       const subjectRole = timesheetRoleFromClaims([String(subject[0].Role ?? "")]);
       timesheetRole = subjectRole ?? suppliedRole;
-      if (timesheetRole && !canManageRole(roles, timesheetRole)) {
+      if (timesheetRole && !(await canManageSheet(connection, roles, callerOid, timesheetRole, targetUserId))) {
         return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${timesheetRole}`);
       }
     }
@@ -234,7 +287,7 @@ async function upsertTimesheet(
     // Check if a timesheet exists and is locked
     const existing = await executeQuery(
       connection,
-      `SELECT TimesheetID, Role, ReadyForApproval, Approved FROM dbo.Timesheets
+      `SELECT TimesheetID, Role, ReadyForApproval, Approved, Revision FROM dbo.Timesheets
        WHERE UserID = @UserID AND WeekStartDate = @WeekStartDate`,
       [
         { name: "UserID",        type: TYPES.NVarChar, value: targetUserId },
@@ -244,25 +297,45 @@ async function upsertTimesheet(
 
     if (existing.length > 0) {
       const row = existing[0];
-      if (!isOwnData && !canManageRole(roles, row.Role as string | null)) {
+      if (!isOwnData && !(await canManageSheet(connection, roles, callerOid, row.Role as string | null, targetUserId))) {
         return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
       }
       if (row.ReadyForApproval || row.Approved) {
         return { status: 400, jsonBody: { error: "Timesheet is locked — recall it before editing" } };
       }
 
-      // Update — role is already stored in the row, not needed here
-      await executeQuery(
+      // The save must name the revision the client loaded (null: it loaded none, so a sheet
+      // that has appeared since is someone else's). A stale save writes nothing.
+      const staleResponse = async (): Promise<HttpResponseInit> => ({
+        status: 409,
+        jsonBody: {
+          code: "stale_timesheet",
+          error: "Someone else changed this week. Reload to see their changes.",
+          timesheet: (await executeQuery(
+            connection!,
+            `SELECT ${TIMESHEET_COLUMNS} FROM dbo.Timesheets WHERE TimesheetID = @Id`,
+            [{ name: "Id", type: TYPES.Int, value: row.TimesheetID }],
+          ))[0],
+        },
+      });
+      if (typeof revision !== "number" || revision !== Number(row.Revision)) return staleResponse();
+
+      // Update — role is already stored in the row, not needed here. The revision is checked
+      // again in the WHERE so two saves racing past the check cannot both land.
+      const written = await executeQuery(
         connection,
         `UPDATE dbo.Timesheets
-         SET Data = @Data, UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy
-         WHERE TimesheetID = @TimesheetID`,
+         SET Data = @Data, UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy, Revision = Revision + 1
+         OUTPUT INSERTED.TimesheetID
+         WHERE TimesheetID = @TimesheetID AND Revision = @Revision`,
         [
           { name: "Data",        type: TYPES.NVarChar, value: JSON.stringify(data) },
           { name: "UpdatedBy",   type: TYPES.NVarChar, value: callerOid },
           { name: "TimesheetID", type: TYPES.Int,      value: row.TimesheetID },
+          { name: "Revision",    type: TYPES.Int,      value: revision },
         ],
       );
+      if (!written || written.length === 0) return staleResponse();
 
       const updated = await executeQuery(
         connection,
@@ -363,7 +436,7 @@ async function submitTimesheetForApproval(
     if (!isOwner && !isApprovalManager(roles)) {
       return forbiddenResponse("Only approval managers can submit for other users");
     }
-    if (!isOwner && !canManageRole(roles, row.Role as string | null)) {
+    if (!isOwner && !(await canManageSheet(connection, roles, callerOid, row.Role as string | null, String(row.UserID)))) {
       return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
     }
     if (row.Approved) {
@@ -382,7 +455,7 @@ async function submitTimesheetForApproval(
       `UPDATE dbo.Timesheets
        SET ReadyForApproval = @Ready,
            ReadyForApprovalDate = IIF(@Ready = 1, GETUTCDATE(), NULL),
-           UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy
+           UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy, Revision = Revision + 1
        WHERE TimesheetID = @Id`,
       [
         { name: "Ready",     type: TYPES.Bit,     value: submit ? 1 : 0 },
@@ -455,7 +528,7 @@ async function approveTimesheet(
       return forbiddenResponse("Cannot approve your own timesheet");
     }
 
-    if (!canManageRole(roles, row.Role as string | null)) {
+    if (!(await canManageSheet(connection, roles, callerOid, row.Role as string | null, String(row.UserID)))) {
       return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${row.Role}`);
     }
 
@@ -477,7 +550,7 @@ async function approveTimesheet(
            ApprovedDate    = IIF(@Approved = 1, GETUTCDATE(), NULL),
            ApprovedBy      = @ApprovedBy,
            ApprovedByName  = @ApprovedByName,
-           UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy
+           UpdatedOn = GETUTCDATE(), UpdatedBy = @UpdatedBy, Revision = Revision + 1
        WHERE TimesheetID = @Id`,
       [
         { name: "Approved",       type: TYPES.Bit,      value: approve ? 1 : 0 },
@@ -518,11 +591,13 @@ async function getTimesheets(
     return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
-  const managed = managedRoles(roles);
+  const managed = scopeGroups(roles);
 
   let connection;
   try {
     connection = await createRequestConnection(token);
+    const identity = await verifiedIdentityFromRequest(request);
+    if (!identity) return unauthorizedResponse();
 
     const qRole             = request.query.get("role");
     const qReadyForApproval = request.query.get("readyForApproval");
@@ -540,10 +615,8 @@ async function getTimesheets(
     const scopedRoles = qRole && managed.includes(qRole as TimesheetRole)
       ? [qRole as TimesheetRole]
       : managed;
-    WHERE_SQL += ` AND Role IN (${scopedRoles.map((_, i) => `@ScopeRole${i}`).join(", ")})`;
-    scopedRoles.forEach((r, i) =>
-      params.push({ name: `ScopeRole${i}`, type: TYPES.NVarChar, value: r }),
-    );
+    const subjects = scopedRoles.includes("general") ? await generalScope(connection, roles, identity.oid) : [];
+    WHERE_SQL += ` AND ${timesheetScopeSql(scopedRoles, subjects, params, "Scope")}`;
 
     if (qReadyForApproval !== null) {
       WHERE_SQL += " AND ReadyForApproval = @ReadyForApproval";
@@ -573,7 +646,7 @@ async function getTimesheets(
       SELECT TimesheetID, UserID, UserDisplayName, WeekStartDate, Role, Data,
              ReadyForApproval, ReadyForApprovalDate, Approved, ApprovedDate,
              ApprovedBy, ApprovedByName, SentToMyobDate,
-             CreatedOn, CreatedBy, UpdatedOn, UpdatedBy
+             CreatedOn, CreatedBy, UpdatedOn, UpdatedBy, Revision
       FROM dbo.Timesheets
       WHERE 1=1${WHERE_SQL}
       ORDER BY WeekStartDate DESC, UserDisplayName ASC
@@ -610,21 +683,23 @@ async function getTimesheetUsers(
     return forbiddenResponse("Requires facilities_manager or accounts_manager");
   }
 
-  const managed = managedRoles(roles);
+  const managed = scopeGroups(roles);
 
   let connection;
   try {
     connection = await createRequestConnection(token);
+    const identity = await verifiedIdentityFromRequest(request);
+    if (!identity) return unauthorizedResponse();
 
     const params: SqlParam[] = [];
-    const PLACEHOLDERS = managed.map((_, i) => `@Role${i}`).join(", ");
-    managed.forEach((r, i) => params.push({ name: `Role${i}`, type: TYPES.NVarChar, value: r }));
+    const subjects = managed.includes("general") ? await generalScope(connection, roles, identity.oid) : [];
+    const scope = timesheetScopeSql(managed, subjects, params, "Scope");
 
     const rows = await executeQuery(
       connection,
       `SELECT DISTINCT UserID, UserDisplayName, Role
        FROM dbo.Timesheets
-       WHERE Role IN (${PLACEHOLDERS})
+       WHERE ${scope}
        ORDER BY UserDisplayName ASC`,
       params,
     );
