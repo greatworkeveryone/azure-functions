@@ -64,9 +64,20 @@ function timesheetRoleFromClaims(roles: string[]): TimesheetRole | null {
   if (roles.includes(AppRole.ADMIN)) return null; // admin handled separately
   if (roles.some((r) => (FACILITIES_ROLES as readonly string[]).includes(r))) return "facilities";
   if (roles.some((r) => (ACCOUNTS_ROLES  as readonly string[]).includes(r))) return "accounts";
-  // Everyone else with an access role (plain staff, directors, the CFO) keeps hours in the general group.
-  if (roles.some((r) => r.trim() !== "")) return "general";
   return null;
+}
+
+/**
+ * The group for a person the claims do not place in facilities or accounts. Plain staff are always
+ * general: the client cannot pick a group for them. Directors and the CFO keep the group they
+ * name (the CFO's own screen says accounts), else general; admin must name one.
+ */
+function defaultGroup(roles: string[], supplied: TimesheetRole | null): TimesheetRole | null {
+  const claimed = timesheetRoleFromClaims(roles);
+  if (claimed) return claimed;
+  if (roles.includes(AppRole.ADMIN)) return supplied;
+  if (roles.includes(AppRole.CFO) || roles.includes(AppRole.DIRECTOR)) return supplied ?? "general";
+  return roles.some((r) => r.trim() !== "") ? "general" : null;
 }
 
 /** People and reporting links, or none when they cannot be read: then only the open roles may approve a general sheet. */
@@ -103,7 +114,7 @@ async function generalScope(connection: Parameters<typeof loadPeople>[0], roles:
   if (roles.includes(AppRole.ADMIN) || opensEveryGeneralSheet(roles)) return "all";
   if (!roles.includes(AppRole.ACCOUNTS_APPROVAL)) return [];
   const people = await peopleOrNone(connection);
-  return generalSubjectsFor(callerOid, roles, people, (role) => timesheetRoleFromClaims([role]) === "general");
+  return generalSubjectsFor(callerOid, roles, people, (role) => defaultGroup([role], null) === "general");
 }
 
 /** Return which role group(s) this caller is authorised to approve/manage. */
@@ -191,7 +202,7 @@ async function getTimesheet(
     const rows = await executeQuery(connection, sql, params);
     // A plain member of staff is told who approves their hours, or that nobody is named.
     let approver = null;
-    if (isOwnData && timesheetRoleFromClaims(roles) === "general") {
+    if (isOwnData && defaultGroup(roles, null) === "general") {
       approver = generalApproverFor(callerOid, await peopleOrNone(connection));
     }
     return { status: 200, jsonBody: { approver, timesheet: rows[0] ?? null } };
@@ -268,7 +279,7 @@ async function upsertTimesheet(
     let targetDisplayName: string = callerName;
     let timesheetRole: TimesheetRole | null;
     if (isOwnData) {
-      timesheetRole = timesheetRoleFromClaims(roles) ?? suppliedRole;
+      timesheetRole = defaultGroup(roles, suppliedRole);
     } else {
       const subject = await executeQuery(
         connection,
@@ -277,8 +288,7 @@ async function upsertTimesheet(
       );
       if (subject.length === 0) return { status: 404, jsonBody: { error: "User not found" } };
       targetDisplayName = ((subject[0].DisplayName as string | null) ?? "").trim() || targetUserId;
-      const subjectRole = timesheetRoleFromClaims([String(subject[0].Role ?? "")]);
-      timesheetRole = subjectRole ?? suppliedRole;
+      timesheetRole = defaultGroup([String(subject[0].Role ?? "")], suppliedRole);
       if (timesheetRole && !(await canManageSheet(connection, roles, callerOid, timesheetRole, targetUserId))) {
         return forbiddenResponse(`You manage ${managedRoles(roles).join(", ")} timesheets; this is ${timesheetRole}`);
       }

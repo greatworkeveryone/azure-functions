@@ -56,6 +56,13 @@ describe("plain staff timesheets", () => {
     expect(insert[2]?.find((p) => p.name === "Role")?.value).toBe("general");
   });
 
+  it("keeps them in general even when the body names another group", async () => {
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ TimesheetID: 1 }]).mockResolvedValueOnce([{ TimesheetID: 1 }]);
+    await post("upsertTimesheet", { weekStart: "2026-11-16", data: DATA, revision: null, role: "facilities" });
+    const insert = query.mock.calls.find(([, sql]) => sql.includes("INSERT INTO dbo.Timesheets"))!;
+    expect(insert[2]?.find((p) => p.name === "Role")?.value).toBe("general");
+  });
+
   it("tells them their named manager approves", async () => {
     jest.mocked(loadPeople).mockResolvedValue({ links: [{ managerId: 2, userId: 1 }], revision: 1, staff } as never);
     query.mockResolvedValueOnce([]);
