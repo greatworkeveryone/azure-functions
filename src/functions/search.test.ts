@@ -18,7 +18,7 @@ jest.mock("../db", () => ({
   executeQuery: jest.fn(async () => []),
 }));
 
-import { requireRole } from "../auth";
+import { requireRole, rolesForRequest } from "../auth";
 import { executeQuery } from "../db";
 import { _resetRateLimitForTests } from "../rateLimit";
 
@@ -82,6 +82,24 @@ describe("search handler — scaffold behaviour", () => {
   it("runs all four entity queries", async () => {
     await search(makeRequest({ q: "acme" }), ctx);
     expect(executeQuery).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("job titles follow the job list gate (SECA-13)", () => {
+  it("does not query jobs for a plain user", async () => {
+    (rolesForRequest as jest.Mock).mockResolvedValueOnce(["user"]);
+    (executeQuery as jest.Mock).mockImplementation(async (_c: unknown, sql: string) =>
+      /FROM Jobs/.test(sql) ? [{ id: 1, title: "Secret job", status: "New", building: "B" }] : [],
+    );
+    const res = await search(makeRequest({ q: "secret" }), ctx);
+    expect((res.jsonBody as { jobs: unknown[] }).jobs).toEqual([]);
+    expect((executeQuery as jest.Mock).mock.calls.some((c) => /FROM Jobs/.test(String(c[1])))).toBe(false);
+    (executeQuery as jest.Mock).mockImplementation(async () => []);
+  });
+  it("still queries jobs for a role that can open the job list", async () => {
+    (rolesForRequest as jest.Mock).mockResolvedValueOnce(["facilities_manager"]);
+    await search(makeRequest({ q: "acme" }), ctx);
+    expect((executeQuery as jest.Mock).mock.calls.some((c) => /FROM Jobs/.test(String(c[1])))).toBe(true);
   });
 });
 
