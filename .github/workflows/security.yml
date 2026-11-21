@@ -1,11 +1,11 @@
 name: Security
 
-# The repo has no `main`; these are the branches that exist and ship.
+# The repo has no `main`; these are the branches that exist and ship. `staging` is the one that deploys (deploy.yml).
 on:
   push:
-    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
+    branches: [dev/launch-readiness, develop-c, master, staging, codex/integrated-review]
   pull_request:
-    branches: [dev/launch-readiness, develop-c, master, codex/integrated-review]
+    branches: [dev/launch-readiness, develop-c, master, staging, codex/integrated-review]
   schedule:
     - cron: "0 6 * * 1"
 
