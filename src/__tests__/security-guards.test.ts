@@ -73,6 +73,7 @@ const ANONYMOUS_BY_DESIGN: Record<string, string> = {
   graphNotification: "Graph webhook; authenticated by the constant-time clientState secret",
   myobAuthCallback: "OAuth redirect; authenticated by the signed, expiring state",
   registerSelf: "sign-in; verifies the token signature itself and needs no role yet",
+  version: "returns only the build SHA, build time and environment name, for the deploy smoke test; no data, no caller",
 };
 
 const NEXT_DECLARATION =
