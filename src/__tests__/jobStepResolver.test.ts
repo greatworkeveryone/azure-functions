@@ -26,10 +26,10 @@ const knownCapability = (capability: string): boolean => capability in ROLE_TABL
 
 /** SHA-256 of each shared file, the same in both repos. */
 const PINS: Record<string, string> = {
-  "jobStepPresent.ts": "72594f1e342595910ce4b55a864725d50c19a266c29ea17d0514165fafc793d8",
-  "jobStepResolver.ts": "881fc957a5fad00b58b9a1b6e41b4224639a4d8a8bd4a1a6ea1885caa935f277",
-  "jobStepTypes.ts": "916b8ce4116151be4bf7b3cd3622ea11f56a53df0b235a823494a276a57b437e",
+  "jobStepPresent.ts": "c728e2d2d57eb80aad7d600fce2247331c8e9851b94107f50af0b9a7f383f0b3",
+  "jobStepResolver.ts": "ce13e0af48e34ad1c882b064e23b8249c8b215199c584da5815b752bad4e1c4e",
   "jobStepResolver.vectors.json": "b9c3d2df846df2d372ca516e512f2fc9e9a3cb82a06c053af231924c7c8aea53",
+  "jobStepTypes.ts": "322d10525efea0677a0dabadd4e49806b7724194f0ff27ac5bc91f4855bf36ce",
 };
 
 interface Expect {
@@ -98,7 +98,7 @@ describe("job step resolver: shared vectors", () => {
 
   it("treats a capability every job role holds as a team wait: nobody is told 'Waiting on you' for it", () => {
     for (const capability of ["createInvoice", "createQuote", "editJobs"]) {
-      for (const role of VECTORS.roles) expect({ capability, role, holds: holdsCapability(role, capability) }).toEqual({ capability, holds: true, role });
+      for (const role of VECTORS.roles) expect({ capability, holds: holdsCapability(role, capability), role }).toEqual({ capability, holds: true, role });
     }
     const team = resolveJobStep(factsOf({ awaitingRole: "accounts", kind: "contract", status: "Awaiting Approval" })).nextAction;
     expect(team.who).toBe("Accounts");
@@ -113,7 +113,7 @@ describe("job step resolver: shared vectors", () => {
     for (const [index, role] of VECTORS.roles.entries()) {
       if (role === "facilities_manager" || !holdsCapability(role, "createPurchaseOrder")) continue;
       const view = presentNextAction(nextAction, viewerOf(index));
-      expect({ role, passive: view.isPassive, label: view.label }).toEqual({ label: "Waiting on a facilities manager to raise the purchase order", passive: true, role });
+      expect({ label: view.label, passive: view.isPassive, role }).toEqual({ label: "Waiting on a facilities manager to raise the purchase order", passive: true, role });
     }
   });
 
@@ -194,8 +194,8 @@ describe("job step resolver: shared vectors", () => {
     const sides = ["facilities", "accounts"] as const;
     const kinds = ["standard", "contract", "internal"] as const;
     const quoteStates = [{}, { contractorsRequested: 2 }, { contractorsRequested: 2, requestsSent: 2 }, { declined: 1 }, { pending: 1 }, { pending: 1, pendingNeedsDirector: true }, { awaitingApproval: 1 }, { awaitingDirector: 1 }, { approved: true }];
-    const poStates = [{}, { raised: 1, notInMyob: 1 }, { raised: 1, complete: 1, notInMyob: 1 }, { raised: 1, complete: 1 }];
-    const invoiceStates = [{}, { rejected: 1 }, { incoming: 1, pending: 1 }, { incoming: 1, awaitingDirector: 1 }, { incoming: 1, approvedNotInMyob: 1 }, { incoming: 1 }];
+    const poStates = [{}, { notInMyob: 1, raised: 1 }, { complete: 1, notInMyob: 1, raised: 1 }, { complete: 1, raised: 1 }];
+    const invoiceStates = [{}, { rejected: 1 }, { incoming: 1, pending: 1 }, { awaitingDirector: 1, incoming: 1 }, { approvedNotInMyob: 1, incoming: 1 }, { incoming: 1 }];
     const space: StepFacts[] = [];
     for (const status of statuses) for (const awaitingRole of sides) for (const kind of kinds) for (const quotes of quoteStates) for (const purchaseOrders of poStates) for (const invoices of invoiceStates) {
       space.push(factsOf({ awaitingRole, invoices, kind, purchaseOrders, quotes, status }));

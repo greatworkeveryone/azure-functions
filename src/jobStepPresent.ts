@@ -5,7 +5,7 @@
 // when the viewer is the assignee or the named approver or, for a job nobody owns, holds the capability the step needs.
 // A viewer without that capability never gets a disabled button: they get a wait that says who can act.
 
-import type { NextAction, StepActor, StepJumpTarget, StepDirectAction } from "./jobStepTypes";
+import type { NextAction, StepActor, StepDirectAction, StepJumpTarget } from "./jobStepTypes";
 
 export interface StepViewer {
   /** Whether the viewer holds an action-roles capability (useCan on the screen, the role table in tests). */

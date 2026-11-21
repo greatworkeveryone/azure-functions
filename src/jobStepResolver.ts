@@ -10,7 +10,7 @@
 // purchase orders and invoices, never amounts or the stored status alone. The viewer is not an input here:
 // jobStepPresent.ts turns this answer into what one person sees.
 
-import { JOB_STEP_LABELS, stepNumber, type JobStep, type JobStepKey, type NextAction, type StepFacts } from "./jobStepTypes";
+import { JOB_STEP_LABELS, type JobStep, type JobStepKey, type NextAction, type StepFacts, stepNumber } from "./jobStepTypes";
 
 export type { JobStep, JobStepKey, NextAction, StepFacts } from "./jobStepTypes";
 export { JOB_STEP_LABELS, JOB_STEP_ORDER } from "./jobStepTypes";
@@ -118,10 +118,10 @@ function quoteApproval(facts: StepFacts) {
     capability: "approveQuote",
     creator: quotes.pendingCreator,
     jumpTarget: "quotes",
+    person: quotes.approver?.userId != null,
     reason: "Choose a quote to approve. Work starts once one is approved.",
     task: "approve the quote",
     verb: "Approve quote",
-    person: quotes.approver?.userId != null,
     waitingOnUserId: quotes.approver?.userId ?? null,
     who: quotes.approver?.name ?? QUOTE_APPROVERS,
   }));
@@ -180,12 +180,12 @@ function invoiceChain(facts: StepFacts) {
       capability: "approveInvoice",
       creator: invoices.pendingCreator,
       jumpTarget: "invoices",
+      person: invoices.approver?.userId != null,
       reason: invoices.pendingNeedsDirector
         ? "The invoice is waiting for approval. A director signs it off after the first approval."
         : "The invoice is waiting for approval.",
       task: "approve the invoice",
       verb: "Approve invoice",
-      person: invoices.approver?.userId != null,
       waitingOnUserId: invoices.approver?.userId ?? null,
       who: invoices.approver?.name ?? INVOICE_APPROVERS,
     }));
