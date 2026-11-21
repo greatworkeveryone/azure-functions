@@ -6,7 +6,8 @@ const sql = readFileSync(join(__dirname, "../../../migrations/199_approval_and_c
 
 describe("migration 199", () => {
   it("seeds every approval policy, each inactive, so nothing fires on deploy", () => {
-    for (const key of Object.values(APPROVAL_POLICIES)) {
+    // contractor.contact_changed is a security notice seeded active by migration 198, not here.
+    for (const key of Object.values(APPROVAL_POLICIES).filter((k) => k !== APPROVAL_POLICIES.contractorContact)) {
       expect(sql).toContain(`(N'${key}'`);
       // the row's last value is Active
       const block = sql.slice(sql.indexOf(`(N'${key}'`));

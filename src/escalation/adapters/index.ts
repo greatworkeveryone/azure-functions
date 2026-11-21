@@ -6,6 +6,7 @@
 import { absenceCoverAdapter } from "./absenceCover";
 import { approvalAttributionAdapter } from "./approvalAttribution";
 import { broadcastAdapter } from "./broadcast";
+import { contractorContactAdapter } from "./contractorContact";
 import { defectsPeriodAdapter } from "./defectsPeriod";
 import { reviewNoticeAdapter } from "./reviewNotice";
 import { jobAdapter } from "./job";
@@ -22,6 +23,7 @@ import { tenancyAdapter } from "./tenancy";
 registerAdapter(absenceCoverAdapter);
 registerAdapter(approvalAttributionAdapter);
 registerAdapter(broadcastAdapter);
+registerAdapter(contractorContactAdapter);
 registerAdapter(defectsPeriodAdapter);
 registerAdapter(jobAdapter);
 registerAdapter(leaseEventAdapter);
