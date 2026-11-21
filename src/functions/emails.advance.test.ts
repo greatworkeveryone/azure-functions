@@ -51,6 +51,8 @@ const ROUTES: { match: RegExp; rows: Record<string, unknown>[] }[] = [
     match: /SELECT EmailID, (MatchedJobID, ReceivedAt, AIClassification, )?FromAddress/,
     rows: [{ AIClassification: "quote", EmailID: 42, FromAddress: "acme@acme.example", MatchedJobID: 9, ReceivedAt: new Date("2026-10-10T00:00:00Z"), SenderAuthenticated: true, Source: "graph" }],
   },
+  { match: /SELECT EmailAddress FROM dbo\.Contractors/, rows: [{ EmailAddress: "acme@acme.example" }] },
+  { match: /SELECT ContractorName FROM dbo\.Contractors/, rows: [{ ContractorName: "Acme" }] },
   { match: /INSERT INTO Quotes/, rows: [{ QuoteID: 7 }] },
   { match: /INSERT INTO JobInvoices/, rows: [{ JobInvoiceID: 5 }] },
 ];
@@ -70,7 +72,7 @@ beforeEach(() => {
 
 describe("promoting an emailed quote", () => {
   it("writes the quote_added event and advances the job with QUOTE_RECEIVED before the transaction commits", async () => {
-    const res = await promoteEmailToQuote(makeRequest({ Amount: 500, ContractorName: "Acme", EmailID: 42, JobID: 9 }), ctx);
+    const res = await promoteEmailToQuote(makeRequest({ Amount: 500, ContractorID: 3, ContractorName: "Acme", EmailID: 42, JobID: 9 }), ctx);
 
     expect(res.status).toBe(200);
     const event = sqlCalls().find((c: { sql: string }) => /INSERT INTO JobEvents/.test(c.sql) && /'quote_added'/.test(c.sql));
@@ -90,7 +92,7 @@ describe("promoting an emailed quote", () => {
 
 describe("promoting an emailed invoice", () => {
   it("writes the invoice_added event and advances the job with WORK_COMPLETED before the transaction commits", async () => {
-    const res = await promoteEmailToInvoice(makeRequest({ Amount: 500, ContractorName: "Acme", EmailID: 42, JobID: 9 }), ctx);
+    const res = await promoteEmailToInvoice(makeRequest({ Amount: 500, ContractorID: 3, ContractorName: "Acme", EmailID: 42, JobID: 9 }), ctx);
 
     expect(res.status).toBe(200);
     const event = sqlCalls().find((c: { sql: string }) => /INSERT INTO JobEvents/.test(c.sql) && /'invoice_added'/.test(c.sql));

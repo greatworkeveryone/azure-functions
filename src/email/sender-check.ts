@@ -1,14 +1,16 @@
 // SECS-02: can a promoted email's sender be taken as the contractor it names?
 // From is spoofable, so an email counts as verified only when its sender was
 // authenticated at intake (SenderAuthenticated, src/email/sender-auth.ts) AND,
-// where the contractor has an address on record, the From address is that one.
-// Anything else needs the person promoting to say they checked another way.
+// the contractor has an address on record AND the From address is that one.
+// With no address on record there is nothing to compare, so that is not
+// verified either (REV-05). Anything else needs the person promoting to say
+// they checked another way.
 // Pure except contractorAddressOf.
 import type { Connection } from "tedious";
 import { TYPES } from "tedious";
 import { executeQuery } from "../db";
 
-export type SenderCheck = "verified" | "unverified" | "mismatch";
+export type SenderCheck = "verified" | "unverified" | "mismatch" | "no_address";
 
 export interface SenderAssessment {
   check: SenderCheck;
@@ -32,7 +34,8 @@ export function assessSender(email: EmailSenderRow, contractorAddress: string | 
   const authenticated = email.SenderAuthenticated === true || email.SenderAuthenticated === 1;
   if (email.Source !== "graph" || !authenticated) return { check: "unverified", senderAddress };
   const onRecord = normalise(contractorAddress);
-  if (onRecord !== "" && onRecord !== from) return { check: "mismatch", senderAddress };
+  if (onRecord === "") return { check: "no_address", senderAddress };
+  if (onRecord !== from) return { check: "mismatch", senderAddress };
   return { check: "verified", senderAddress };
 }
 
@@ -53,7 +56,9 @@ export function senderRefusalBody(assessment: SenderAssessment) {
     error:
       assessment.check === "mismatch"
         ? `This message came from ${who}, which is not the contractor's address on record. Confirm that you have checked it another way.`
-        : `This message could not be verified as coming from ${who}. Confirm that you have checked it another way.`,
+        : assessment.check === "no_address"
+          ? `There is no address on record to check ${who} against. Confirm that you have checked it another way.`
+          : `This message could not be verified as coming from ${who}. Confirm that you have checked it another way.`,
     senderAddress: assessment.senderAddress,
     senderCheck: assessment.check,
   };
