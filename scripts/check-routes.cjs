@@ -28,6 +28,7 @@ const PUBLIC_ROUTES = {
   graphNotification: "Microsoft Graph webhook; callers must present the shared clientState secret (timing-safe compare)",
   health: "shallow probe returns {ok:true}; ?deep=true requires the admin role inside the handler",
   myobAuthCallback: "OAuth redirect driven by MYOB; the signed state parameter (10 min TTL) is verified before anything is stored",
+  version: "returns only the build SHA, build time and environment name, for the deploy smoke test and the staging notice",
   registerSelf: "verified Entra token (signature checked) and rate limited; links or creates only the caller's own AppUsers row, which is how a user obtains a role at all",
 };
 

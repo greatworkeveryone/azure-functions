@@ -21,10 +21,12 @@ jest.mock("../db", () => ({
   executeQuery: jest.fn(),
   rollbackTransaction: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock("../escalation/approvals/raise", () => ({ concludeApproval: jest.fn(), raiseApproval: jest.fn().mockResolvedValue(null) }));
 jest.mock("../ledger", () => ({ record: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../ledger/actor", () => ({ resolveLedgerActor: jest.fn(async () => ({ name: "Verified manager", oid: "manager-oid" })) }));
 jest.mock("../mybuildings-client", () => ({ createOrUpdateContractors: jest.fn(), fetchContractorById: jest.fn() }));
 
+const raiseNotice = (jest.requireMock("../escalation/approvals/raise") as { raiseApproval: jest.Mock }).raiseApproval;
 const query = jest.mocked(executeQuery);
 const push = jest.mocked(createOrUpdateContractors);
 const fetchOne = jest.mocked(fetchContractorById);
@@ -104,4 +106,14 @@ it("an email change starts the hold on purchase orders to that contractor, and i
 it("a change that leaves the email and ABN alone does not start it", async () => {
   await updateContractorDetails(request({ EmailAddress: "old@arjays.test" }), context);
   expect(updates()[0]?.[1] as string).not.toMatch(/ContactChangedAt/);
+});
+
+it("tells accounts managers when the email changes, after the commit, and not when only the phone changes (SECA-04)", async () => {
+  expect((await updateContractorDetails(request(), context)).status).toBe(200);
+  expect(raiseNotice).toHaveBeenCalledTimes(1);
+  expect(raiseNotice).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ policyKey: "contractor.contact_changed", subjectId: "7", subjectType: "contractor" }));
+  expect(jest.mocked(commitTransaction).mock.invocationCallOrder[0]).toBeLessThan(raiseNotice.mock.invocationCallOrder[0]);
+  raiseNotice.mockClear();
+  expect((await updateContractorDetails(request({ EmailAddress: ROW.EmailAddress, PhoneNumber: "0889 111 111" }), context)).status).toBe(200);
+  expect(raiseNotice).not.toHaveBeenCalled();
 });

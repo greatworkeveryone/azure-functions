@@ -309,6 +309,9 @@
   "manageEmailIdentities": [
     "admin"
   ],
+  "manageEscalationPolicies": [
+    "admin"
+  ],
   "manageFeatureFlags": [
     "admin"
   ],

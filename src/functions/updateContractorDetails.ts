@@ -20,6 +20,8 @@ import { isStaging } from "../config/stagingGuard";
 import { MANAGE_SERVICE_SCHEDULES_ROLES } from "../facilitiesRoles";
 import { authorizeWrite, badRequest, conflict, inTransaction, notFound, readJsonBody, txFail, txOk } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery, type SqlParam } from "../db";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { raiseApproval } from "../escalation/approvals/raise";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 import { createOrUpdateContractors, fetchContractorById, type MyContractor } from "../mybuildings-client";
@@ -87,12 +89,14 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
     if (!actor) return { jsonBody: { error: "Unauthorised" }, status: 401 };
     const idParam: SqlParam = { name: "Id", type: TYPES.Int, value: input.contractorId };
 
+    let contactChangedForNotice = false;
     const result = await inTransaction(conn, async () => {
       const before = (await executeQuery(conn, SELECT_ROW, [idParam]))[0] as (ContractorDetails & { Version: string }) | undefined;
       if (!before) return txFail(notFound("That contractor isn't in Floorplan"));
       if (before.Version !== input.version) return txFail(conflict("Someone else changed this contractor. Reload to see their version."));
 
       const contactChanged = contactDetailsChanged(before, input.details);
+      contactChangedForNotice = contactChanged;
       const params: SqlParam[] = [idParam, ...CONTRACTOR_DETAIL_FIELDS.map((field) => ({ name: field, type: TYPES.NVarChar, value: input.details[field] }))];
       const HOLD_COLUMNS = contactChanged
         ? ", ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=@ChangedByOid, ContactConfirmedAt=NULL, ContactConfirmedBy=NULL"
@@ -131,6 +135,19 @@ export async function updateContractorDetails(request: HttpRequest, context: Inv
       return txOk({ version: after.Version });
     });
     if (!result.ok) return result.response;
+    // SECA-04: accounts managers are told that a contractor's email or ABN changed, and a second person has to
+    // confirm it. After the commit, never throws: a notice that cannot be written never undoes the change.
+    if (contactChangedForNotice) {
+      await raiseApproval(conn, {
+        actor,
+        excludeUserIds: actor.kind === "user" && actor.userId !== null ? [actor.userId] : [],
+        headline: "Contractor email or ABN changed: a second person has to confirm it",
+        log: (message) => context.warn(message),
+        policyKey: APPROVAL_POLICIES.contractorContact,
+        subjectId: String(input.contractorId),
+        subjectType: APPROVAL_SUBJECTS.contractor,
+      });
+    }
     return { jsonBody: { ...result.value, myBuildingsUpdated: pushEnabled() }, status: 200 };
   } catch (error) {
     context.error("updateContractorDetails failed:", (error as Error).message);

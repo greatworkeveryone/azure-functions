@@ -5,6 +5,7 @@
 
 export const APPROVAL_POLICIES = {
   broadcast: "comms.broadcast_approval",
+  contractorContact: "contractor.contact_changed",
   holdOverdue: "job.hold_overdue",
   approvalWaiting: "job.approval_waiting",
   leave: "leave.decision",
@@ -17,6 +18,7 @@ export type ApprovalPolicyKey = (typeof APPROVAL_POLICIES)[keyof typeof APPROVAL
 
 export const APPROVAL_SUBJECTS = {
   broadcast: "correspondence",
+  contractor: "contractor",
   leave: "leave_request",
   procedure: "procedure",
 } as const;
@@ -24,6 +26,7 @@ export const APPROVAL_SUBJECTS = {
 /** Policies whose escalation ends only with the subject's own decision, so nobody withdraws it by hand. */
 export const DECISION_ONLY_POLICIES: ReadonlySet<string> = new Set([
   APPROVAL_POLICIES.broadcast,
+  APPROVAL_POLICIES.contractorContact,
   APPROVAL_POLICIES.leave,
   APPROVAL_POLICIES.optionApproval,
   APPROVAL_POLICIES.procedure,

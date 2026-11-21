@@ -8,6 +8,8 @@ import { ACTION_ROLES } from "../action-roles";
 import { AppRole, rolesForRequest } from "../auth";
 import { authorizeWrite, badRequest, conflict, inTransaction, notFound, readJsonBody, txFail, txOk } from "../assetRegisterSupport";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval } from "../escalation/approvals/raise";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
 
@@ -58,7 +60,17 @@ export async function confirmContractorContact(request: HttpRequest, context: In
       });
       return txOk({ confirmed: true });
     });
-    return result.ok ? { jsonBody: result.value, status: 200 } : result.response;
+    if (!result.ok) return result.response;
+    await concludeApproval(conn, {
+      actor,
+      code: "confirmed",
+      log: (message) => context.warn(message),
+      note: "A second person confirmed the change",
+      policyKeys: [APPROVAL_POLICIES.contractorContact],
+      subjectId: String(contractorId),
+      subjectType: APPROVAL_SUBJECTS.contractor,
+    });
+    return { jsonBody: result.value, status: 200 };
   } catch (error) {
     context.error("confirmContractorContact failed:", (error as Error).message);
     return { jsonBody: { error: "The confirmation couldn't be saved. Try again." }, status: 500 };
