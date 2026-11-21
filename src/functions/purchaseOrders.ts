@@ -972,7 +972,7 @@ async function sendPurchaseOrder(
               po.EmailSubject, po.EmailBody,
               po.JobID, po.ContractorID, po.ContractorName,
               po.EstimatedCost, po.CostNotToExceed, po.SentAt, po.SendAttemptedAt,
-              c.ContactChangedAt, c.ContactChangedBy, c.ContactConfirmedAt,
+              c.ContactChangedAt, c.ContactChangedBy, c.ContactChangedByOid, c.ContactConfirmedAt,
               CAST(CASE WHEN po.IsTest = 1 OR j.IsTest = 1 THEN 1 ELSE 0 END AS BIT) AS IsTest
          FROM PurchaseOrders po
          LEFT JOIN Contractors c ON c.ContractorID = po.ContractorID
@@ -1004,6 +1004,19 @@ async function sendPurchaseOrder(
       confirmedAt: (contractorRows[0].ContactConfirmedAt as Date | null | undefined) ?? null,
     };
     const contactHeld = contactChangeHolds(contact);
+    // REV-07: the person who changed the address cannot tick that they checked it.
+    const changedByOid = (contractorRows[0].ContactChangedByOid as string | null | undefined) ?? null;
+    if (contactHeld && body?.ContactChangeChecked === true && changedByOid !== null && changedByOid === identity.oid) {
+      const message = "You changed this address, so someone else has to check it. Ask an accounts manager, the CFO or a director to confirm it before sending.";
+      await recordRefusal(
+        connection,
+        actor,
+        { id: PurchaseOrderID, type: "purchase_order" },
+        { attempted: "po.send", code: "contact_check_by_editor", message },
+        contractorRows[0].JobID as number,
+      );
+      return { status: 409, jsonBody: { code: "contact_check_by_editor", error: message } };
+    }
     if (contactHeld && body?.ContactChangeChecked !== true) {
       const message = `${contactChangeSentence(contact)}. Check the address with the contractor, or ask an accounts manager, the CFO or a director to confirm it, before sending.`;
       await recordRefusal(

@@ -34,3 +34,15 @@ export function contactChangeSentence(facts: Pick<ContactChangeFacts, "changedAt
   const date = when ? `${when.getUTCDate()}/${when.getUTCMonth() + 1}/${when.getUTCFullYear()}` : "an unknown date";
   return `Email changed on ${date}${facts.changedBy ? ` by ${facts.changedBy}` : ""}`;
 }
+
+/** The columns whose change redirects money: the email address and the ABN. Compared trimmed and case-folded. */
+export function contactDetailsChanged(
+  before: { ABN?: string | null; EmailAddress?: string | null },
+  after: { ABN?: string | null; EmailAddress?: string | null },
+): boolean {
+  const norm = (value: string | null | undefined) => (value ?? "").trim().toLowerCase();
+  return norm(before.EmailAddress) !== norm(after.EmailAddress) || norm(before.ABN) !== norm(after.ABN);
+}
+
+/** Who a hold started by the myBuildings sync is attributed to: nobody in Floorplan, so nobody can tick past it as the editor. */
+export const SYNC_CHANGED_BY = "myBuildings sync";

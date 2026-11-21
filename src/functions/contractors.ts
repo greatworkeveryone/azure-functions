@@ -5,6 +5,7 @@ import { fetchAllContractors, createOrUpdateContractors, MyContractor } from "..
 import { AppRole, extractToken, requireRole, unauthorizedResponse, errorResponse } from "../auth";
 import { record } from "../ledger";
 import { resolveLedgerActor } from "../ledger/actor";
+import { contactDetailsChanged, SYNC_CHANGED_BY } from "../contractorContactHold";
 
 interface UpdateContractorsBody {
   Contractors?: unknown;
@@ -85,13 +86,19 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
 
     for (const c of contractors) {
       const existing = await executeQuery(connection,
-        "SELECT Id FROM Contractors WHERE ContractorID = @ContractorID",
+        "SELECT Id, EmailAddress, ABN FROM Contractors WHERE ContractorID = @ContractorID",
         [{ name: "ContractorID", type: TYPES.Int, value: c.ContractorID }]
       );
 
       const p = contractorToParams(c);
 
       if (existing.length > 0) {
+        // SECA-04 / REV-07: a changed email or ABN arriving from myBuildings starts the same hold an edit here
+        // does. Nobody in Floorplan made the change, so nobody can tick past it as its editor.
+        const holds = contactDetailsChanged(
+          { ABN: existing[0].ABN as string | null, EmailAddress: existing[0].EmailAddress as string | null },
+          { ABN: c.ABN ?? null, EmailAddress: c.EmailAddress ?? null },
+        );
         await executeQuery(connection,
           `UPDATE Contractors SET
            ThirdPartySystem_ContractorID=@ThirdPartyContractorID,
@@ -100,8 +107,13 @@ async function syncContractors(request: HttpRequest, context: InvocationContext)
            Suspended=@Suspended, EmailAddress=@EmailAddress,
            PhoneNumber=@PhoneNumber, MobileNumber=@MobileNumber,
            ContactFirstName=@ContactFirstName, ContactLastName=@ContactLastName,
-           LastSyncedAt=GETUTCDATE(), UpdatedAt=GETUTCDATE()
-           WHERE ContractorID=@ContractorID`, p);
+           LastSyncedAt=GETUTCDATE(), UpdatedAt=GETUTCDATE()${
+             holds
+               ? `, ContactChangedAt=SYSUTCDATETIME(), ContactChangedBy=@ChangedBy, ContactChangedByOid=NULL,
+           ContactConfirmedAt=NULL, ContactConfirmedBy=NULL`
+               : ""
+           }
+           WHERE ContractorID=@ContractorID`, holds ? [...p, { name: "ChangedBy", type: TYPES.NVarChar, value: SYNC_CHANGED_BY }] : p);
         updated++;
       } else {
         await executeQuery(connection,

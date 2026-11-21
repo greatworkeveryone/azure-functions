@@ -1739,6 +1739,21 @@ describe("SECA-04: a contractor's changed email holds the send until the sender 
     expect(ledgerInserts(db.executeQuery).find((r) => r.action === "po.send")?.after).toMatchObject({ contactChangeChecked: true });
   });
 
+  it("does not let the person who changed the address tick that they checked it (REV-07)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedByOid: "fred-oid" }), JOB, stored]);
+    const res = await send({ ContactChangeChecked: true });
+    expect(res).toMatchObject({ jsonBody: { code: "contact_check_by_editor" }, status: 409 });
+    expect(graph.graphSendMail).not.toHaveBeenCalled();
+    expect(ledgerInserts(db.executeQuery)).toEqual([expect.objectContaining({ action: "denied", ruleApplied: "contact_check_by_editor" })]);
+  });
+
+  it("lets someone else tick it, and a change made by the myBuildings sync (nobody's oid) can be ticked by anyone (REV-07)", async () => {
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedByOid: "sam-oid" }), JOB, stored]);
+    expect((await send({ ContactChangeChecked: true })).status).toBe(200);
+    mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactChangedBy: "myBuildings sync", ContactChangedByOid: null }), JOB, stored]);
+    expect((await send({ ContactChangeChecked: true })).status).toBe(200);
+  });
+
   it("needs no tick once a second person has confirmed, or when nothing changed", async () => {
     mockSql([APP_USER, JOB_BUILDING, sendRow({ ContactConfirmedAt: new Date() }), JOB, stored]);
     expect((await send()).status).toBe(200);
