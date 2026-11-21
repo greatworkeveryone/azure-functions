@@ -36,6 +36,7 @@ jest.mock("../auth", () => {
 });
 jest.mock("../contractor-acronym-db", () => ({ INTERNAL_ACRONYM: "INT", ensureContractorAcronym: jest.fn().mockResolvedValue("ACM") }));
 jest.mock("../po-reference-db", () => ({ resolvePoNumber: jest.fn().mockResolvedValue({ chargeCode: "e", poNumber: "66Se261013" }) }));
+jest.mock("../approval-limits-db", () => ({ getCachedApprovalLimits: jest.fn() }));
 jest.mock("../jobStatusHelpers", () => ({ advanceJobStatus: jest.fn().mockResolvedValue({ advanced: true }) }));
 jest.mock("../graph", () => ({ graphSendMail: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../blob-storage", () => ({
@@ -58,6 +59,7 @@ const db = require("../db") as {
 };
 const graph = require("../graph") as { graphSendMail: jest.Mock };
 const statusHelpers = require("../jobStatusHelpers") as { advanceJobStatus: jest.Mock };
+const limitsDb = require("../approval-limits-db") as { getCachedApprovalLimits: jest.Mock };
 const { _resetRateLimitForTests } = require("../rateLimit") as { _resetRateLimitForTests: () => void };
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{ jsonBody?: unknown; status?: number }>;
@@ -116,6 +118,12 @@ beforeEach(() => {
   db.commitTransaction.mockResolvedValue(undefined);
   db.rollbackTransaction.mockResolvedValue(undefined);
   db.createRequestConnection.mockResolvedValue({ id: "connection" });
+  // Real limit rows, not none: with none every non-director is "not eligible", which hid REV-03.
+  limitsDb.getCachedApprovalLimits.mockResolvedValue([
+    { MaxApprovalAmount: 5000, RoleName: "facilities_manager" },
+    { MaxApprovalAmount: 20000, RoleName: "accounts_manager" },
+    { MaxApprovalAmount: null, RoleName: "director" },
+  ]);
 });
 
 afterEach(() => jest.restoreAllMocks());
@@ -140,6 +148,27 @@ describe("upsertPurchaseOrder: creating", () => {
     mockSql([APP_USER, JOB_BUILDING, job({ HasApprovedQuote: 0, IsContract: true, Status: "Work" }), CREATED, STORED]);
     expect((await create({ EstimatedCost: 800 })).status).toBe(200);
     expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
+  });
+
+  describe("on a contract job the spending check applies to everyone who raises one, drafts included (REV-03)", () => {
+    const contractJob = () => job({ HasApprovedQuote: 0, IsContract: true, Status: "Work" });
+    it("refuses plain accounts, who hold no spending authority, even for a draft", async () => {
+      auth.rolesForRequest.mockResolvedValue(["accounts"]);
+      mockSql([APP_USER, JOB_BUILDING, contractJob(), CREATED, STORED]);
+      expect(await create({ EstimatedCost: 250000 })).toMatchObject({ status: 403 });
+      expect(wrote(/INSERT INTO PurchaseOrders/)).toBe(false);
+      expect(await create({ EstimatedCost: 100 })).toMatchObject({ jsonBody: { code: "po_not_authorised" }, status: 403 });
+    });
+    it("refuses a manager over their own limit and lets one within it raise a draft", async () => {
+      mockSql([APP_USER, JOB_BUILDING, contractJob(), CREATED, STORED]);
+      expect(await create({ EstimatedCost: 6000 })).toMatchObject({ jsonBody: { code: "po_over_authority" }, status: 403 });
+      expect((await create({ EstimatedCost: 4000 })).status).toBe(200);
+    });
+    it("still lets plain accounts draft on a quote job: the quote's approval carried the limit", async () => {
+      auth.rolesForRequest.mockResolvedValue(["accounts"]);
+      mockSql([APP_USER, JOB_BUILDING, job(), CREATED, STORED]);
+      expect((await create({ EstimatedCost: 4000 })).status).toBe(200);
+    });
   });
 
   it("refuses a PO with no cost, or a cost of $0 or less", async () => {
@@ -243,6 +272,48 @@ describe("markPurchaseOrderMyobCreated (decision 4)", () => {
     mockSql([APP_USER, JOB_BUILDING, po(), STORED]);
     expect((await call("markPurchaseOrderMyobCreated", { id: 99, jobId: 9 })).status).toBe(200);
   });
+  describe("on a contract job marking it in MYOB is the commitment, so it runs the spend check (REV-03)", () => {
+    const contractJob = () => job({ HasApprovedQuote: 0, IsContract: true, Status: "Work" });
+    const mark = () => call("markPurchaseOrderMyobCreated", { id: 99, jobId: 9 });
+    const tenThousand = () => po({ CostNotToExceed: 10000, EstimatedCost: 10000 });
+
+    it("refuses a facilities manager with a $5,000 limit on a $10,000 purchase order, ledgered, and writes no marker", async () => {
+      mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, contractJob(), tenThousand(), STORED]);
+      expect(await mark()).toMatchObject({ jsonBody: { code: "po_over_authority" }, status: 403 });
+      expect(wrote(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/)).toBe(false);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ action: "denied", before: expect.objectContaining({ attempted: "po.myob_created" }), ruleApplied: "po_over_authority" }),
+      ]);
+    });
+    it("lets a director mark it", async () => {
+      auth.rolesForRequest.mockResolvedValue(["director"]);
+      mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, contractJob(), tenThousand(), STORED]);
+      expect((await mark()).status).toBe(200);
+      expect(wrote(/SET MyobCreatedAt = SYSUTCDATETIME\(\)/)).toBe(true);
+    });
+    it("does not re-check a quote job: the quote's approval carried the limit", async () => {
+      mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, job(), tenThousand(), STORED]);
+      expect((await mark()).status).toBe(200);
+    });
+  });
+
+  describe("completing a purchase order nobody checked is allowed, and flagged (REV-03)", () => {
+    const complete = () => call("markPurchaseOrderComplete", { id: 99, jobId: 9 });
+    const contractJob = () => job({ HasApprovedQuote: 0, IsContract: true, Status: "Work" });
+    it("records spendUnchecked when the completer could not have raised it", async () => {
+      mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, contractJob(), po({ CostNotToExceed: 10000, EstimatedCost: 10000 }), PO_SCOPE, STORED]);
+      expect((await complete()).status).toBe(200);
+      expect(ledgerInserts(db.executeQuery)).toEqual([
+        expect.objectContaining({ action: "po.complete", after: expect.objectContaining({ spendUnchecked: true }) }),
+      ]);
+    });
+    it("says nothing when it is within the completer's limit", async () => {
+      mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, contractJob(), po({ CostNotToExceed: 3000, EstimatedCost: 3000 }), PO_SCOPE, STORED]);
+      expect((await complete()).status).toBe(200);
+      expect(ledgerInserts(db.executeQuery)[0]).toEqual(expect.objectContaining({ action: "po.complete", after: expect.not.objectContaining({ spendUnchecked: true }) }));
+    });
+  });
+
   it("refuses admin un-marking a real record too, ledgered", async () => {
     auth.rolesForRequest.mockResolvedValue(["admin"]);
     mockSql([APP_USER, JOB_BUILDING, NO_TEST_FLAG, po({ MyobCreatedAt: new Date(), MyobCreatedBy: "Abby" }), PO_SCOPE]);

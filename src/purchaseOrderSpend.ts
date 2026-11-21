@@ -11,8 +11,10 @@
 //    whose limit covers the total has to raise or send it.
 //  - Admin counts for nothing on a real record (decision 4), on either kind.
 //
-// A plain accounts clerk holds no spending authority: they may draft a purchase
-// order (nothing leaves the building), but the person who sends it is checked.
+// A plain accounts clerk holds no spending authority. On a quote job they may
+// draft a purchase order (the quote's approval carried the limit); on a
+// contract job the check applies to whoever raises it, drafts included, and
+// again when the purchase order is marked as recorded in MYOB (REV-03).
 
 import { approvalOutcome } from "./approvalOutcome";
 import type { AuthorityFacts, Identity } from "./approvalAuthority";
@@ -77,9 +79,9 @@ export function purchaseOrderSpendRefusal(input: PoSpendInput, facts: AuthorityF
   if (outcome.kind === "approved") return null;
   if (outcome.kind === "refused") {
     if (outcome.reason === "admin_test_records_only") return { ...refusal("po_admin_test_only", outcome.message), status: 403 };
-    // Not eligible to spend: may draft, may not send. On a quote job the quote's approval carried the limit.
-    const drafting = input.stage === "create";
-    return drafting || quote ? null : { ...refusal("po_not_authorised", outcome.message), status: 403 };
+    // Not eligible to spend. On a quote job the quote's approval carried the limit, so the creator may draft.
+    // With no quote (a contract job) nothing else bounded the amount, so a draft is a commitment too (REV-03).
+    return quote ? null : { ...refusal("po_not_authorised", outcome.message), status: 403 };
   }
   // A director is the authority above every threshold: raising it is their own decision.
   if (quote || (outcome.kind === "awaiting_director" && (input.actor.roles ?? []).some((role) => role.trim().toLowerCase() === "director"))) return null;

@@ -124,8 +124,15 @@ const APP_USER: Route = { match: /FROM dbo\.AppUsers WHERE EntraOid/, rows: [{ U
 const JOB_BUILDING: Route = { match: /SELECT BuildingID FROM Jobs WHERE JobID/, rows: [{ BuildingID: 5 }] };
 const LEDGER_FAILS: Route = { match: /INSERT INTO dbo\.DecisionLedger/, reject: new Error("ledger unavailable") };
 
-// No approval-limit rows unless a test sets them: the spend rule (SECA-03) reads them on create and send.
-beforeEach(() => limitsDb.getCachedApprovalLimits.mockResolvedValue([]));
+// Real approval-limit rows by default (REV-03): with none, every non-director is "not eligible to spend",
+// which hid how the spend rule treats a person who has a limit.
+beforeEach(() =>
+  limitsDb.getCachedApprovalLimits.mockResolvedValue([
+    { MaxApprovalAmount: 20000, RoleName: "facilities_manager" },
+    { MaxApprovalAmount: 20000, RoleName: "accounts_manager" },
+    { MaxApprovalAmount: 50000, RoleName: "cfo" },
+    { MaxApprovalAmount: null, RoleName: "director" },
+  ]));
 
 // Every money row any test here writes has the shape trend reports read (see the fixture).
 afterEach(() => moneyShape.check(ledgerInserts(db.executeQuery)));
