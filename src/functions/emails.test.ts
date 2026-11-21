@@ -113,7 +113,7 @@ beforeEach(() => {
 
 describe("promoteEmailToJobUpdate", () => {
   const emailRow = (status = "new", matchedJobId: number | null = null): SqlRoute => [
-    /SELECT Status, MatchedJobID, FromAddress/,
+    /SELECT Status, MatchedJobID FROM Emails/,
     [{ FromAddress: "sam@arjays.test", MatchedJobID: matchedJobId, SenderAuthenticated: true, Source: "graph", Status: status }],
   ];
   const unverifiedEmail: SqlRoute = [/SELECT Status, MatchedJobID/, [{ FromAddress: "x@elsewhere.test", MatchedJobID: null, SenderAuthenticated: false, Source: "graph", Status: "new" }]];
@@ -151,80 +151,29 @@ describe("promoteEmailToJobUpdate", () => {
     expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
   });
 
-  it("fires WORK_COMPLETED through advanceJobStatus when MarkWorkCompleted is true from Work", async () => {
-    routeSql([emailExists, jobIn("Work"), insertedEvent, flipOk]);
-    statusHelpers.advanceJobStatus.mockResolvedValue({
-      advanced: true,
-      from: { awaitingRole: "facilities", status: "Work" },
-      to: { awaitingRole: "accounts", status: "Awaiting Approval" },
-    });
-
-    const res = await promoteEmailToJobUpdate(
-      makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done" }),
-      ctx,
-    );
-
-    expect(res.status).toBe(200);
-    expect(res.jsonBody).toEqual({ eventId: 501, jobId: 7, newStatus: "Awaiting Approval" });
-    expect(statusHelpers.advanceJobStatus).toHaveBeenCalledWith({}, 7, "WORK_COMPLETED", { actor: "Ops User" });
-    expect(db.commitTransaction).toHaveBeenCalledTimes(1);
+  it("never changes a job's status or stamps a service run, whatever the email says or who sent it (REV-01)", async () => {
+    for (const email of [emailExists, unverifiedEmail]) {
+      db.executeQuery.mockReset();
+      db.beginTransaction.mockClear();
+      statusHelpers.advanceJobStatus.mockClear();
+      routeSql([email, jobIn("Work"), insertedEvent, flipOk]);
+      const res = await promoteEmailToJobUpdate(makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done" }), ctx);
+      expect(res.status).toBe(422);
+      expect((res.jsonBody as { code: string; error: string }).code).toBe("work_not_complete");
+      expect((res.jsonBody as { error: string }).error).toMatch(/purchase order/);
+      expect(db.beginTransaction).not.toHaveBeenCalled();
+      expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
+      expect(sqlCalls().some((c) => /INSERT|UPDATE/i.test(c.sql))).toBe(false);
+    }
   });
 
-  it("will not mark work completed from an unverified email on one click, and writes nothing (SECS-01)", async () => {
-    routeSql([unverifiedEmail, jobIn("Work"), insertedEvent, flipOk]);
-    const res = await promoteEmailToJobUpdate(makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done" }), ctx);
-    expect(res.status).toBe(422);
-    expect((res.jsonBody as { code: string }).code).toBe("sender_unverified");
-    expect(db.beginTransaction).not.toHaveBeenCalled();
-    expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
-  });
-
-  it("completes it once the person confirms, and the note says who confirmed (SECS-01)", async () => {
-    routeSql([unverifiedEmail, jobIn("Work"), insertedEvent, flipOk]);
-    statusHelpers.advanceJobStatus.mockResolvedValue({ advanced: true, from: { awaitingRole: "facilities", status: "Work" }, to: { awaitingRole: "accounts", status: "Awaiting Approval" } });
-    const res = await promoteEmailToJobUpdate(makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done", confirmUnverifiedSender: true }), ctx);
-    expect(res.status).toBe(200);
-    const insert = sqlCalls().find((c) => /INSERT INTO JobEvents/.test(c.sql));
-    expect(JSON.stringify(insert)).toMatch(/Sender not verified: Ops User confirmed/);
-  });
-
-  it("a plain note from an unverified email moves nothing, so it needs no confirmation", async () => {
+  it("still files a plain note, touching only the job's clock and no status", async () => {
     routeSql([unverifiedEmail, jobIn("Work"), insertedEvent, flipOk]);
     const res = await promoteEmailToJobUpdate(makeRequest({ EmailID: 42, JobID: 7, Text: "FYI" }), ctx);
     expect(res.status).toBe(200);
-  });
-
-  it("returns 422 and writes nothing when MarkWorkCompleted is illegal from the job's state", async () => {
-    routeSql([emailExists, jobIn("New"), insertedEvent]);
-
-    const res = await promoteEmailToJobUpdate(
-      makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done" }),
-      ctx,
-    );
-
-    expect(res.status).toBe(422);
-    expect((res.jsonBody as { error: string }).error).toMatch(/Cannot mark work completed/);
-    expect(db.beginTransaction).not.toHaveBeenCalled();
-    expect(sqlCalls().some((c) => /INSERT|UPDATE/i.test(c.sql))).toBe(false);
+    expect(res.jsonBody).toMatchObject({ newStatus: null });
     expect(statusHelpers.advanceJobStatus).not.toHaveBeenCalled();
-  });
-
-  it("rolls back with 409 when the status write loses a race", async () => {
-    routeSql([emailExists, jobIn("Work"), insertedEvent, flipOk]);
-    statusHelpers.advanceJobStatus.mockResolvedValue({
-      advanced: false,
-      from: { awaitingRole: "facilities", status: "Work" },
-      to: null,
-    });
-
-    const res = await promoteEmailToJobUpdate(
-      makeRequest({ EmailID: 42, JobID: 7, MarkWorkCompleted: true, Text: "All done" }),
-      ctx,
-    );
-
-    expect(res.status).toBe(409);
-    expect(db.rollbackTransaction).toHaveBeenCalledTimes(1);
-    expect(db.commitTransaction).not.toHaveBeenCalled();
+    expect(sqlCalls().some((c) => /SET Status/i.test(c.sql) && /Jobs/.test(c.sql))).toBe(false);
   });
 
   it("returns 400 when Text is empty", async () => {

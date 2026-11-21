@@ -944,19 +944,21 @@ function alreadyHandledResponse(status: string | null): HttpResponseInit | null 
 }
 
 // ── POST /api/promoteEmailToJobUpdate ───────────────────────────────────────
-// Body: { EmailID: number, JobID: number, Text: string, MarkWorkCompleted?: boolean, confirmUnverifiedSender?: boolean }
+// Body: { EmailID: number, JobID: number, Text: string, MarkWorkCompleted refused with 422 }
 // Records a reply on an existing job as a timeline note (EventType
 // 'email_update', SourceEmailID set) and optionally fires WORK_COMPLETED:
 // pre-check nextState(current, WORK_COMPLETED) — null → 422, nothing
 // written — then advanceJobStatus; !advanced (the job moved underneath us)
 // → 409 and rollback. Note + status change + email flip are one transaction.
 
+export const WORK_COMPLETE_ELSEWHERE =
+  "A reply can't mark work complete. Mark it complete on the purchase order, or on a contract or internal job add the contractor's invoice. The note can still be filed.";
+
 interface PromoteEmailToJobUpdateBody {
   EmailID?: unknown;
   JobID?: unknown;
   MarkWorkCompleted?: unknown;
   Text?: unknown;
-  confirmUnverifiedSender?: unknown;
 }
 
 export async function promoteEmailToJobUpdate(
@@ -979,7 +981,7 @@ export async function promoteEmailToJobUpdate(
   }
 
   const body = ((await request.json().catch(() => null)) ?? {}) as PromoteEmailToJobUpdateBody;
-  const { EmailID, JobID, Text, MarkWorkCompleted, confirmUnverifiedSender } = body;
+  const { EmailID, JobID, Text, MarkWorkCompleted } = body;
   if (!isValidId(EmailID) || !isValidId(JobID)) {
     return { status: 400, jsonBody: { error: "EmailID and JobID (positive integers) are required" } };
   }
@@ -992,7 +994,11 @@ export async function promoteEmailToJobUpdate(
   if (MarkWorkCompleted !== undefined && typeof MarkWorkCompleted !== "boolean") {
     return { status: 400, jsonBody: { error: "MarkWorkCompleted must be a boolean when provided" } };
   }
-  const markCompleted = MarkWorkCompleted === true;
+  // REV-01: an email reply moves nothing. Work is marked complete on the purchase order, or by adding the
+  // invoice on a contract or internal job, where the work-complete rule and the sender checks run.
+  if (MarkWorkCompleted === true) {
+    return { status: 422, jsonBody: { code: "work_not_complete", error: WORK_COMPLETE_ELSEWHERE } };
+  }
 
   let connection: Connection | undefined;
   let inTransaction = false;
@@ -1001,42 +1007,19 @@ export async function promoteEmailToJobUpdate(
 
     const emailRows = await executeQuery(
       connection,
-      "SELECT Status, MatchedJobID, FromAddress, Source, SenderAuthenticated FROM Emails WHERE EmailID = @Id",
+      "SELECT Status, MatchedJobID FROM Emails WHERE EmailID = @Id",
       [{ name: "Id", type: TYPES.Int, value: EmailID }],
     );
     if (emailRows.length === 0) return { status: 404, jsonBody: { error: "Email not found" } };
     const handled = alreadyHandledResponse(emailRows[0].Status as string | null);
     if (handled) return handled;
     const priorJobId = emailRows[0].MatchedJobID as number | null;
-    // SECS-01: mail that cannot be tied to the sender it claims never moves a job on one click. A plain note
-    // moves nothing, so only "mark work completed" needs the promoter's say-so; who gave it is written on the note.
-    const sender = assessSender(emailRows[0], null);
-    const senderUnconfirmed = markCompleted && sender.check !== "verified";
-    if (senderUnconfirmed && confirmUnverifiedSender !== true) {
-      return { status: 422, jsonBody: senderRefusalBody(sender) };
-    }
-
     const jobRows = await executeQuery(
       connection,
       "SELECT Status, AwaitingRole FROM Jobs WHERE JobID = @JobID",
       [{ name: "JobID", type: TYPES.Int, value: JobID }],
     );
     if (jobRows.length === 0) return { status: 404, jsonBody: { error: "Job not found" } };
-
-    if (markCompleted) {
-      const current: JobState = {
-        status: jobRows[0].Status as JobStatus,
-        awaitingRole: (jobRows[0].AwaitingRole as AwaitingRole) ?? AwaitingRole.FACILITIES,
-      };
-      // Same machine advanceJobStatus consults — checked up front so an
-      // illegal transition writes nothing, not even the note.
-      if (nextState(current, JobEvent.WORK_COMPLETED) == null) {
-        return {
-          status: 422,
-          jsonBody: { error: `Cannot mark work completed from status "${current.status}"`, from: current.status },
-        };
-      }
-    }
 
     await beginTransaction(connection);
     inTransaction = true;
@@ -1049,34 +1032,19 @@ export async function promoteEmailToJobUpdate(
       [
         { name: "JobID", type: TYPES.Int, value: JobID },
         { name: "CreatedBy", type: TYPES.NVarChar, value: identity.name },
-        {
-          name: "Text",
-          type: TYPES.NVarChar,
-          value: senderUnconfirmed ? `${Text.trim()}\n\nSender not verified: ${identity.name} confirmed it had been checked another way.` : Text.trim(),
-        },
+        { name: "Text", type: TYPES.NVarChar, value: Text.trim() },
         { name: "EmailID", type: TYPES.Int, value: EmailID },
       ],
     );
     const eventId = inserted[0].JobEventID as number;
 
-    let newStatus: string | null = null;
-    if (markCompleted) {
-      const advanced = await advanceJobStatus(connection, JobID, JobEvent.WORK_COMPLETED, { actor: identity.name });
-      if (!advanced.advanced || !advanced.to) {
-        // The job moved between our check and the write — refuse rather than
-        // leave a note that claims completion.
-        await rollbackTransaction(connection);
-        inTransaction = false;
-        return { status: 409, jsonBody: { error: "Job status changed concurrently — reload and try again" } };
-      }
-      newStatus = advanced.to.status;
-    } else {
-      await executeQuery(
-        connection,
-        "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
-        [{ name: "JobID", type: TYPES.Int, value: JobID }],
-      );
-    }
+    // A reply never changes a job's status: this only files the note and touches the job's clock.
+    const newStatus: string | null = null;
+    await executeQuery(
+      connection,
+      "UPDATE Jobs SET LastModifiedDate = SYSUTCDATETIME() WHERE JobID = @JobID",
+      [{ name: "JobID", type: TYPES.Int, value: JobID }],
+    );
 
     // Conditional flip: a concurrent promote leaves 0 rows → rollback + 409.
     const flipped = await executeQuery(
