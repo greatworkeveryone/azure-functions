@@ -26,7 +26,7 @@ export const jobsSource: SourceAdapter<SqlRow[]> = {
     return withJobSteps(connection, await executeQuery(connection, SQL));
   },
   derive(rows, viewer) {
-    const stepViewer: StepViewer = { can: (capability) => holds(viewer, capability), name: viewer.name, oid: viewer.oid, userId: viewer.userId };
+    const stepViewer: StepViewer = { can: (capability) => holds(viewer, capability), name: viewer.name, oid: viewer.oid, roles: viewer.roles, userId: viewer.userId };
     const onFacilities = viewer.roles.some((role) => role === "facilities" || role === "facilities_manager");
     const onAccounts = viewer.roles.some((role) => role === "accounts" || role === "accounts_manager");
     const out = [];

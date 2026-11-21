@@ -91,6 +91,12 @@ export interface NextAction {
   /** The button label. */
   verb: string;
   waitingOnUserId: number | null;
+  /**
+   * The one role whose turn it is, when a step waits on a role rather than on whoever holds the capability (the
+   * purchase order is raised by a facilities manager, though accounts and directors may also do it): others read a
+   * plain wait naming who. Absent or null: whoever holds `capability`.
+   */
+  waitingOnRole?: string | null;
   /** A named person (the assignee, a named approver) or a team ("Facilities", "Accounts", "a director"). */
   who: string;
 }

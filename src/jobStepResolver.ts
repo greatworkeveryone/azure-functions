@@ -31,6 +31,7 @@ function action(draft: Draft): NextAction {
     jumpTarget: null,
     person: false,
     unassigned: false,
+    waitingOnRole: null,
     waitingOnUserId: null,
     ...draft,
   };
@@ -145,6 +146,7 @@ function purchaseOrderStep(facts: StepFacts) {
       reason: "The quote is approved. A facilities manager raises the purchase order so the contractor can start.",
       task: "raise the purchase order",
       verb: "Raise purchase order",
+      waitingOnRole: "facilities_manager",
       who: "a facilities manager",
     }));
   }

@@ -26,10 +26,10 @@ const knownCapability = (capability: string): boolean => capability in ROLE_TABL
 
 /** SHA-256 of each shared file, the same in both repos. */
 const PINS: Record<string, string> = {
-  "jobStepPresent.ts": "b1f80d5a80f5a140d0bd2f2004a75881a9bc1b6e1650432db0cd0029dd13e601",
-  "jobStepResolver.ts": "29f936bd115425069f85b6d67d281d98f57fa18a0414a33d784ec46ddefd2848",
-  "jobStepTypes.ts": "f3da74469efe7a4d7472b33bb26700167b1f7e1a68c9bef6b7d19d31e9910621",
-  "jobStepResolver.vectors.json": "53421e79f1d6d6e4d11111e8f7b28cf7dadc22b90f03a6e6e16b88c4dab271bd",
+  "jobStepPresent.ts": "72594f1e342595910ce4b55a864725d50c19a266c29ea17d0514165fafc793d8",
+  "jobStepResolver.ts": "881fc957a5fad00b58b9a1b6e41b4224639a4d8a8bd4a1a6ea1885caa935f277",
+  "jobStepTypes.ts": "916b8ce4116151be4bf7b3cd3622ea11f56a53df0b235a823494a276a57b437e",
+  "jobStepResolver.vectors.json": "b9c3d2df846df2d372ca516e512f2fc9e9a3cb82a06c053af231924c7c8aea53",
 };
 
 interface Expect {
@@ -70,7 +70,7 @@ function factsOf(patch: Record<string, unknown>): StepFacts {
 
 function viewerOf(index: number): StepViewer {
   const role = VECTORS.roles[index];
-  return { can: (capability) => holdsCapability(role, capability), name: VECTORS.viewerCodes[index], oid: `oid-${VECTORS.viewerCodes[index]}`, userId: USER_IDS[index] };
+  return { can: (capability) => holdsCapability(role, capability), name: VECTORS.viewerCodes[index], oid: `oid-${VECTORS.viewerCodes[index]}`, roles: [role], userId: USER_IDS[index] };
 }
 
 /** "+Label|you": + the contained button, ~ an outlined one, . a plain wait; |you when "Waiting on you" is true. */
@@ -103,6 +103,18 @@ describe("job step resolver: shared vectors", () => {
     const team = resolveJobStep(factsOf({ awaitingRole: "accounts", kind: "contract", status: "Awaiting Approval" })).nextAction;
     expect(team.who).toBe("Accounts");
     for (let index = 0; index < VECTORS.roles.length; index += 1) expect(presentNextAction(team, viewerOf(index)).waitLine).toBe("Waiting on Accounts");
+  });
+
+  it("at the purchase order step only a facilities manager is told 'Waiting on you'; the rest who hold the capability read a plain wait naming who (UXB-08)", () => {
+    const { nextAction } = resolveJobStep(factsOf({ quotes: { approved: true }, status: "Awaiting Approval" }));
+    expect(nextAction.waitingOnRole).toBe("facilities_manager");
+    const onYou = VECTORS.roles.filter((_role, index) => presentNextAction(nextAction, viewerOf(index)).onViewer);
+    expect(onYou).toEqual(["facilities_manager"]);
+    for (const [index, role] of VECTORS.roles.entries()) {
+      if (role === "facilities_manager" || !holdsCapability(role, "createPurchaseOrder")) continue;
+      const view = presentNextAction(nextAction, viewerOf(index));
+      expect({ role, passive: view.isPassive, label: view.label }).toEqual({ label: "Waiting on a facilities manager to raise the purchase order", passive: true, role });
+    }
   });
 
   it("covers every step, on hold and closed, in the matrix", () => {

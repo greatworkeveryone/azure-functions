@@ -406,56 +406,72 @@
       {
         "id": "jobs-3",
         "kind": "paragraph",
-        "text": "**Every job shows exactly one next action.** Not a menu of options — one button saying what needs to happen now. \"Request quotes\", \"Add received quote\", \"Review quote\", \"Mark work complete\", \"Review invoice\", \"Close job\"."
+        "text": "**Every job shows where it is, and one next action.** The state line under the job's name says the step (\"Step 3 of 8 · Raise purchase order\") and who it is waiting on. Beside the steps there is one button for what needs to happen now: \"Request quotes\", \"Add received quote\", \"Approve quote\", \"Raise purchase order\", \"Mark work complete\", \"Add the invoice\", \"Approve invoice\", \"Record invoice in MYOB\", \"Close job\". Pressing it does that step, or takes you to it."
       },
       {
         "id": "jobs-4",
         "kind": "paragraph",
-        "text": "If the button says **\"Waiting on Accounts\"**, the job is not yours at that moment and there is nothing for you to do. That is the system working, not the system stuck."
+        "text": "If the job says **\"Waiting on Accounts\"** (or on a named person, or \"Waiting on 2 contractors\"), it is not yours at that moment and there is nothing for you to do. That is the system working, not the system stuck. **\"Waiting on you\"** means it is yours."
       },
       {
         "id": "jobs-5",
-        "kind": "paragraph",
-        "text": "This means you cannot really get a job into a wrong state. Jobs move through a fixed sequence and the app only offers the move that is legal from where it is."
+        "kind": "heading",
+        "level": 2,
+        "text": "The eight steps"
       },
       {
         "id": "jobs-6",
+        "items": [
+          "**Request quotes.** Pick the contractors to ask. Floorplan prepares the email; you send it from your own mailbox, then mark it sent.",
+          "**Choose a quote.** Add each quote as it arrives, then approve one.",
+          "**Raise purchase order.** A facilities manager raises it so the contractor can start.",
+          "**Work under way.** When the contractor finishes, press **Mark work complete** on the purchase order. The job then goes to accounts.",
+          "**Get the invoice.** Add the contractor's invoice when it arrives. If one is rejected, add the corrected invoice.",
+          "**Approve the invoice.** Whoever added an invoice cannot approve it; another approver does.",
+          "**Record in MYOB.** An accounts manager records the invoice (and the purchase order) in MYOB. Floorplan can't check MYOB: record it only when it is true.",
+          "**Closed.** Press **Close job**. The job packet has everything on it."
+        ],
+        "kind": "list",
+        "ordered": true
+      },
+      {
+        "id": "jobs-7",
+        "kind": "paragraph",
+        "text": "Standing-contract work skips the quote steps and goes straight to work, and an internal job has no money steps at all: close it when the work is finished."
+      },
+      {
+        "id": "jobs-8",
         "kind": "heading",
         "level": 2,
         "text": "Who does what"
       },
       {
-        "id": "jobs-7",
-        "kind": "paragraph",
-        "text": "Broadly: Facilities raises jobs, chases quotes and confirms work is done. Accounts handles purchase orders and invoices. Managers approve. Above a threshold, a director has to approve as well — the app works out when and routes it, so you do not have to remember the number."
-      },
-      {
-        "id": "jobs-8",
-        "kind": "paragraph",
-        "text": "Standing-contract work skips the quote stage entirely and goes straight to work."
-      },
-      {
         "id": "jobs-9",
+        "kind": "paragraph",
+        "text": "Broadly: Facilities raises jobs, chases quotes and confirms work is done. Accounts handles invoices. Managers approve. Above a threshold, a director has to approve as well: the app works out when and routes it, so you do not have to remember the number. A job with no assignee waits on its team, not on one person."
+      },
+      {
+        "id": "jobs-10",
         "kind": "heading",
         "level": 2,
         "text": "Your board"
       },
       {
-        "id": "jobs-10",
+        "id": "jobs-11",
         "kind": "paragraph",
-        "text": "The board splits into **Needs your action**, **Alerts** and **History**. Live in the first one. Alerts are jobs that have gone quiet or need chasing. History is everything else."
+        "text": "Under \"Job Board\" one sentence counts the board: how many jobs are open, how many are overdue for an update, and how many are **waiting on me**. Press a number to narrow the board to those jobs; press it again to see them all. The \"Waiting on me\" group at the top lists the same jobs. My work counts the same jobs plus anything waiting on you elsewhere in Floorplan, so its number can be larger."
       },
       {
-        "id": "jobs-11",
+        "id": "jobs-12",
         "kind": "heading",
         "level": 2,
         "text": "Worth knowing"
       },
       {
-        "id": "jobs-12",
+        "id": "jobs-13",
         "items": [
-          "MYOB is not connected yet. Where you see \"Mark created in MYOB\", that is you telling the app you have done it there. It cannot check, so only tick it when it is true — a job will not close until you do.",
-          "Rejecting an invoice currently flags the invoice but leaves the job sitting in approval. Tell Connor if you hit that so the job can be moved on by hand.",
+          "Where you see \"Record invoice in MYOB\" or \"Record purchase order in MYOB\", that is you telling Floorplan you have entered it in MYOB. It can't check, so only record it when it is true. The job closes once everything is recorded.",
+          "The job's menu (\"Job actions\") holds the rest: History on a phone, Edit details, Escalate, Download PDF and Archive.",
           "Attachments go with the job, so quotes, photos and invoices stay together and the packet at the end is complete."
         ],
         "kind": "list",
@@ -470,7 +486,7 @@
     "status": "draft",
     "summary": "A job from raised to paid — quotes, purchase order, invoice — in one place.",
     "title": "Jobs",
-    "updated": "2026-08-11",
+    "updated": "2026-11-21",
     "version": 1
   },
   {
