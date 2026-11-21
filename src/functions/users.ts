@@ -246,12 +246,15 @@ export async function upsertAppUser(
 
       // An omitted role leaves the role as it is; an explicit null clears it.
       const requestedRole = role === undefined ? oldRole : role;
+      // REV-08: switching a deactivated director, CFO or admin back on restores the privileged role, so it
+      // takes a second person like any other grant: the account stays off until it is confirmed.
+      const reactivating = !oldActive && isActive === true;
       // SECA-02 / D5: a move to director, cfo or admin waits for a second person; until then the person keeps the role they have.
-      const grantPending = needsSecondPerson(oldRole, requestedRole);
+      const grantPending = needsSecondPerson(reactivating ? null : oldRole, requestedRole);
       const newRole = grantPending ? oldRole : requestedRole;
       // An edit that omits isActive leaves the account as it is; defaulting to
       // true here used to reactivate a deactivated account on every role change.
-      const newActive = isActive ?? oldActive;
+      const newActive = grantPending && reactivating ? oldActive : (isActive ?? oldActive);
 
       // Never leave the app without an active admin.
       if (oldRole === AppRole.ADMIN && oldActive && (!newActive || requestedRole !== AppRole.ADMIN)) {
@@ -286,6 +289,15 @@ export async function upsertAppUser(
             { name: "IsActive", type: TYPES.Bit,      value: newActive },
           ],
         );
+
+        // REV-08: any role or activation change makes an older pending request out of date.
+        if (!grantPending && (newRole !== oldRole || newActive !== oldActive)) {
+          await executeQuery(
+            connection,
+            `UPDATE dbo.PendingRoleGrants SET Status = N'superseded', DecidedAt = SYSUTCDATETIME() WHERE TargetUserID = @UserID AND Status = N'pending'`,
+            [{ name: "UserID", type: TYPES.Int, value: userId }],
+          );
+        }
 
         if (grantPending && requestedRole) {
           pendingGrantId = await requestRoleGrant(connection, {

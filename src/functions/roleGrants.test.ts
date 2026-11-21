@@ -112,7 +112,7 @@ describe("upsertAppUser granting director", () => {
     const res = await upsertAppUser(req({ role: "director", userId: 7 }), ctx);
 
     expect(res.status).toBe(200);
-    expect(sqls().some((s) => /PendingRoleGrants/.test(s))).toBe(false);
+    expect(sqls().some((s) => /INSERT INTO dbo\.PendingRoleGrants/.test(s))).toBe(false);
     expect(ledgerActions()).toEqual(["user.role_change"]);
   });
 
@@ -134,8 +134,9 @@ describe("upsertAppUser granting director", () => {
 });
 
 describe("decideRoleGrant", () => {
-  const pending = (over: Record<string, unknown> = {}) => ({
-    "FROM dbo\\.PendingRoleGrants g": [{ CurrentRole: "facilities_manager", GrantID: 31, RequestedByOid: "oid-admin", RequestedRole: "director", Status: "pending", TargetEmail: "p@co.com", TargetOid: "oid-p", TargetUserID: 7, ...over }],
+  const pending = (over: Record<string, unknown> = {}, requester: Record<string, unknown> | null = { IsActive: true, Role: "admin" }) => ({
+    "FROM dbo\\.PendingRoleGrants g": [{ CurrentRole: "facilities_manager", GrantID: 31, PreviousRole: "facilities_manager", RequestedByOid: "oid-admin", RequestedRole: "director", Status: "pending", TargetActive: true, TargetEmail: "p@co.com", TargetOid: "oid-p", TargetUserID: 7, ...over }],
+    "SELECT Role, IsActive FROM dbo\\.AppUsers WHERE EntraOid": requester ? [requester] : [],
   });
   const asDirector = () => {
     auth.rolesForRequest.mockResolvedValue(["director"]);
@@ -185,5 +186,74 @@ describe("decideRoleGrant", () => {
     asDirector();
     mockSql(pending({ Status: "confirmed" }));
     expect((await decideRoleGrant(req({ decision: "confirm", grantId: 31 }), ctx)).status).toBe(409);
+  });
+
+  // REV-08: confirming acts on the facts as they are now.
+  describe("a request that has gone stale is closed, not applied", () => {
+    const appliedRole = () => sqls().some((s) => /UPDATE dbo\.AppUsers SET Role/.test(s));
+    const closed = () => sqls().some((s) => /SET Status = N'superseded'/.test(s));
+
+    it.each([
+      ["the person's account was switched off", pending({ TargetActive: false })],
+      ["their role changed since it was asked", pending({ CurrentRole: "accounts" })],
+      ["the person who asked is no longer an admin", pending({}, { IsActive: true, Role: "facilities" })],
+      ["the person who asked is switched off", pending({}, { IsActive: false, Role: "admin" })],
+      ["the person who asked is gone", pending({}, null)],
+    ])("%s", async (_name, rows) => {
+      asDirector();
+      mockSql(rows);
+      const res = await decideRoleGrant(req({ decision: "confirm", grantId: 31 }), ctx);
+      expect(res).toMatchObject({ jsonBody: { code: "role_grant_stale" }, status: 409 });
+      expect(appliedRole()).toBe(false);
+      expect(closed()).toBe(true);
+      expect(ledgerActions()).toEqual([]);
+    });
+
+    it("does not demote the last active admin", async () => {
+      asDirector();
+      mockSql({ ...pending({ CurrentRole: "admin", PreviousRole: "admin", RequestedRole: "director" }), "SELECT COUNT\\(\\*\\) AS Remaining": [{ Remaining: 0 }] });
+      const res = await decideRoleGrant(req({ decision: "confirm", grantId: 31 }), ctx);
+      expect(res).toMatchObject({ jsonBody: { error: "Cannot demote the last active admin." }, status: 409 });
+      expect(appliedRole()).toBe(false);
+    });
+
+    it("a decline or withdrawal still works on a request that has gone stale", async () => {
+      asDirector();
+      mockSql(pending({ TargetActive: false }));
+      expect((await decideRoleGrant(req({ decision: "decline", grantId: 31 }), ctx)).status).toBe(200);
+    });
+  });
+
+  it("confirming a reactivation switches the account back on as well", async () => {
+    asDirector();
+    mockSql(pending({ CurrentRole: "director", PreviousRole: "director", RequestedRole: "director", TargetActive: false }));
+    expect((await decideRoleGrant(req({ decision: "confirm", grantId: 31 }), ctx)).status).toBe(200);
+    expect(sqls().some((s) => /UPDATE dbo\.AppUsers SET Role = @Role, IsActive = 1/.test(s))).toBe(true);
+  });
+});
+
+describe("upsertAppUser: older requests and reactivation (REV-08)", () => {
+  const user = (over: Record<string, unknown>) => ({ "SELECT Role, Email, EntraOid, IsActive": [{ Email: "p@co.com", EntraOid: "oid-p", IsActive: true, Role: "facilities_manager", ...over }] });
+  const params = (re: RegExp) => Object.fromEntries((db.executeQuery.mock.calls.find((c: unknown[]) => re.test(String(c[1])))![2] as { name: string; value: unknown }[]).map((p) => [p.name, p.value]));
+
+  it("a change to a lower role closes the older pending request", async () => {
+    mockSql(user({}));
+    expect((await upsertAppUser(req({ role: "accounts", userId: 7 }), ctx)).status).toBe(200);
+    expect(sqls().some((s) => /UPDATE dbo\.PendingRoleGrants SET Status = N'superseded'/.test(s))).toBe(true);
+  });
+
+  it("switching a deactivated director back on takes a second person: the account stays off", async () => {
+    mockSql(user({ IsActive: false, Role: "director" }));
+    const res = await upsertAppUser(req({ isActive: true, userId: 7 }), ctx);
+    expect(res.status).toBe(202);
+    expect(params(/UPDATE dbo\.AppUsers/)).toMatchObject({ IsActive: false, Role: "director" });
+    expect(ledgerActions()).toEqual(["user.role_grant_requested"]);
+  });
+
+  it("switching a deactivated non-privileged user back on is immediate", async () => {
+    mockSql(user({ IsActive: false }));
+    const res = await upsertAppUser(req({ isActive: true, userId: 7 }), ctx);
+    expect(res.status).toBe(200);
+    expect(params(/UPDATE dbo\.AppUsers/)).toMatchObject({ IsActive: true });
   });
 });
