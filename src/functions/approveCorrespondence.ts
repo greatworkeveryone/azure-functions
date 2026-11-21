@@ -15,6 +15,9 @@ import { approveJob } from "../comms/decide";
 import { findUserByOid } from "../comms/userSignatureStore";
 import { unexpectedKey, wholeId } from "../comms/request";
 import { readJob } from "../comms/store";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval } from "../escalation/approvals/raise";
+import { ledgerUserActor } from "../ledger/actor";
 import { closeConnection, createRequestConnection } from "../db";
 
 export async function approveCorrespondence(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -38,6 +41,14 @@ export async function approveCorrespondence(request: HttpRequest, context: Invoc
     const user = await findUserByOid(connection, actor.oid);
     const decided = await approveJob(connection, job, actor, user?.userId ?? null);
     if (!decided.ok) return conflict(decided.error);
+    await concludeApproval(connection, {
+      actor: ledgerUserActor({ name: actor.name, roles: actor.roles, userId: user?.userId ?? null }),
+      code: "approved",
+      log: (message) => context.warn(message),
+      policyKeys: [APPROVAL_POLICIES.broadcast],
+      subjectId: String(id),
+      subjectType: APPROVAL_SUBJECTS.broadcast,
+    });
     return { headers: noStore, jsonBody: { correspondenceId: id, status: decided.status }, status: 200 };
   } catch (error) {
     context.error("approveCorrespondence failed:", error instanceof Error ? error.message : error);

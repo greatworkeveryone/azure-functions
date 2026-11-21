@@ -1111,13 +1111,17 @@ describe("the sweep drives the engine", () => {
     createdAt: new Date(MONDAY_9AM.getTime() - 3 * 24 * 3_600_000),
     expectedProgressUpdate: null,
     firstQuoteRequestAt: null,
+    invoicesAwaitingDirector: 0,
     isArchived: false,
+    isFlaggedStalled: false,
     jobId: 12,
     kind: "facilities",
+    oldestDirectorRequiredAt: null,
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
     quoteCount: 0,
+    quotesAwaitingDirector: 0,
     requestedContractors: 0,
     status: "New",
     statusSince: new Date(MONDAY_9AM.getTime() - 3 * 24 * 3_600_000),
@@ -1202,17 +1206,30 @@ describe("the sweep drives the engine", () => {
     expect(ledger).not.toHaveBeenCalled();
   });
 
-  it("stops SLA re-escalation once the target acknowledges", async () => {
+  it("an acknowledgement holds only until its follow-up date, then the level is asked again (LOOP-02)", async () => {
     jobs = [unassignedJob()];
     await sweepAt(MONDAY_9AM);
     const [level1] = [...mockWorld.rows.values()];
     await acknowledge(conn, { actor: actorOf(ADAM), escalationId: level1.escalationId, now: at(2) });
+    expect(rowOf(level1.escalationId).dueAt).not.toBeNull();
+
+    const before = await sweepAt(at(4));
+    expect(before).toMatchObject({ reminded: 0, superseded: 0 });
+    expect(rowOf(level1.escalationId).status).toBe("acknowledged");
 
     const late = await sweepAt(at(30));
+    expect(late).toMatchObject({ reminded: 1, superseded: 0 });
+    expect(rowOf(level1.escalationId).status).toBe("superseded");
+  });
 
-    expect(late).toMatchObject({ reminded: 0, superseded: 0 });
-    expect(mockWorld.rows.size).toBe(1);
-    expect(rowOf(level1.escalationId).status).toBe("acknowledged");
+  it("refuses to acknowledge an approval: it is decided, not acknowledged (LOOP-02)", async () => {
+    jobs = [unassignedJob()];
+    await sweepAt(MONDAY_9AM);
+    const [level1] = [...mockWorld.rows.values()];
+    mockWorld.rows.set(level1.escalationId, { ...level1, kind: "authority" });
+
+    await expect(acknowledge(conn, { actor: actorOf(ADAM), escalationId: level1.escalationId, now: at(2) })).rejects.toThrow(/decided, not acknowledged/);
+    expect(rowOf(level1.escalationId).status).toBe("open");
   });
 
   it("ends an escalation by itself when its condition clears (condition_cleared)", async () => {

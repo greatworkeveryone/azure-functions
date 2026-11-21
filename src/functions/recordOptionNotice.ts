@@ -48,6 +48,8 @@ import { invalidateTenantAndBuilding } from "../tenant-register-cache";
 import { rowVersionHex } from "../tenancyScheduleWrite";
 import { refuseClosedTenancy } from "../leaseEvents/apply";
 import { toLeaseEventDto, type OptionTerms } from "../leaseEvents/dto";
+import { APPROVAL_POLICIES } from "../escalation/approvals/policies";
+import { raiseApproval } from "../escalation/approvals/raise";
 import { concludeLeaseEscalations, LEASE_POLICIES } from "../leaseEvents/escalations";
 import {
   LeaseEventError,
@@ -222,6 +224,18 @@ export async function recordOptionNotice(request: HttpRequest, context: Invocati
       leaseEventId: done.leaseEventId,
       log: (message) => context.warn(message),
       policyKeys: [LEASE_POLICIES.optionDeadline, LEASE_POLICIES.optionLapsed],
+    });
+    // The deadline escalations end here, so the approval this notice now waits for is put to an approver and chased
+    // (never the person who recorded it). A notice outside the window goes straight to the directors.
+    await raiseApproval(db, {
+      actor: caller.actor,
+      excludeUserIds: caller.actor.kind === "user" && caller.actor.userId !== null ? [caller.actor.userId] : [],
+      headline: done.late ? "Late option notice: only a director can accept it" : "Option notice waiting for approval",
+      log: (message) => context.warn(message),
+      policyKey: APPROVAL_POLICIES.optionApproval,
+      startAtRole: done.late ? "director" : null,
+      subjectId: done.leaseEventId,
+      subjectType: "lease_event",
     });
     return { jsonBody: { event: toLeaseEventDto(done.after), late: done.late }, status: 200 };
   } catch (error) {

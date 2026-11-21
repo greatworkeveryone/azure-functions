@@ -41,13 +41,17 @@ function job(overrides: Partial<JobFacts> = {}): JobFacts {
     createdAt: darwin("2026-09-01 09:00"),
     expectedProgressUpdate: null,
     firstQuoteRequestAt: null,
+    invoicesAwaitingDirector: 0,
     isArchived: false,
+    isFlaggedStalled: false,
     jobId: 12,
     kind: "facilities",
+    oldestDirectorRequiredAt: null,
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
     quoteCount: 0,
+    quotesAwaitingDirector: 0,
     requestedContractors: 0,
     status: "Work",
     statusSince: darwin("2026-10-01 09:00"),
@@ -266,13 +270,15 @@ describe("jobConditionActive", () => {
     expect(jobConditionActive("rent_review.overdue", job(), rule)).toBe(false);
   });
 
-  it("covers the five sweep policies", () => {
+  it("covers the seven sweep policies", () => {
     expect([...SWEEP_JOB_POLICIES]).toEqual([
       "job.stalled_unacknowledged",
       "job.unassigned",
       "job.quote_not_back",
       "job.invoice_waiting",
       "job.past_due",
+      "job.approval_waiting",
+      "job.hold_overdue",
     ]);
   });
 });
@@ -288,6 +294,8 @@ describe("the job kinds each sweep policy applies to (plan D2)", () => {
     "job.quote_not_back": { firstQuoteRequestAt: darwin("2026-10-01 09:00"), requestedContractors: 1, status: "Quote" },
     "job.invoice_waiting": { oldestPendingInvoiceAt: darwin("2026-10-01 09:00"), pendingInvoices: 1 },
     "job.past_due": { expectedProgressUpdate: darwin("2026-10-01 00:00") },
+    "job.approval_waiting": { quotesAwaitingDirector: 1, status: "Awaiting Approval", statusSince: darwin("2026-10-01 09:00") },
+    "job.hold_overdue": { status: "Tenant", expectedProgressUpdate: darwin("2026-10-01 00:00") },
   };
 
   it.each(POLICIES)("%s applies to facilities and maintenance jobs", (policyKey) => {
@@ -362,5 +370,53 @@ describe("jobHeadline", () => {
     expect(jobHeadline("job.invoice_waiting", job({ oldestPendingInvoiceAt: darwin("2026-10-02 09:00") }), now)).toBe("Invoice waiting for a decision since 02/10/2026");
     expect(jobHeadline("job.past_due", job({ expectedProgressUpdate: darwin("2026-10-08 00:00") }), now)).toBe("Past due: the next update was due 08/10/2026");
     expect(jobHeadline("job.critical", job(), now)).toMatch(/Critical/);
+  });
+});
+
+describe("job.approval_waiting (JOB-07): a director who never answers", () => {
+  const holidays = NO_HOLIDAYS;
+  const waiting = (over: Partial<JobFacts> = {}) =>
+    job({ quotesAwaitingDirector: 1, status: "Awaiting Approval", statusSince: darwin("2026-10-12 09:00"), ...over });
+
+  it("is not yet due inside two business days, and due after them", () => {
+    expect(jobConditionActive("job.approval_waiting", waiting(), { env: ENV, holidays, now: darwin("2026-10-13 12:00") })).toBe(false);
+    expect(jobConditionActive("job.approval_waiting", waiting(), { env: ENV, holidays, now: darwin("2026-10-14 12:00") })).toBe(true);
+  });
+
+  it("counts an invoice sent to the directors from the moment stage 1 sent it", () => {
+    const invoice = job({ invoicesAwaitingDirector: 1, oldestDirectorRequiredAt: darwin("2026-10-05 09:00") });
+    expect(jobConditionActive("job.approval_waiting", invoice, { env: ENV, holidays, now: darwin("2026-10-14 12:00") })).toBe(true);
+  });
+
+  it("is quiet when nothing waits for a director, or the job is done", () => {
+    const now = darwin("2026-10-20 12:00");
+    expect(jobConditionActive("job.approval_waiting", job(), { env: ENV, holidays, now })).toBe(false);
+    expect(jobConditionActive("job.approval_waiting", waiting({ status: "Done" }), { env: ENV, holidays, now })).toBe(false);
+  });
+});
+
+describe("job.hold_overdue (JOB-08): a hold nobody chases", () => {
+  const rule = (now: string) => ({ env: ENV, holidays: NO_HOLIDAYS, now: darwin(now) });
+
+  it("chases a job on hold once its next-update date has passed in Darwin", () => {
+    const hold = job({ expectedProgressUpdate: darwin("2026-10-12 00:00"), status: "Tenant" });
+    expect(jobConditionActive("job.hold_overdue", hold, rule("2026-10-12 17:00"))).toBe(false);
+    expect(jobConditionActive("job.hold_overdue", hold, rule("2026-10-13 09:00"))).toBe(true);
+  });
+
+  it("chases a job flagged stalled in any status, on the same date", () => {
+    const flagged = job({ expectedProgressUpdate: darwin("2026-10-01 00:00"), isFlaggedStalled: true, status: "Work" });
+    expect(jobConditionActive("job.hold_overdue", flagged, rule("2026-10-13 09:00"))).toBe(true);
+  });
+
+  it("with no date, waits the priority's stall threshold from when the hold began", () => {
+    const hold = job({ expectedProgressUpdate: null, priority: "Normal", status: "Tenant", statusSince: darwin("2026-10-01 09:00") });
+    expect(jobConditionActive("job.hold_overdue", hold, rule("2026-10-03 09:00"))).toBe(false);
+    expect(jobConditionActive("job.hold_overdue", hold, rule("2026-10-20 09:00"))).toBe(true);
+  });
+
+  it("leaves an ordinary job and a closed one alone", () => {
+    expect(jobConditionActive("job.hold_overdue", job({ expectedProgressUpdate: darwin("2026-10-01 00:00") }), rule("2026-10-20 09:00"))).toBe(false);
+    expect(jobConditionActive("job.hold_overdue", job({ status: "Done", isFlaggedStalled: true }), rule("2026-10-20 09:00"))).toBe(false);
   });
 });

@@ -6,6 +6,7 @@ import { decideLeaveRequest } from "./decideLeaveRequest";
 import { getLeaveRequests } from "./getLeaveRequests";
 import { createLeaveRequest } from "./createLeaveRequest";
 import { saveStaffReporting } from "./saveStaffReporting";
+import { concludeApproval, raiseApproval } from "../escalation/approvals/raise";
 jest.mock("@azure/functions", () => ({
   ...jest.requireActual("@azure/functions"),
   app: { http: jest.fn() },
@@ -18,6 +19,10 @@ jest.mock("../auth", () => ({
   requireRole: async (_r: unknown, allowed: string[]) =>
     jest.requireActual("../auth").rolesPassGate(roles, allowed) ? null : { status: 403 },
   verifiedIdentityFromRequest: async () => ({ name: "Verified actor", oid: actor }),
+}));
+jest.mock("../escalation/approvals/raise", () => ({
+  concludeApproval: jest.fn().mockResolvedValue(1),
+  raiseApproval: jest.fn().mockResolvedValue(null),
 }));
 jest.mock("../rateLimit", () => ({ checkRateLimit: () => ({ allowed: true }) }));
 jest.mock("../peopleWorkflow", () => ({ loadPeople: jest.fn(), peopleAudit: jest.fn() }));
@@ -206,4 +211,43 @@ it("allows an owner to withdraw approved leave but forbids a reviewer withdrawin
   expect(
     (await decideLeaveRequest(req({ id: 9, revision: 1, action: "withdraw", note: "" }), context)).status,
   ).toBe(200);
+});
+
+it("puts a new leave request to the named approvers through the engine, and says whether anyone was told (MOD-4, LOOP-04)", async () => {
+  actor = "staff";
+  query.mockImplementation(async (_c, sql) => (sql.startsWith("INSERT dbo.LeaveRequests") ? [{ RequestId: 10 }] : []));
+  jest.mocked(raiseApproval).mockResolvedValueOnce({ notificationState: "sent" } as never);
+
+  const response = await createLeaveRequest(
+    req({ kind: "annual_leave", startDate: "2026-12-01", endDate: "2026-12-01", hours: 8 }),
+    context,
+  );
+
+  expect(raiseApproval).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ policyKey: "leave.decision", subjectId: "10", subjectType: "leave_request", userTargets: [2] }),
+  );
+  expect(response.jsonBody).toMatchObject({ approvers: ["Manager"], id: 10, notified: true });
+});
+
+it("says nobody was told when the leave policy is switched off, so the screen never claims a send", async () => {
+  actor = "staff";
+  query.mockImplementation(async (_c, sql) => (sql.startsWith("INSERT dbo.LeaveRequests") ? [{ RequestId: 11 }] : []));
+
+  const response = await createLeaveRequest(
+    req({ kind: "annual_leave", startDate: "2026-12-02", endDate: "2026-12-02", hours: 8 }),
+    context,
+  );
+
+  expect(response.status).toBe(201);
+  expect(response.jsonBody).toMatchObject({ approvers: ["Manager"], notified: false });
+});
+
+it("ends the approvers' escalation with the decision, carrying the reason a decline gave", async () => {
+  await decideLeaveRequest(req({ id: 9, revision: 1, action: "decline", note: "Short staffed that week" }), context);
+
+  expect(concludeApproval).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ code: "declined", note: "Short staffed that week", policyKeys: ["leave.decision"], subjectId: "9", subjectType: "leave_request" }),
+  );
 });

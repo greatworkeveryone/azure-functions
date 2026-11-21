@@ -18,7 +18,7 @@ export async function getLeaveRequests(
     if (!self) return { status: 403, jsonBody: { error: "An active staff record is required" } };
     const rows = await executeQuery(
       connection,
-      `SELECT TOP(501) RequestId,UserId,Kind,CONVERT(VARCHAR(10),StartDate,23) AS StartDate,CONVERT(VARCHAR(10),EndDate,23) AS EndDate,Hours,Note,Status,Revision,CreatedAt,DecidedBy,DecisionNote FROM dbo.LeaveRequests WHERE UserId=@User OR Status='pending' ORDER BY RequestId DESC`,
+      `SELECT TOP(501) RequestId,UserId,Kind,CONVERT(VARCHAR(10),StartDate,23) AS StartDate,CONVERT(VARCHAR(10),EndDate,23) AS EndDate,Hours,Note,Status,Revision,CreatedAt,UpdatedAt,DecidedBy,DecisionNote FROM dbo.LeaveRequests WHERE UserId=@User OR Status='pending' ORDER BY RequestId DESC`,
       [{ name: "User", type: TYPES.Int, value: self.id }],
     );
     const visible = rows.filter(
@@ -51,6 +51,8 @@ export async function getLeaveRequests(
             status: row.Status,
             revision: row.Revision,
             createdAt: row.CreatedAt,
+            // When the status last changed: for a decided request, when it was decided.
+            updatedAt: row.UpdatedAt,
             decidedBy: row.DecidedBy,
             decisionNote: row.DecisionNote,
             canDecide: row.UserId !== self.id && row.Status === "pending",

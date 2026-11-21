@@ -6,6 +6,7 @@
 
 import { type Connection, TYPES } from "tedious";
 import { executeQuery } from "../../db";
+import { APPROVAL_POLICIES } from "../approvals/policies";
 import { normaliseRole, ROLES } from "../roles";
 import type { EscalationAdapter } from "./registry";
 
@@ -23,7 +24,7 @@ const TENANCY_VIEW_ROLES: ReadonlySet<string> = new Set([
 
 const SUMMARY_PARTS_MAX = 160;
 
-const TENANCY_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt, b.BuildingName
+const TENANCY_SQL = `SELECT t.TenantId, t.BuildingId, t.LegalName, t.TradingName, t.Status, t.ArchivedAt, t.ScheduleSignedOffAt, b.BuildingName
   FROM dbo.Tenants t
   LEFT JOIN dbo.Buildings b ON b.BuildingID = t.BuildingId
   WHERE t.TenantId = @TenantId`;
@@ -50,7 +51,10 @@ export const tenancyAdapter: EscalationAdapter = {
     const id = tenantId(ref.subjectId);
     if (id === null) return false;
     const row = await loadTenancy(connection, id);
-    return row !== null && row.Status !== "vacated" && (row.ArchivedAt === null || row.ArchivedAt === undefined);
+    const live = row !== null && row.Status !== "vacated" && (row.ArchivedAt === null || row.ArchivedAt === undefined);
+    // The unsigned-schedule chase lasts only until somebody signs the schedule off.
+    if (ref.policyKey === APPROVAL_POLICIES.scheduleUnsigned) return live && !row.ScheduleSignedOffAt;
+    return live;
   },
 
   ledgerScope: (escalation) => ({ tenantId: tenantId(escalation.subjectId) }),

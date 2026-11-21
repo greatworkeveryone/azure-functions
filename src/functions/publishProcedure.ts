@@ -21,6 +21,9 @@ import {
   executeQuery,
   rollbackTransaction,
 } from "../db";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval } from "../escalation/approvals/raise";
+import { resolveLedgerActor } from "../ledger/actor";
 import { errorResponse, extractToken, unauthorizedResponse, userInfoFromToken } from "../auth";
 import { requireProcedureApprover, readCallerRoles } from "../procedureAccess";
 import { canEndorseProcedure } from "../procedureEndorsement";
@@ -124,6 +127,18 @@ export async function publishProcedure(request: HttpRequest, context: Invocation
 
     await commitTransaction(connection);
     inTransaction = false;
+    // The approval the draft was waiting for is answered: end its escalation. Never undoes the publish.
+    const answered = await resolveLedgerActor(request, connection).catch(() => null);
+    if (answered) {
+      await concludeApproval(connection, {
+        actor: answered,
+        code: "published",
+        log: (message) => context.warn(message),
+        policyKeys: [APPROVAL_POLICIES.procedure],
+        subjectId: slug,
+        subjectType: APPROVAL_SUBJECTS.procedure,
+      });
+    }
     return { status: 200, jsonBody: { ok: true } };
   } catch (error: any) {
     if (connection && inTransaction) await rollbackTransaction(connection).catch(() => undefined);

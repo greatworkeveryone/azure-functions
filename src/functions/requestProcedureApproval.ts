@@ -20,7 +20,10 @@ import { TYPES } from "tedious";
 import { errorResponse, extractToken, requireRole, serviceUnavailableResponse, unauthorizedResponse, userInfoFromToken } from "../auth";
 import { closeConnection, createRequestConnection, createServiceRequestConnection, executeQuery } from "../db";
 import { resolveRecipient } from "../email-recipient";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval, raiseApproval } from "../escalation/approvals/raise";
 import { listActiveUsers } from "../escalation/store";
+import { resolveLedgerActor } from "../ledger/actor";
 import { graphSendMail } from "../graph";
 import { outsideAudienceResponse, readCallerRoles } from "../procedureAccess";
 import { splitAudience } from "../procedureLibrary";
@@ -158,6 +161,31 @@ export async function requestProcedureApproval(request: HttpRequest, context: In
     if (updated.length === 0) return { status: 409, jsonBody: { error: "That draft is not there any more: it was published or replaced." } };
 
     const notified = await notify(approver, requestedBy, String(draft.Title), slug, context);
+    // The request is also an escalation to the named director, chased and moved up to the other directors, so it
+    // shows in their My work. Asking someone else (or again) replaces the earlier one. Best effort, and off by default.
+    const asker = await resolveLedgerActor(request, connection).catch(() => null);
+    if (asker) {
+      const log = (message: string) => context.warn(message);
+      await concludeApproval(connection, {
+        actor: asker,
+        code: "reasked",
+        log,
+        note: "The request was made again",
+        policyKeys: [APPROVAL_POLICIES.procedure],
+        subjectId: slug,
+        subjectType: APPROVAL_SUBJECTS.procedure,
+        withdrawn: true,
+      });
+      await raiseApproval(connection, {
+        actor: asker,
+        headline: "Procedure waiting for approval",
+        log,
+        policyKey: APPROVAL_POLICIES.procedure,
+        subjectId: slug,
+        subjectType: APPROVAL_SUBJECTS.procedure,
+        userTargets: [approver.userId],
+      });
+    }
     const at = updated[0].ApprovalRequestedAt;
     return {
       status: 200,

@@ -11,6 +11,9 @@ import {
 } from "../assetRegisterSupport";
 import { LEAVE_READ_ROLES, leaveApprovers, validRevision } from "../leavePolicy";
 import { loadPeople, peopleAudit } from "../peopleWorkflow";
+import { APPROVAL_POLICIES, APPROVAL_SUBJECTS } from "../escalation/approvals/policies";
+import { concludeApproval } from "../escalation/approvals/raise";
+import { ledgerUserActor } from "../ledger/actor";
 import { closeConnection, createRequestConnection, executeQuery } from "../db";
 export async function decideLeaveRequest(
   request: HttpRequest,
@@ -36,6 +39,7 @@ export async function decideLeaveRequest(
   try {
     connection = await createRequestConnection(auth.token);
     const conn = connection;
+    const held: { decider?: { id: number; role: string } } = {};
     const result = await inTransaction(conn, async () => {
       const data = await loadPeople(conn, true),
         self = data.staff.find((person) => person.oid === auth.caller.oid);
@@ -78,9 +82,26 @@ export async function decideLeaveRequest(
         status,
         reportingRevision: data.revision,
       });
-      return txOk({ saved: true });
+      held.decider = { id: self.id, role: self.role };
+      return txOk({ saved: true, status });
     });
-    return result.ok ? { status: 200, jsonBody: result.value } : result.response;
+    if (!result.ok) return result.response;
+    // The decision has committed: end the approvers' escalation with it. The requester is told by the engine
+    // (the resolved notice to whoever raised it) when the policy is on, and sees the status on My leave either way.
+    const by = held.decider;
+    if (by) {
+      await concludeApproval(conn, {
+        actor: ledgerUserActor({ name: auth.caller.name, roles: [by.role], userId: by.id }),
+        code: result.value.status === "approved" ? "approved" : result.value.status === "declined" ? "declined" : "withdrawn",
+        log: (message) => context.warn(message),
+        note: note || null,
+        policyKeys: [APPROVAL_POLICIES.leave],
+        subjectId: String(body.id),
+        subjectType: APPROVAL_SUBJECTS.leave,
+        withdrawn: body.action === "withdraw",
+      });
+    }
+    return { status: 200, jsonBody: { saved: true } };
   } catch (error) {
     context.error("Leave decision failed", error);
     return { status: 500, jsonBody: { error: "Could not record the leave decision" } };

@@ -41,13 +41,17 @@ function job(over: Partial<JobFacts> = {}): JobFacts {
     createdAt: ago(40 * DAY),
     expectedProgressUpdate: null,
     firstQuoteRequestAt: null,
+    invoicesAwaitingDirector: 0,
     isArchived: false,
+    isFlaggedStalled: false,
     jobId: 1,
     kind: "facilities",
+    oldestDirectorRequiredAt: null,
     oldestPendingInvoiceAt: null,
     pendingInvoices: 0,
     priority: "Normal",
     quoteCount: 0,
+    quotesAwaitingDirector: 0,
     requestedContractors: 0,
     status: "Work",
     statusSince: ago(1 * DAY),
@@ -629,18 +633,41 @@ describe("an unacknowledged escalation past its SLA is superseded by the next le
     expect(world.rows[1]).toMatchObject({ level: 2, parentEscalationId: 1, status: "open", targetRole: "director" });
   });
 
-  it("leaves it alone before its SLA, when acknowledged, or when it has no SLA", async () => {
+  it("leaves it alone before its SLA, when acknowledged and not yet due a follow-up, or when it has no SLA", async () => {
     const world = makeWorld();
     world.jobs = [stalledJob(), job({ jobId: 2, statusSince: ago(9 * DAY) }), job({ jobId: 3, statusSince: ago(9 * DAY) })];
     world.rows = [
       esc({ dueAt: ago(-1), subjectId: "1" }),
-      esc({ acknowledgedAt: ago(5), dueAt: ago(2), status: "acknowledged", subjectId: "2", targetUserId: 4 }),
+      esc({ acknowledgedAt: ago(5), dueAt: ago(-2), status: "acknowledged", subjectId: "2", targetUserId: 4 }),
       esc({ dueAt: null, subjectId: "3" }),
     ];
 
     await sweep(world);
 
     expect(world.calls.escalateFurther).toEqual([]);
+  });
+
+  describe("an acknowledged escalation comes back at its follow-up date (LOOP-02)", () => {
+    it("asks the level again, as a reminder, once the follow-up date has passed", async () => {
+      const world = makeWorld();
+      world.jobs = [stalledJob()];
+      world.rows = [esc({ acknowledgedAt: ago(30), dueAt: ago(1), status: "acknowledged", targetUserId: 4 })];
+
+      const report = await sweep(world);
+
+      expect(world.calls.escalateFurther[0]).toMatchObject({ code: "reminder", mode: "same_level", onlyIfOpen: false });
+      expect(report.reminded).toBe(1);
+    });
+
+    it("leaves one acknowledged before the follow-up clock existed alone (its date is not after the acknowledgement)", async () => {
+      const world = makeWorld();
+      world.jobs = [stalledJob()];
+      world.rows = [esc({ acknowledgedAt: ago(1), dueAt: ago(30), status: "acknowledged", targetUserId: 4 })];
+
+      await sweep(world);
+
+      expect(world.calls.escalateFurther).toEqual([]);
+    });
   });
 
   it("repeats the level as a reminder at the top of the ladder", async () => {
@@ -1584,5 +1611,105 @@ describe("attribution notices (R2, R13)", () => {
     world.deps.listUnansweredAttributions = async () => [{ attributedToUserId: 30, ref: { id: 7, jobId: 9, kind: "quote" } }];
     expect((await sweep(world, { dryRun: true })).raised).toBe(1);
     expect(world.calls.raise).toEqual([]);
+  });
+});
+
+// ── The since floor and the unsigned schedules (AF5, S1-4, LOOP-12, LOOP-11) ──
+
+describe("ESCALATION_SWEEP_SINCE", () => {
+  const darwinDay = (daysAgo: number): string => new Date(NOW.getTime() - daysAgo * 24 * 3_600_000 + 9.5 * 3_600_000).toISOString().slice(0, 10);
+  const since = { ...ENV, ESCALATION_SWEEP_SINCE: darwinDay(5) } as NodeJS.ProcessEnv;
+
+  it("never raises for a condition whose clock started before the date, and counts what it skipped", async () => {
+    const world = makeWorld();
+    world.jobs = [
+      job({ jobId: 1, priority: "Critical", statusSince: ago(9 * DAY) }), // stalled since before the floor
+      job({ jobId: 2, priority: "Critical", statusSince: ago(3 * DAY) }), // stalled since after it
+    ];
+
+    const report = await sweep(world, { env: since });
+
+    expect(raisedKeys(world)).toEqual(["job.stalled_unacknowledged:2"]);
+    expect(report.skippedBeforeSince).toBe(1);
+  });
+
+  it("with no floor, raises both (the sweep's old behaviour)", async () => {
+    const world = makeWorld();
+    world.jobs = [job({ jobId: 1, priority: "Critical", statusSince: ago(9 * DAY) }), job({ jobId: 2, priority: "Critical", statusSince: ago(3 * DAY) })];
+
+    const report = await sweep(world);
+
+    expect(raisedKeys(world).sort()).toEqual(["job.stalled_unacknowledged:1", "job.stalled_unacknowledged:2"]);
+    expect(report.skippedBeforeSince).toBe(0);
+  });
+
+  it("fails closed on a value that is not a date: nothing is raised, and it says why", async () => {
+    const world = makeWorld();
+    world.jobs = [job({ jobId: 2, priority: "Critical", statusSince: ago(3 * DAY) })];
+    const warn = jest.fn();
+
+    await sweep(world, { env: { ...ENV, ESCALATION_SWEEP_SINCE: "last month" } as NodeJS.ProcessEnv, warn });
+
+    expect(world.calls.raise).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("ESCALATION_SWEEP_SINCE"));
+  });
+
+  it("does not follow up an acknowledgement made before the floor", async () => {
+    const world = makeWorld();
+    world.jobs = [job({ jobId: 1, statusSince: ago(9 * DAY) })];
+    world.rows = [esc({ acknowledgedAt: ago(9 * DAY), dueAt: ago(8 * DAY), status: "acknowledged", targetUserId: 4 })];
+
+    const report = await sweep(world, { env: since });
+
+    expect(world.calls.escalateFurther).toEqual([]);
+    expect(report.skippedBeforeSince).toBe(1);
+  });
+
+  it("puts the count in the run's log line", async () => {
+    const world = makeWorld();
+    world.jobs = [job({ jobId: 1, priority: "Critical", statusSince: ago(9 * DAY) })];
+    const log = jest.fn();
+
+    await sweep(world, { env: since, log });
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("skippedBeforeSince=1"));
+  });
+});
+
+describe("tenancy.schedule_unsigned", () => {
+  const withSchedules = (world: World, schedules: { since: Date; tenantId: number }[], active = true) => {
+    world.policies["tenancy.schedule_unsigned"] = policy("tenancy.schedule_unsigned", { active, ladder: [{ role: "accounts_manager", slaHours: 40 }] });
+    world.deps.listUnsignedSchedules = async () => schedules;
+  };
+
+  it("raises for an unsigned schedule near a review date, once", async () => {
+    const world = makeWorld();
+    withSchedules(world, [{ since: ago(3 * DAY), tenantId: 7 }]);
+
+    await sweep(world);
+    await sweep(world);
+
+    expect(raisedKeys(world)).toEqual(["tenancy.schedule_unsigned:7"]);
+    expect(world.rows.filter((r) => r.policyKey === "tenancy.schedule_unsigned" && live(r))).toHaveLength(1);
+  });
+
+  it("does nothing while the policy is switched off (the seeded state)", async () => {
+    const world = makeWorld();
+    withSchedules(world, [{ since: ago(3 * DAY), tenantId: 7 }], false);
+
+    await sweep(world);
+
+    expect(world.calls.raise).toEqual([]);
+  });
+
+  it("respects the since floor", async () => {
+    const world = makeWorld();
+    withSchedules(world, [{ since: ago(30 * DAY), tenantId: 7 }]);
+    const floor = new Date(NOW.getTime() - 5 * 24 * 3_600_000 + 9.5 * 3_600_000).toISOString().slice(0, 10);
+
+    const report = await sweep(world, { env: { ...ENV, ESCALATION_SWEEP_SINCE: floor } as NodeJS.ProcessEnv });
+
+    expect(world.calls.raise).toEqual([]);
+    expect(report.skippedBeforeSince).toBe(1);
   });
 });
