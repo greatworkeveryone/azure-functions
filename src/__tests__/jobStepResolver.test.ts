@@ -28,7 +28,7 @@ const knownCapability = (capability: string): boolean => capability in ROLE_TABL
 const PINS: Record<string, string> = {
   "jobStepPresent.ts": "e33106530a869450d4ffedc6973feb35635ac48f6fd9a07098e1e80da22c6f84",
   "jobStepResolver.ts": "29f936bd115425069f85b6d67d281d98f57fa18a0414a33d784ec46ddefd2848",
-  "jobStepTypes.ts": "253b1c7601cd2c8ffba31d0c0e6cac9e69de9f815379373fbb9320a2ac14d812",
+  "jobStepTypes.ts": "f3da74469efe7a4d7472b33bb26700167b1f7e1a68c9bef6b7d19d31e9910621",
   "jobStepResolver.vectors.json": "f007984428df1cd9819fb23d33fbffab2fd84955e2928da84d54c4c763c2c22d",
 };
 

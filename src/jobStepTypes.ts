@@ -42,7 +42,7 @@ export const JOB_STEP_LABELS: Readonly<Record<JobStepKey, string>> = Object.free
 
 /** 1 to 8 for the eight steps; null while on hold (the job is parked, not at a step). */
 export function stepNumber(key: JobStepKey): number | null {
-  const index = (JOB_STEP_ORDER as readonly string[]).indexOf(key);
+  const index = JOB_STEP_ORDER.findIndex((step) => step === key);
   return index < 0 ? null : index + 1;
 }
 
@@ -96,10 +96,10 @@ export interface NextAction {
 }
 
 export interface QuoteFacts {
-  /** Who a quote waiting for approval routes to, when known. */
-  approver: StepApprover | null;
   /** Jobs.ApprovedQuoteID points at an approved (or completed) quote. */
   approved: boolean;
+  /** Who a quote waiting for approval routes to, when known. */
+  approver: StepApprover | null;
   /** Quotes sent up to a senior approver (awaiting_approval). */
   awaitingApproval: number;
   /** Quotes with a director (awaiting_director). */
@@ -118,9 +118,9 @@ export interface QuoteFacts {
 }
 
 export interface InvoiceFacts {
-  approver: StepApprover | null;
   /** Fully approved invoices (either direction) not yet marked created in MYOB. */
   approvedNotInMyob: number;
+  approver: StepApprover | null;
   /** First approval done, director's still to come (approved, director required). */
   awaitingDirector: number;
   /** Incoming invoices that are not rejected or superseded. */
