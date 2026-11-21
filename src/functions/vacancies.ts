@@ -14,7 +14,7 @@ import {
   verifiedIdentityFromRequest,
 } from "../auth";
 import { blobHostFromConnectionString, uploadPublicBlob, deletePublicBlob, vacanciesReadSasUrl } from "../blob-storage";
-import { MAX_SIZE_BYTES } from "../upload-constants";
+import { imageBytesMatch, MAX_SIZE_BYTES } from "../upload-constants";
 import { buildWpPayload } from "../wpContentBuilder";
 import { checkRateLimit, RateLimitOpts } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
@@ -616,6 +616,9 @@ async function handleUploadVacancyImage(
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    if (!imageBytesMatch(contentType, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
     const { url } = await uploadPublicBlob(buffer, originalName, contentType, `${vacancyId}`);
 
     context.log(`Uploaded vacancy image: ${url}`);
@@ -861,6 +864,12 @@ async function handleUploadVacancySlotImage(
       return { status: 413, jsonBody: { error: "File too large" } };
     }
 
+    // The bytes are checked before anything is read from or removed in storage.
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (!imageBytesMatch(file.type, buffer)) {
+      return { status: 415, jsonBody: { error: "File contents do not match its declared type" } };
+    }
+
     connection = await createRequestConnection(token);
 
     // Delete existing blob for this slot if present
@@ -879,7 +888,6 @@ async function handleUploadVacancySlotImage(
       if (oldBlobName) await deletePublicBlob(oldBlobName).catch(() => undefined);
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const { url } = await uploadPublicBlob(
       buffer,
       file.name,

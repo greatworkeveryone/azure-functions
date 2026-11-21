@@ -29,7 +29,7 @@ import { NOT_A_RECORD } from "../test-data";
 import { checkRateLimit } from "../rateLimit";
 import { tooManyRequests } from "../rateLimitResponse";
 import { Sentry } from "../sentry";
-import { isAllowedContentType } from "../upload-constants";
+import { imageBytesMatch, isAllowedContentType } from "../upload-constants";
 import type { GraphAttachment } from "../graph";
 
 const MAX_BODY_CHARS = 4000;
@@ -94,6 +94,9 @@ async function collectPhotos(form: FormData): Promise<PhotoResult> {
   const attachments: GraphAttachment[] = [];
   for (const entry of entries) {
     const buffer = Buffer.from(await entry.arrayBuffer());
+    if (!imageBytesMatch(entry.type, buffer)) {
+      return { ok: false, error: "A photo's contents do not match its type" };
+    }
     attachments.push({
       contentBase64: buffer.toString("base64"),
       contentType: entry.type,

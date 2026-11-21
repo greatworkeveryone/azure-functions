@@ -14,7 +14,8 @@ const ctx = { log: jest.fn(), warn: jest.fn() } as unknown as InvocationContext;
 const oldName = "building-hero/-7/11111111-1111-4111-8111-111111111111.jpg";
 const newName = "building-hero/-7/22222222-2222-4222-8222-222222222222.jpg";
 const url = (name: string) => `https://example.blob.core.windows.net/vacancies/${name}`;
-const upload = (id = -7) => ({ headers: new Headers(), formData: async () => new Map<string, unknown>([["buildingId", String(id)], ["file", { type: "image/jpeg", size: 3, name: "photo.jpg", arrayBuffer: async () => new ArrayBuffer(3) }]]) }) as unknown as HttpRequest;
+const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]).buffer;
+const upload = (id = -7, bytes: ArrayBuffer = JPEG, type = "image/jpeg") => ({ headers: new Headers(), formData: async () => new Map<string, unknown>([["buildingId", String(id)], ["file", { type, size: bytes.byteLength, name: "photo.jpg", arrayBuffer: async () => bytes }]]) }) as unknown as HttpRequest;
 const call = (name: string, request: HttpRequest) => handlers.get(name)!(request, ctx);
 
 beforeEach(() => {
@@ -72,4 +73,16 @@ it("keeps the image when clearing the DB pointer fails", async () => {
   jest.mocked(executeQuery).mockResolvedValueOnce([{ HeroImageUrl: url(oldName) }]).mockRejectedValueOnce(new Error("SQL unavailable"));
   expect((await call("deleteBuildingHeroImage", { json: async () => ({ buildingId: -7 }) } as HttpRequest))?.status).toBe(500);
   expect(deletePublicBlob).not.toHaveBeenCalled();
+});
+
+it("refuses a file whose bytes are not the image it says it is, storing and removing nothing", async () => {
+  const html = new TextEncoder().encode("<html><script>alert(1)</script>").buffer as ArrayBuffer;
+  expect((await call("uploadBuildingHeroImage", upload(-7, html)))?.status).toBe(415);
+  expect(uploadPublicBlob).not.toHaveBeenCalled();
+  expect(deletePublicBlob).not.toHaveBeenCalled();
+});
+it("checks image/jpg against the JPEG signature", async () => {
+  expect((await call("uploadBuildingHeroImage", upload(-7, JPEG, "image/jpg")))?.status ?? 200).toBe(200);
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).buffer;
+  expect((await call("uploadBuildingHeroImage", upload(-7, png, "image/jpg")))?.status).toBe(415);
 });

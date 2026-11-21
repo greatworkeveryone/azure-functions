@@ -54,3 +54,11 @@ export function bytesMatchMediaType(raw: string, buf: Buffer): boolean {
     default: return true;
   }
 }
+
+// For the image-only upload routes, which also accept the non-standard "image/jpg".
+// Anything that is not an image, or whose bytes are not that image, fails.
+export function imageBytesMatch(raw: string, buf: Buffer): boolean {
+  const t = normaliseMediaType(raw);
+  if (!t.startsWith("image/")) return false;
+  return bytesMatchMediaType(t === "image/jpg" ? "image/jpeg" : t, buf);
+}
